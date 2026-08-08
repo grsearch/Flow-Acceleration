@@ -186,14 +186,14 @@
   <main class="shell">
     <header class="masthead">
       <div>
-        <p class="eyebrow">Pump.fun ? Pre-Graduation Research</p>
+        <p class="eyebrow">Pump.fun · Pre-Graduation Research</p>
         <h1>Flow Acceleration</h1>
-        <p class="subtitle">?????????????????????????AGE ? Curve ??????????????</p>
+        <p class="subtitle">只研究净买入资金、独立买家与买单速度是否同时加速。AGE 与 Curve 只记录，不参与当前信号过滤。</p>
       </div>
-      <div class="live-pill"><span id="status-dot" class="dot"></span><span id="status-text">?????</span></div>
+      <div class="live-pill"><span id="status-dot" class="dot"></span><span id="status-text">等待数据流</span></div>
     </header>
 
-    <nav class="tabs" role="tablist" aria-label="????">
+    <nav class="tabs" role="tablist" aria-label="研究页面">
       <button class="tab" role="tab" aria-selected="true" aria-controls="overview" id="tab-overview">Overview</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="signals" id="tab-signals">Signal Monitor</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="backtest" id="tab-backtest">Backtest</button>
@@ -206,15 +206,15 @@
       <div class="research-note">
         <article class="card hypothesis">
           <p class="eyebrow">Research hypothesis</p>
-          <blockquote>??????????????????????????????????????????????</blockquote>
-          <footer>?????????????????????</footer>
+          <blockquote>毕业前，当净买入资金、独立买家数量和买入成交速度同时加速，未来数秒可能存在可交易的价格惯性。</blockquote>
+          <footer>当前是研究采集模式，不会提交链上买卖交易。</footer>
         </article>
         <article class="card">
-          <div class="section-title"><h2>????</h2><p>?????? 2 ?</p></div>
+          <div class="section-title"><h2>信号窗口</h2><p>连续三段，各 2 秒</p></div>
           <div class="windows">
-            <div class="window"><b>W1</b><span>T?6 ? T?4</span></div>
-            <div class="window"><b>W2</b><span>T?4 ? T?2</span></div>
-            <div class="window"><b>W3</b><span>T?2 ? T</span></div>
+            <div class="window"><b>W1</b><span>T−6 → T−4</span></div>
+            <div class="window"><b>W2</b><span>T−4 → T−2</span></div>
+            <div class="window"><b>W3</b><span>T−2 → T</span></div>
           </div>
         </article>
       </div>
@@ -222,9 +222,9 @@
 
     <section class="panel" role="tabpanel" id="signals" aria-labelledby="tab-signals" hidden>
       <article class="card">
-        <div class="section-title"><h2>?? Flow Signals</h2><p>CA ????? GMGN</p></div>
+        <div class="section-title"><h2>实时 Flow Signals</h2><p>CA 可直接打开 GMGN</p></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>??</th><th>Symbol / CA</th><th>AGE</th><th>Curve</th><th>NetFlow W1?W3</th><th>Accel</th><th>Buyers</th><th>Buy TX</th><th>5s Return</th></tr></thead>
+          <thead><tr><th>时间</th><th>Symbol / CA</th><th>AGE</th><th>Curve</th><th>NetFlow W1→W3</th><th>Accel</th><th>Buyers</th><th>Buy TX</th><th>5s Return</th></tr></thead>
           <tbody id="signal-rows"></tbody>
         </table></div>
       </article>
@@ -232,38 +232,38 @@
 
     <section class="panel" role="tabpanel" id="backtest" aria-labelledby="tab-backtest" hidden>
       <article class="card">
-        <div class="section-title"><h2>???????</h2><p>???????????????</p></div>
+        <div class="section-title"><h2>成本与延迟回测</h2><p>持仓时间从实际模拟成交开始计算</p></div>
         <form id="backtest-form" class="grid form-grid">
           <label>Hold Time
-            <select name="holdMs"><option value="1000">1 ?</option><option value="2000">2 ?</option><option value="3000">3 ?</option><option value="5000" selected>5 ?</option><option value="8000">8 ?</option><option value="10000">10 ?</option><option value="15000">15 ?</option><option value="20000">20 ?</option><option value="30000">30 ?</option></select>
+            <select name="holdMs"><option value="1000">1 秒</option><option value="2000">2 秒</option><option value="3000">3 秒</option><option value="5000" selected>5 秒</option><option value="8000">8 秒</option><option value="10000">10 秒</option><option value="15000">15 秒</option><option value="20000">20 秒</option><option value="30000">30 秒</option></select>
           </label>
           <label>Execution Delay
-            <select name="executionDelayMs"><option value="100">100 ms</option><option value="200" selected>200 ms</option><option value="400">400 ms</option><option value="600">600 ms</option><option value="1000">1 ?</option></select>
+            <select name="executionDelayMs"><option value="100">100 ms</option><option value="200" selected>200 ms</option><option value="400">400 ms</option><option value="600">600 ms</option><option value="1000">1 秒</option></select>
           </label>
-          <label>?????? (ms)<input name="entryTimeoutMs" type="number" min="1" step="100" value="2000"></label>
-          <label>?????? (ms)<input name="exitTimeoutMs" type="number" min="1" step="100" value="5000"></label>
-          <label>?????? (%)<input name="noExitLossPct" type="number" min="0" step="1" value="100"></label>
-          <label>?? (%)<input name="takeProfitPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>?? (%)<input name="stopLossPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>?????? (%)<input name="trailingStopPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>???????? (%)<input name="trailingActivationPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>?????? (ms)<input name="exitExecutionDelayMs" type="number" min="0" step="50" value="0"></label>
-          <label>????????<input name="exitRetryCount" type="number" min="0" max="20" step="1" value="0"></label>
-          <label>?????? (ms)<input name="exitRetryDelayMs" type="number" min="0" step="50" value="500"></label>
-          <label>??? (%)<input name="platformFeePct" type="number" min="0" step="0.1" value="1.4"></label>
-          <label>???? (%)<input name="buySlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
-          <label>???? (%)<input name="sellSlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
-          <label>???? (%)<input name="priceImpactPct" type="number" min="0" step="0.1" value="0.2"></label>
-          <label>????? (SOL)<input name="baseTxFeeSol" type="number" min="0" step="0.00001" value="0.00001"></label>
-          <label>??? (SOL)<input name="priorityFeeSol" type="number" min="0" step="0.0001" value="0.0005"></label>
-          <label>Jito ?? (SOL)<input name="jitoTipSol" type="number" min="0" step="0.0001" value="0"></label>
-          <label>?? (SOL)<input name="positionSizeSol" type="number" min="0.001" step="0.01" value="0.2"></label>
-          <label>????? (%)<input name="entryFailureRatePct" type="number" min="0" max="100" step="0.1" value="0"></label>
-          <label>???????? (%)<input name="entryFailureCostPct" type="number" min="0" step="0.1" value="1"></label>
-          <label>W3 NetFlow ?? (SOL)<input name="minNetFlowW3" type="number" min="0" step="0.1" value="1"></label>
-          <label>Flow Accel ??<input name="minFlowAccel" type="number" min="0" step="0.1" value="1.2"></label>
-          <label>???????<input name="splitRatio" type="number" min="0.1" max="0.9" step="0.05" value="0.7"></label>
-          <button class="primary" type="submit">????</button>
+          <label>入场等待上限 (ms)<input name="entryTimeoutMs" type="number" min="1" step="100" value="2000"></label>
+          <label>出场等待上限 (ms)<input name="exitTimeoutMs" type="number" min="1" step="100" value="5000"></label>
+          <label>无法出场损失 (%)<input name="noExitLossPct" type="number" min="0" step="1" value="100"></label>
+          <label>止盈 (%)<input name="takeProfitPct" type="number" min="0" step="0.1" value="0"></label>
+          <label>止损 (%)<input name="stopLossPct" type="number" min="0" step="0.1" value="0"></label>
+          <label>移动止损回撤 (%)<input name="trailingStopPct" type="number" min="0" step="0.1" value="0"></label>
+          <label>移动止损激活盈利 (%)<input name="trailingActivationPct" type="number" min="0" step="0.1" value="0"></label>
+          <label>卖出执行延迟 (ms)<input name="exitExecutionDelayMs" type="number" min="0" step="50" value="0"></label>
+          <label>模拟连续卖出失败<input name="exitRetryCount" type="number" min="0" max="20" step="1" value="0"></label>
+          <label>卖出重试间隔 (ms)<input name="exitRetryDelayMs" type="number" min="0" step="50" value="500"></label>
+          <label>平台费 (%)<input name="platformFeePct" type="number" min="0" step="0.1" value="1.4"></label>
+          <label>买入滑点 (%)<input name="buySlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
+          <label>卖出滑点 (%)<input name="sellSlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
+          <label>价格冲击 (%)<input name="priceImpactPct" type="number" min="0" step="0.1" value="0.2"></label>
+          <label>基础交易费 (SOL)<input name="baseTxFeeSol" type="number" min="0" step="0.00001" value="0.00001"></label>
+          <label>优先费 (SOL)<input name="priorityFeeSol" type="number" min="0" step="0.0001" value="0.0005"></label>
+          <label>Jito 小费 (SOL)<input name="jitoTipSol" type="number" min="0" step="0.0001" value="0"></label>
+          <label>仓位 (SOL)<input name="positionSizeSol" type="number" min="0.001" step="0.01" value="0.2"></label>
+          <label>买入失败率 (%)<input name="entryFailureRatePct" type="number" min="0" max="100" step="0.1" value="0"></label>
+          <label>失败买入尝试成本 (%)<input name="entryFailureCostPct" type="number" min="0" step="0.1" value="1"></label>
+          <label>W3 NetFlow 下限 (SOL)<input name="minNetFlowW3" type="number" min="0" step="0.1" value="1"></label>
+          <label>Flow Accel 下限<input name="minFlowAccel" type="number" min="0" step="0.1" value="1.2"></label>
+          <label>时间外验证比例<input name="splitRatio" type="number" min="0.1" max="0.9" step="0.05" value="0.7"></label>
+          <button class="primary" type="submit">运行回测</button>
         </form>
       </article>
       <div class="grid result-grid" id="backtest-results"></div>
@@ -281,11 +281,11 @@
   <script>
     const state = { active: 'overview' };
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-    const number = (value, digits = 0) => Number.isFinite(value) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value) : '?';
-    const pct = (value, digits = 2) => Number.isFinite(value) ? `${value >= 0 ? '+' : ''}${number(value, digits)}%` : '?';
-    const sol = (value) => Number.isFinite(value) ? `${number(value, 2)} SOL` : '?';
-    const age = (ms) => !Number.isFinite(ms) ? '?' : ms < 60000 ? `${number(ms/1000, 0)}s` : `${number(ms/60000, 1)}m`;
-    const time = (ms) => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '?';
+    const number = (value, digits = 0) => Number.isFinite(value) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value) : '—';
+    const pct = (value, digits = 2) => Number.isFinite(value) ? `${value >= 0 ? '+' : ''}${number(value, digits)}%` : '—';
+    const sol = (value) => Number.isFinite(value) ? `${number(value, 2)} SOL` : '—';
+    const age = (ms) => !Number.isFinite(ms) ? '—' : ms < 60000 ? `${number(ms/1000, 0)}s` : `${number(ms/60000, 1)}m`;
+    const time = (ms) => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
     const tone = (value) => Number.isFinite(value) ? (value >= 0 ? 'positive' : 'negative') : 'muted';
     async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
 
@@ -312,23 +312,23 @@
 
     function renderOverview(data) {
       const items = [
-        ['?? Raw Trades', data.rawTradesToday, '?????????'],
-        ['?? Token', data.activeTokens, '?? 10 ?????'],
-        ['Candidate', data.candidateCount, '??? 5 ? Activity Wake-Up'],
-        ['Flow Signals', data.flowSignalsToday, '??????'],
-        ['Smart Wallet Trades', data.smartWalletTradesToday, '??????'],
+        ['今日 Raw Trades', data.rawTradesToday, '毕业前逐笔链上成交'],
+        ['活跃 Token', data.activeTokens, '最近 10 分钟有成交'],
+        ['Candidate', data.candidateCount, '已触发 5 秒 Activity Wake-Up'],
+        ['Flow Signals', data.flowSignalsToday, '今日研究信号'],
+        ['Smart Wallet Trades', data.smartWalletTradesToday, '今日标注事件'],
       ];
       document.querySelector('#overview-metrics').innerHTML = items.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${number(value)}</strong><small>${note}</small></article>`).join('');
     }
 
     function renderSignals(rows) {
       const target = document.querySelector('#signal-rows');
-      if (!rows.length) { target.innerHTML = '<tr><td colspan="9" class="empty">????? Flow Acceleration ??</td></tr>'; return; }
+      if (!rows.length) { target.innerHTML = '<tr><td colspan="9" class="empty">等待第一条 Flow Acceleration 信号</td></tr>'; return; }
       target.innerHTML = rows.map(row => {
         const mint = escapeHtml(row.mint);
         const symbol = escapeHtml(row.symbol || mint.slice(0, 6));
-        const accel = Number.isFinite(row.flow_accel) ? `${number(row.flow_accel, 2)}?` : '? only';
-        return `<tr><td>${time(row.timestamp_ms)}</td><td><b>${symbol}</b><br><a class="mint" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noreferrer">${mint.slice(0,6)}?${mint.slice(-4)}</a></td><td>${age(row.age_ms)}</td><td>${pct(row.curve_pct,1)}</td><td>${number(row.netflow_w1,2)} ? ${number(row.netflow_w2,2)} ? <b class="positive">${number(row.netflow_w3,2)}</b></td><td>${accel}</td><td>${row.unique_buyers_w1} ? ${row.unique_buyers_w2} ? ${row.unique_buyers_w3}</td><td>${row.buy_tx_w1} ? ${row.buy_tx_w2} ? ${row.buy_tx_w3}</td><td class="${tone(row.return_5s)}">${pct(row.return_5s)}</td></tr>`;
+        const accel = Number.isFinite(row.flow_accel) ? `${number(row.flow_accel, 2)}×` : 'Δ only';
+        return `<tr><td>${time(row.timestamp_ms)}</td><td><b>${symbol}</b><br><a class="mint" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noreferrer">${mint.slice(0,6)}…${mint.slice(-4)}</a></td><td>${age(row.age_ms)}</td><td>${pct(row.curve_pct,1)}</td><td>${number(row.netflow_w1,2)} → ${number(row.netflow_w2,2)} → <b class="positive">${number(row.netflow_w3,2)}</b></td><td>${accel}</td><td>${row.unique_buyers_w1} → ${row.unique_buyers_w2} → ${row.unique_buyers_w3}</td><td>${row.buy_tx_w1} → ${row.buy_tx_w2} → ${row.buy_tx_w3}</td><td class="${tone(row.return_5s)}">${pct(row.return_5s)}</td></tr>`;
       }).join('');
     }
 
@@ -353,37 +353,40 @@
         ['Profit Factor', number(m.profitFactor,2)], ['Expectancy', pct(m.expectancyPct)],
         ['Avg MFE', pct(m.averageMfePct)], ['Avg MAE', pct(m.averageMaePct)],
         ['Total Cost', pct(result.parameters.totalCostPct)],
-        ['Observed Entry Gap', Number.isFinite(m.averageMarketObservedEntryDelayMs) ? `${number(m.averageMarketObservedEntryDelayMs)} ms` : '?'],
+        ['Observed Entry Gap', Number.isFinite(m.averageMarketObservedEntryDelayMs) ? `${number(m.averageMarketObservedEntryDelayMs)} ms` : '—'],
         ['Latency Move', pct(m.averageLatencyMovePct)],
       ];
       document.querySelector('#backtest-results').innerHTML = items.map(([label,value]) => `<div class="result"><span>${label}</span><b>${value}</b></div>`).join('');
     }
 
     function renderWallets(rows) {
-      document.querySelector('#wallet-cards').innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">Smart Wallet Label</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>????</span><b>${number(row.trades)}</b></div><div><span>????</span><b>${number(row.boughtTokens)}</b></div><div><span>????</span><b>${age(row.averageHoldMs)}</b></div><div><span>?? Curve</span><b>${pct(row.averageBuyCurvePct,1)}</b></div><div><span>?? AGE</span><b>${age(row.averageBuyAgeMs)}</b></div><div><span>Signal ???</span><b>${pct(row.flowSignalOverlapPct,1)}</b></div></div></article>`).join('');
+      document.querySelector('#wallet-cards').innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">Smart Wallet Label</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>买入 Curve</span><b>${pct(row.averageBuyCurvePct,1)}</b></div><div><span>买入 AGE</span><b>${age(row.averageBuyAgeMs)}</b></div><div><span>Signal 重合率</span><b>${pct(row.flowSignalOverlapPct,1)}</b></div></div></article>`).join('');
     }
 
     function renderHealth(data) {
-      const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} ? ${escapeHtml(region.state || 'waiting')}`).join('<br>') || '???';
+      const regions = data.stream.regions.map(region => {
+        const role = region.active ? '当前' : (region.configuredRole === 'primary' ? '首选' : '备用');
+        return `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${role}`;
+      }).join('<br>') || '未连接';
       const cards = [
-        ['Stream', [['??', data.status], ['Regions', regions], ['????', number(data.stream.transactionsReceived)], ['????', number(data.stream.duplicatesDropped)], ['??', number(data.stream.errors)]]],
-        ['Processing', [['????', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '?'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Signals', number(data.engine.signalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Signal Rows', number(data.database.signalRows)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['??????', Number.isFinite(data.database.lastFlushMs) ? `${number(data.database.lastFlushMs)} ms` : '?'], ['????', number(data.database.writeErrors)]]],
-        ['Scope Guard', [['??? / ??', 'Bonding Curve only'], ['??', 'Bonding Curve / PumpSwap'], ['??????', 'Blocked'], ['AGE / Curve', 'Record only'], ['????', 'Disabled'], ['????', '1s ? 60s']]],
+        ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['停滞切换', number(data.stream.staleFailovers)], ['错误', number(data.stream.errors)]]],
+        ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Signals', number(data.engine.signalsCreated)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Signal Rows', number(data.database.signalRows)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['最近写入耗时', Number.isFinite(data.database.lastFlushMs) ? `${number(data.database.lastFlushMs)} ms` : '—'], ['写入错误', number(data.database.writeErrors)]]],
+        ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['AGE / Curve', 'Record only'], ['链上交易', 'Disabled'], ['未来标签', '1s → 60s']]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const live = data.status === 'streaming';
       document.querySelector('#status-dot').classList.toggle('live', live);
-      document.querySelector('#status-text').textContent = live ? '????????' : '?????';
+      document.querySelector('#status-text').textContent = live ? '链上数据流运行中' : '等待数据流';
     }
 
     document.querySelector('#backtest-form').addEventListener('submit', async event => {
       event.preventDefault();
       const query = new URLSearchParams(new FormData(event.currentTarget));
       const target = document.querySelector('#backtest-results');
-      target.innerHTML = '<div class="card empty">??????????????</div>';
+      target.innerHTML = '<div class="card empty">正在计算延迟与成本后的结果…</div>';
       try { renderBacktest(await json(`/api/backtest?${query}`)); }
-      catch (error) { target.innerHTML = `<div class="card empty error">?????${escapeHtml(error.message)}</div>`; }
+      catch (error) { target.innerHTML = `<div class="card empty error">回测失败：${escapeHtml(error.message)}</div>`; }
     });
 
     async function refresh() {

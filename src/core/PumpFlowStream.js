@@ -41,38 +41,34 @@ function subscribeRequest(value) {
 }
 
 class RegionConnection {
-  constructor({ endpoint, token, label, programs, reconnect, onTransaction, onState, onError }) {
+  constructor({ endpoint, token, label, programs, onTransaction, onState, onError, onUnavailable }) {
     this.endpoint = endpoint;
     this.token = token;
     this.label = label;
     this.programs = programs;
-    this.reconnect = reconnect;
     this.onTransaction = onTransaction;
     this.onState = onState;
     this.onError = onError;
+    this.onUnavailable = onUnavailable;
 
     this.client = null;
     this.stream = null;
     this.running = false;
     this.connected = false;
     this.ammMints = new Set();
-    this.reconnectAttempts = 0;
-    this.reconnectTimer = null;
-    this.reconnectScheduled = false;
+    this.unavailableNotified = false;
     this.lastMessageAt = null;
     this.connectedAt = null;
   }
 
   async start() {
     this.running = true;
-    await this._connect();
+    this.unavailableNotified = false;
+    return this._connect();
   }
 
   async stop() {
     this.running = false;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = null;
-    this.reconnectScheduled = false;
     await this._close();
   }
 
@@ -82,9 +78,15 @@ class RegionConnection {
     try {
       await this._sendSubscription();
     } catch (error) {
-      this.onError(error, this.label, 'update_subscription');
-      this._scheduleReconnect();
+      this._notifyUnavailable(error, 'update_subscription');
     }
+  }
+
+  markStale(staleForMs) {
+    this._notifyUnavailable(
+      new Error(`no transactions received for ${staleForMs}ms`),
+      'stale',
+    );
   }
 
   async _connect() {
@@ -109,16 +111,16 @@ class RegionConnection {
       await this._sendSubscription();
       this.connected = true;
       this.connectedAt = Date.now();
-      this.reconnectAttempts = 0;
-      this.reconnectScheduled = false;
+      this.unavailableNotified = false;
       this.onState(this.label, {
         state: 'connected',
         connectedAt: this.connectedAt,
         ammMintCount: this.ammMints.size,
       });
+      return true;
     } catch (error) {
-      this.onError(error, this.label, 'connect');
-      this._scheduleReconnect();
+      this._notifyUnavailable(error, 'connect');
+      return false;
     }
   }
 
@@ -172,27 +174,15 @@ class RegionConnection {
   }
 
   _handleEnd(error) {
-    if (!this.running || this.reconnectScheduled) return;
-    this.connected = false;
-    this.onError(error, this.label, 'stream');
-    this._scheduleReconnect();
+    this._notifyUnavailable(error, 'stream');
   }
 
-  _scheduleReconnect() {
-    if (!this.running || this.reconnectScheduled) return;
-    this.reconnectScheduled = true;
+  _notifyUnavailable(error, phase) {
+    if (!this.running || this.unavailableNotified) return;
+    this.unavailableNotified = true;
     this.connected = false;
-    this.reconnectAttempts += 1;
-    const delay = Math.min(
-      this.reconnect.maxMs,
-      this.reconnect.minMs * (2 ** Math.min(this.reconnectAttempts - 1, 8)),
-    );
-    this.onState(this.label, { state: 'reconnecting', reconnectInMs: delay });
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.reconnectScheduled = false;
-      this._connect().catch((error) => this.onError(error, this.label, 'reconnect'));
-    }, delay);
+    this.onError(error, this.label, phase);
+    this.onUnavailable(this, error, phase);
   }
 
   async _close() {
@@ -213,11 +203,17 @@ class RegionConnection {
 }
 
 class PumpFlowStream extends EventEmitter {
-  constructor({ config, tokenForEndpoint }) {
+  constructor({ config, tokenForEndpoint, connectionFactory }) {
     super();
     this.config = config;
     this.tokenForEndpoint = tokenForEndpoint;
-    this.connections = [];
+    this.connectionFactory = connectionFactory || ((options) => new RegionConnection(options));
+    this.connection = null;
+    this.activeEndpointIndex = -1;
+    this.running = false;
+    this.failoverAttempts = 0;
+    this.failoverTimer = null;
+    this.watchdogTimer = null;
     this.states = new Map();
     this.seenSignatures = new Map();
     this.ammMints = new Set();
@@ -226,37 +222,43 @@ class PumpFlowStream extends EventEmitter {
       transactionsReceived: 0,
       duplicatesDropped: 0,
       errors: 0,
+      failovers: 0,
+      staleFailovers: 0,
       lastTransactionAt: null,
     };
   }
 
   async start() {
-    const programs = {
-      pump: this.config.pump.programId,
-      amm: this.config.pump.ammProgramId,
-    };
-    this.connections = this.config.stream.endpoints.map((endpoint, index) => new RegionConnection({
-      endpoint,
-      token: this.tokenForEndpoint(endpoint),
-      label: `FLOW-${index + 1}`,
-      programs,
-      reconnect: {
-        minMs: this.config.stream.reconnectMinMs,
-        maxMs: this.config.stream.reconnectMaxMs,
-      },
-      onTransaction: (transaction, label, receivedAt) => this._handleTransaction(transaction, label, receivedAt),
-      onState: (label, patch) => this._updateState(label, patch),
-      onError: (error, label, phase) => this._handleError(error, label, phase),
-    }));
-
-    await Promise.all(this.connections.map((connection) => connection.start()));
+    if (this.running) return;
+    this.running = true;
+    this.config.stream.endpoints.forEach((endpoint, index) => {
+      const label = this._labelFor(index);
+      this.states.set(label, {
+        endpoint,
+        configuredRole: index === 0 ? 'primary' : 'standby',
+        active: false,
+        state: 'standby',
+      });
+    });
+    this._startWatchdog();
+    await this._activateEndpoint(0, 'startup');
   }
 
   async stop() {
+    this.running = false;
     if (this.updateTimer) clearTimeout(this.updateTimer);
+    if (this.failoverTimer) clearTimeout(this.failoverTimer);
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     this.updateTimer = null;
-    await Promise.all(this.connections.map((connection) => connection.stop()));
-    this.connections = [];
+    this.failoverTimer = null;
+    this.watchdogTimer = null;
+    const connection = this.connection;
+    this.connection = null;
+    if (connection) await connection.stop();
+    if (this.activeEndpointIndex >= 0) {
+      this._updateState(this._labelFor(this.activeEndpointIndex), { active: false, state: 'stopped' });
+    }
+    this.activeEndpointIndex = -1;
   }
 
   setAmmMints(mints) {
@@ -266,21 +268,124 @@ class PumpFlowStream extends EventEmitter {
     if (this.updateTimer) clearTimeout(this.updateTimer);
     this.updateTimer = setTimeout(() => {
       this.updateTimer = null;
-      for (const connection of this.connections) {
-        connection.setAmmMints(this.ammMints).catch((error) => {
-          this._handleError(error, connection.label, 'set_amm_mints');
-        });
-      }
+      const connection = this.connection;
+      if (!connection) return;
+      connection.setAmmMints(this.ammMints).catch((error) => {
+        this._handleError(error, connection.label, 'set_amm_mints');
+      });
     }, 100);
   }
 
   health() {
+    const activeEndpoint = this.activeEndpointIndex >= 0
+      ? this.config.stream.endpoints[this.activeEndpointIndex]
+      : null;
     return {
       ...this.metrics,
+      mode: 'active-passive',
+      activeEndpoint,
+      activeLabel: this.activeEndpointIndex >= 0 ? this._labelFor(this.activeEndpointIndex) : null,
       dedupSize: this.seenSignatures.size,
       ammMintCount: this.ammMints.size,
-      regions: [...this.states.entries()].map(([label, state]) => ({ label, ...state })),
+      regions: this.config.stream.endpoints.map((_endpoint, index) => {
+        const label = this._labelFor(index);
+        return { label, ...(this.states.get(label) || {}) };
+      }),
     };
+  }
+
+  async _activateEndpoint(index, reason) {
+    if (!this.running || this.config.stream.endpoints.length === 0) return;
+    const normalizedIndex = index % this.config.stream.endpoints.length;
+    const previousIndex = this.activeEndpointIndex;
+    const previousConnection = this.connection;
+
+    this.connection = null;
+    if (previousConnection) await previousConnection.stop();
+    if (!this.running) return;
+
+    if (previousIndex >= 0) {
+      this._updateState(this._labelFor(previousIndex), { active: false, state: 'standby' });
+    }
+    if (reason !== 'startup' && previousIndex >= 0 && previousIndex !== normalizedIndex) {
+      this.metrics.failovers += 1;
+    }
+
+    this.activeEndpointIndex = normalizedIndex;
+    const endpoint = this.config.stream.endpoints[normalizedIndex];
+    const label = this._labelFor(normalizedIndex);
+    const connection = this.connectionFactory({
+      endpoint,
+      token: this.tokenForEndpoint(endpoint),
+      label,
+      programs: {
+        pump: this.config.pump.programId,
+        amm: this.config.pump.ammProgramId,
+      },
+      onTransaction: (transaction, region, receivedAt) => {
+        this._handleTransaction(transaction, region, receivedAt);
+      },
+      onState: (region, patch) => this._updateState(region, patch),
+      onError: (error, region, phase) => this._handleError(error, region, phase),
+      onUnavailable: (failedConnection, error, phase) => {
+        this._scheduleFailover(failedConnection, error, phase);
+      },
+    });
+    this.connection = connection;
+    this._updateState(label, {
+      active: true,
+      state: 'connecting',
+      activatedAt: Date.now(),
+      activationReason: reason,
+    });
+    await connection.setAmmMints(this.ammMints);
+    const connected = await connection.start();
+    if (connected && this.connection === connection) this.failoverAttempts = 0;
+  }
+
+  _scheduleFailover(connection, _error, phase) {
+    if (!this.running || connection !== this.connection || this.failoverTimer) return;
+    this.failoverAttempts += 1;
+    if (phase === 'stale') this.metrics.staleFailovers += 1;
+    const delay = Math.min(
+      this.config.stream.reconnectMaxMs,
+      this.config.stream.reconnectMinMs * (2 ** Math.min(this.failoverAttempts - 1, 8)),
+    );
+    const nextIndex = this.config.stream.endpoints.length > 1
+      ? (this.activeEndpointIndex + 1) % this.config.stream.endpoints.length
+      : this.activeEndpointIndex;
+    const label = this._labelFor(this.activeEndpointIndex);
+    this._updateState(label, {
+      state: 'reconnecting',
+      reconnectInMs: delay,
+      nextLabel: this._labelFor(nextIndex),
+    });
+    this.failoverTimer = setTimeout(() => {
+      this.failoverTimer = null;
+      this._activateEndpoint(nextIndex, phase).catch((error) => {
+        this._handleError(error, this._labelFor(nextIndex), 'failover');
+      });
+    }, delay);
+    if (this.failoverTimer.unref) this.failoverTimer.unref();
+  }
+
+  _startWatchdog() {
+    const staleTimeoutMs = this.config.stream.staleTimeoutMs;
+    const staleCheckMs = this.config.stream.staleCheckMs;
+    if (!Number.isFinite(staleTimeoutMs) || staleTimeoutMs <= 0) return;
+    this.watchdogTimer = setInterval(() => {
+      const connection = this.connection;
+      if (!this.running || !connection?.connected) return;
+      const lastActivityAt = connection.lastMessageAt || connection.connectedAt;
+      if (!lastActivityAt) return;
+      const staleForMs = Date.now() - lastActivityAt;
+      if (staleForMs >= staleTimeoutMs) connection.markStale(staleForMs);
+    }, staleCheckMs);
+    if (this.watchdogTimer.unref) this.watchdogTimer.unref();
+  }
+
+  _labelFor(index) {
+    return `FLOW-${index + 1}`;
   }
 
   _handleTransaction(transaction, region, receivedAt) {
