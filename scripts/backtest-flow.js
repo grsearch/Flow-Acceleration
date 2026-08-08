@@ -17,12 +17,16 @@ function args(argv) {
 
 const input = args(process.argv.slice(2));
 const dbPath = input.db || config.storage.dbPath;
+const signalVariant = input['signal-variant'] || 'primary_3w';
+const defaultMinFlowAccel = ['shadow_netflow_breakout', '*'].includes(signalVariant)
+  ? 0
+  : config.strategy.minAccelerationRatio;
 const db = new Database(dbPath, { readonly: true, fileMustExist: true });
 
 try {
   const result = runBacktest(db, {
     holdMs: input['hold-ms'],
-    executionDelayMs: input['delay-ms'],
+    executionDelayMs: input['delay-ms'] ?? config.backtest.executionDelayMs,
     entryTimeoutMs: input['entry-timeout-ms'] ?? config.backtest.entryTimeoutMs,
     exitTimeoutMs: input['exit-timeout-ms'] ?? config.backtest.exitTimeoutMs,
     noExitLossPct: input['no-exit-loss-pct'] ?? config.backtest.noExitLossPct,
@@ -30,7 +34,7 @@ try {
     stopLossPct: input['stop-loss-pct'],
     trailingStopPct: input['trailing-stop-pct'],
     trailingActivationPct: input['trailing-activation-pct'],
-    exitExecutionDelayMs: input['exit-delay-ms'],
+    exitExecutionDelayMs: input['exit-delay-ms'] ?? config.backtest.exitExecutionDelayMs,
     exitRetryCount: input['exit-retry-count'],
     exitRetryDelayMs: input['exit-retry-delay-ms'],
     exitFailureCostSol: input['exit-failure-cost-sol'],
@@ -49,7 +53,15 @@ try {
     entryFailureCostPct: input['entry-failure-cost-pct'] ?? input['failure-loss-pct']
       ?? config.labels.costModel.entryFailureCostPct,
     minNetFlowW3: input['min-net-w3'] ?? config.strategy.minNetFlowW3Sol,
-    minFlowAccel: input['min-accel'] ?? config.strategy.minAccelerationRatio,
+    maxNetFlowW3: input['max-net-w3'],
+    minFlowAccel: input['min-accel'] ?? defaultMinFlowAccel,
+    minCurvePct: input['min-curve-pct'],
+    maxCurvePct: input['max-curve-pct'],
+    maxBuyTxW3: input['max-buy-tx-w3'],
+    maxUniqueBuyersW3: input['max-buyers-w3'],
+    firstSignalOnly: input['first-signal-only'],
+    signalCooldownMs: input['signal-cooldown-ms'],
+    signalVariant,
     fromMs: input['from-ms'],
     toMs: input['to-ms'],
     dataCutoffMs: input['data-cutoff-ms'],

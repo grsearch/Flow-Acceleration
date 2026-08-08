@@ -9,6 +9,12 @@ function numeric(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function boolean(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
 class ResearchServer {
   constructor({ config, store, engine, stream, labeler }) {
     this.config = config;
@@ -37,9 +43,16 @@ class ResearchServer {
 
     this.app.get('/api/backtest', (request, response) => {
       const defaultCosts = this.config.labels.costModel || {};
+      const signalVariant = request.query.signalVariant || 'primary_3w';
+      const defaultMinFlowAccel = ['shadow_netflow_breakout', '*'].includes(signalVariant)
+        ? 0
+        : this.config.strategy.minAccelerationRatio;
       const result = runBacktest(this.store.db, {
         holdMs: numeric(request.query.holdMs, 5_000),
-        executionDelayMs: numeric(request.query.executionDelayMs, 200),
+        executionDelayMs: numeric(
+          request.query.executionDelayMs,
+          this.config.backtest?.executionDelayMs ?? 200,
+        ),
         entryTimeoutMs: numeric(
           request.query.entryTimeoutMs,
           this.config.backtest?.entryTimeoutMs ?? 2_000,
@@ -56,7 +69,10 @@ class ResearchServer {
         stopLossPct: numeric(request.query.stopLossPct, 0),
         trailingStopPct: numeric(request.query.trailingStopPct, 0),
         trailingActivationPct: numeric(request.query.trailingActivationPct, 0),
-        exitExecutionDelayMs: numeric(request.query.exitExecutionDelayMs, 0),
+        exitExecutionDelayMs: numeric(
+          request.query.exitExecutionDelayMs,
+          this.config.backtest?.exitExecutionDelayMs ?? 200,
+        ),
         exitRetryCount: numeric(request.query.exitRetryCount, 0),
         exitRetryDelayMs: numeric(request.query.exitRetryDelayMs, 500),
         exitFailureCostSol: numeric(request.query.exitFailureCostSol, undefined),
@@ -81,7 +97,15 @@ class ResearchServer {
           defaultCosts.entryFailureCostPct ?? defaultCosts.failureLossPct ?? 1,
         ),
         minNetFlowW3: numeric(request.query.minNetFlowW3, this.config.strategy.minNetFlowW3Sol),
-        minFlowAccel: numeric(request.query.minFlowAccel, this.config.strategy.minAccelerationRatio),
+        maxNetFlowW3: numeric(request.query.maxNetFlowW3, undefined),
+        minFlowAccel: numeric(request.query.minFlowAccel, defaultMinFlowAccel),
+        minCurvePct: numeric(request.query.minCurvePct, undefined),
+        maxCurvePct: numeric(request.query.maxCurvePct, undefined),
+        maxBuyTxW3: numeric(request.query.maxBuyTxW3, undefined),
+        maxUniqueBuyersW3: numeric(request.query.maxUniqueBuyersW3, undefined),
+        firstSignalOnly: boolean(request.query.firstSignalOnly, false),
+        signalCooldownMs: numeric(request.query.signalCooldownMs, 0),
+        signalVariant,
         fromMs: request.query.fromMs,
         toMs: request.query.toMs,
         dataCutoffMs: request.query.dataCutoffMs,

@@ -15,6 +15,16 @@ function finiteOrNull(value) {
   return Number.isFinite(value) ? value : null;
 }
 
+function receivedTimestampMs(value, eventTimestampMs) {
+  let timestamp = Number(value);
+  if (!Number.isFinite(timestamp)) return eventTimestampMs;
+  while (Math.abs(timestamp) > 100_000_000_000_000) timestamp /= 1_000;
+  if (!Number.isFinite(eventTimestampMs)) return timestamp;
+  return Math.abs(timestamp - eventTimestampMs) <= 86_400_000
+    ? timestamp
+    : eventTimestampMs;
+}
+
 function curveProgress(initialRaw, currentRaw) {
   try {
     const initial = BigInt(initialRaw);
@@ -65,6 +75,7 @@ class ResearchStore {
       tradesQueued: 0,
       tradesWritten: 0,
       writeErrors: 0,
+      timestampCorrections: 0,
       lastFlushAt: null,
       lastFlushMs: null,
       lastArchiveAt: null,
@@ -161,6 +172,8 @@ class ResearchStore {
         flow_accel_1 REAL,
         flow_accel_2 REAL,
         flow_accel REAL,
+        signal_variant TEXT NOT NULL DEFAULT 'primary_3w',
+        is_primary INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_flow_signals_ts ON flow_signals(timestamp_ms);
@@ -210,6 +223,27 @@ class ResearchStore {
         ON smart_wallet_events(wallet, timestamp_ms);
       CREATE INDEX IF NOT EXISTS idx_smart_wallet_events_mint_ts
         ON smart_wallet_events(mint, timestamp_ms);
+    `);
+
+    const signalColumns = new Set(
+      this.db.prepare('PRAGMA table_info(flow_signals)').all().map((column) => column.name),
+    );
+    const signalMigrations = [
+      [
+        'signal_variant',
+        "ALTER TABLE flow_signals ADD COLUMN signal_variant TEXT NOT NULL DEFAULT 'primary_3w'",
+      ],
+      [
+        'is_primary',
+        'ALTER TABLE flow_signals ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 1',
+      ],
+    ];
+    for (const [column, sql] of signalMigrations) {
+      if (!signalColumns.has(column)) this.db.exec(sql);
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_flow_signals_variant_ts
+      ON flow_signals(signal_variant, timestamp_ms)
     `);
 
     const returnColumns = new Set(
@@ -373,7 +407,8 @@ class ResearchStore {
           delta_netflow_12, delta_netflow_23,
           unique_buyers_w1, unique_buyers_w2, unique_buyers_w3,
           buy_tx_w1, buy_tx_w2, buy_tx_w3,
-          flow_accel_1, flow_accel_2, flow_accel, created_at
+          flow_accel_1, flow_accel_2, flow_accel,
+          signal_variant, is_primary, created_at
         ) VALUES (
           @timestampMs, @slot, @signature, @mint, @symbol, @ageMs, @curvePct, @price,
           @buyFlowW1, @buyFlowW2, @buyFlowW3,
@@ -382,7 +417,8 @@ class ResearchStore {
           @deltaNetFlow12, @deltaNetFlow23,
           @uniqueBuyersW1, @uniqueBuyersW2, @uniqueBuyersW3,
           @buyTxW1, @buyTxW2, @buyTxW3,
-          @flowAccel1, @flowAccel2, @flowAccel, @createdAt
+          @flowAccel1, @flowAccel2, @flowAccel,
+          @signalVariant, @isPrimary, @createdAt
         )
       `),
       insertReturn: this.db.prepare(`
@@ -406,7 +442,7 @@ class ResearchStore {
       nearestSignal: this.db.prepare(`
         SELECT signal_id, timestamp_ms
         FROM flow_signals
-        WHERE mint = ? AND timestamp_ms <= ? AND timestamp_ms >= ?
+        WHERE mint = ? AND timestamp_ms <= ? AND timestamp_ms >= ? AND is_primary = 1
         ORDER BY timestamp_ms DESC
         LIMIT 1
       `),
@@ -503,10 +539,12 @@ class ResearchStore {
   }
 
   queueRawTrade(trade) {
+    const normalizedReceivedAtMs = receivedTimestampMs(trade.receivedAtMs, trade.timestampMs);
+    if (normalizedReceivedAtMs !== trade.receivedAtMs) this.metrics.timestampCorrections += 1;
     this.rawBuffer.push({
       timestampMs: trade.timestampMs,
       chainTimestampMs: trade.chainTimestampMs || null,
-      receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+      receivedAtMs: normalizedReceivedAtMs,
       slot: trade.slot || null,
       signature: trade.signature || null,
       eventIndex: trade.eventIndex || 0,
@@ -552,8 +590,13 @@ class ResearchStore {
   recordSignal(signal) {
     const createdAt = Date.now();
     const acceleration = [signal.flowAccel1, signal.flowAccel2].filter(Number.isFinite);
+    const signalVariant = signal.signalVariant || 'primary_3w';
     const signalRow = {
       ...signal,
+      signalVariant,
+      isPrimary: signal.isPrimary == null
+        ? Number(signalVariant === 'primary_3w')
+        : Number(signal.isPrimary !== false),
       flowAccel: Number.isFinite(signal.flowAccel)
         ? signal.flowAccel
         : acceleration.length ? Math.min(...acceleration) : null,
@@ -648,7 +691,12 @@ class ResearchStore {
       rawTradesToday: this.db.prepare('SELECT COUNT(*) AS n FROM raw_trades WHERE timestamp_ms >= ?').get(since).n,
       activeTokens: this.db.prepare('SELECT COUNT(*) AS n FROM flow_tokens WHERE last_trade_at >= ?').get(activeSince).n,
       candidateCount,
-      flowSignalsToday: this.db.prepare('SELECT COUNT(*) AS n FROM flow_signals WHERE timestamp_ms >= ?').get(since).n,
+      flowSignalsToday: this.db.prepare(`
+        SELECT COUNT(*) AS n FROM flow_signals WHERE timestamp_ms >= ? AND is_primary = 1
+      `).get(since).n,
+      shadowSignalsToday: this.db.prepare(`
+        SELECT COUNT(*) AS n FROM flow_signals WHERE timestamp_ms >= ? AND is_primary = 0
+      `).get(since).n,
       smartWalletTradesToday: this.db.prepare('SELECT COUNT(*) AS n FROM smart_wallet_events WHERE timestamp_ms >= ?').get(since).n,
     };
   }
@@ -658,6 +706,7 @@ class ResearchStore {
       SELECT s.*, r.return_5s, r.return_10s, r.return_30s, r.mfe_10s, r.mae_10s
       FROM flow_signals s
       LEFT JOIN signal_returns r USING(signal_id)
+      WHERE s.is_primary = 1
       ORDER BY s.timestamp_ms DESC
       LIMIT ?
     `).all(Math.min(1_000, Math.max(1, limit)));
@@ -728,12 +777,20 @@ class ResearchStore {
   health() {
     const rawRows = this.db.prepare('SELECT COUNT(*) AS n FROM raw_trades').get().n;
     const signalRows = this.db.prepare('SELECT COUNT(*) AS n FROM flow_signals').get().n;
+    const primarySignalRows = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM flow_signals WHERE is_primary = 1
+    `).get().n;
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
         COALESCE(SUM(label_status = 'PENDING'), 0) AS pending,
         COALESCE(SUM(label_status = 'COMPLETE'), 0) AS complete,
-        COALESCE(SUM(label_status = 'RIGHT_CENSORED'), 0) AS right_censored
+        COALESCE(SUM(label_status = 'RIGHT_CENSORED'), 0) AS right_censored,
+        COUNT(return_1s) AS observed_1s,
+        COUNT(return_5s) AS observed_5s,
+        COUNT(return_10s) AS observed_10s,
+        COUNT(return_30s) AS observed_30s,
+        COUNT(return_60s) AS observed_60s
       FROM signal_returns
     `).get();
     return {
@@ -741,6 +798,8 @@ class ResearchStore {
       pendingWrites: this.rawBuffer.length,
       rawRows,
       signalRows,
+      primarySignalRows,
+      shadowSignalRows: signalRows - primarySignalRows,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };

@@ -31,7 +31,7 @@ function makeStore() {
   });
 }
 
-function addSignal(store, mint, timestampMs) {
+function addSignal(store, mint, timestampMs, overrides = {}) {
   return store.recordSignal({
     timestampMs, slot: 1, signature: `signal-${mint}`, mint, symbol: 'FLOW',
     ageMs: 10_000, curvePct: 40, price: 1,
@@ -42,6 +42,7 @@ function addSignal(store, mint, timestampMs) {
     uniqueBuyersW1: 2, uniqueBuyersW2: 5, uniqueBuyersW3: 10,
     buyTxW1: 3, buyTxW2: 8, buyTxW3: 15,
     flowAccel1: 2.67, flowAccel2: 3.5,
+    ...overrides,
   });
 }
 
@@ -72,6 +73,10 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   assert.strictEqual(signal.flowAccel, 2.67);
   const saved = store.db.prepare('SELECT flow_accel FROM flow_signals WHERE signal_id = 1').get();
   assert.strictEqual(saved.flow_accel, 2.67, 'summary acceleration must use the stricter ratio');
+  const variant = store.db.prepare(`
+    SELECT signal_variant, is_primary FROM flow_signals WHERE signal_id = 1
+  `).get();
+  assert.deepStrictEqual(variant, { signal_variant: 'primary_3w', is_primary: 1 });
   const savedReturn = store.db.prepare('SELECT cost_model_json FROM signal_returns WHERE signal_id = 1').get();
   assert.strictEqual(JSON.parse(savedReturn.cost_model_json).platformFeePct, 1.4);
 
@@ -94,6 +99,11 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   assert.strictEqual(result.rows[0].status, STATUS.COMPLETED);
   assert.ok(result.metrics.averageRawReturnPct > 3.9 && result.metrics.averageRawReturnPct < 4);
   assert.ok(result.metrics.averageNetReturnPct > 2.9 && result.metrics.averageNetReturnPct < 3);
+  assert.ok(result.metrics.averageExecutedNetReturnPct > 2.9);
+  assert.ok(result.metrics.medianExecutedNetReturnPct > 2.9);
+  assert.ok(result.metrics.executedWinRatePct === 100);
+  assert.ok(result.metrics.executedRobustness);
+  assert.ok(result.warnings.some(({ code }) => code === 'IDEALIZED_ZERO_DELAY_EXIT'));
   assert.ok(result.metrics.averageMfePct > 6.9);
   assert.ok(result.metrics.averageMaePct < -1.9);
 
@@ -120,6 +130,88 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   assert.strictEqual(failedExecution.metrics.averageNetReturnPct, -7);
   assert.strictEqual(failedExecution.metrics.winRatePct, 0);
   assert.strictEqual(failedExecution.metrics.modeledFailureSamples, 1);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  store.queueRawTrade({
+    timestampMs: 17_000_000,
+    chainTimestampMs: 17_000_000,
+    receivedAtMs: 17_000_000_000_000_000,
+    signature: 'bad-received-at',
+    eventIndex: 0,
+    market: 'PUMP_BONDING_CURVE',
+    mint: 'timestamp-sanity',
+    wallet: 'wallet',
+    side: 'BUY',
+    solAmount: 1,
+    tokenAmount: 1,
+    price: 1,
+  });
+  store.flushRawTrades();
+  const saved = store.db.prepare(`
+    SELECT timestamp_ms, received_at_ms FROM raw_trades WHERE signature = 'bad-received-at'
+  `).get();
+  assert.strictEqual(saved.received_at_ms, saved.timestamp_ms);
+  assert.strictEqual(store.health().timestampCorrections, 1);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  const start = 16_000_000;
+  const researchSignal = {
+    curvePct: 30,
+    netFlowW3: 1.5,
+    buyTxW3: 3,
+    uniqueBuyersW3: 2,
+  };
+  addSignal(store, 'cooldown-filter', start, researchSignal);
+  addSignal(store, 'cooldown-filter', start + 10_000, researchSignal);
+  addSignal(store, 'cooldown-filter', start + 20_000, researchSignal);
+  addSignal(store, 'late-curve', start + 25_000, { ...researchSignal, curvePct: 85 });
+  addSignal(store, 'shadow-only', start + 30_000, {
+    ...researchSignal,
+    signalVariant: 'shadow_2w',
+    isPrimary: false,
+    flowAccel1: 0.5,
+    flowAccel2: 1.5,
+  });
+  addTrade(store, 'coverage-filter', start + 60_000, 1);
+  store.flushRawTrades();
+
+  const firstOnly = runBacktest(store.db, {
+    firstSignalOnly: true,
+    maxCurvePct: 60,
+    maxBuyTxW3: 3,
+    maxUniqueBuyersW3: 2,
+    maxNetFlowW3: 2,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(firstOnly.analysisWindow.selectedSignals, 1);
+  assert.strictEqual(firstOnly.analysisWindow.signalSelection.filteredByFirstSignal, 2);
+  assert.strictEqual(firstOnly.rows[0].mint, 'cooldown-filter');
+
+  const cooldown = runBacktest(store.db, {
+    signalCooldownMs: 15_000,
+    maxCurvePct: 60,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(cooldown.analysisWindow.selectedSignals, 2,
+    'cooldown must compare with the last accepted signal, not merely the previous row');
+  assert.strictEqual(cooldown.analysisWindow.signalSelection.filteredByCooldown, 1);
+
+  const shadow = runBacktest(store.db, {
+    signalVariant: 'shadow_2w',
+    minFlowAccel: 1.2,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(shadow.analysisWindow.selectedSignals, 1);
+  assert.strictEqual(shadow.rows[0].signalVariant, 'shadow_2w');
   store.close();
 }
 
@@ -353,6 +445,9 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   initialStore.close();
   const legacyDb = new Database(dbPath);
   legacyDb.exec(`
+    DROP INDEX idx_flow_signals_variant_ts;
+    ALTER TABLE flow_signals DROP COLUMN signal_variant;
+    ALTER TABLE flow_signals DROP COLUMN is_primary;
     ALTER TABLE signal_returns DROP COLUMN cost_model_json;
     ALTER TABLE signal_returns DROP COLUMN label_status;
     ALTER TABLE signal_returns DROP COLUMN censor_reason;
@@ -361,6 +456,16 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   `);
   legacyDb.close();
   const migratedStore = new ResearchStore(storage, { configuredTradingCostPct: 1.4 });
+  const signalColumns = new Set(
+    migratedStore.db.prepare('PRAGMA table_info(flow_signals)').all()
+      .map((column) => column.name),
+  );
+  assert.ok(signalColumns.has('signal_variant'));
+  assert.ok(signalColumns.has('is_primary'));
+  const migratedSignal = migratedStore.db.prepare(`
+    SELECT signal_variant, is_primary FROM flow_signals WHERE signal_id = 1
+  `).get();
+  assert.deepStrictEqual(migratedSignal, { signal_variant: 'primary_3w', is_primary: 1 });
   const columns = migratedStore.db.prepare('PRAGMA table_info(signal_returns)').all();
   const names = new Set(columns.map((column) => column.name));
   for (const column of [

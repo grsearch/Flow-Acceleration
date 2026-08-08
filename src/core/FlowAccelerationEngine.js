@@ -18,6 +18,12 @@ function round(value, digits = 8) {
   return Math.round(value * scale) / scale;
 }
 
+const SIGNAL_VARIANTS = Object.freeze({
+  PRIMARY: 'primary_3w',
+  TWO_WINDOW: 'shadow_2w',
+  NETFLOW_BREAKOUT: 'shadow_netflow_breakout',
+});
+
 class FlowAccelerationEngine extends EventEmitter {
   constructor(config) {
     super();
@@ -29,8 +35,10 @@ class FlowAccelerationEngine extends EventEmitter {
       rawTrades: 0,
       candidatesCreated: 0,
       signalsCreated: 0,
+      shadowSignalsCreated: 0,
       lastTradeAt: null,
       lastSignalAt: null,
+      lastShadowSignalAt: null,
     };
   }
 
@@ -60,6 +68,7 @@ class FlowAccelerationEngine extends EventEmitter {
     if (state) {
       state.candidateSince = null;
       state.signalActive = false;
+      state.variantActive.clear();
     }
     this.emit('graduated', event);
   }
@@ -95,34 +104,52 @@ class FlowAccelerationEngine extends EventEmitter {
 
     if (!state.candidateSince) return null;
     const metrics = this._signalMetrics(state, trade.timestampMs);
-    if (!this._isSignal(metrics)) {
-      state.signalActive = false;
-      return null;
-    }
-    if (state.signalActive) return null;
-    state.signalActive = true;
-
-    const lastSignalAt = state.lastSignalAt || 0;
-    if (trade.timestampMs - lastSignalAt < this.config.signalCooldownMs) return null;
-
+    const variants = [
+      [SIGNAL_VARIANTS.PRIMARY, this._isSignal(metrics), true],
+      [SIGNAL_VARIANTS.TWO_WINDOW, this._isTwoWindowSignal(metrics), false],
+      [SIGNAL_VARIANTS.NETFLOW_BREAKOUT, this._isNetFlowBreakout(metrics), false],
+    ];
     const tokenInfo = token || this.tokens.get(trade.mint) || {};
-    const signal = {
-      timestampMs: trade.timestampMs,
-      slot: trade.slot || null,
-      signature: trade.signature || null,
-      mint: trade.mint,
-      symbol: tokenInfo.symbol || null,
-      ageMs: Number.isFinite(trade.ageMs) ? trade.ageMs : null,
-      curvePct: Number.isFinite(trade.curvePct) ? trade.curvePct : null,
-      price: trade.price,
-      ...metrics,
-    };
+    let primarySignal = null;
+    for (const [signalVariant, matches, isPrimary] of variants) {
+      if (!matches) {
+        state.variantActive.set(signalVariant, false);
+        if (isPrimary) state.signalActive = false;
+        continue;
+      }
+      if (state.variantActive.get(signalVariant)) continue;
+      state.variantActive.set(signalVariant, true);
+      if (isPrimary) state.signalActive = true;
 
-    state.lastSignalAt = trade.timestampMs;
-    this.metrics.signalsCreated += 1;
-    this.metrics.lastSignalAt = trade.timestampMs;
-    this.emit('signal', signal);
-    return signal;
+      const lastSignalAt = state.lastSignalByVariant.get(signalVariant) || 0;
+      if (trade.timestampMs - lastSignalAt < this.config.signalCooldownMs) continue;
+      const signal = {
+        timestampMs: trade.timestampMs,
+        slot: trade.slot || null,
+        signature: trade.signature || null,
+        mint: trade.mint,
+        symbol: tokenInfo.symbol || null,
+        ageMs: Number.isFinite(trade.ageMs) ? trade.ageMs : null,
+        curvePct: Number.isFinite(trade.curvePct) ? trade.curvePct : null,
+        price: trade.price,
+        signalVariant,
+        isPrimary,
+        ...metrics,
+      };
+      state.lastSignalByVariant.set(signalVariant, trade.timestampMs);
+      if (isPrimary) {
+        state.lastSignalAt = trade.timestampMs;
+        this.metrics.signalsCreated += 1;
+        this.metrics.lastSignalAt = trade.timestampMs;
+        this.emit('signal', signal);
+        primarySignal = signal;
+      } else {
+        this.metrics.shadowSignalsCreated += 1;
+        this.metrics.lastShadowSignalAt = trade.timestampMs;
+        this.emit('shadowSignal', signal);
+      }
+    }
+    return primarySignal;
   }
 
   cleanup(now = Date.now()) {
@@ -132,6 +159,7 @@ class FlowAccelerationEngine extends EventEmitter {
       if (state.candidateSince && now - state.lastTradeAt > this.config.candidateIdleMs) {
         state.candidateSince = null;
         state.signalActive = false;
+        state.variantActive.clear();
       }
       if (state.events.length === 0 && state.lastTradeAt < deleteBefore) this.states.delete(mint);
     }
@@ -157,7 +185,13 @@ class FlowAccelerationEngine extends EventEmitter {
     let state = this.states.get(mint);
     if (!state) {
       state = {
-        events: [], candidateSince: null, signalActive: false, lastSignalAt: null, lastTradeAt: 0,
+        events: [],
+        candidateSince: null,
+        signalActive: false,
+        variantActive: new Map(),
+        lastSignalByVariant: new Map(),
+        lastSignalAt: null,
+        lastTradeAt: 0,
       };
       this.states.set(mint, state);
     }
@@ -261,6 +295,24 @@ class FlowAccelerationEngine extends EventEmitter {
     const txIncreasing = metrics.buyTxW1 <= metrics.buyTxW2
       && metrics.buyTxW2 < metrics.buyTxW3;
     return buyersIncreasing && txIncreasing;
+  }
+
+  _isTwoWindowSignal(metrics) {
+    if (metrics.netFlowW2 >= metrics.netFlowW3
+      || metrics.netFlowW3 < this.config.minNetFlowW3Sol
+      || metrics.deltaNetFlow23 < this.config.minNetFlowDeltaSol) return false;
+    if (Number.isFinite(metrics.flowAccel2)
+      && metrics.flowAccel2 < this.config.minAccelerationRatio) return false;
+    return metrics.uniqueBuyersW2 < metrics.uniqueBuyersW3
+      && metrics.buyTxW2 < metrics.buyTxW3;
+  }
+
+  _isNetFlowBreakout(metrics) {
+    return metrics.netFlowW2 < metrics.netFlowW3
+      && metrics.netFlowW3 >= this.config.minNetFlowW3Sol
+      && metrics.deltaNetFlow23 >= this.config.minNetFlowDeltaSol
+      && metrics.uniqueBuyersW2 < metrics.uniqueBuyersW3
+      && metrics.buyTxW2 < metrics.buyTxW3;
   }
 }
 

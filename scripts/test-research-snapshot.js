@@ -46,6 +46,7 @@ async function main() {
   addTrade(store, 'one', 1_000_000, 1);
   addTrade(store, 'one', 1_000_200, 1);
   addTrade(store, 'one', 1_001_200, 1.1);
+  addTrade(store, 'one', 1_001_400, 1.1);
   addTrade(store, 'coverage', 1_030_000, 1);
   store.close();
 
@@ -78,11 +79,13 @@ async function main() {
   }
   const analysis = JSON.parse(fs.readFileSync(analysisPath, 'utf8'));
   assert.strictEqual(analysis.dataSpan.signals, 1);
+  assert.strictEqual(analysis.dataSpan.primary_signals, 1);
+  assert.strictEqual(analysis.dataSpan.shadow_signals, 0);
   assert.strictEqual(analysis.baseline.metrics.completedSamples, 1);
   assert.strictEqual(analysis.fixedCohort.dataCutoffMs, 1_030_000);
-  assert.strictEqual(analysis.fixedCohort.maxLookaheadMs, 18_000,
+  assert.strictEqual(analysis.fixedCohort.maxLookaheadMs, 18_200,
     'fixed cohort must reserve entry delay, entry timeout, hold, and exit timeout');
-  assert.strictEqual(analysis.fixedCohort.toMs, 1_012_000);
+  assert.strictEqual(analysis.fixedCohort.toMs, 1_011_800);
   fs.rmSync(tempDir, { recursive: true, force: true });
   console.log('test-research-snapshot: ok');
 }
