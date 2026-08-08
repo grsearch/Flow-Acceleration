@@ -20,7 +20,28 @@ const engine = new FlowAccelerationEngine({
 
 const mint = 'FlowMint1111111111111111111111111111111111';
 const signals = [];
+const shadowSignals = [];
 engine.on('signal', (signal) => signals.push(signal));
+engine.on('shadowSignal', (signal) => shadowSignals.push(signal));
+
+const twoWindowOnly = {
+  netFlowW1: 2,
+  netFlowW2: 1,
+  netFlowW3: 4,
+  deltaNetFlow12: -1,
+  deltaNetFlow23: 3,
+  flowAccel1: 0.5,
+  flowAccel2: 4,
+  uniqueBuyersW1: 5,
+  uniqueBuyersW2: 2,
+  uniqueBuyersW3: 4,
+  buyTxW1: 6,
+  buyTxW2: 3,
+  buyTxW3: 5,
+};
+assert.strictEqual(engine._isSignal(twoWindowOnly), false);
+assert.strictEqual(engine._isTwoWindowSignal(twoWindowOnly), true);
+assert.strictEqual(engine._isNetFlowBreakout(twoWindowOnly), true);
 
 function addMany({ count, total, side, start, end = null, wallets }) {
   for (let index = 0; index < count; index += 1) {
@@ -47,6 +68,13 @@ addMany({ count: 1, total: 0.7, side: 'SELL', start: 99_000, wallets: 1 });
 addMany({ count: 21, total: 4.2, side: 'BUY', start: 99_100, end: 100_000, wallets: 12 });
 
 assert.strictEqual(signals.length, 1);
+assert.strictEqual(signals[0].signalVariant, 'primary_3w');
+assert.strictEqual(signals[0].isPrimary, true);
+assert.deepStrictEqual(
+  new Set(shadowSignals.map((signal) => signal.signalVariant)),
+  new Set(['shadow_2w', 'shadow_netflow_breakout']),
+);
+assert.ok(shadowSignals.every((signal) => signal.isPrimary === false));
 assert.ok(Math.abs(signals[0].netFlowW1 - 0.3) < 1e-8);
 assert.ok(Math.abs(signals[0].netFlowW2 - 1.0) < 1e-8);
 assert.ok(Math.abs(signals[0].netFlowW3 - 3.5) < 1e-8);
@@ -67,5 +95,6 @@ engine.handleComplete({ mint, completedAt: 101_000 });
 engine.handleCreate({ mint, symbol: 'FLOW', graduated_at: 101_000 });
 addMany({ count: 30, total: 30, side: 'BUY', start: 102_000, wallets: 30 });
 assert.strictEqual(signals.length, 1, 'graduated tokens must not emit new signals');
+assert.strictEqual(engine.stats().shadowSignalsCreated, 2);
 
 console.log('test-flow-acceleration: ok');

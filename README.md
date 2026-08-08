@@ -127,9 +127,28 @@ pnpm run backtest -- \
   --exit-retry-delay-ms=500 \
   --split-ratio=0.7 \
   --bootstrap-samples=500 \
+  --signal-variant=primary_3w \
+  --first-signal-only=false \
+  --signal-cooldown-ms=30000 \
+  --max-curve-pct=60 \
+  --max-buy-tx-w3=3 \
+  --max-buyers-w3=3 \
+  --max-net-w3=3 \
   --min-net-w3=1 \
   --min-accel=1.2
 ```
+
+Dashboard、命令行回测和批量分析默认使用 200ms 买入延迟及 200ms 卖出延迟。`exit-delay-ms=0` 只代表理想化成交价格；结果会返回 `IDEALIZED_ZERO_DELAY_EXIT` 警告，不能作为可执行策略结论。
+
+每 Mint 首信号与冷却只在回测选择阶段应用，不会从采集库删除原始信号。`first-signal-only` 保留分析窗口内每个 Mint 的首个合格信号；`signal-cooldown-ms` 按上一个已接受信号执行状态化冷却。
+
+程序并行保存三个研究版本：
+
+- `primary_3w`：现有三窗口 Flow Acceleration 主信号。
+- `shadow_2w`：仅使用最近两个窗口的提前确认信号。
+- `shadow_netflow_breakout`：不要求加速度 ratio 的净流入突破影子信号。
+
+影子信号只用于 Future Label 和回测研究，不会触发链上交易；Signal Monitor 和 Smart Wallet 重合默认仍以 `primary_3w` 为准。
 
 入场只接受 `Signal Time + Execution Delay` 之后、入场等待上限以内且毕业之前的 Bonding Curve 成交，绝不会用 PumpSwap 反推买入。持仓时间从实际模拟入场开始计算；出场可使用 Bonding Curve 或毕业后的 PumpSwap 成交。没有入场、毕业前未成交、没有出场、历史数据缺口和数据右删失会分别统计，不再静默丢弃。没有出场的已入场样本默认按 `-100%` 再扣确定性成本。
 

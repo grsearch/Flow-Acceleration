@@ -34,6 +34,10 @@ function compact(result) {
 
 async function main() {
   const input = args(process.argv.slice(2));
+  const signalVariant = input['signal-variant'] || 'primary_3w';
+  const defaultMinFlowAccel = ['shadow_netflow_breakout', '*'].includes(signalVariant)
+    ? 0
+    : config.strategy.minAccelerationRatio;
   const sourcePath = input.db || config.storage.dbPath;
   let analysisPath = sourcePath;
   let snapshot = null;
@@ -54,6 +58,21 @@ async function main() {
         (SELECT COUNT(*) FROM flow_signals) AS signals,
         (SELECT COUNT(DISTINCT mint) FROM flow_signals) AS mints
     `).get();
+    const signalColumns = new Set(
+      db.prepare('PRAGMA table_info(flow_signals)').all().map((column) => column.name),
+    );
+    if (signalColumns.has('is_primary')) {
+      const breakdown = db.prepare(`
+        SELECT
+          COALESCE(SUM(is_primary = 1), 0) AS primary_signals,
+          COALESCE(SUM(is_primary = 0), 0) AS shadow_signals
+        FROM flow_signals
+      `).get();
+      Object.assign(dataSpan, breakdown);
+    } else {
+      dataSpan.primary_signals = dataSpan.signals;
+      dataSpan.shadow_signals = 0;
+    }
     if (!Number.isFinite(dataSpan.raw_last_ms)) throw new Error('Snapshot contains no raw trades');
 
     const holds = [1_000, 2_000, 3_000, 5_000, 8_000, 10_000];
@@ -61,7 +80,10 @@ async function main() {
     const thresholds = [1, 2, 3, 5, 8, 10];
     const exitTimeoutMs = number(input['exit-timeout-ms'], config.backtest.exitTimeoutMs);
     const entryTimeoutMs = number(input['entry-timeout-ms'], config.backtest.entryTimeoutMs);
-    const exitDelayMs = number(input['exit-delay-ms'], 0);
+    const exitDelayMs = number(
+      input['exit-delay-ms'],
+      config.backtest.exitExecutionDelayMs,
+    );
     const retryCount = number(input['exit-retry-count'], 0);
     const retryDelayMs = number(input['exit-retry-delay-ms'], 500);
     const baselineHoldMs = number(input['hold-ms'], 5_000);
@@ -83,7 +105,15 @@ async function main() {
       exitTimeoutMs,
       noExitLossPct: number(input['no-exit-loss-pct'], config.backtest.noExitLossPct),
       minNetFlowW3: number(input['min-net-w3'], config.strategy.minNetFlowW3Sol),
-      minFlowAccel: number(input['min-accel'], config.strategy.minAccelerationRatio),
+      maxNetFlowW3: input['max-net-w3'],
+      minFlowAccel: number(input['min-accel'], defaultMinFlowAccel),
+      minCurvePct: input['min-curve-pct'],
+      maxCurvePct: input['max-curve-pct'],
+      maxBuyTxW3: input['max-buy-tx-w3'],
+      maxUniqueBuyersW3: input['max-buyers-w3'],
+      firstSignalOnly: input['first-signal-only'],
+      signalCooldownMs: input['signal-cooldown-ms'],
+      signalVariant,
       takeProfitPct: input['take-profit-pct'],
       stopLossPct: input['stop-loss-pct'],
       trailingStopPct: input['trailing-stop-pct'],

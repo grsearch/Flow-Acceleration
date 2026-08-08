@@ -16,6 +16,11 @@ async function main() {
   for (const [, source] of inlineScripts) {
     assert.doesNotThrow(() => new Function(source), 'dashboard script should parse');
   }
+  assert.ok(dashboard.includes('name="exitExecutionDelayMs"'));
+  assert.ok(dashboard.includes('name="exitExecutionDelayMs" type="number" min="0" step="50" value="200"'));
+  assert.ok(dashboard.includes('name="firstSignalOnly"'));
+  assert.ok(dashboard.includes('name="signalCooldownMs"'));
+  assert.ok(dashboard.includes('value="shadow_2w"'));
 
   const runtimeConfig = {
     ...config,
@@ -62,14 +67,29 @@ async function main() {
     }
     const dynamicResponse = await fetch(
       `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&stopLossPct=3`
-      + '&trailingStopPct=2&exitRetryCount=1&splitRatio=0.6',
+      + '&trailingStopPct=2&exitRetryCount=1&splitRatio=0.6'
+      + '&firstSignalOnly=true&signalCooldownMs=30000&maxCurvePct=60&maxBuyTxW3=3',
     );
     const dynamic = await dynamicResponse.json();
     assert.strictEqual(dynamic.parameters.takeProfitPct, 5);
     assert.strictEqual(dynamic.parameters.stopLossPct, 3);
     assert.strictEqual(dynamic.parameters.trailingStopPct, 2);
     assert.strictEqual(dynamic.parameters.exitRetryCount, 1);
+    assert.strictEqual(dynamic.parameters.exitExecutionDelayMs, 200);
+    assert.strictEqual(dynamic.parameters.firstSignalOnly, true);
+    assert.strictEqual(dynamic.parameters.signalCooldownMs, 30_000);
+    assert.strictEqual(dynamic.parameters.maxCurvePct, 60);
+    assert.strictEqual(dynamic.parameters.maxBuyTxW3, 3);
+    assert.ok(!dynamic.warnings.some(({ code }) => code === 'IDEALIZED_ZERO_DELAY_EXIT'));
     assert.ok(dynamic.metrics.robustness);
+    const idealized = await (await fetch(
+      `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&exitExecutionDelayMs=0`,
+    )).json();
+    assert.ok(idealized.warnings.some(({ code }) => code === 'IDEALIZED_ZERO_DELAY_EXIT'));
+    const breakout = await (await fetch(
+      `http://127.0.0.1:${port}/api/backtest?signalVariant=shadow_netflow_breakout`,
+    )).json();
+    assert.strictEqual(breakout.parameters.minFlowAccel, 0);
   } finally {
     await runtime.stop('server-smoke-test');
   }

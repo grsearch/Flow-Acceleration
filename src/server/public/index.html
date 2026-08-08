@@ -138,6 +138,8 @@
       outline: none;
     }
     input:focus, select:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(85, 216, 208, .12); }
+    .check { display: flex; align-items: center; align-self: end; min-height: 42px; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #07151d; }
+    .check input { width: auto; margin: 0; accent-color: var(--lime); }
     .primary {
       align-self: end;
       min-height: 42px;
@@ -153,6 +155,8 @@
     .result { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: rgba(5, 17, 24, .55); }
     .result span { color: var(--muted); font-size: 12px; }
     .result b { display: block; margin-top: 7px; font-size: 22px; }
+    .notice { margin-top: 14px; padding: 13px 15px; border: 1px solid rgba(245, 189, 98, .55); border-radius: 12px; background: rgba(245, 189, 98, .08); color: var(--amber); line-height: 1.55; }
+    .notice[hidden] { display: none; }
     .wallet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .wallet-address { overflow: hidden; color: var(--cyan); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; }
     .wallet-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
@@ -188,7 +192,7 @@
       <div>
         <p class="eyebrow">Pump.fun · Pre-Graduation Research</p>
         <h1>Flow Acceleration</h1>
-        <p class="subtitle">只研究净买入资金、独立买家与买单速度是否同时加速。AGE 与 Curve 只记录，不参与当前信号过滤。</p>
+        <p class="subtitle">只研究净买入资金、独立买家与买单速度是否同时加速。AGE 与 Curve 不触发实时主信号，但可用于回测分层。</p>
       </div>
       <div class="live-pill"><span id="status-dot" class="dot"></span><span id="status-text">等待数据流</span></div>
     </header>
@@ -207,7 +211,7 @@
         <article class="card hypothesis">
           <p class="eyebrow">Research hypothesis</p>
           <blockquote>毕业前，当净买入资金、独立买家数量和买入成交速度同时加速，未来数秒可能存在可交易的价格惯性。</blockquote>
-          <footer>当前是研究采集模式，不会提交链上买卖交易。</footer>
+          <footer>当前并行记录三窗口主信号与两个提前影子信号；仅用于研究，不会提交链上买卖交易。</footer>
         </article>
         <article class="card">
           <div class="section-title"><h2>信号窗口</h2><p>连续三段，各 2 秒</p></div>
@@ -232,8 +236,11 @@
 
     <section class="panel" role="tabpanel" id="backtest" aria-labelledby="tab-backtest" hidden>
       <article class="card">
-        <div class="section-title"><h2>成本与延迟回测</h2><p>持仓时间从实际模拟成交开始计算</p></div>
+        <div class="section-title"><h2>可执行买卖策略回测</h2><p>默认采用 200ms 买入及卖出延迟；0ms 动态卖出仅供理想价格对照</p></div>
         <form id="backtest-form" class="grid form-grid">
+          <label>信号版本
+            <select name="signalVariant"><option value="primary_3w" selected>主信号 · 三窗口</option><option value="shadow_2w">影子信号 · 两窗口</option><option value="shadow_netflow_breakout">影子信号 · 净流入突破（不要求 ratio）</option><option value="*">全部版本（仅诊断）</option></select>
+          </label>
           <label>Hold Time
             <select name="holdMs"><option value="1000">1 秒</option><option value="2000">2 秒</option><option value="3000">3 秒</option><option value="5000" selected>5 秒</option><option value="8000">8 秒</option><option value="10000">10 秒</option><option value="15000">15 秒</option><option value="20000">20 秒</option><option value="30000">30 秒</option></select>
           </label>
@@ -247,7 +254,7 @@
           <label>止损 (%)<input name="stopLossPct" type="number" min="0" step="0.1" value="0"></label>
           <label>移动止损回撤 (%)<input name="trailingStopPct" type="number" min="0" step="0.1" value="0"></label>
           <label>移动止损激活盈利 (%)<input name="trailingActivationPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>卖出执行延迟 (ms)<input name="exitExecutionDelayMs" type="number" min="0" step="50" value="0"></label>
+          <label>卖出执行延迟 (ms)<input name="exitExecutionDelayMs" type="number" min="0" step="50" value="200"></label>
           <label>模拟连续卖出失败<input name="exitRetryCount" type="number" min="0" max="20" step="1" value="0"></label>
           <label>卖出重试间隔 (ms)<input name="exitRetryDelayMs" type="number" min="0" step="50" value="500"></label>
           <label>平台费 (%)<input name="platformFeePct" type="number" min="0" step="0.1" value="1.4"></label>
@@ -261,11 +268,19 @@
           <label>买入失败率 (%)<input name="entryFailureRatePct" type="number" min="0" max="100" step="0.1" value="0"></label>
           <label>失败买入尝试成本 (%)<input name="entryFailureCostPct" type="number" min="0" step="0.1" value="1"></label>
           <label>W3 NetFlow 下限 (SOL)<input name="minNetFlowW3" type="number" min="0" step="0.1" value="1"></label>
+          <label>W3 NetFlow 上限 (SOL)<input name="maxNetFlowW3" type="number" min="0" step="0.1" placeholder="不限制"></label>
           <label>Flow Accel 下限<input name="minFlowAccel" type="number" min="0" step="0.1" value="1.2"></label>
+          <label>Curve 下限 (%)<input name="minCurvePct" type="number" min="0" max="100" step="1" placeholder="不限制"></label>
+          <label>Curve 上限 (%)<input name="maxCurvePct" type="number" min="0" max="100" step="1" placeholder="不限制"></label>
+          <label>W3 买单数上限<input name="maxBuyTxW3" type="number" min="0" step="1" placeholder="不限制"></label>
+          <label>W3 买家数上限<input name="maxUniqueBuyersW3" type="number" min="0" step="1" placeholder="不限制"></label>
+          <label>每 Mint 冷却 (ms)<input name="signalCooldownMs" type="number" min="0" step="1000" value="0"></label>
+          <label class="check"><input name="firstSignalOnly" type="checkbox" value="true">仅保留每 Mint 首个合格信号</label>
           <label>时间外验证比例<input name="splitRatio" type="number" min="0.1" max="0.9" step="0.05" value="0.7"></label>
           <button class="primary" type="submit">运行回测</button>
         </form>
       </article>
+      <div class="notice" id="backtest-warning" hidden></div>
       <div class="grid result-grid" id="backtest-results"></div>
     </section>
 
@@ -315,7 +330,7 @@
         ['今日 Raw Trades', data.rawTradesToday, '毕业前逐笔链上成交'],
         ['活跃 Token', data.activeTokens, '最近 10 分钟有成交'],
         ['Candidate', data.candidateCount, '已触发 5 秒 Activity Wake-Up'],
-        ['Flow Signals', data.flowSignalsToday, '今日研究信号'],
+        ['Flow Signals', data.flowSignalsToday, `主信号；影子信号 ${number(data.shadowSignalsToday)}`],
         ['Smart Wallet Trades', data.smartWalletTradesToday, '今日标注事件'],
       ];
       document.querySelector('#overview-metrics').innerHTML = items.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${number(value)}</strong><small>${note}</small></article>`).join('');
@@ -334,22 +349,35 @@
 
     function renderBacktest(result) {
       const m = result.metrics;
+      const selection = result.analysisWindow?.signalSelection || {};
+      const warning = document.querySelector('#backtest-warning');
+      const messages = (result.warnings || []).map(item => escapeHtml(item.message || item.code));
+      warning.hidden = messages.length === 0;
+      warning.innerHTML = messages.join('<br>');
       const items = [
+        ['信号版本', escapeHtml(result.parameters.signalVariant)],
+        ['Selected Signals', number(result.analysisWindow?.selectedSignals)],
+        ['首信号过滤', number(selection.filteredByFirstSignal)],
+        ['冷却过滤', number(selection.filteredByCooldown)],
         ['Resolved Signals', number(m.samples)], ['Completed Trades', number(m.completedSamples)],
         ['Execution Rate', pct(m.executionRatePct,1)], ['Round-trip Rate', pct(m.roundTripCompletionRatePct,1)],
         ['No Entry', number(m.noEntry)], ['No Exit', number(m.noExit)],
         ['Graduated Before Entry', number(m.graduatedBeforeEntry)], ['Right Censored', number(m.rightCensored)],
-        ['Win Rate', pct(m.winRatePct,1)],
-        ['Avg Net Return', pct(m.averageNetReturnPct)], ['Median Return', pct(m.medianNetReturnPct)],
-        ['Executed Return', pct(m.averageExecutedNetReturnPct)],
+        ['每信号胜率（含未入场）', pct(m.winRatePct,1)],
+        ['每信号平均（未入场=0）', pct(m.averageNetReturnPct)],
+        ['每信号中位数', pct(m.medianNetReturnPct)],
+        ['已入场平均净收益', pct(m.averageExecutedNetReturnPct)],
+        ['已入场中位数', pct(m.medianExecutedNetReturnPct)],
+        ['已入场胜率', pct(m.executedWinRatePct,1)],
+        ['已入场 Profit Factor', number(m.executedProfitFactor,2)],
         ['Unique Mints', number(m.uniqueMints)],
-        ['Mint-weighted Return', pct(m.robustness?.mintEqualWeightedReturnPct)],
-        ['95% CI Low', pct(m.robustness?.mintBootstrap95Pct?.lowerPct)],
-        ['95% CI High', pct(m.robustness?.mintBootstrap95Pct?.upperPct)],
-        ['Top 5 Profit Share', pct(m.robustness?.topWinnerContributionPct?.top5)],
-        ['Without Top 5', pct(m.robustness?.averageWithoutTopWinnersPct?.top5)],
-        ['Out-of-time Return', pct(result.validation?.test?.averageNetReturnPct)],
-        ['Out-of-time PF', number(result.validation?.test?.profitFactor,2)],
+        ['Mint 等权（已入场）', pct(m.executedRobustness?.mintEqualWeightedReturnPct)],
+        ['Mint 95% CI Low', pct(m.executedRobustness?.mintBootstrap95Pct?.lowerPct)],
+        ['Mint 95% CI High', pct(m.executedRobustness?.mintBootstrap95Pct?.upperPct)],
+        ['已入场 Top 5 盈利占比', pct(m.executedRobustness?.topWinnerContributionPct?.top5)],
+        ['已入场去除 Top 5', pct(m.executedRobustness?.averageWithoutTopWinnersPct?.top5)],
+        ['样本外已入场收益', pct(result.validation?.test?.averageExecutedNetReturnPct)],
+        ['样本外已入场 PF', number(result.validation?.test?.executedProfitFactor,2)],
         ['Profit Factor', number(m.profitFactor,2)], ['Expectancy', pct(m.expectancyPct)],
         ['Avg MFE', pct(m.averageMfePct)], ['Avg MAE', pct(m.averageMaePct)],
         ['Total Cost', pct(result.parameters.totalCostPct)],
@@ -364,14 +392,22 @@
     }
 
     function renderHealth(data) {
+      const labelCensorRate = data.database.labels?.total
+        ? data.database.labels.right_censored / data.database.labels.total * 100
+        : null;
+      const labelCoverage = ['1s','5s','10s','30s','60s'].map(horizon => {
+        const observed = data.database.labels?.[`observed_${horizon}`];
+        const total = data.database.labels?.total;
+        return `${horizon} ${Number.isFinite(observed) && total ? number(observed / total * 100, 1) : '—'}%`;
+      }).join(' · ');
       const regions = data.stream.regions.map(region => {
         const role = region.active ? '当前' : (region.configuredRole === 'primary' ? '首选' : '备用');
         return `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${role}`;
       }).join('<br>') || '未连接';
       const cards = [
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['停滞切换', number(data.stream.staleFailovers)], ['错误', number(data.stream.errors)]]],
-        ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Signals', number(data.engine.signalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Signal Rows', number(data.database.signalRows)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['最近写入耗时', Number.isFinite(data.database.lastFlushMs) ? `${number(data.database.lastFlushMs)} ms` : '—'], ['写入错误', number(data.database.writeErrors)]]],
+        ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Primary Signals', number(data.engine.signalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Primary Signals', number(data.database.primarySignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Label Censor Rate', pct(labelCensorRate, 1)], ['各周期标签覆盖', labelCoverage], ['时间戳修正', number(data.database.timestampCorrections)], ['Pending Writes', number(data.database.pendingWrites)], ['最近写入耗时', Number.isFinite(data.database.lastFlushMs) ? `${number(data.database.lastFlushMs)} ms` : '—'], ['写入错误', number(data.database.writeErrors)]]],
         ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['AGE / Curve', 'Record only'], ['链上交易', 'Disabled'], ['未来标签', '1s → 60s']]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
@@ -379,6 +415,16 @@
       document.querySelector('#status-dot').classList.toggle('live', live);
       document.querySelector('#status-text').textContent = live ? '链上数据流运行中' : '等待数据流';
     }
+
+    const signalVariantInput = document.querySelector('[name="signalVariant"]');
+    const minFlowAccelInput = document.querySelector('[name="minFlowAccel"]');
+    signalVariantInput.addEventListener('change', () => {
+      if (['shadow_netflow_breakout', '*'].includes(signalVariantInput.value) && minFlowAccelInput.value === '1.2') {
+        minFlowAccelInput.value = '0';
+      } else if (!['shadow_netflow_breakout', '*'].includes(signalVariantInput.value) && minFlowAccelInput.value === '0') {
+        minFlowAccelInput.value = '1.2';
+      }
+    });
 
     document.querySelector('#backtest-form').addEventListener('submit', async event => {
       event.preventDefault();

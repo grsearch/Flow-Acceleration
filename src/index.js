@@ -41,20 +41,25 @@ function createRuntime(runtimeConfig = config) {
     );
   });
 
-  engine.on('signal', (signal) => {
+  const persistSignal = (signal, logPrefix) => {
     try {
       const saved = store.recordSignal(signal);
       labeler.addSignal(saved);
       console.log(
-        `[FLOW_ACCEL_SIGNAL] ${signal.symbol || signal.mint.slice(0, 8)} `
-        + `net=${signal.netFlowW1.toFixed(2)}→${signal.netFlowW2.toFixed(2)}→${signal.netFlowW3.toFixed(2)}SOL `
-        + `buyers=${signal.uniqueBuyersW1}→${signal.uniqueBuyersW2}→${signal.uniqueBuyersW3} `
+        `[${logPrefix}] ${signal.signalVariant} ${signal.symbol || signal.mint.slice(0, 8)} `
+        + `net=${signal.netFlowW1.toFixed(2)}→${signal.netFlowW2.toFixed(2)}`
+        + `→${signal.netFlowW3.toFixed(2)}SOL `
+        + `buyers=${signal.uniqueBuyersW1}→${signal.uniqueBuyersW2}`
+        + `→${signal.uniqueBuyersW3} `
         + `tx=${signal.buyTxW1}→${signal.buyTxW2}→${signal.buyTxW3}`,
       );
     } catch (error) {
       console.error('[Signal] persistence failed:', error.message);
     }
-  });
+  };
+
+  engine.on('signal', (signal) => persistSignal(signal, 'FLOW_ACCEL_SIGNAL'));
+  engine.on('shadowSignal', (signal) => persistSignal(signal, 'FLOW_SHADOW_SIGNAL'));
 
   stream.on('transaction', (transaction, context) => {
     let events;

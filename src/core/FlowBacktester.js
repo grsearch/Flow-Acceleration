@@ -35,6 +35,17 @@ function optionalFinite(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function optionalNonNegative(value) {
+  const number = optionalFinite(value);
+  return number != null && number >= 0 ? number : null;
+}
+
+function boolean(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
 function average(values) {
   return values.length ? values.reduce((total, value) => total + value, 0) / values.length : null;
 }
@@ -85,6 +96,7 @@ function passesAcceleration(signal, threshold) {
 function blankRow(signal, status) {
   return {
     signalId: signal.signal_id,
+    signalVariant: signal.signal_variant || 'primary_3w',
     mint: signal.mint,
     status,
     signalAt: signal.timestamp_ms,
@@ -222,6 +234,14 @@ function diagnosticsFor(rows, bootstrapSamples) {
   };
 }
 
+function profitFactor(values) {
+  const grossProfit = values.filter((value) => value > 0)
+    .reduce((total, value) => total + value, 0);
+  const grossLoss = Math.abs(values.filter((value) => value < 0)
+    .reduce((total, value) => total + value, 0));
+  return grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? null : 0);
+}
+
 function calculateMetrics(rows, costs, options = {}) {
   const unresolvedStatuses = new Set([STATUS.DATA_UNAVAILABLE, STATUS.RIGHT_CENSORED]);
   const resolvedRows = rows.filter((row) => !unresolvedStatuses.has(row.status));
@@ -260,6 +280,7 @@ function calculateMetrics(rows, costs, options = {}) {
   }
 
   const averageExecutedNetReturnPct = average(executedReturns);
+  const sortedExecutedReturns = [...executedReturns].sort((a, b) => a - b);
   const metrics = {
     candidateSignals: rows.length,
     samples: resolvedRows.length,
@@ -288,6 +309,11 @@ function calculateMetrics(rows, costs, options = {}) {
     averageRawReturnPct: average(rawReturns),
     averageNetReturnPct: weightedAverage(outcomes),
     averageExecutedNetReturnPct,
+    medianExecutedNetReturnPct: percentile(sortedExecutedReturns, 0.5),
+    executedWinRatePct: executedReturns.length
+      ? (executedReturns.filter((value) => value > 0).length / executedReturns.length) * 100
+      : null,
+    executedProfitFactor: profitFactor(executedReturns),
     entryFailureCanImproveNegativeStrategy: failureProbability > 0
       && Number.isFinite(averageExecutedNetReturnPct)
       && averageExecutedNetReturnPct < -costs.entryFailureCostPct,
@@ -304,6 +330,10 @@ function calculateMetrics(rows, costs, options = {}) {
   };
   if (options.diagnostics !== false) {
     metrics.robustness = diagnosticsFor(rows, options.bootstrapSamples ?? 500);
+    metrics.executedRobustness = diagnosticsFor(
+      resolvedEnteredRows,
+      options.bootstrapSamples ?? 500,
+    );
   }
   return metrics;
 }
@@ -315,13 +345,27 @@ function runBacktest(db, options = {}) {
   const exitTimeoutMs = Math.max(1, finite(options.exitTimeoutMs, 5_000));
   const noExitLossPct = Math.max(0, finite(options.noExitLossPct, 100));
   const minNetFlowW3 = Math.max(0, finite(options.minNetFlowW3, 0));
+  const maxNetFlowW3 = optionalNonNegative(options.maxNetFlowW3);
   const minFlowAccel = Math.max(0, finite(options.minFlowAccel, 0));
+  const minCurvePct = optionalNonNegative(options.minCurvePct);
+  const maxCurvePct = optionalNonNegative(options.maxCurvePct);
+  const maxBuyTxW3 = optionalNonNegative(options.maxBuyTxW3);
+  const maxUniqueBuyersW3 = optionalNonNegative(options.maxUniqueBuyersW3);
+  const firstSignalOnly = boolean(options.firstSignalOnly, false);
+  const signalCooldownMs = Math.max(0, finite(options.signalCooldownMs, 0));
+  const signalVariant = String(options.signalVariant || 'primary_3w').trim() || 'primary_3w';
   const limit = Math.min(100_000, Math.max(1, Math.trunc(finite(options.limit, 10_000))));
   const fromMs = optionalFinite(options.fromMs);
   const toMs = optionalFinite(options.toMs);
   const requestedDataCutoffMs = optionalFinite(options.dataCutoffMs);
   const dataCutoffMs = requestedDataCutoffMs ?? Number.MAX_SAFE_INTEGER;
   if (fromMs != null && toMs != null && fromMs > toMs) throw new Error('fromMs must be <= toMs');
+  if (maxNetFlowW3 != null && maxNetFlowW3 < minNetFlowW3) {
+    throw new Error('maxNetFlowW3 must be >= minNetFlowW3');
+  }
+  if (minCurvePct != null && maxCurvePct != null && minCurvePct > maxCurvePct) {
+    throw new Error('minCurvePct must be <= maxCurvePct');
+  }
 
   const takeProfitPct = optionalPositive(options.takeProfitPct);
   const stopLossPct = optionalPositive(options.stopLossPct);
@@ -340,26 +384,105 @@ function runBacktest(db, options = {}) {
     ? costBreakdown({ ...costs, fixedCostSol: costs.fixedCostSol + retryCostSol })
     : costs;
 
-  const conditions = [
-    's.netflow_w3 >= @minNetFlowW3',
-    `(@minFlowAccel <= 0 OR (
+  const accelerationCondition = signalVariant === 'primary_3w' || signalVariant === '*'
+    ? `(@minFlowAccel <= 0 OR (
       (s.flow_accel_1 IS NULL OR s.flow_accel_1 >= @minFlowAccel)
       AND (s.flow_accel_2 IS NULL OR s.flow_accel_2 >= @minFlowAccel)
-    ))`,
+    ))`
+    : '(@minFlowAccel <= 0 OR s.flow_accel_2 IS NULL OR s.flow_accel_2 >= @minFlowAccel)';
+  const conditions = [
+    's.netflow_w3 >= @minNetFlowW3',
+    accelerationCondition,
   ];
+  if (maxNetFlowW3 != null) conditions.push('s.netflow_w3 <= @maxNetFlowW3');
+  if (minCurvePct != null) conditions.push('s.curve_pct >= @minCurvePct');
+  if (maxCurvePct != null) conditions.push('s.curve_pct <= @maxCurvePct');
+  if (maxBuyTxW3 != null) conditions.push('s.buy_tx_w3 <= @maxBuyTxW3');
+  if (maxUniqueBuyersW3 != null) {
+    conditions.push('s.unique_buyers_w3 <= @maxUniqueBuyersW3');
+  }
   if (fromMs != null) conditions.push('s.timestamp_ms >= @fromMs');
   if (toMs != null) conditions.push('s.timestamp_ms <= @toMs');
-  const signalParameters = { minNetFlowW3, minFlowAccel, limit };
+  const signalColumns = new Set(
+    db.prepare('PRAGMA table_info(flow_signals)').all().map((column) => column.name),
+  );
+  const supportsSignalVariant = signalColumns.has('signal_variant');
+  if (supportsSignalVariant && signalVariant !== '*') {
+    conditions.push('s.signal_variant = @signalVariant');
+  } else if (!supportsSignalVariant && !['*', 'primary_3w'].includes(signalVariant)) {
+    conditions.push('1 = 0');
+  }
+  conditions.push(`(
+    @cursorTimestampMs IS NULL
+    OR s.timestamp_ms > @cursorTimestampMs
+    OR (s.timestamp_ms = @cursorTimestampMs AND s.signal_id > @cursorSignalId)
+  )`);
+  const signalParameters = {
+    minNetFlowW3,
+    minFlowAccel,
+    maxNetFlowW3,
+    minCurvePct,
+    maxCurvePct,
+    maxBuyTxW3,
+    maxUniqueBuyersW3,
+    signalVariant,
+    cursorTimestampMs: null,
+    cursorSignalId: 0,
+    pageSize: Math.min(5_000, Math.max(500, limit)),
+  };
   if (fromMs != null) signalParameters.fromMs = fromMs;
   if (toMs != null) signalParameters.toMs = toMs;
-  const signals = db.prepare(`
+  const signalPage = db.prepare(`
     SELECT s.*, t.graduated_at
     FROM flow_signals s
     LEFT JOIN flow_tokens t USING(mint)
     WHERE ${conditions.join(' AND ')}
     ORDER BY s.timestamp_ms, s.signal_id
-    LIMIT @limit
-  `).all(signalParameters);
+    LIMIT @pageSize
+  `);
+  const signals = [];
+  const seenMints = new Set();
+  const lastAcceptedByMint = new Map();
+  const signalSelection = {
+    fetchedSignals: 0,
+    scannedSignals: 0,
+    filteredByFirstSignal: 0,
+    filteredByCooldown: 0,
+    limitReached: false,
+  };
+  while (signals.length < limit) {
+    const page = signalPage.all(signalParameters);
+    if (page.length === 0) break;
+    signalSelection.fetchedSignals += page.length;
+    for (const signal of page) {
+      signalSelection.scannedSignals += 1;
+      if (!supportsSignalVariant) {
+        signal.signal_variant = 'primary_3w';
+        signal.is_primary = 1;
+      }
+      if (firstSignalOnly && seenMints.has(signal.mint)) {
+        signalSelection.filteredByFirstSignal += 1;
+        continue;
+      }
+      if (firstSignalOnly) seenMints.add(signal.mint);
+      const lastAcceptedAt = lastAcceptedByMint.get(signal.mint);
+      if (signalCooldownMs > 0 && Number.isFinite(lastAcceptedAt)
+        && signal.timestamp_ms - lastAcceptedAt < signalCooldownMs) {
+        signalSelection.filteredByCooldown += 1;
+        continue;
+      }
+      signals.push(signal);
+      lastAcceptedByMint.set(signal.mint, signal.timestamp_ms);
+      if (signals.length >= limit) {
+        signalSelection.limitReached = true;
+        break;
+      }
+    }
+    const last = page.at(-1);
+    signalParameters.cursorTimestampMs = last.timestamp_ms;
+    signalParameters.cursorSignalId = last.signal_id;
+    if (page.length < signalParameters.pageSize) break;
+  }
 
   const coverage = db.prepare(`
     SELECT MIN(timestamp_ms) AS min_timestamp_ms, MAX(timestamp_ms) AS max_timestamp_ms
@@ -491,6 +614,20 @@ function runBacktest(db, options = {}) {
     };
   }
 
+  const warnings = [];
+  if (exitExecutionDelayMs === 0) {
+    warnings.push({
+      code: 'IDEALIZED_ZERO_DELAY_EXIT',
+      message: 'Exit delay is 0 ms. This is an idealized fill assumption; use a non-zero delay for executable research, especially with stop or trailing triggers.',
+    });
+  }
+  if (firstSignalOnly && signalCooldownMs > 0) {
+    warnings.push({
+      code: 'REDUNDANT_SIGNAL_FILTER',
+      message: 'firstSignalOnly already keeps one eligible signal per mint; signalCooldownMs has no additional effect.',
+    });
+  }
+
   return {
     parameters: {
       holdMs,
@@ -516,18 +653,28 @@ function runBacktest(db, options = {}) {
       totalCostPct: costs.deterministicCostPct,
       effectiveCostWithRetriesPct: rowCosts.deterministicCostPct,
       minNetFlowW3,
+      maxNetFlowW3,
       minFlowAccel,
+      minCurvePct,
+      maxCurvePct,
+      maxBuyTxW3,
+      maxUniqueBuyersW3,
+      firstSignalOnly,
+      signalCooldownMs,
+      signalVariant,
     },
     analysisWindow: {
       selectedSignalFirstMs: signals[0]?.timestamp_ms ?? null,
       selectedSignalLastMs: signals.at(-1)?.timestamp_ms ?? null,
       selectedSignals: signals.length,
       selectedMints: new Set(signals.map((signal) => signal.mint)).size,
+      signalSelection,
       rawFirstMs: coverage.min_timestamp_ms,
       rawLastMs: coverage.max_timestamp_ms,
     },
     metrics,
     validation,
+    warnings,
     rows: options.includeRows === false ? undefined : rows,
   };
 }
