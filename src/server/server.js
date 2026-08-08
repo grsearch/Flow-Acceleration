@@ -36,22 +36,36 @@ class ResearchServer {
     });
 
     this.app.get('/api/backtest', (request, response) => {
+      const defaultCosts = this.config.labels.costModel || {};
       const result = runBacktest(this.store.db, {
         holdMs: numeric(request.query.holdMs, 5_000),
         executionDelayMs: numeric(request.query.executionDelayMs, 200),
+        entryTimeoutMs: numeric(
+          request.query.entryTimeoutMs,
+          this.config.backtest?.entryTimeoutMs ?? 2_000,
+        ),
+        exitTimeoutMs: numeric(
+          request.query.exitTimeoutMs,
+          this.config.backtest?.exitTimeoutMs ?? 5_000,
+        ),
+        noExitLossPct: numeric(
+          request.query.noExitLossPct,
+          this.config.backtest?.noExitLossPct ?? 100,
+        ),
         platformFeePct: numeric(
           request.query.platformFeePct,
-          this.config.labels.configuredTradingCostPct,
+          defaultCosts.platformFeePct ?? this.config.labels.configuredTradingCostPct,
         ),
-        buySlippagePct: numeric(request.query.buySlippagePct, 0),
-        sellSlippagePct: numeric(request.query.sellSlippagePct, 0),
-        priceImpactPct: numeric(request.query.priceImpactPct, 0),
-        baseTxFeeSol: numeric(request.query.baseTxFeeSol, 0),
-        priorityFeeSol: numeric(request.query.priorityFeeSol, 0),
-        jitoTipSol: numeric(request.query.jitoTipSol, 0),
-        positionSizeSol: numeric(request.query.positionSizeSol, 0.2),
-        failureRatePct: numeric(request.query.failureRatePct, 0),
-        failureLossPct: numeric(request.query.failureLossPct, 0),
+        buySlippagePct: numeric(request.query.buySlippagePct, defaultCosts.buySlippagePct ?? 0),
+        sellSlippagePct: numeric(request.query.sellSlippagePct, defaultCosts.sellSlippagePct ?? 0),
+        priceImpactPct: numeric(request.query.priceImpactPct, defaultCosts.priceImpactPct ?? 0),
+        baseTxFeeSol: numeric(request.query.baseTxFeeSol, defaultCosts.baseTxFeeSol ?? 0),
+        priorityFeeSol: numeric(request.query.priorityFeeSol, defaultCosts.priorityFeeSol ?? 0),
+        jitoTipSol: numeric(request.query.jitoTipSol, defaultCosts.jitoTipSol ?? 0),
+        fixedCostSol: numeric(request.query.fixedCostSol, defaultCosts.fixedCostSol ?? 0),
+        positionSizeSol: numeric(request.query.positionSizeSol, defaultCosts.positionSizeSol ?? 0.2),
+        failureRatePct: numeric(request.query.failureRatePct, defaultCosts.failureRatePct ?? 0),
+        failureLossPct: numeric(request.query.failureLossPct, defaultCosts.failureLossPct ?? 1),
         minNetFlowW3: numeric(request.query.minNetFlowW3, this.config.strategy.minNetFlowW3Sol),
         minFlowAccel: numeric(request.query.minFlowAccel, this.config.strategy.minAccelerationRatio),
         includeRows: false,

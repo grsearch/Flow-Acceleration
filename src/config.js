@@ -2,6 +2,8 @@
 
 require('dotenv').config();
 
+const { costBreakdown, normalizeCostModel } = require('./core/CostModel');
+
 function numberEnv(name, fallback, { min = -Infinity, max = Infinity } = {}) {
   const raw = process.env[name];
   const value = raw == null || raw === '' ? fallback : Number(raw);
@@ -23,10 +25,42 @@ function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
-const heliusEndpoints = listEnv('HELIUS_LASERSTREAM_ENDPOINTS',
+function normalizeEndpoint(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const withProtocol = /^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  const parsed = new URL(withProtocol);
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new TypeError(`Unsupported gRPC endpoint protocol: ${parsed.protocol}`);
+  }
+  return parsed.toString().replace(/\/$/, '');
+}
+
+function endpointEnv(name, fallback = []) {
+  return listEnv(name, fallback).map(normalizeEndpoint).filter(Boolean);
+}
+
+const heliusEndpoints = endpointEnv('HELIUS_LASERSTREAM_ENDPOINTS',
   process.env.HELIUS_LASERSTREAM_ENDPOINT ? [process.env.HELIUS_LASERSTREAM_ENDPOINT] : []);
-const allenHarkEndpoints = listEnv('ALLENHARK_GRPC_ENDPOINTS');
-const explicitEndpoints = listEnv('FLOW_GRPC_ENDPOINTS');
+const allenHarkEndpoints = endpointEnv('ALLENHARK_GRPC_ENDPOINTS');
+const explicitEndpoints = endpointEnv('FLOW_GRPC_ENDPOINTS');
+const labelCostModel = normalizeCostModel({
+  platformFeePct: numberEnv(
+    'FLOW_PLATFORM_FEE_PCT',
+    numberEnv('FLOW_DEFAULT_TRADING_COST_PCT', 1.4, { min: 0 }),
+    { min: 0 },
+  ),
+  buySlippagePct: numberEnv('FLOW_BUY_SLIPPAGE_PCT', 0.3, { min: 0 }),
+  sellSlippagePct: numberEnv('FLOW_SELL_SLIPPAGE_PCT', 0.3, { min: 0 }),
+  priceImpactPct: numberEnv('FLOW_PRICE_IMPACT_PCT', 0.2, { min: 0 }),
+  baseTxFeeSol: numberEnv('FLOW_BASE_TX_FEE_SOL', 0.00001, { min: 0 }),
+  priorityFeeSol: numberEnv('FLOW_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
+  jitoTipSol: numberEnv('FLOW_JITO_TIP_SOL', 0, { min: 0 }),
+  fixedCostSol: numberEnv('FLOW_FIXED_COST_SOL', 0, { min: 0 }),
+  positionSizeSol: numberEnv('FLOW_POSITION_SIZE_SOL', 0.2, { min: 0.000001 }),
+  failureRatePct: numberEnv('FLOW_FAILURE_RATE_PCT', 0, { min: 0, max: 100 }),
+  failureLossPct: numberEnv('FLOW_FAILURE_LOSS_PCT', 1, { min: 0 }),
+});
 
 const config = {
   pump: {
@@ -41,7 +75,10 @@ const config = {
       ? explicitEndpoints
       : [...heliusEndpoints, ...allenHarkEndpoints]),
     heliusEndpoints: new Set(heliusEndpoints),
-    heliusToken: process.env.FLOW_GRPC_TOKEN || process.env.HELIUS_LASERSTREAM_TOKEN || '',
+    heliusToken: process.env.FLOW_GRPC_TOKEN
+      || process.env.HELIUS_LASERSTREAM_TOKEN
+      || process.env.HELIUS_API_KEY
+      || '',
     allenHarkEndpoints: new Set(allenHarkEndpoints),
     allenHarkToken: process.env.ALLENHARK_GRPC_TOKEN || '',
     reconnectMinMs: integerEnv('FLOW_STREAM_RECONNECT_MIN_MS', 1_000, { min: 250 }),
@@ -61,14 +98,21 @@ const config = {
     minNetFlowDeltaSol: numberEnv('FLOW_MIN_NET_DELTA_SOL', 0.1, { min: 0 }),
     minAccelerationRatio: numberEnv('FLOW_MIN_ACCEL_RATIO', 1.2, { min: 1 }),
     ratioFloorSol: numberEnv('FLOW_RATIO_FLOOR_SOL', 0.05, { min: 0.000001 }),
-    signalCooldownMs: integerEnv('FLOW_SIGNAL_COOLDOWN_MS', 10_000, { min: 0 }),
+    signalCooldownMs: integerEnv('FLOW_SIGNAL_COOLDOWN_MS', 0, { min: 0 }),
     candidateIdleMs: integerEnv('FLOW_CANDIDATE_IDLE_MS', 15_000, { min: 2_000 }),
   },
 
   labels: {
     horizonsSeconds: [1, 2, 3, 5, 8, 10, 15, 20, 30, 60],
     excursionSeconds: [5, 10, 30],
-    configuredTradingCostPct: numberEnv('FLOW_DEFAULT_TRADING_COST_PCT', 1.4, { min: 0 }),
+    costModel: labelCostModel,
+    configuredTradingCostPct: costBreakdown(labelCostModel).deterministicCostPct,
+  },
+
+  backtest: {
+    entryTimeoutMs: integerEnv('FLOW_BACKTEST_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitTimeoutMs: integerEnv('FLOW_BACKTEST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    noExitLossPct: numberEnv('FLOW_BACKTEST_NO_EXIT_LOSS_PCT', 100, { min: 0 }),
   },
 
   smartWallets: listEnv('FLOW_SMART_WALLETS', [
@@ -108,6 +152,7 @@ function validateConfig() {
 
 module.exports = {
   config,
+  normalizeEndpoint,
   validateConfig,
   streamTokenFor,
 };

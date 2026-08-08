@@ -57,7 +57,10 @@ class FlowAccelerationEngine extends EventEmitter {
       graduated_at: event.completedAt || event.timestampMs || Date.now(),
     });
     const state = this.states.get(event.mint);
-    if (state) state.candidateSince = null;
+    if (state) {
+      state.candidateSince = null;
+      state.signalActive = false;
+    }
     this.emit('graduated', event);
   }
 
@@ -91,11 +94,16 @@ class FlowAccelerationEngine extends EventEmitter {
     }
 
     if (!state.candidateSince) return null;
+    const metrics = this._signalMetrics(state, trade.timestampMs);
+    if (!this._isSignal(metrics)) {
+      state.signalActive = false;
+      return null;
+    }
+    if (state.signalActive) return null;
+    state.signalActive = true;
+
     const lastSignalAt = state.lastSignalAt || 0;
     if (trade.timestampMs - lastSignalAt < this.config.signalCooldownMs) return null;
-
-    const metrics = this._signalMetrics(state, trade.timestampMs);
-    if (!this._isSignal(metrics)) return null;
 
     const tokenInfo = token || this.tokens.get(trade.mint) || {};
     const signal = {
@@ -123,6 +131,7 @@ class FlowAccelerationEngine extends EventEmitter {
       this._prune(state, now);
       if (state.candidateSince && now - state.lastTradeAt > this.config.candidateIdleMs) {
         state.candidateSince = null;
+        state.signalActive = false;
       }
       if (state.events.length === 0 && state.lastTradeAt < deleteBefore) this.states.delete(mint);
     }
@@ -147,7 +156,9 @@ class FlowAccelerationEngine extends EventEmitter {
   _state(mint) {
     let state = this.states.get(mint);
     if (!state) {
-      state = { events: [], candidateSince: null, lastSignalAt: null, lastTradeAt: 0 };
+      state = {
+        events: [], candidateSince: null, signalActive: false, lastSignalAt: null, lastTradeAt: 0,
+      };
       this.states.set(mint, state);
     }
     return state;
@@ -207,6 +218,9 @@ class FlowAccelerationEngine extends EventEmitter {
     const ratio = (next, previous) => previous > this.config.ratioFloorSol
       ? round(next / previous, 6)
       : null;
+    const flowAccel1 = ratio(rows[1].netFlow, rows[0].netFlow);
+    const flowAccel2 = ratio(rows[2].netFlow, rows[1].netFlow);
+    const finiteAcceleration = [flowAccel1, flowAccel2].filter(Number.isFinite);
 
     return {
       buyFlowW1: rows[0].buyFlow,
@@ -220,8 +234,9 @@ class FlowAccelerationEngine extends EventEmitter {
       netFlowW3: rows[2].netFlow,
       deltaNetFlow12: round(delta12, 8),
       deltaNetFlow23: round(delta23, 8),
-      flowAccel1: ratio(rows[1].netFlow, rows[0].netFlow),
-      flowAccel2: ratio(rows[2].netFlow, rows[1].netFlow),
+      flowAccel1,
+      flowAccel2,
+      flowAccel: finiteAcceleration.length ? Math.min(...finiteAcceleration) : null,
       uniqueBuyersW1: rows[0].uniqueBuyers,
       uniqueBuyersW2: rows[1].uniqueBuyers,
       uniqueBuyersW3: rows[2].uniqueBuyers,

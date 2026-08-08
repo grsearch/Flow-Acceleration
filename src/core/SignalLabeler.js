@@ -1,8 +1,35 @@
 'use strict';
 
+const { costBreakdown, expectedNetReturnPct, normalizeCostModel } = require('./CostModel');
+
 function returnPct(price, entryPrice) {
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(entryPrice) || entryPrice <= 0) return null;
   return ((price / entryPrice) - 1) * 100;
+}
+
+function legacyCostModel(configuredCostPct = 0) {
+  return normalizeCostModel({
+    platformFeePct: configuredCostPct,
+    buySlippagePct: 0,
+    sellSlippagePct: 0,
+    priceImpactPct: 0,
+    baseTxFeeSol: 0,
+    priorityFeeSol: 0,
+    jitoTipSol: 0,
+    fixedCostSol: 0,
+    positionSizeSol: 0.2,
+    failureRatePct: 0,
+    failureLossPct: 1,
+  });
+}
+
+function parseCostModel(value) {
+  if (!value) return null;
+  try {
+    return normalizeCostModel(typeof value === 'string' ? JSON.parse(value) : value);
+  } catch (_) {
+    return null;
+  }
 }
 
 class SignalLabeler {
@@ -25,6 +52,7 @@ class SignalLabeler {
         timestampMs: row.timestamp_ms,
         price: row.p0,
         configuredCostPct: row.configured_cost_pct,
+        costModel: parseCostModel(row.cost_model_json),
         existing: row,
       });
       if (typeof this.store.labelSamples === 'function') {
@@ -40,12 +68,19 @@ class SignalLabeler {
   }
 
   addSignal(signal) {
+    const costModel = parseCostModel(signal.costModel)
+      || parseCostModel(signal.existing?.cost_model_json)
+      || (signal.configuredCostPct != null
+        ? legacyCostModel(signal.configuredCostPct)
+        : parseCostModel(this.config.costModel)
+          || legacyCostModel(this.config.configuredTradingCostPct));
     const state = {
       signalId: signal.signalId,
       mint: signal.mint,
       timestampMs: signal.timestampMs,
       p0: signal.price,
-      configuredCostPct: signal.configuredCostPct ?? this.config.configuredTradingCostPct,
+      costModel,
+      configuredCostPct: costBreakdown(costModel).deterministicCostPct,
       samples: [{ elapsedMs: 0, value: 0 }],
       returns: new Map(),
       excursionsDone: new Set(),
@@ -87,7 +122,7 @@ class SignalLabeler {
         if (state.returns.has(seconds) || elapsedMs < seconds * 1_000) continue;
         state.returns.set(seconds, value);
         patch[`return_${seconds}s`] = value;
-        patch[`net_return_${seconds}s`] = value - state.configuredCostPct;
+        patch[`net_return_${seconds}s`] = expectedNetReturnPct(value, state.costModel);
       }
 
       for (const seconds of this.config.excursionSeconds) {

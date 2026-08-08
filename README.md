@@ -59,6 +59,8 @@ W3 = T-2s ~ T
 
 `NetFlow <= 0` 时不会强行做除法。系统同时保存绝对增量与可安全计算的 ratio，避免接近 0 时比例失真。AGE 与 Curve 只记录，不参与 V1 过滤。
 
+信号按条件的 `false → true` 边沿发出；条件持续成立时不会重复发信号。`FLOW_SIGNAL_COOLDOWN_MS` 只是可选的额外保护，默认关闭，因此不会暗中改变研究样本。
+
 ## 数据库
 
 默认数据库为 `data/flow-research.db`，核心表为：
@@ -80,7 +82,7 @@ Yellowstone gRPC v5 当前随包提供 Linux/macOS 原生客户端，实时采�
 ```bash
 pnpm install
 cp .env.example .env
-# 填写 FLOW_GRPC_ENDPOINTS 和 FLOW_GRPC_TOKEN
+# 填写 FLOW_GRPC_TOKEN；端点默认使用新加坡官方 LaserStream 区域
 pnpm test
 pnpm start
 ```
@@ -103,6 +105,9 @@ Dashboard 可直接运行常用组合。命令行支持更细的成本拆分：
 pnpm run backtest -- \
   --hold-ms=5000 \
   --delay-ms=200 \
+  --entry-timeout-ms=2000 \
+  --exit-timeout-ms=5000 \
+  --no-exit-loss-pct=100 \
   --platform-fee-pct=0.8 \
   --buy-slippage-pct=0.3 \
   --sell-slippage-pct=0.3 \
@@ -117,8 +122,29 @@ pnpm run backtest -- \
   --min-accel=1.2
 ```
 
-入场价使用 `Signal Time + Execution Delay` 之后的第一笔真实成交；持仓时间从该模拟成交开始计算。失败成本按 `失败率 × 单次失败损失` 计入期望成本。输出同时包含 Raw Return、Net Return、胜率、Profit Factor、Expectancy、MFE、MAE、实际延迟和延迟期间价格损耗。
+入场只接受 `Signal Time + Execution Delay` 之后、入场等待上限以内且毕业之前的 Bonding Curve 成交，绝不会用 PumpSwap 反推买入。持仓时间从实际模拟入场开始计算；出场可使用 Bonding Curve 或毕业后的 PumpSwap 成交。没有入场、毕业前未成交、没有出场、历史数据缺口和数据右删失会分别统计，不再静默丢弃。没有出场的已入场样本默认按 `-100%` 再扣确定性成本。
+
+平台费、双边滑点、价格冲击和固定链上费用构成成功成交的确定性成本；失败率会把每个已完成样本拆成成功/失败两个加权结果，并真实影响胜率、收益中位数、Profit Factor 与 Expectancy。Future Label 与回测保存并使用同一套成本模型。
 
 ## 部署
 
 `deploy/flow-acceleration.service` 提供 systemd 模板。服务重启后会继续使用同一个 SQLite 数据库；最近 120 秒内尚未完成的 Signal Labels 会恢复跟踪。
+
+Helius LaserStream 端点必须使用 HTTP(S) URI。配置中省略协议时程序会自动补成 `https://`。推荐使用离服务器最近的官方区域端点，例如：
+
+```text
+https://laserstream-mainnet-ewr.helius-rpc.com
+https://laserstream-mainnet-tyo.helius-rpc.com
+https://laserstream-mainnet-sgp.helius-rpc.com
+```
+
+Linux 一键安装会保留已有 `.env`、检查服务用户、Node.js 22+ 与 pnpm，生成缺失的 `.env`，校验 systemd 单元并设置开机自启：
+
+```bash
+sudo bash deploy/install.sh /opt/flow-acceleration
+sudo nano /opt/flow-acceleration/.env
+sudo systemctl restart flow-acceleration
+sudo systemctl --no-pager --full status flow-acceleration
+```
+
+也可以在已经配置好 `.env` 时使用 `START_SERVICE=1 sudo -E bash deploy/install.sh`，让安装脚本完成后立即启动并显示服务状态。
