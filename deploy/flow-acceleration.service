@@ -10,6 +10,8 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/flow-acceleration
 EnvironmentFile=/opt/flow-acceleration/.env
+Environment=NODE_ENV=production
+ExecStartPre=/usr/bin/test -s /opt/flow-acceleration/.env
 ExecStart=/usr/bin/node /opt/flow-acceleration/src/index-flow.js
 Restart=always
 RestartSec=5
@@ -21,6 +23,7 @@ StandardOutput=append:/opt/flow-acceleration/logs/out.log
 StandardError=append:/opt/flow-acceleration/logs/err.log
 SyslogIdentifier=flow-acceleration
 LimitNOFILE=65536
+UMask=0077
 NoNewPrivileges=true
 ProtectSystem=full
 PrivateTmp=true

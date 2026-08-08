@@ -55,6 +55,13 @@ assert.deepStrictEqual(
   [2, 5, 12],
 );
 assert.deepStrictEqual([signals[0].buyTxW1, signals[0].buyTxW2, signals[0].buyTxW3], [3, 8, 21]);
+assert.ok(Math.abs(signals[0].flowAccel - signals[0].flowAccel1) < 1e-8);
+
+engine.handleTrade({
+  market: 'PUMP_BONDING_CURVE', mint, wallet: 'wallet-extra', side: 'BUY', solAmount: 0.1,
+  tokenAmount: 1, price: 1, timestampMs: 100_001, curvePct: 40, ageMs: 30_001,
+}, { mint, symbol: 'FLOW' });
+assert.strictEqual(signals.length, 1, 'a sustained condition must not emit duplicate signals');
 
 engine.handleComplete({ mint, completedAt: 101_000 });
 engine.handleCreate({ mint, symbol: 'FLOW', graduated_at: 101_000 });

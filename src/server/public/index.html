@@ -240,6 +240,9 @@
           <label>Execution Delay
             <select name="executionDelayMs"><option value="100">100 ms</option><option value="200" selected>200 ms</option><option value="400">400 ms</option><option value="600">600 ms</option><option value="1000">1 秒</option></select>
           </label>
+          <label>入场等待上限 (ms)<input name="entryTimeoutMs" type="number" min="1" step="100" value="2000"></label>
+          <label>出场等待上限 (ms)<input name="exitTimeoutMs" type="number" min="1" step="100" value="5000"></label>
+          <label>无法出场损失 (%)<input name="noExitLossPct" type="number" min="0" step="1" value="100"></label>
           <label>平台费 (%)<input name="platformFeePct" type="number" min="0" step="0.1" value="1.4"></label>
           <label>买入滑点 (%)<input name="buySlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
           <label>卖出滑点 (%)<input name="sellSlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
@@ -324,7 +327,11 @@
     function renderBacktest(result) {
       const m = result.metrics;
       const items = [
-        ['Samples', number(m.samples)], ['Win Rate', pct(m.winRatePct,1)],
+        ['Resolved Signals', number(m.samples)], ['Completed Trades', number(m.completedSamples)],
+        ['Execution Rate', pct(m.executionRatePct,1)], ['Round-trip Rate', pct(m.roundTripCompletionRatePct,1)],
+        ['No Entry', number(m.noEntry)], ['No Exit', number(m.noExit)],
+        ['Graduated Before Entry', number(m.graduatedBeforeEntry)], ['Right Censored', number(m.rightCensored)],
+        ['Win Rate', pct(m.winRatePct,1)],
         ['Avg Net Return', pct(m.averageNetReturnPct)], ['Median Return', pct(m.medianNetReturnPct)],
         ['Profit Factor', number(m.profitFactor,2)], ['Expectancy', pct(m.expectancyPct)],
         ['Avg MFE', pct(m.averageMfePct)], ['Avg MAE', pct(m.averageMaePct)],

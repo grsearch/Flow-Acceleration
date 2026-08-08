@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const Database = require('better-sqlite3');
+const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 
 function ensureParent(filePath) {
   if (filePath === ':memory:') return;
@@ -25,6 +26,22 @@ function curveProgress(initialRaw, currentRaw) {
   } catch (_) {
     return null;
   }
+}
+
+function legacyCostModel(configuredCostPct = 0) {
+  return normalizeCostModel({
+    platformFeePct: configuredCostPct,
+    buySlippagePct: 0,
+    sellSlippagePct: 0,
+    priceImpactPct: 0,
+    baseTxFeeSol: 0,
+    priorityFeeSol: 0,
+    jitoTipSol: 0,
+    fixedCostSol: 0,
+    positionSizeSol: 0.2,
+    failureRatePct: 0,
+    failureLossPct: 1,
+  });
 }
 
 class ResearchStore {
@@ -153,6 +170,7 @@ class ResearchStore {
         signal_id INTEGER PRIMARY KEY REFERENCES flow_signals(signal_id) ON DELETE CASCADE,
         p0 REAL NOT NULL,
         configured_cost_pct REAL NOT NULL DEFAULT 0,
+        cost_model_json TEXT,
         return_1s REAL, return_2s REAL, return_3s REAL, return_5s REAL,
         return_8s REAL, return_10s REAL, return_15s REAL, return_20s REAL,
         return_30s REAL, return_60s REAL,
@@ -188,6 +206,27 @@ class ResearchStore {
         ON smart_wallet_events(wallet, timestamp_ms);
       CREATE INDEX IF NOT EXISTS idx_smart_wallet_events_mint_ts
         ON smart_wallet_events(mint, timestamp_ms);
+    `);
+
+    const returnColumns = new Set(
+      this.db.prepare('PRAGMA table_info(signal_returns)').all().map((column) => column.name),
+    );
+    if (!returnColumns.has('cost_model_json')) {
+      this.db.exec('ALTER TABLE signal_returns ADD COLUMN cost_model_json TEXT');
+    }
+    this.db.exec(`
+      UPDATE flow_signals SET flow_accel = CASE
+        WHEN flow_accel_1 IS NULL THEN flow_accel_2
+        WHEN flow_accel_2 IS NULL THEN flow_accel_1
+        WHEN flow_accel_1 <= flow_accel_2 THEN flow_accel_1
+        ELSE flow_accel_2
+      END
+      WHERE flow_accel IS NOT CASE
+        WHEN flow_accel_1 IS NULL THEN flow_accel_2
+        WHEN flow_accel_2 IS NULL THEN flow_accel_1
+        WHEN flow_accel_1 <= flow_accel_2 THEN flow_accel_1
+        ELSE flow_accel_2
+      END
     `);
   }
 
@@ -280,13 +319,13 @@ class ResearchStore {
           @deltaNetFlow12, @deltaNetFlow23,
           @uniqueBuyersW1, @uniqueBuyersW2, @uniqueBuyersW3,
           @buyTxW1, @buyTxW2, @buyTxW3,
-          @flowAccel1, @flowAccel2, @flowAccel2, @createdAt
+          @flowAccel1, @flowAccel2, @flowAccel, @createdAt
         )
       `),
       insertReturn: this.db.prepare(`
         INSERT INTO signal_returns (
-          signal_id, p0, configured_cost_pct, updated_at
-        ) VALUES (?, ?, ?, ?)
+          signal_id, p0, configured_cost_pct, cost_model_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
       `),
       recentPendingSignals: this.db.prepare(`
         SELECT s.*, r.*
@@ -449,15 +488,28 @@ class ResearchStore {
 
   recordSignal(signal) {
     const createdAt = Date.now();
-    const result = this.stmts.insertSignal.run({ ...signal, createdAt });
+    const acceleration = [signal.flowAccel1, signal.flowAccel2].filter(Number.isFinite);
+    const signalRow = {
+      ...signal,
+      flowAccel: Number.isFinite(signal.flowAccel)
+        ? signal.flowAccel
+        : acceleration.length ? Math.min(...acceleration) : null,
+      createdAt,
+    };
+    const result = this.stmts.insertSignal.run(signalRow);
     const signalId = Number(result.lastInsertRowid);
+    const costModel = this.labelsConfig.costModel
+      ? normalizeCostModel(this.labelsConfig.costModel)
+      : legacyCostModel(this.labelsConfig.configuredTradingCostPct);
+    const configuredCostPct = costBreakdown(costModel).deterministicCostPct;
     this.stmts.insertReturn.run(
       signalId,
       signal.price,
-      this.labelsConfig.configuredTradingCostPct,
+      configuredCostPct,
+      JSON.stringify(costModel),
       createdAt,
     );
-    return { ...signal, signalId, configuredCostPct: this.labelsConfig.configuredTradingCostPct };
+    return { ...signalRow, signalId, configuredCostPct, costModel };
   }
 
   updateSignalReturn(signalId, patch) {

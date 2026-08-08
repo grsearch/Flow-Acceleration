@@ -23,6 +23,9 @@ try {
   const result = runBacktest(db, {
     holdMs: input['hold-ms'],
     executionDelayMs: input['delay-ms'],
+    entryTimeoutMs: input['entry-timeout-ms'],
+    exitTimeoutMs: input['exit-timeout-ms'],
+    noExitLossPct: input['no-exit-loss-pct'],
     platformFeePct: input['platform-fee-pct'] ?? input['cost-pct'],
     buySlippagePct: input['buy-slippage-pct'],
     sellSlippagePct: input['sell-slippage-pct'],
