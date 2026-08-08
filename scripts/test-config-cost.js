@@ -25,6 +25,8 @@ const costs = costBreakdown({
   failureLossPct: 5,
 });
 assert.ok(Math.abs(costs.deterministicCostPct - 2.4) < 1e-12);
+assert.strictEqual(costs.entryFailureRatePct, 10);
+assert.strictEqual(costs.entryFailureCostPct, 5);
 assert.ok(Math.abs(expectedNetReturnPct(10, costs) - 6.34) < 1e-12);
 
 console.log('test-config-cost: ok');

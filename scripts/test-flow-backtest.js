@@ -6,7 +6,9 @@ const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { ResearchStore } = require('../src/data/ResearchStore');
-const { STATUS, passesAcceleration, runBacktest } = require('../src/core/FlowBacktester');
+const {
+  EXIT_REASON, STATUS, passesAcceleration, runBacktest,
+} = require('../src/core/FlowBacktester');
 
 const zeroVariableCosts = {
   buySlippagePct: 0,
@@ -169,6 +171,21 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   assert.strictEqual(result.rows[0].netReturnPct, -101);
   assert.strictEqual(result.metrics.noExit, 1);
   assert.strictEqual(result.metrics.roundTripCompletionRatePct, 0);
+
+  const failedEntry = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    exitTimeoutMs: 1_000,
+    noExitLossPct: 100,
+    platformFeePct: 1,
+    ...zeroVariableCosts,
+    entryFailureRatePct: 100,
+    entryFailureCostPct: 7,
+  });
+  assert.strictEqual(failedEntry.metrics.averageNetReturnPct, -7,
+    'a failed entry must also replace a modeled no-exit loss because no position opened');
+  assert.strictEqual(failedEntry.metrics.modeledEntryFailureSamples, 1);
+  assert.strictEqual(failedEntry.rows[0].expectedNetReturnPct, -7);
   store.close();
 }
 
@@ -205,19 +222,159 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
 }
 
 {
+  const store = makeStore();
+  addSignal(store, 'dynamic-tp', 7_000_000);
+  addTrade(store, 'dynamic-tp', 7_000_200, 1);
+  addTrade(store, 'dynamic-tp', 7_000_500, 1.1);
+  addTrade(store, 'dynamic-tp', 7_000_700, 1.08);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    takeProfitPct: 5,
+    exitExecutionDelayMs: 200,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows[0].exitReason, EXIT_REASON.TAKE_PROFIT);
+  assert.strictEqual(result.rows[0].triggerAt, 7_000_500);
+  assert.strictEqual(result.rows[0].exitAt, 7_000_700);
+  assert.ok(Math.abs(result.rows[0].rawReturnPct - 8) < 1e-9);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  addSignal(store, 'dynamic-stop', 8_000_000);
+  addTrade(store, 'dynamic-stop', 8_000_200, 1);
+  addTrade(store, 'dynamic-stop', 8_000_500, 0.94);
+  addTrade(store, 'dynamic-stop', 8_000_600, 0.92);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    stopLossPct: 5,
+    exitExecutionDelayMs: 100,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows[0].exitReason, EXIT_REASON.STOP_LOSS);
+  assert.strictEqual(result.rows[0].exitAt, 8_000_600);
+  assert.ok(Math.abs(result.rows[0].rawReturnPct + 8) < 1e-9);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  addSignal(store, 'dynamic-trailing', 9_000_000);
+  addTrade(store, 'dynamic-trailing', 9_000_200, 1);
+  addTrade(store, 'dynamic-trailing', 9_000_500, 1.1);
+  addTrade(store, 'dynamic-trailing', 9_000_600, 1.06);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    trailingStopPct: 3,
+    trailingActivationPct: 5,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows[0].exitReason, EXIT_REASON.TRAILING_STOP);
+  assert.strictEqual(result.rows[0].exitAt, 9_000_600);
+  assert.ok(Math.abs(result.rows[0].rawReturnPct - 6) < 1e-9);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  const returns = [10, -5, 2, -1];
+  returns.forEach((value, index) => {
+    const mint = `analysis-${index}`;
+    const timestamp = 10_000_000 + index * 10_000;
+    addSignal(store, mint, timestamp);
+    addTrade(store, mint, timestamp + 200, 1);
+    addTrade(store, mint, timestamp + 1_200, 1 + value / 100);
+  });
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 1_000,
+    executionDelayMs: 200,
+    splitRatio: 0.5,
+    bootstrapSamples: 100,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.metrics.uniqueMints, 4);
+  assert.strictEqual(result.validation.train.candidateSignals, 2);
+  assert.strictEqual(result.validation.test.candidateSignals, 2);
+  assert.ok(Number.isFinite(result.metrics.robustness.mintBootstrap95Pct.lowerPct));
+  assert.ok(result.metrics.robustness.topWinnerContributionPct.top1 > 80);
+  assert.ok(result.metrics.robustness.averageWithoutTopWinnersPct.top1 < 0);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  addSignal(store, 'filtered-before-limit', 15_000_000);
+  addSignal(store, 'qualified-after-limit', 15_010_000);
+  store.db.prepare(`
+    UPDATE flow_signals SET flow_accel_1 = 1, flow_accel = 1
+    WHERE mint = 'filtered-before-limit'
+  `).run();
+  addTrade(store, 'filtered-before-limit', 15_000_200, 1);
+  addTrade(store, 'filtered-before-limit', 15_001_200, 1.1);
+  addTrade(store, 'qualified-after-limit', 15_010_200, 1);
+  addTrade(store, 'qualified-after-limit', 15_011_200, 1.1);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 1_000,
+    executionDelayMs: 200,
+    minFlowAccel: 1.2,
+    limit: 1,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows.length, 1,
+    'the SQL limit must apply after the acceleration threshold');
+  assert.strictEqual(result.rows[0].mint, 'qualified-after-limit');
+  store.close();
+}
+
+{
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-schema-migration-'));
   const dbPath = path.join(tempDir, 'research.db');
   const storage = {
     dbPath, archiveDir: tempDir, rawRetentionHours: 24, flushMs: 60_000, flushMax: 100,
   };
   const initialStore = new ResearchStore(storage, { configuredTradingCostPct: 1.4 });
+  addSignal(initialStore, 'legacy-label', 20_000_000);
+  initialStore.db.prepare('UPDATE signal_returns SET finalized_at = ? WHERE signal_id = 1')
+    .run(20_060_000);
   initialStore.close();
   const legacyDb = new Database(dbPath);
-  legacyDb.exec('ALTER TABLE signal_returns DROP COLUMN cost_model_json');
+  legacyDb.exec(`
+    ALTER TABLE signal_returns DROP COLUMN cost_model_json;
+    ALTER TABLE signal_returns DROP COLUMN label_status;
+    ALTER TABLE signal_returns DROP COLUMN censor_reason;
+    ALTER TABLE signal_returns DROP COLUMN missing_horizons_json;
+    ALTER TABLE signal_returns DROP COLUMN horizon_observation_lags_json;
+  `);
   legacyDb.close();
   const migratedStore = new ResearchStore(storage, { configuredTradingCostPct: 1.4 });
   const columns = migratedStore.db.prepare('PRAGMA table_info(signal_returns)').all();
-  assert.ok(columns.some((column) => column.name === 'cost_model_json'));
+  const names = new Set(columns.map((column) => column.name));
+  for (const column of [
+    'cost_model_json', 'label_status', 'censor_reason', 'missing_horizons_json',
+    'horizon_observation_lags_json',
+  ]) assert.ok(names.has(column), `missing migrated column: ${column}`);
+  const migratedLabel = migratedStore.db.prepare(`
+    SELECT label_status, censor_reason, missing_horizons_json
+    FROM signal_returns WHERE signal_id = 1
+  `).get();
+  assert.strictEqual(migratedLabel.label_status, 'RIGHT_CENSORED');
+  assert.strictEqual(migratedLabel.censor_reason, 'LEGACY_MISSING_HORIZON');
+  assert.deepStrictEqual(JSON.parse(migratedLabel.missing_horizons_json),
+    [1, 2, 3, 5, 8, 10, 15, 20, 30, 60]);
   migratedStore.close();
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

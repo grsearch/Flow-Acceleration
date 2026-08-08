@@ -29,6 +29,9 @@ assert.ok(Math.abs(merged.mfe_5s - 5) < 1e-9);
 assert.ok(Math.abs(merged.mae_5s + 1) < 1e-9);
 assert.ok(Math.abs(merged.return_60s - 6) < 1e-9);
 assert.ok(merged.finalized_at);
+assert.strictEqual(merged.label_status, 'COMPLETE');
+assert.deepStrictEqual(JSON.parse(merged.missing_horizons_json), []);
+assert.strictEqual(JSON.parse(merged.horizon_observation_lags_json)['60'], 0);
 assert.strictEqual(labeler.stats().pendingSignals, 0);
 
 const restoredUpdates = [];
@@ -57,6 +60,11 @@ restoredLabeler.advanceTime(2_066_000);
 const restoredPatch = restoredUpdates.at(-1).patch;
 assert.ok(Math.abs(restoredPatch.mfe_10s - 10) < 1e-9);
 assert.ok(Math.abs(restoredPatch.mae_10s + 10) < 1e-9);
+assert.strictEqual(restoredPatch.mfe_30s, undefined,
+  'an uncovered excursion window must remain missing instead of being reported as 0%');
+assert.strictEqual(restoredPatch.label_status, 'RIGHT_CENSORED');
+assert.deepStrictEqual(JSON.parse(restoredPatch.missing_horizons_json), [1, 2, 15, 20, 30, 60]);
+assert.strictEqual(JSON.parse(restoredPatch.horizon_observation_lags_json)['3'], 2000);
 
 const failureUpdates = [];
 const failureLabeler = new SignalLabeler({
@@ -73,6 +81,19 @@ const failureLabeler = new SignalLabeler({
 });
 failureLabeler.addSignal({ signalId: 9, mint: 'failure', timestampMs: 3_000_000, price: 100 });
 failureLabeler.onTrade({ mint: 'failure', timestampMs: 3_001_000, price: 110 });
-assert.strictEqual(failureUpdates[0].net_return_1s, -7);
+assert.ok(Math.abs(failureUpdates[0].net_return_1s - 10) < 1e-9,
+  'future labels must describe market returns, not stochastic execution failures');
+
+const censoredUpdates = [];
+const censoredLabeler = new SignalLabeler({
+  store: { updateSignalReturn: (_signalId, patch) => censoredUpdates.push(patch) },
+  config: { horizonsSeconds: [1, 5], excursionSeconds: [], configuredTradingCostPct: 1 },
+});
+censoredLabeler.addSignal({ signalId: 10, mint: 'idle', timestampMs: 4_000_000, price: 100 });
+censoredLabeler.advanceTime(4_010_000);
+assert.strictEqual(censoredUpdates[0].label_status, 'RIGHT_CENSORED');
+assert.strictEqual(censoredUpdates[0].censor_reason, 'NO_TRADE_WITHIN_MAX_OBSERVATION_LAG');
+assert.deepStrictEqual(JSON.parse(censoredUpdates[0].missing_horizons_json), [1, 5]);
+assert.strictEqual(censoredLabeler.stats().censoredSignals, 1);
 
 console.log('test-signal-labeler: ok');

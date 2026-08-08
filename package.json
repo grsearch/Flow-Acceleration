@@ -8,13 +8,16 @@
     "start": "node src/index-flow.js",
     "dev": "node --trace-warnings src/index-flow.js",
     "backtest": "node scripts/backtest-flow.js",
+    "analyze": "node scripts/analyze-flow-strategy.js",
+    "snapshot": "node scripts/snapshot-db.js",
     "health": "node scripts/health.js",
-    "test": "node scripts/test-config-cost.js && node scripts/test-pump-event-parser.js && node scripts/test-flow-acceleration.js && node scripts/test-signal-labeler.js && node scripts/test-flow-backtest.js && node scripts/test-research-server.js",
+    "test": "node scripts/test-config-cost.js && node scripts/test-pump-event-parser.js && node scripts/test-flow-acceleration.js && node scripts/test-signal-labeler.js && node scripts/test-flow-backtest.js && node scripts/test-research-snapshot.js && node scripts/test-research-server.js",
     "test:config": "node scripts/test-config-cost.js",
     "test:parser": "node scripts/test-pump-event-parser.js",
     "test:flow": "node scripts/test-flow-acceleration.js",
     "test:labels": "node scripts/test-signal-labeler.js",
     "test:backtest": "node scripts/test-flow-backtest.js",
+    "test:snapshot": "node scripts/test-research-snapshot.js",
     "test:server": "node scripts/test-research-server.js"
   },
   "dependencies": {
