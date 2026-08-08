@@ -52,6 +52,14 @@ class ResearchServer {
           request.query.noExitLossPct,
           this.config.backtest?.noExitLossPct ?? 100,
         ),
+        takeProfitPct: numeric(request.query.takeProfitPct, 0),
+        stopLossPct: numeric(request.query.stopLossPct, 0),
+        trailingStopPct: numeric(request.query.trailingStopPct, 0),
+        trailingActivationPct: numeric(request.query.trailingActivationPct, 0),
+        exitExecutionDelayMs: numeric(request.query.exitExecutionDelayMs, 0),
+        exitRetryCount: numeric(request.query.exitRetryCount, 0),
+        exitRetryDelayMs: numeric(request.query.exitRetryDelayMs, 500),
+        exitFailureCostSol: numeric(request.query.exitFailureCostSol, undefined),
         platformFeePct: numeric(
           request.query.platformFeePct,
           defaultCosts.platformFeePct ?? this.config.labels.configuredTradingCostPct,
@@ -64,10 +72,21 @@ class ResearchServer {
         jitoTipSol: numeric(request.query.jitoTipSol, defaultCosts.jitoTipSol ?? 0),
         fixedCostSol: numeric(request.query.fixedCostSol, defaultCosts.fixedCostSol ?? 0),
         positionSizeSol: numeric(request.query.positionSizeSol, defaultCosts.positionSizeSol ?? 0.2),
-        failureRatePct: numeric(request.query.failureRatePct, defaultCosts.failureRatePct ?? 0),
-        failureLossPct: numeric(request.query.failureLossPct, defaultCosts.failureLossPct ?? 1),
+        entryFailureRatePct: numeric(
+          request.query.entryFailureRatePct ?? request.query.failureRatePct,
+          defaultCosts.entryFailureRatePct ?? defaultCosts.failureRatePct ?? 0,
+        ),
+        entryFailureCostPct: numeric(
+          request.query.entryFailureCostPct ?? request.query.failureLossPct,
+          defaultCosts.entryFailureCostPct ?? defaultCosts.failureLossPct ?? 1,
+        ),
         minNetFlowW3: numeric(request.query.minNetFlowW3, this.config.strategy.minNetFlowW3Sol),
         minFlowAccel: numeric(request.query.minFlowAccel, this.config.strategy.minAccelerationRatio),
+        fromMs: request.query.fromMs,
+        toMs: request.query.toMs,
+        dataCutoffMs: request.query.dataCutoffMs,
+        splitRatio: numeric(request.query.splitRatio, 0.7),
+        bootstrapSamples: numeric(request.query.bootstrapSamples, 500),
         includeRows: false,
       });
       response.json(result);

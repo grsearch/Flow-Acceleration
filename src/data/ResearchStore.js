@@ -171,6 +171,10 @@ class ResearchStore {
         p0 REAL NOT NULL,
         configured_cost_pct REAL NOT NULL DEFAULT 0,
         cost_model_json TEXT,
+        label_status TEXT NOT NULL DEFAULT 'PENDING',
+        censor_reason TEXT,
+        missing_horizons_json TEXT,
+        horizon_observation_lags_json TEXT,
         return_1s REAL, return_2s REAL, return_3s REAL, return_5s REAL,
         return_8s REAL, return_10s REAL, return_15s REAL, return_20s REAL,
         return_30s REAL, return_60s REAL,
@@ -211,9 +215,68 @@ class ResearchStore {
     const returnColumns = new Set(
       this.db.prepare('PRAGMA table_info(signal_returns)').all().map((column) => column.name),
     );
-    if (!returnColumns.has('cost_model_json')) {
-      this.db.exec('ALTER TABLE signal_returns ADD COLUMN cost_model_json TEXT');
+    const returnMigrations = [
+      ['cost_model_json', 'ALTER TABLE signal_returns ADD COLUMN cost_model_json TEXT'],
+      [
+        'label_status',
+        "ALTER TABLE signal_returns ADD COLUMN label_status TEXT NOT NULL DEFAULT 'PENDING'",
+      ],
+      ['censor_reason', 'ALTER TABLE signal_returns ADD COLUMN censor_reason TEXT'],
+      [
+        'missing_horizons_json',
+        'ALTER TABLE signal_returns ADD COLUMN missing_horizons_json TEXT',
+      ],
+      [
+        'horizon_observation_lags_json',
+        'ALTER TABLE signal_returns ADD COLUMN horizon_observation_lags_json TEXT',
+      ],
+    ];
+    for (const [column, sql] of returnMigrations) {
+      if (!returnColumns.has(column)) this.db.exec(sql);
     }
+    this.db.exec(`
+      UPDATE signal_returns SET
+        label_status = CASE
+          WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
+            AND return_3s IS NOT NULL AND return_5s IS NOT NULL
+            AND return_8s IS NOT NULL AND return_10s IS NOT NULL
+            AND return_15s IS NOT NULL AND return_20s IS NOT NULL
+            AND return_30s IS NOT NULL AND return_60s IS NOT NULL
+            THEN 'COMPLETE'
+          ELSE 'RIGHT_CENSORED'
+        END,
+        censor_reason = CASE
+          WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
+            AND return_3s IS NOT NULL AND return_5s IS NOT NULL
+            AND return_8s IS NOT NULL AND return_10s IS NOT NULL
+            AND return_15s IS NOT NULL AND return_20s IS NOT NULL
+            AND return_30s IS NOT NULL AND return_60s IS NOT NULL
+            THEN NULL
+          ELSE COALESCE(censor_reason, 'LEGACY_MISSING_HORIZON')
+        END,
+        missing_horizons_json = CASE
+          WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
+            AND return_3s IS NOT NULL AND return_5s IS NOT NULL
+            AND return_8s IS NOT NULL AND return_10s IS NOT NULL
+            AND return_15s IS NOT NULL AND return_20s IS NOT NULL
+            AND return_30s IS NOT NULL AND return_60s IS NOT NULL
+            THEN '[]'
+          ELSE '[' || rtrim(
+            CASE WHEN return_1s IS NULL THEN '1,' ELSE '' END
+            || CASE WHEN return_2s IS NULL THEN '2,' ELSE '' END
+            || CASE WHEN return_3s IS NULL THEN '3,' ELSE '' END
+            || CASE WHEN return_5s IS NULL THEN '5,' ELSE '' END
+            || CASE WHEN return_8s IS NULL THEN '8,' ELSE '' END
+            || CASE WHEN return_10s IS NULL THEN '10,' ELSE '' END
+            || CASE WHEN return_15s IS NULL THEN '15,' ELSE '' END
+            || CASE WHEN return_20s IS NULL THEN '20,' ELSE '' END
+            || CASE WHEN return_30s IS NULL THEN '30,' ELSE '' END
+            || CASE WHEN return_60s IS NULL THEN '60,' ELSE '' END,
+            ','
+          ) || ']'
+        END
+      WHERE finalized_at IS NOT NULL
+    `);
     this.db.exec(`
       UPDATE flow_signals SET flow_accel = CASE
         WHEN flow_accel_1 IS NULL THEN flow_accel_2
@@ -519,7 +582,8 @@ class ResearchStore {
       'net_return_1s', 'net_return_2s', 'net_return_3s', 'net_return_5s', 'net_return_8s',
       'net_return_10s', 'net_return_15s', 'net_return_20s', 'net_return_30s', 'net_return_60s',
       'mfe_5s', 'mae_5s', 'mfe_10s', 'mae_10s', 'mfe_30s', 'mae_30s',
-      'last_observed_at', 'finalized_at',
+      'last_observed_at', 'finalized_at', 'label_status', 'censor_reason',
+      'missing_horizons_json', 'horizon_observation_lags_json',
     ]);
     const keys = Object.keys(patch).filter((key) => allowed.has(key));
     if (keys.length === 0) return;
@@ -539,7 +603,13 @@ class ResearchStore {
   }
 
   restorePendingSignals(now = Date.now()) {
-    return this.stmts.recentPendingSignals.all(now - 120_000);
+    const maxHorizonMs = Math.max(0, ...(this.labelsConfig.horizonsSeconds || [])) * 1_000;
+    const maxObservationLagMs = Math.max(
+      0,
+      Number(this.labelsConfig.maxObservationLagMs ?? 2_000),
+    );
+    const restoreLookbackMs = Math.max(120_000, maxHorizonMs + maxObservationLagMs + 60_000);
+    return this.stmts.recentPendingSignals.all(now - restoreLookbackMs);
   }
 
   labelSamples(mint, startMs, endMs) {
@@ -658,11 +728,20 @@ class ResearchStore {
   health() {
     const rawRows = this.db.prepare('SELECT COUNT(*) AS n FROM raw_trades').get().n;
     const signalRows = this.db.prepare('SELECT COUNT(*) AS n FROM flow_signals').get().n;
+    const labelRows = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(label_status = 'PENDING'), 0) AS pending,
+        COALESCE(SUM(label_status = 'COMPLETE'), 0) AS complete,
+        COALESCE(SUM(label_status = 'RIGHT_CENSORED'), 0) AS right_censored
+      FROM signal_returns
+    `).get();
     return {
       ...this.metrics,
       pendingWrites: this.rawBuffer.length,
       rawRows,
       signalRows,
+      labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };
   }

@@ -58,8 +58,16 @@ const labelCostModel = normalizeCostModel({
   jitoTipSol: numberEnv('FLOW_JITO_TIP_SOL', 0, { min: 0 }),
   fixedCostSol: numberEnv('FLOW_FIXED_COST_SOL', 0, { min: 0 }),
   positionSizeSol: numberEnv('FLOW_POSITION_SIZE_SOL', 0.2, { min: 0.000001 }),
-  failureRatePct: numberEnv('FLOW_FAILURE_RATE_PCT', 0, { min: 0, max: 100 }),
-  failureLossPct: numberEnv('FLOW_FAILURE_LOSS_PCT', 1, { min: 0 }),
+  entryFailureRatePct: numberEnv(
+    'FLOW_ENTRY_FAILURE_RATE_PCT',
+    numberEnv('FLOW_FAILURE_RATE_PCT', 0, { min: 0, max: 100 }),
+    { min: 0, max: 100 },
+  ),
+  entryFailureCostPct: numberEnv(
+    'FLOW_ENTRY_FAILURE_COST_PCT',
+    numberEnv('FLOW_FAILURE_LOSS_PCT', 1, { min: 0 }),
+    { min: 0 },
+  ),
 });
 
 const config = {
@@ -105,6 +113,7 @@ const config = {
   labels: {
     horizonsSeconds: [1, 2, 3, 5, 8, 10, 15, 20, 30, 60],
     excursionSeconds: [5, 10, 30],
+    maxObservationLagMs: integerEnv('FLOW_LABEL_MAX_OBSERVATION_LAG_MS', 2_000, { min: 0 }),
     costModel: labelCostModel,
     configuredTradingCostPct: costBreakdown(labelCostModel).deterministicCostPct,
   },
@@ -122,7 +131,7 @@ const config = {
 
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
-    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 24, { min: 1 }),
+    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),
     archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
     flushMs: integerEnv('FLOW_DB_FLUSH_MS', 250, { min: 25 }),
     flushMax: integerEnv('FLOW_DB_FLUSH_MAX', 1_000, { min: 10 }),

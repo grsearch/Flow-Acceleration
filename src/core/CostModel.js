@@ -10,8 +10,8 @@ const DEFAULT_COST_MODEL = Object.freeze({
   jitoTipSol: 0,
   fixedCostSol: 0,
   positionSizeSol: 0.2,
-  failureRatePct: 0,
-  failureLossPct: 1,
+  entryFailureRatePct: 0,
+  entryFailureCostPct: 1,
 });
 
 function finite(value, fallback) {
@@ -24,6 +24,14 @@ function nonNegative(value, fallback) {
 }
 
 function normalizeCostModel(options = {}) {
+  const entryFailureRatePct = Math.min(100, nonNegative(
+    options.entryFailureRatePct,
+    finite(options.failureRatePct, DEFAULT_COST_MODEL.entryFailureRatePct),
+  ));
+  const entryFailureCostPct = nonNegative(
+    options.entryFailureCostPct,
+    finite(options.failureLossPct, DEFAULT_COST_MODEL.entryFailureCostPct),
+  );
   return {
     platformFeePct: nonNegative(
       options.platformFeePct,
@@ -40,11 +48,11 @@ function normalizeCostModel(options = {}) {
       0.000001,
       finite(options.positionSizeSol, DEFAULT_COST_MODEL.positionSizeSol),
     ),
-    failureRatePct: Math.min(
-      100,
-      nonNegative(options.failureRatePct, DEFAULT_COST_MODEL.failureRatePct),
-    ),
-    failureLossPct: nonNegative(options.failureLossPct, DEFAULT_COST_MODEL.failureLossPct),
+    entryFailureRatePct,
+    entryFailureCostPct,
+    // Backward-compatible aliases. A failed entry means no position was opened.
+    failureRatePct: entryFailureRatePct,
+    failureLossPct: entryFailureCostPct,
   };
 }
 
@@ -61,10 +69,10 @@ function costBreakdown(options = {}) {
 function expectedNetReturnPct(rawReturnPct, options = {}) {
   if (!Number.isFinite(rawReturnPct)) return null;
   const costs = costBreakdown(options);
-  const successProbability = 1 - costs.failureRatePct / 100;
-  const failureProbability = costs.failureRatePct / 100;
+  const successProbability = 1 - costs.entryFailureRatePct / 100;
+  const failureProbability = costs.entryFailureRatePct / 100;
   const successfulReturn = rawReturnPct - costs.deterministicCostPct;
-  const failedReturn = -costs.failureLossPct;
+  const failedReturn = -costs.entryFailureCostPct;
   return successProbability * successfulReturn + failureProbability * failedReturn;
 }
 
