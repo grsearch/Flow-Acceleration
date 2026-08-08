@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07131b">
+  <title>Flow Acceleration Research</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #061017;
+      --panel: #0b1922;
+      --panel-2: #0e202b;
+      --line: #1c3440;
+      --text: #e9f4f2;
+      --muted: #8ba3a7;
+      --lime: #b7f34a;
+      --cyan: #55d8d0;
+      --amber: #f5bd62;
+      --red: #ff7a71;
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(85, 216, 208, .12), transparent 28rem),
+        radial-gradient(circle at 92% 18%, rgba(183, 243, 74, .08), transparent 24rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    .shell { max-width: 1480px; margin: 0 auto; padding: 28px; }
+    .masthead {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 28px;
+    }
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--cyan);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(28px, 4vw, 48px); line-height: 1; letter-spacing: -.04em; }
+    .subtitle { max-width: 720px; margin: 12px 0 0; color: var(--muted); line-height: 1.6; }
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 10px 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(11, 25, 34, .9);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 14px currentColor; }
+    .dot.live { color: var(--lime); background: var(--lime); }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 5px;
+      margin-bottom: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(7, 20, 28, .86);
+    }
+    .tab {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 15px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .tab:hover { color: var(--text); }
+    .tab[aria-selected="true"] { color: #071017; background: var(--lime); }
+    .panel[hidden] { display: none; }
+    .grid { display: grid; gap: 14px; }
+    .metric-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .metric, .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(145deg, rgba(14, 32, 43, .96), rgba(8, 22, 30, .96));
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .16);
+    }
+    .metric { min-height: 136px; padding: 20px; }
+    .metric span { color: var(--muted); font-size: 13px; }
+    .metric strong { display: block; margin-top: 14px; font-size: clamp(27px, 3vw, 39px); letter-spacing: -.04em; }
+    .metric small { display: block; margin-top: 7px; color: #668088; }
+    .card { padding: 20px; }
+    .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .section-title h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+    .section-title p { margin: 0; color: var(--muted); font-size: 13px; }
+    .research-note {
+      display: grid;
+      grid-template-columns: 1.3fr .7fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .hypothesis { padding: 26px; }
+    .hypothesis blockquote { margin: 0; font-size: clamp(18px, 2vw, 25px); line-height: 1.5; letter-spacing: -.02em; }
+    .hypothesis footer { margin-top: 15px; color: var(--muted); font-size: 13px; }
+    .windows { display: flex; gap: 7px; margin-top: 18px; }
+    .window { flex: 1; padding: 12px 8px; border-radius: 10px; border: 1px solid var(--line); text-align: center; }
+    .window b { display: block; color: var(--cyan); }
+    .window span { color: var(--muted); font-size: 11px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; text-align: left; }
+    th, td { padding: 12px 11px; border-bottom: 1px solid rgba(28, 52, 64, .72); white-space: nowrap; }
+    tbody tr:hover { background: rgba(85, 216, 208, .04); }
+    .mint { color: var(--cyan); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .mint:hover { text-decoration: underline; }
+    .positive { color: var(--lime); }
+    .negative { color: var(--red); }
+    .muted { color: var(--muted); }
+    .form-grid { grid-template-columns: repeat(4, minmax(140px, 1fr)); }
+    label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 11px 12px;
+      background: #07151d;
+      color: var(--text);
+      outline: none;
+    }
+    input:focus, select:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(85, 216, 208, .12); }
+    .primary {
+      align-self: end;
+      min-height: 42px;
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 16px;
+      background: var(--lime);
+      color: #071017;
+      cursor: pointer;
+      font-weight: 850;
+    }
+    .result-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 14px; }
+    .result { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: rgba(5, 17, 24, .55); }
+    .result span { color: var(--muted); font-size: 12px; }
+    .result b { display: block; margin-top: 7px; font-size: 22px; }
+    .wallet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .wallet-address { overflow: hidden; color: var(--cyan); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; }
+    .wallet-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
+    .wallet-metrics div { padding-top: 12px; border-top: 1px solid var(--line); }
+    .wallet-metrics span { display: block; color: var(--muted); font-size: 11px; }
+    .wallet-metrics b { display: block; margin-top: 4px; font-size: 17px; }
+    .health-grid { grid-template-columns: 1fr 1fr; }
+    .health-list { display: grid; gap: 12px; }
+    .health-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+    .health-row:last-child { padding: 0; border: 0; }
+    .health-row span { color: var(--muted); }
+    .empty { padding: 40px 20px; color: var(--muted); text-align: center; }
+    .error { color: var(--red); }
+    @media (max-width: 980px) {
+      .metric-grid { grid-template-columns: repeat(2, 1fr); }
+      .research-note, .wallet-grid, .health-grid { grid-template-columns: 1fr; }
+      .form-grid, .result-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 620px) {
+      .shell { padding: 18px 14px; }
+      .masthead { display: block; }
+      .live-pill { margin-top: 18px; }
+      .metric-grid, .form-grid, .result-grid { grid-template-columns: 1fr; }
+      .wallet-metrics { grid-template-columns: repeat(2, 1fr); }
+      .section-title { display: block; }
+      .section-title p { margin-top: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Pump.fun · Pre-Graduation Research</p>
+        <h1>Flow Acceleration</h1>
+        <p class="subtitle">只研究净买入资金、独立买家与买单速度是否同时加速。AGE 与 Curve 只记录，不参与当前信号过滤。</p>
+      </div>
+      <div class="live-pill"><span id="status-dot" class="dot"></span><span id="status-text">等待数据流</span></div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="研究页面">
+      <button class="tab" role="tab" aria-selected="true" aria-controls="overview" id="tab-overview">Overview</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="signals" id="tab-signals">Signal Monitor</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="backtest" id="tab-backtest">Backtest</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="wallets" id="tab-wallets">Smart Wallet</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="health" id="tab-health">System Health</button>
+    </nav>
+
+    <section class="panel" role="tabpanel" id="overview" aria-labelledby="tab-overview">
+      <div class="grid metric-grid" id="overview-metrics"></div>
+      <div class="research-note">
+        <article class="card hypothesis">
+          <p class="eyebrow">Research hypothesis</p>
+          <blockquote>毕业前，当净买入资金、独立买家数量和买入成交速度同时加速，未来数秒可能存在可交易的价格惯性。</blockquote>
+          <footer>当前是研究采集模式，不会提交链上买卖交易。</footer>
+        </article>
+        <article class="card">
+          <div class="section-title"><h2>信号窗口</h2><p>连续三段，各 2 秒</p></div>
+          <div class="windows">
+            <div class="window"><b>W1</b><span>T−6 → T−4</span></div>
+            <div class="window"><b>W2</b><span>T−4 → T−2</span></div>
+            <div class="window"><b>W3</b><span>T−2 → T</span></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel" role="tabpanel" id="signals" aria-labelledby="tab-signals" hidden>
+      <article class="card">
+        <div class="section-title"><h2>实时 Flow Signals</h2><p>CA 可直接打开 GMGN</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>时间</th><th>Symbol / CA</th><th>AGE</th><th>Curve</th><th>NetFlow W1→W3</th><th>Accel</th><th>Buyers</th><th>Buy TX</th><th>5s Return</th></tr></thead>
+          <tbody id="signal-rows"></tbody>
+        </table></div>
+      </article>
+    </section>
+
+    <section class="panel" role="tabpanel" id="backtest" aria-labelledby="tab-backtest" hidden>
+      <article class="card">
+        <div class="section-title"><h2>成本与延迟回测</h2><p>持仓时间从实际模拟成交开始计算</p></div>
+        <form id="backtest-form" class="grid form-grid">
+          <label>Hold Time
+            <select name="holdMs"><option value="1000">1 秒</option><option value="2000">2 秒</option><option value="3000">3 秒</option><option value="5000" selected>5 秒</option><option value="8000">8 秒</option><option value="10000">10 秒</option><option value="15000">15 秒</option><option value="20000">20 秒</option><option value="30000">30 秒</option></select>
+          </label>
+          <label>Execution Delay
+            <select name="executionDelayMs"><option value="100">100 ms</option><option value="200" selected>200 ms</option><option value="400">400 ms</option><option value="600">600 ms</option><option value="1000">1 秒</option></select>
+          </label>
+          <label>平台费 (%)<input name="platformFeePct" type="number" min="0" step="0.1" value="1.4"></label>
+          <label>买入滑点 (%)<input name="buySlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
+          <label>卖出滑点 (%)<input name="sellSlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
+          <label>价格冲击 (%)<input name="priceImpactPct" type="number" min="0" step="0.1" value="0.2"></label>
+          <label>基础交易费 (SOL)<input name="baseTxFeeSol" type="number" min="0" step="0.00001" value="0.00001"></label>
+          <label>优先费 (SOL)<input name="priorityFeeSol" type="number" min="0" step="0.0001" value="0.0005"></label>
+          <label>Jito 小费 (SOL)<input name="jitoTipSol" type="number" min="0" step="0.0001" value="0"></label>
+          <label>仓位 (SOL)<input name="positionSizeSol" type="number" min="0.001" step="0.01" value="0.2"></label>
+          <label>失败率 (%)<input name="failureRatePct" type="number" min="0" max="100" step="0.1" value="0"></label>
+          <label>单次失败损失 (%)<input name="failureLossPct" type="number" min="0" step="0.1" value="1"></label>
+          <label>W3 NetFlow 下限 (SOL)<input name="minNetFlowW3" type="number" min="0" step="0.1" value="1"></label>
+          <label>Flow Accel 下限<input name="minFlowAccel" type="number" min="0" step="0.1" value="1.2"></label>
+          <button class="primary" type="submit">运行回测</button>
+        </form>
+      </article>
+      <div class="grid result-grid" id="backtest-results"></div>
+    </section>
+
+    <section class="panel" role="tabpanel" id="wallets" aria-labelledby="tab-wallets" hidden>
+      <div class="grid wallet-grid" id="wallet-cards"></div>
+    </section>
+
+    <section class="panel" role="tabpanel" id="health" aria-labelledby="tab-health" hidden>
+      <div class="grid health-grid" id="health-cards"></div>
+    </section>
+  </main>
+
+  <script>
+    const state = { active: 'overview' };
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const number = (value, digits = 0) => Number.isFinite(value) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value) : '—';
+    const pct = (value, digits = 2) => Number.isFinite(value) ? `${value >= 0 ? '+' : ''}${number(value, digits)}%` : '—';
+    const sol = (value) => Number.isFinite(value) ? `${number(value, 2)} SOL` : '—';
+    const age = (ms) => !Number.isFinite(ms) ? '—' : ms < 60000 ? `${number(ms/1000, 0)}s` : `${number(ms/60000, 1)}m`;
+    const time = (ms) => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+    const tone = (value) => Number.isFinite(value) ? (value >= 0 ? 'positive' : 'negative') : 'muted';
+    async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
+
+    function selectTab(id) {
+      state.active = id;
+      document.querySelectorAll('[role="tab"]').forEach(tab => {
+        const selected = tab.getAttribute('aria-controls') === id;
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+      });
+      document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== id; });
+    }
+    const tabs = [...document.querySelectorAll('[role="tab"]')];
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => selectTab(tab.getAttribute('aria-controls')));
+      tab.addEventListener('keydown', event => {
+        if (!['ArrowLeft','ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        const direction = event.key === 'ArrowRight' ? 1 : -1;
+        const next = tabs[(index + direction + tabs.length) % tabs.length];
+        selectTab(next.getAttribute('aria-controls')); next.focus();
+      });
+    });
+
+    function renderOverview(data) {
+      const items = [
+        ['今日 Raw Trades', data.rawTradesToday, '毕业前逐笔链上成交'],
+        ['活跃 Token', data.activeTokens, '最近 10 分钟有成交'],
+        ['Candidate', data.candidateCount, '已触发 5 秒 Activity Wake-Up'],
+        ['Flow Signals', data.flowSignalsToday, '今日研究信号'],
+        ['Smart Wallet Trades', data.smartWalletTradesToday, '今日标注事件'],
+      ];
+      document.querySelector('#overview-metrics').innerHTML = items.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${number(value)}</strong><small>${note}</small></article>`).join('');
+    }
+
+    function renderSignals(rows) {
+      const target = document.querySelector('#signal-rows');
+      if (!rows.length) { target.innerHTML = '<tr><td colspan="9" class="empty">等待第一条 Flow Acceleration 信号</td></tr>'; return; }
+      target.innerHTML = rows.map(row => {
+        const mint = escapeHtml(row.mint);
+        const symbol = escapeHtml(row.symbol || mint.slice(0, 6));
+        const accel = Number.isFinite(row.flow_accel) ? `${number(row.flow_accel, 2)}×` : 'Δ only';
+        return `<tr><td>${time(row.timestamp_ms)}</td><td><b>${symbol}</b><br><a class="mint" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noreferrer">${mint.slice(0,6)}…${mint.slice(-4)}</a></td><td>${age(row.age_ms)}</td><td>${pct(row.curve_pct,1)}</td><td>${number(row.netflow_w1,2)} → ${number(row.netflow_w2,2)} → <b class="positive">${number(row.netflow_w3,2)}</b></td><td>${accel}</td><td>${row.unique_buyers_w1} → ${row.unique_buyers_w2} → ${row.unique_buyers_w3}</td><td>${row.buy_tx_w1} → ${row.buy_tx_w2} → ${row.buy_tx_w3}</td><td class="${tone(row.return_5s)}">${pct(row.return_5s)}</td></tr>`;
+      }).join('');
+    }
+
+    function renderBacktest(result) {
+      const m = result.metrics;
+      const items = [
+        ['Samples', number(m.samples)], ['Win Rate', pct(m.winRatePct,1)],
+        ['Avg Net Return', pct(m.averageNetReturnPct)], ['Median Return', pct(m.medianNetReturnPct)],
+        ['Profit Factor', number(m.profitFactor,2)], ['Expectancy', pct(m.expectancyPct)],
+        ['Avg MFE', pct(m.averageMfePct)], ['Avg MAE', pct(m.averageMaePct)],
+        ['Total Cost', pct(result.parameters.totalCostPct)],
+        ['Actual Delay', Number.isFinite(m.averageActualDelayMs) ? `${number(m.averageActualDelayMs)} ms` : '—'],
+        ['Latency Move', pct(m.averageLatencyMovePct)],
+      ];
+      document.querySelector('#backtest-results').innerHTML = items.map(([label,value]) => `<div class="result"><span>${label}</span><b>${value}</b></div>`).join('');
+    }
+
+    function renderWallets(rows) {
+      document.querySelector('#wallet-cards').innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">Smart Wallet Label</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>买入 Curve</span><b>${pct(row.averageBuyCurvePct,1)}</b></div><div><span>买入 AGE</span><b>${age(row.averageBuyAgeMs)}</b></div><div><span>Signal 重合率</span><b>${pct(row.flowSignalOverlapPct,1)}</b></div></div></article>`).join('');
+    }
+
+    function renderHealth(data) {
+      const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')}`).join('<br>') || '未连接';
+      const cards = [
+        ['Stream', [['状态', data.status], ['Regions', regions], ['收到交易', number(data.stream.transactionsReceived)], ['去重交易', number(data.stream.duplicatesDropped)], ['错误', number(data.stream.errors)]]],
+        ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Signals', number(data.engine.signalsCreated)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Signal Rows', number(data.database.signalRows)], ['Pending Writes', number(data.database.pendingWrites)], ['最近写入耗时', Number.isFinite(data.database.lastFlushMs) ? `${number(data.database.lastFlushMs)} ms` : '—'], ['写入错误', number(data.database.writeErrors)]]],
+        ['Scope Guard', [['交易阶段', 'Bonding Curve only'], ['新信号 after graduation', 'Blocked'], ['AGE / Curve', 'Record only'], ['链上交易', 'Disabled'], ['未来标签', '1s → 60s']]],
+      ];
+      document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
+      const live = data.status === 'streaming';
+      document.querySelector('#status-dot').classList.toggle('live', live);
+      document.querySelector('#status-text').textContent = live ? '链上数据流运行中' : '等待数据流';
+    }
+
+    document.querySelector('#backtest-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const query = new URLSearchParams(new FormData(event.currentTarget));
+      const target = document.querySelector('#backtest-results');
+      target.innerHTML = '<div class="card empty">正在计算延迟与成本后的结果…</div>';
+      try { renderBacktest(await json(`/api/backtest?${query}`)); }
+      catch (error) { target.innerHTML = `<div class="card empty error">回测失败：${escapeHtml(error.message)}</div>`; }
+    });
+
+    async function refresh() {
+      const jobs = [
+        json('/api/overview').then(renderOverview),
+        json('/api/signals?limit=200').then(renderSignals),
+        json('/api/smart-wallets').then(renderWallets),
+        json('/api/health').then(renderHealth),
+      ];
+      await Promise.allSettled(jobs);
+    }
+    document.querySelector('#backtest-form').requestSubmit();
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

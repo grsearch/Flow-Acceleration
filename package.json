@@ -1,0 +1,30 @@
+{
+  "name": "pump-flow-acceleration-research",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pump.fun pre-graduation net buy flow acceleration research collector and backtester.",
+  "main": "src/index-flow.js",
+  "scripts": {
+    "start": "node src/index-flow.js",
+    "dev": "node --trace-warnings src/index-flow.js",
+    "backtest": "node scripts/backtest-flow.js",
+    "health": "node scripts/health.js",
+    "test": "node scripts/test-pump-event-parser.js && node scripts/test-flow-acceleration.js && node scripts/test-signal-labeler.js && node scripts/test-flow-backtest.js && node scripts/test-research-server.js",
+    "test:parser": "node scripts/test-pump-event-parser.js",
+    "test:flow": "node scripts/test-flow-acceleration.js",
+    "test:labels": "node scripts/test-signal-labeler.js",
+    "test:backtest": "node scripts/test-flow-backtest.js",
+    "test:server": "node scripts/test-research-server.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "@triton-one/yellowstone-grpc": "^5.0.8",
+    "better-sqlite3": "13.0.1",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

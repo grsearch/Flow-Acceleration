@@ -1,0 +1,32 @@
+[Unit]
+Description=Pump.fun Flow Acceleration research collector
+Documentation=file:///opt/flow-acceleration/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/flow-acceleration
+EnvironmentFile=/opt/flow-acceleration/.env
+ExecStart=/usr/bin/node /opt/flow-acceleration/src/index-flow.js
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+TimeoutStopSec=20
+KillSignal=SIGTERM
+StandardOutput=append:/opt/flow-acceleration/logs/out.log
+StandardError=append:/opt/flow-acceleration/logs/err.log
+SyslogIdentifier=flow-acceleration
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

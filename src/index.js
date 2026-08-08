@@ -1,0 +1,211 @@
+'use strict';
+
+const { config, validateConfig, streamTokenFor } = require('./config');
+const { PumpEventParser } = require('./core/PumpEventParser');
+const PumpFlowStream = require('./core/PumpFlowStream');
+const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
+const SignalLabeler = require('./core/SignalLabeler');
+const { ResearchStore } = require('./data/ResearchStore');
+const ResearchServer = require('./server/server');
+
+function createRuntime(runtimeConfig = config) {
+  const store = new ResearchStore(runtimeConfig.storage, runtimeConfig.labels);
+  const engine = new FlowAccelerationEngine(runtimeConfig.strategy);
+  engine.hydrateTokens(store.allTokens());
+  const labeler = new SignalLabeler({ store, config: runtimeConfig.labels });
+  labeler.restore(store.restorePendingSignals());
+  const parser = new PumpEventParser({
+    pumpProgramId: runtimeConfig.pump.programId,
+    pumpAmmProgramId: runtimeConfig.pump.ammProgramId,
+    wsolMint: runtimeConfig.pump.wsolMint,
+  });
+  const stream = new PumpFlowStream({ config: runtimeConfig, tokenForEndpoint: streamTokenFor });
+  const server = new ResearchServer({
+    config: runtimeConfig,
+    store,
+    engine,
+    stream,
+    labeler,
+  });
+  const smartWallets = new Set(runtimeConfig.smartWallets);
+  const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
+  let maintenanceTimer = null;
+  let archiveTimer = null;
+  let stopping = false;
+
+  engine.on('candidate', (candidate) => {
+    console.log(
+      `[Candidate] ${candidate.symbol || candidate.mint.slice(0, 8)} `
+      + `volume=${candidate.activityVolumeSol.toFixed(2)}SOL `
+      + `tx=${candidate.activityTxCount} wallets=${candidate.activityUniqueWallets}`,
+    );
+  });
+
+  engine.on('signal', (signal) => {
+    try {
+      const saved = store.recordSignal(signal);
+      labeler.addSignal(saved);
+      console.log(
+        `[FLOW_ACCEL_SIGNAL] ${signal.symbol || signal.mint.slice(0, 8)} `
+        + `net=${signal.netFlowW1.toFixed(2)}→${signal.netFlowW2.toFixed(2)}→${signal.netFlowW3.toFixed(2)}SOL `
+        + `buyers=${signal.uniqueBuyersW1}→${signal.uniqueBuyersW2}→${signal.uniqueBuyersW3} `
+        + `tx=${signal.buyTxW1}→${signal.buyTxW2}→${signal.buyTxW3}`,
+      );
+    } catch (error) {
+      console.error('[Signal] persistence failed:', error.message);
+    }
+  });
+
+  stream.on('transaction', (transaction, context) => {
+    let events;
+    try {
+      events = parser.parseTransaction(transaction, context.receivedAt);
+    } catch (error) {
+      runtimeMetrics.parseErrors += 1;
+      console.error('[Parser] transaction failed:', error.message);
+      return;
+    }
+
+    for (const event of events) {
+      runtimeMetrics.parsedEvents += 1;
+      try {
+        if (event.type === 'create') {
+          const token = store.recordCreate(event);
+          engine.handleCreate(token || event);
+          continue;
+        }
+        if (event.type === 'complete') {
+          store.recordComplete(event);
+          engine.handleComplete(event);
+          continue;
+        }
+        if (event.type === 'migration') {
+          store.recordMigration(event);
+          engine.handleComplete({ ...event, completedAt: event.migratedAt });
+          continue;
+        }
+        if (event.type !== 'trade' && event.type !== 'ammTrade') {
+          runtimeMetrics.ignoredEvents += 1;
+          continue;
+        }
+
+        if (event.type === 'ammTrade') {
+          event.mint = store.resolveAmmMint(event.pool, event.mint);
+        }
+        if (!event.mint || !Number.isFinite(event.solAmount) || event.solAmount <= 0
+          || !Number.isFinite(event.tokenAmount) || event.tokenAmount <= 0
+          || !Number.isFinite(event.price) || event.price <= 0) {
+          runtimeMetrics.ignoredEvents += 1;
+          continue;
+        }
+
+        const trade = store.enrichTrade(event);
+        store.queueRawTrade(trade);
+        engine.handleTrade(trade, store.getToken(trade.mint));
+        labeler.onTrade(trade);
+        if (trade.wallet && smartWallets.has(trade.wallet)) store.recordSmartWalletEvent(trade);
+      } catch (error) {
+        runtimeMetrics.parseErrors += 1;
+        console.error(`[Runtime] ${event.type} failed:`, error.message);
+      }
+    }
+  });
+
+  stream.on('streamError', ({ label, phase, error }) => {
+    console.error(`[Stream:${label}] ${phase}: ${error?.message || error}`);
+  });
+
+  async function start() {
+    await server.start();
+    console.log(`Flow Acceleration dashboard: http://127.0.0.1:${runtimeConfig.server.port}`);
+    console.log('Mode: RESEARCH ONLY — no wallet key, BUY, or SELL path is loaded.');
+    console.log(
+      `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
+      + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `
+      + `wallets>=${runtimeConfig.strategy.activityMinUniqueWallets}`,
+    );
+    console.log(
+      `Signal: 3×${runtimeConfig.strategy.signalWindowMs}ms windows, `
+      + `W3 net>=${runtimeConfig.strategy.minNetFlowW3Sol}SOL, `
+      + `ratio>=${runtimeConfig.strategy.minAccelerationRatio}x when defined`,
+    );
+
+    maintenanceTimer = setInterval(() => {
+      const now = Date.now();
+      engine.cleanup(now);
+      labeler.advanceTime(now);
+      const graduatedPending = labeler.pendingMints().filter((mint) => store.getToken(mint)?.graduated_at);
+      stream.setAmmMints(graduatedPending);
+    }, 1_000);
+
+    archiveTimer = setInterval(() => {
+      try {
+        const archived = store.archiveExpiredRawTrades();
+        if (archived) console.log(`[Archive] ${archived.rows} raw trades -> ${archived.archivePath}`);
+      } catch (error) {
+        console.error('[Archive] failed:', error.message);
+      }
+    }, 60 * 60_000);
+    if (archiveTimer.unref) archiveTimer.unref();
+
+    await stream.start();
+  }
+
+  async function stop(reason = 'shutdown') {
+    if (stopping) return;
+    stopping = true;
+    console.log(`[Flow] stopping: ${reason}`);
+    if (maintenanceTimer) clearInterval(maintenanceTimer);
+    if (archiveTimer) clearInterval(archiveTimer);
+    maintenanceTimer = null;
+    archiveTimer = null;
+    await stream.stop();
+    await server.stop();
+    store.close();
+  }
+
+  function health() {
+    return {
+      runtime: runtimeMetrics,
+      engine: engine.stats(),
+      labels: labeler.stats(),
+      stream: stream.health(),
+      database: store.health(),
+    };
+  }
+
+  return { start, stop, health, store, engine, labeler, parser, stream, server };
+}
+
+async function main() {
+  const errors = validateConfig();
+  if (errors.length > 0) {
+    console.error('Configuration error:');
+    for (const error of errors) console.error(`  - ${error}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const runtime = createRuntime(config);
+  const shutdown = async (signal) => {
+    try {
+      await runtime.stop(signal);
+      process.exit(0);
+    } catch (error) {
+      console.error('[Shutdown]', error);
+      process.exit(1);
+    }
+  };
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  await runtime.start();
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error('[Fatal]', error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { createRuntime, main };
