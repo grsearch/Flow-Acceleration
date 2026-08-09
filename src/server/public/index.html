@@ -32,85 +32,33 @@
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     button, input, select { font: inherit; }
-    button, a { -webkit-tap-highlight-color: transparent; }
     .shell { max-width: 1480px; margin: 0 auto; padding: 28px; }
-    .masthead {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 24px;
-      margin-bottom: 28px;
-    }
-    .eyebrow {
-      margin: 0 0 7px;
-      color: var(--cyan);
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: .16em;
-      text-transform: uppercase;
-    }
+    .masthead { display: flex; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    .eyebrow { margin: 0 0 7px; color: var(--cyan); font-size: 12px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
     h1 { margin: 0; font-size: clamp(28px, 4vw, 48px); line-height: 1; letter-spacing: -.04em; }
-    .subtitle { max-width: 720px; margin: 12px 0 0; color: var(--muted); line-height: 1.6; }
-    .live-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 9px;
-      padding: 10px 14px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: rgba(11, 25, 34, .9);
-      color: var(--muted);
-      white-space: nowrap;
-    }
+    .subtitle { max-width: 820px; margin: 12px 0 0; color: var(--muted); line-height: 1.6; }
+    .live-pill { display: inline-flex; align-items: center; gap: 9px; height: fit-content; padding: 10px 14px; border: 1px solid var(--line); border-radius: 999px; background: rgba(11,25,34,.9); color: var(--muted); white-space: nowrap; }
     .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 14px currentColor; }
     .dot.live { color: var(--lime); background: var(--lime); }
-    .tabs {
-      display: flex;
-      gap: 6px;
-      overflow-x: auto;
-      padding: 5px;
-      margin-bottom: 18px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: rgba(7, 20, 28, .86);
-    }
-    .tab {
-      border: 0;
-      border-radius: 10px;
-      padding: 10px 15px;
-      background: transparent;
-      color: var(--muted);
-      cursor: pointer;
-      font-weight: 750;
-      white-space: nowrap;
-    }
+    .tabs { display: flex; gap: 6px; overflow-x: auto; padding: 5px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 14px; background: rgba(7,20,28,.86); }
+    .tab { border: 0; border-radius: 10px; padding: 10px 15px; background: transparent; color: var(--muted); cursor: pointer; font-weight: 750; white-space: nowrap; }
     .tab:hover { color: var(--text); }
     .tab[aria-selected="true"] { color: #071017; background: var(--lime); }
-    .panel[hidden] { display: none; }
+    .panel[hidden], .notice[hidden] { display: none; }
     .grid { display: grid; gap: 14px; }
     .metric-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-    .metric, .card {
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: linear-gradient(145deg, rgba(14, 32, 43, .96), rgba(8, 22, 30, .96));
-      box-shadow: 0 18px 50px rgba(0, 0, 0, .16);
-    }
+    .metric, .card, fieldset { border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(145deg, rgba(14,32,43,.96), rgba(8,22,30,.96)); box-shadow: 0 18px 50px rgba(0,0,0,.16); }
     .metric { min-height: 136px; padding: 20px; }
     .metric span { color: var(--muted); font-size: 13px; }
     .metric strong { display: block; margin-top: 14px; font-size: clamp(27px, 3vw, 39px); letter-spacing: -.04em; }
     .metric small { display: block; margin-top: 7px; color: #668088; }
     .card { padding: 20px; }
     .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-    .section-title h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+    .section-title h2 { margin: 0; font-size: 18px; }
     .section-title p { margin: 0; color: var(--muted); font-size: 13px; }
-    .research-note {
-      display: grid;
-      grid-template-columns: 1.3fr .7fr;
-      gap: 14px;
-      margin-top: 14px;
-    }
+    .research-note { display: grid; grid-template-columns: 1.3fr .7fr; gap: 14px; margin-top: 14px; }
     .hypothesis { padding: 26px; }
-    .hypothesis blockquote { margin: 0; font-size: clamp(18px, 2vw, 25px); line-height: 1.5; letter-spacing: -.02em; }
+    .hypothesis blockquote { margin: 0; font-size: clamp(18px, 2vw, 25px); line-height: 1.5; }
     .hypothesis footer { margin-top: 15px; color: var(--muted); font-size: 13px; }
     .windows { display: flex; gap: 7px; margin-top: 18px; }
     .window { flex: 1; padding: 12px 8px; border-radius: 10px; border: 1px solid var(--line); text-align: center; }
@@ -119,50 +67,43 @@
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; text-align: left; }
-    th, td { padding: 12px 11px; border-bottom: 1px solid rgba(28, 52, 64, .72); white-space: nowrap; }
-    tbody tr:hover { background: rgba(85, 216, 208, .04); }
+    th, td { padding: 12px 11px; border-bottom: 1px solid rgba(28,52,64,.72); white-space: nowrap; }
+    tbody tr:hover { background: rgba(85,216,208,.04); }
     .mint { color: var(--cyan); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-    .mint:hover { text-decoration: underline; }
     .positive { color: var(--lime); }
     .negative { color: var(--red); }
     .muted { color: var(--muted); }
+    .strategy-form { display: grid; gap: 14px; }
+    fieldset { margin: 0; padding: 20px; min-width: 0; }
+    legend { padding: 0 9px; color: var(--lime); font-weight: 850; }
+    .strategy-help { margin: -4px 0 16px; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .form-grid { grid-template-columns: repeat(4, minmax(140px, 1fr)); }
     label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
-    input, select {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 11px 12px;
-      background: #07151d;
-      color: var(--text);
-      outline: none;
-    }
-    input:focus, select:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(85, 216, 208, .12); }
+    input, select { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; background: #07151d; color: var(--text); outline: none; }
+    input:focus, select:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(85,216,208,.12); }
     .check { display: flex; align-items: center; align-self: end; min-height: 42px; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #07151d; }
     .check input { width: auto; margin: 0; accent-color: var(--lime); }
-    .primary {
-      align-self: end;
-      min-height: 42px;
-      border: 0;
-      border-radius: 10px;
-      padding: 10px 16px;
-      background: var(--lime);
-      color: #071017;
-      cursor: pointer;
-      font-weight: 850;
-    }
-    .result-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 14px; }
-    .result { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: rgba(5, 17, 24, .55); }
+    .wide { grid-column: span 2; }
+    details { border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; background: rgba(7,21,29,.65); }
+    summary { cursor: pointer; color: var(--cyan); font-weight: 800; }
+    details .form-grid { margin-top: 16px; }
+    .primary { justify-self: end; min-height: 44px; border: 0; border-radius: 10px; padding: 10px 24px; background: var(--lime); color: #071017; cursor: pointer; font-weight: 850; }
+    .result-grid { grid-template-columns: repeat(4, minmax(0,1fr)); margin-top: 14px; }
+    .result { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: rgba(5,17,24,.55); }
     .result span { color: var(--muted); font-size: 12px; }
     .result b { display: block; margin-top: 7px; font-size: 22px; }
-    .notice { margin-top: 14px; padding: 13px 15px; border: 1px solid rgba(245, 189, 98, .55); border-radius: 12px; background: rgba(245, 189, 98, .08); color: var(--amber); line-height: 1.55; }
-    .notice[hidden] { display: none; }
-    .wallet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .notice { margin-top: 14px; padding: 13px 15px; border: 1px solid rgba(245,189,98,.55); border-radius: 12px; background: rgba(245,189,98,.08); color: var(--amber); line-height: 1.55; }
+    .wallet-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
     .wallet-address { overflow: hidden; color: var(--cyan); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; }
-    .wallet-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
+    .wallet-metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 18px; }
     .wallet-metrics div { padding-top: 12px; border-top: 1px solid var(--line); }
     .wallet-metrics span { display: block; color: var(--muted); font-size: 11px; }
     .wallet-metrics b { display: block; margin-top: 4px; font-size: 17px; }
+    .signal-quality { margin-bottom: 14px; }
+    .quality-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 12px; }
+    .quality-grid div { padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: rgba(5,17,24,.45); }
+    .quality-grid span { display: block; color: var(--muted); font-size: 11px; }
+    .quality-grid b { display: block; margin-top: 6px; font-size: 19px; }
     .health-grid { grid-template-columns: 1fr 1fr; }
     .health-list { display: grid; gap: 12px; }
     .health-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
@@ -171,16 +112,17 @@
     .empty { padding: 40px 20px; color: var(--muted); text-align: center; }
     .error { color: var(--red); }
     @media (max-width: 980px) {
-      .metric-grid { grid-template-columns: repeat(2, 1fr); }
+      .metric-grid, .quality-grid { grid-template-columns: repeat(2,1fr); }
       .research-note, .wallet-grid, .health-grid { grid-template-columns: 1fr; }
-      .form-grid, .result-grid { grid-template-columns: repeat(2, 1fr); }
+      .form-grid, .result-grid { grid-template-columns: repeat(2,1fr); }
     }
     @media (max-width: 620px) {
       .shell { padding: 18px 14px; }
       .masthead { display: block; }
       .live-pill { margin-top: 18px; }
-      .metric-grid, .form-grid, .result-grid { grid-template-columns: 1fr; }
-      .wallet-metrics { grid-template-columns: repeat(2, 1fr); }
+      .metric-grid, .quality-grid, .form-grid, .result-grid { grid-template-columns: 1fr; }
+      .wide { grid-column: auto; }
+      .wallet-metrics { grid-template-columns: repeat(2,1fr); }
       .section-title { display: block; }
       .section-title p { margin-top: 6px; }
     }
@@ -192,26 +134,26 @@
       <div>
         <p class="eyebrow">Pump.fun · Pre-Graduation Research</p>
         <h1>Flow Acceleration</h1>
-        <p class="subtitle">只研究净买入资金、独立买家与买单速度是否同时加速。AGE 与 Curve 不触发实时主信号，但可用于回测分层。</p>
+        <p class="subtitle">只研究净买入资金、独立买家和买单速度，并按“禁止开单过滤 → 买入信号筛选 → 动态卖出”三层验证。AGE 与 Curve 只用于分层和禁入规则。</p>
       </div>
       <div class="live-pill"><span id="status-dot" class="dot"></span><span id="status-text">等待数据流</span></div>
     </header>
 
     <nav class="tabs" role="tablist" aria-label="研究页面">
-      <button class="tab" role="tab" aria-selected="true" aria-controls="overview" id="tab-overview">Overview</button>
-      <button class="tab" role="tab" aria-selected="false" aria-controls="signals" id="tab-signals">Signal Monitor</button>
-      <button class="tab" role="tab" aria-selected="false" aria-controls="backtest" id="tab-backtest">Backtest</button>
-      <button class="tab" role="tab" aria-selected="false" aria-controls="wallets" id="tab-wallets">Smart Wallet</button>
-      <button class="tab" role="tab" aria-selected="false" aria-controls="health" id="tab-health">System Health</button>
+      <button class="tab" role="tab" aria-selected="true" aria-controls="overview">Overview</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="signals">Signal Monitor</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="backtest">Backtest</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="wallets">Smart Wallet</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="health">System Health</button>
     </nav>
 
-    <section class="panel" role="tabpanel" id="overview" aria-labelledby="tab-overview">
+    <section class="panel" role="tabpanel" id="overview">
       <div class="grid metric-grid" id="overview-metrics"></div>
       <div class="research-note">
         <article class="card hypothesis">
           <p class="eyebrow">Research hypothesis</p>
-          <blockquote>毕业前，当净买入资金、独立买家数量和买入成交速度同时加速，未来数秒可能存在可交易的价格惯性。</blockquote>
-          <footer>当前并行记录三窗口主信号与两个提前影子信号；仅用于研究，不会提交链上买卖交易。</footer>
+          <blockquote>毕业前，当净买入资金与独立买家扩张时，先排除不可交易标的，再判断是否买入，并根据流量衰减和价格路径动态退出。</blockquote>
+          <footer>所有信号继续完整记录；过滤仅作用于研究分组与模拟开仓，不删除原始数据。</footer>
         </article>
         <article class="card">
           <div class="section-title"><h2>信号窗口</h2><p>连续三段，各 2 秒</p></div>
@@ -224,103 +166,133 @@
       </div>
     </section>
 
-    <section class="panel" role="tabpanel" id="signals" aria-labelledby="tab-signals" hidden>
+    <section class="panel" role="tabpanel" id="signals" hidden>
       <article class="card">
-        <div class="section-title"><h2>实时 Flow Signals</h2><p>CA 可直接打开 GMGN</p></div>
+        <div class="section-title"><h2>实时 Flow Signals</h2><p>Rank 表示同一 Mint 第几次触发</p></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>时间</th><th>Symbol / CA</th><th>AGE</th><th>Curve</th><th>NetFlow W1→W3</th><th>Accel</th><th>Buyers</th><th>Buy TX</th><th>5s Return</th></tr></thead>
+          <thead><tr><th>时间</th><th>Symbol / CA</th><th>Rank</th><th>AGE</th><th>Curve</th><th>NetFlow W1→W3</th><th>Accel</th><th>Buyers</th><th>5s Return</th></tr></thead>
           <tbody id="signal-rows"></tbody>
         </table></div>
       </article>
     </section>
 
-    <section class="panel" role="tabpanel" id="backtest" aria-labelledby="tab-backtest" hidden>
+    <section class="panel" role="tabpanel" id="backtest" hidden>
       <article class="card">
-        <div class="section-title"><h2>可执行买卖策略回测</h2><p>默认采用 200ms 买入及卖出延迟；0ms 动态卖出仅供理想价格对照</p></div>
-        <form id="backtest-form" class="grid form-grid">
-          <label>信号版本
-            <select name="signalVariant"><option value="primary_3w" selected>主信号 · 三窗口</option><option value="shadow_2w">影子信号 · 两窗口</option><option value="shadow_netflow_breakout">影子信号 · 净流入突破（不要求 ratio）</option><option value="*">全部版本（仅诊断）</option></select>
-          </label>
-          <label>Hold Time
-            <select name="holdMs"><option value="1000">1 秒</option><option value="2000">2 秒</option><option value="3000">3 秒</option><option value="5000" selected>5 秒</option><option value="8000">8 秒</option><option value="10000">10 秒</option><option value="15000">15 秒</option><option value="20000">20 秒</option><option value="30000">30 秒</option></select>
-          </label>
-          <label>Execution Delay
-            <select name="executionDelayMs"><option value="100">100 ms</option><option value="200" selected>200 ms</option><option value="400">400 ms</option><option value="600">600 ms</option><option value="1000">1 秒</option></select>
-          </label>
-          <label>入场等待上限 (ms)<input name="entryTimeoutMs" type="number" min="1" step="100" value="2000"></label>
-          <label>出场等待上限 (ms)<input name="exitTimeoutMs" type="number" min="1" step="100" value="5000"></label>
-          <label>无法出场损失 (%)<input name="noExitLossPct" type="number" min="0" step="1" value="100"></label>
-          <label>止盈 (%)<input name="takeProfitPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>止损 (%)<input name="stopLossPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>移动止损回撤 (%)<input name="trailingStopPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>移动止损激活盈利 (%)<input name="trailingActivationPct" type="number" min="0" step="0.1" value="0"></label>
-          <label>卖出执行延迟 (ms)<input name="exitExecutionDelayMs" type="number" min="0" step="50" value="200"></label>
-          <label>模拟连续卖出失败<input name="exitRetryCount" type="number" min="0" max="20" step="1" value="0"></label>
-          <label>卖出重试间隔 (ms)<input name="exitRetryDelayMs" type="number" min="0" step="50" value="500"></label>
-          <label>平台费 (%)<input name="platformFeePct" type="number" min="0" step="0.1" value="1.4"></label>
-          <label>买入滑点 (%)<input name="buySlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
-          <label>卖出滑点 (%)<input name="sellSlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
-          <label>价格冲击 (%)<input name="priceImpactPct" type="number" min="0" step="0.1" value="0.2"></label>
-          <label>基础交易费 (SOL)<input name="baseTxFeeSol" type="number" min="0" step="0.00001" value="0.00001"></label>
-          <label>优先费 (SOL)<input name="priorityFeeSol" type="number" min="0" step="0.0001" value="0.0005"></label>
-          <label>Jito 小费 (SOL)<input name="jitoTipSol" type="number" min="0" step="0.0001" value="0"></label>
-          <label>仓位 (SOL)<input name="positionSizeSol" type="number" min="0.001" step="0.01" value="0.2"></label>
-          <label>买入失败率 (%)<input name="entryFailureRatePct" type="number" min="0" max="100" step="0.1" value="0"></label>
-          <label>失败买入尝试成本 (%)<input name="entryFailureCostPct" type="number" min="0" step="0.1" value="1"></label>
-          <label>W3 NetFlow 下限 (SOL)<input name="minNetFlowW3" type="number" min="0" step="0.1" value="1"></label>
-          <label>W3 NetFlow 上限 (SOL)<input name="maxNetFlowW3" type="number" min="0" step="0.1" placeholder="不限制"></label>
-          <label>Flow Accel 下限<input name="minFlowAccel" type="number" min="0" step="0.1" value="1.2"></label>
-          <label>Curve 下限 (%)<input name="minCurvePct" type="number" min="0" max="100" step="1" placeholder="不限制"></label>
-          <label>Curve 上限 (%)<input name="maxCurvePct" type="number" min="0" max="100" step="1" placeholder="不限制"></label>
-          <label>W3 买单数上限<input name="maxBuyTxW3" type="number" min="0" step="1" placeholder="不限制"></label>
-          <label>W3 买家数上限<input name="maxUniqueBuyersW3" type="number" min="0" step="1" placeholder="不限制"></label>
-          <label>每 Mint 冷却 (ms)<input name="signalCooldownMs" type="number" min="0" step="1000" value="0"></label>
-          <label class="check"><input name="firstSignalOnly" type="checkbox" value="true">仅保留每 Mint 首个合格信号</label>
-          <label>时间外验证比例<input name="splitRatio" type="number" min="0.1" max="0.9" step="0.05" value="0.7"></label>
-          <button class="primary" type="submit">运行回测</button>
+        <div class="section-title"><h2>三层买卖策略回测</h2><p>固定持仓仅作为最大持仓兜底，不再作为唯一卖出条件</p></div>
+        <form id="backtest-form" class="strategy-form">
+          <fieldset>
+            <legend>1 · 禁止开单过滤</legend>
+            <p class="strategy-help">用于排除过晚、过热、价格已经跳升或手工禁止的币。过滤只影响模拟开仓，原始信号仍保留。</p>
+            <div class="grid form-grid">
+              <label class="wide">禁止 Mint（逗号或空格分隔）<input name="excludedMints" placeholder="留空表示不使用手工黑名单"></label>
+              <label>最大 AGE（秒）<input name="maxAgeSec" type="number" min="0" step="1" placeholder="不限制"></label>
+              <label>最大 Curve（%）<input name="maxCurvePct" type="number" min="0" max="100" step="1" placeholder="不限制"></label>
+              <label>最大 W3 NetFlow（SOL）<input name="maxNetFlowW3" type="number" min="0" step="0.1" placeholder="不限制"></label>
+              <label>最大 W3 买单数<input name="maxBuyTxW3" type="number" min="0" step="1" placeholder="不限制"></label>
+              <label>最大 W3 买家数<input name="maxUniqueBuyersW3" type="number" min="0" step="1" placeholder="不限制"></label>
+              <label>入场前最大价格跳升（%）<input name="maxEntryPriceJumpPct" type="number" min="0" step="0.1" placeholder="不限制"></label>
+              <label>同 Mint 信号冷却（ms）<input name="signalCooldownMs" type="number" min="0" step="1000" value="5000"></label>
+              <label class="check"><input name="singlePositionPerMint" type="checkbox" value="true" checked>同一 Mint 同时只允许一个仓位</label>
+              <label class="check"><input name="firstSignalOnly" type="checkbox" value="true">每 Mint 只保留首个信号（诊断）</label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>2 · 买入信号条件</legend>
+            <p class="strategy-help">这些字段只使用信号发生时已经可见的数据，适合做样本外验证，不包含未来 Smart Wallet 行为。</p>
+            <div class="grid form-grid">
+              <label>信号版本<select name="signalVariant"><option value="primary_3w" selected>主信号 · 三窗口</option><option value="shadow_2w">影子 · 两窗口</option><option value="shadow_netflow_breakout">影子 · 净流入突破</option><option value="*">全部（诊断）</option></select></label>
+              <label>最小 AGE（秒）<input name="minAgeSec" type="number" min="0" step="1" placeholder="不限制"></label>
+              <label>最小 Curve（%）<input name="minCurvePct" type="number" min="0" max="100" step="1" placeholder="不限制"></label>
+              <label>W3 NetFlow 下限（SOL）<input name="minNetFlowW3" type="number" min="0" step="0.1" value="1"></label>
+              <label>Delta W1→W2 下限<input name="minDeltaNetFlow12" type="number" step="0.1" placeholder="不限制"></label>
+              <label>Delta W2→W3 下限<input name="minDeltaNetFlow23" type="number" step="0.1" placeholder="不限制"></label>
+              <label>W3 买单数下限<input name="minBuyTxW3" type="number" min="0" step="1" placeholder="不限制"></label>
+              <label>W3 买家数下限<input name="minUniqueBuyersW3" type="number" min="0" step="1" placeholder="不限制"></label>
+              <label>Flow Accel 下限<input name="minFlowAccel" type="number" min="0" step="0.1" value="1.2"></label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>3 · 动态卖出策略</legend>
+            <p class="strategy-help">达到任一条件即触发卖出；“最大持仓”仅用于所有动态条件均未触发时的兜底退出。</p>
+            <div class="grid form-grid">
+              <label>最大持仓兜底<select name="holdMs"><option value="5000">5 秒</option><option value="10000">10 秒</option><option value="30000">30 秒</option><option value="60000" selected>60 秒</option><option value="120000">2 分钟</option><option value="180000">3 分钟</option></select></label>
+              <label>止盈 (%)<input name="takeProfitPct" type="number" min="0" step="0.1" placeholder="关闭"></label>
+              <label>止损（%）<input name="stopLossPct" type="number" min="0" step="0.1" placeholder="关闭"></label>
+              <label>移动止损回撤（%）<input name="trailingStopPct" type="number" min="0" step="0.1" placeholder="关闭"></label>
+              <label>移动止损激活盈利（%）<input name="trailingActivationPct" type="number" min="0" step="0.1" value="0"></label>
+              <label>流量退出窗口（ms）<input name="flowExitWindowMs" type="number" min="250" step="250" value="2000"></label>
+              <label>流量退出 NetFlow≤（SOL）<input name="flowExitNetFlowThresholdSol" type="number" step="0.1" placeholder="关闭"></label>
+              <label>流量退出最短持仓（ms）<input name="flowExitMinHoldMs" type="number" min="0" step="250" value="1000"></label>
+              <label>连续弱流确认次数<input name="flowExitConfirmations" type="number" min="1" step="1" value="2"></label>
+              <label class="check"><input name="exitOnSmartWalletSell" type="checkbox" value="true">跟踪钱包出现 SELL 时触发退出</label>
+              <label>卖出执行延迟（ms）<input name="exitExecutionDelayMs" type="number" min="0" step="50" value="200"></label>
+              <label>出场等待上限（ms）<input name="exitTimeoutMs" type="number" min="1" step="100" value="5000"></label>
+              <label>模拟连续卖出失败<input name="exitRetryCount" type="number" min="0" max="20" step="1" value="0"></label>
+              <label>卖出重试间隔（ms）<input name="exitRetryDelayMs" type="number" min="0" step="50" value="500"></label>
+              <label>无法出场损失（%）<input name="noExitLossPct" type="number" min="0" step="1" value="100"></label>
+            </div>
+          </fieldset>
+
+          <details>
+            <summary>执行、成本与验证设置</summary>
+            <div class="grid form-grid">
+              <label>买入执行延迟<select name="executionDelayMs"><option value="100">100 ms</option><option value="200" selected>200 ms</option><option value="400">400 ms</option><option value="600">600 ms</option><option value="1000">1 秒</option></select></label>
+              <label>入场等待上限（ms）<input name="entryTimeoutMs" type="number" min="1" step="100" value="2000"></label>
+              <label>平台费（%）<input name="platformFeePct" type="number" min="0" step="0.1" value="1.4"></label>
+              <label>买入滑点（%）<input name="buySlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
+              <label>卖出滑点（%）<input name="sellSlippagePct" type="number" min="0" step="0.1" value="0.3"></label>
+              <label>价格冲击（%）<input name="priceImpactPct" type="number" min="0" step="0.1" value="0.2"></label>
+              <label>基础交易费（SOL）<input name="baseTxFeeSol" type="number" min="0" step="0.00001" value="0.00001"></label>
+              <label>优先费（SOL）<input name="priorityFeeSol" type="number" min="0" step="0.0001" value="0.0005"></label>
+              <label>Jito 小费（SOL）<input name="jitoTipSol" type="number" min="0" step="0.0001" value="0"></label>
+              <label>仓位（SOL）<input name="positionSizeSol" type="number" min="0.001" step="0.01" value="0.2"></label>
+              <label>买入失败率（%）<input name="entryFailureRatePct" type="number" min="0" max="100" step="0.1" value="0"></label>
+              <label>失败买入成本（%）<input name="entryFailureCostPct" type="number" min="0" step="0.1" value="1"></label>
+              <label>时间外验证比例<input name="splitRatio" type="number" min="0.1" max="0.9" step="0.05" value="0.7"></label>
+            </div>
+          </details>
+          <button class="primary" type="submit">运行三层策略回测</button>
         </form>
       </article>
       <div class="notice" id="backtest-warning" hidden></div>
       <div class="grid result-grid" id="backtest-results"></div>
     </section>
 
-    <section class="panel" role="tabpanel" id="wallets" aria-labelledby="tab-wallets" hidden>
+    <section class="panel" role="tabpanel" id="wallets" hidden>
+      <article class="card signal-quality">
+        <div class="section-title"><h2>Primary 同 Mint 再触发</h2><p>与钱包买入覆盖率分开统计</p></div>
+        <div class="quality-grid" id="signal-quality"></div>
+      </article>
       <div class="grid wallet-grid" id="wallet-cards"></div>
     </section>
 
-    <section class="panel" role="tabpanel" id="health" aria-labelledby="tab-health" hidden>
+    <section class="panel" role="tabpanel" id="health" hidden>
       <div class="grid health-grid" id="health-cards"></div>
     </section>
   </main>
 
   <script>
-    const state = { active: 'overview' };
-    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     const number = (value, digits = 0) => Number.isFinite(value) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value) : '—';
     const pct = (value, digits = 2) => Number.isFinite(value) ? `${value >= 0 ? '+' : ''}${number(value, digits)}%` : '—';
-    const sol = (value) => Number.isFinite(value) ? `${number(value, 2)} SOL` : '—';
-    const age = (ms) => !Number.isFinite(ms) ? '—' : ms < 60000 ? `${number(ms/1000, 0)}s` : `${number(ms/60000, 1)}m`;
-    const time = (ms) => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
-    const tone = (value) => Number.isFinite(value) ? (value >= 0 ? 'positive' : 'negative') : 'muted';
+    const age = ms => !Number.isFinite(ms) ? '—' : ms < 60000 ? `${number(ms/1000,0)}s` : `${number(ms/60000,1)}m`;
+    const time = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+    const tone = value => Number.isFinite(value) ? (value >= 0 ? 'positive' : 'negative') : 'muted';
     async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
 
+    const tabs = [...document.querySelectorAll('[role="tab"]')];
     function selectTab(id) {
-      state.active = id;
-      document.querySelectorAll('[role="tab"]').forEach(tab => {
-        const selected = tab.getAttribute('aria-controls') === id;
-        tab.setAttribute('aria-selected', String(selected));
-        tab.tabIndex = selected ? 0 : -1;
-      });
+      tabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.getAttribute('aria-controls') === id)));
       document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== id; });
     }
-    const tabs = [...document.querySelectorAll('[role="tab"]')];
     tabs.forEach((tab, index) => {
       tab.addEventListener('click', () => selectTab(tab.getAttribute('aria-controls')));
       tab.addEventListener('keydown', event => {
         if (!['ArrowLeft','ArrowRight'].includes(event.key)) return;
         event.preventDefault();
-        const direction = event.key === 'ArrowRight' ? 1 : -1;
-        const next = tabs[(index + direction + tabs.length) % tabs.length];
+        const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
         selectTab(next.getAttribute('aria-controls')); next.focus();
       });
     });
@@ -328,9 +300,9 @@
     function renderOverview(data) {
       const items = [
         ['今日 Raw Trades', data.rawTradesToday, '毕业前逐笔链上成交'],
-        ['活跃 Token', data.activeTokens, '最近 10 分钟有成交'],
-        ['Candidate', data.candidateCount, '已触发 5 秒 Activity Wake-Up'],
-        ['Flow Signals', data.flowSignalsToday, `主信号；影子信号 ${number(data.shadowSignalsToday)}`],
+        ['活跃 Token', data.activeTokens, '最近10分钟有成交'],
+        ['Candidate', data.candidateCount, '已触发 Activity Wake-Up'],
+        ['Primary Signals', data.flowSignalsToday, `影子信号 ${number(data.shadowSignalsToday)}`],
         ['Smart Wallet Trades', data.smartWalletTradesToday, '今日标注事件'],
       ];
       document.querySelector('#overview-metrics').innerHTML = items.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${number(value)}</strong><small>${note}</small></article>`).join('');
@@ -338,77 +310,79 @@
 
     function renderSignals(rows) {
       const target = document.querySelector('#signal-rows');
-      if (!rows.length) { target.innerHTML = '<tr><td colspan="9" class="empty">等待第一条 Flow Acceleration 信号</td></tr>'; return; }
+      if (!rows.length) { target.innerHTML = '<tr><td colspan="9" class="empty">等待第一条信号</td></tr>'; return; }
       target.innerHTML = rows.map(row => {
         const mint = escapeHtml(row.mint);
-        const symbol = escapeHtml(row.symbol || mint.slice(0, 6));
-        const accel = Number.isFinite(row.flow_accel) ? `${number(row.flow_accel, 2)}×` : 'Δ only';
-        return `<tr><td>${time(row.timestamp_ms)}</td><td><b>${symbol}</b><br><a class="mint" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noreferrer">${mint.slice(0,6)}…${mint.slice(-4)}</a></td><td>${age(row.age_ms)}</td><td>${pct(row.curve_pct,1)}</td><td>${number(row.netflow_w1,2)} → ${number(row.netflow_w2,2)} → <b class="positive">${number(row.netflow_w3,2)}</b></td><td>${accel}</td><td>${row.unique_buyers_w1} → ${row.unique_buyers_w2} → ${row.unique_buyers_w3}</td><td>${row.buy_tx_w1} → ${row.buy_tx_w2} → ${row.buy_tx_w3}</td><td class="${tone(row.return_5s)}">${pct(row.return_5s)}</td></tr>`;
+        const symbol = escapeHtml(row.symbol || mint.slice(0,6));
+        const accel = Number.isFinite(row.flow_accel) ? `${number(row.flow_accel,2)}×` : 'Δ only';
+        return `<tr><td>${time(row.timestamp_ms)}</td><td><b>${symbol}</b><br><a class="mint" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noreferrer">${mint.slice(0,6)}…${mint.slice(-4)}</a></td><td>${number(row.signal_rank_in_mint)}</td><td>${age(row.age_ms)}</td><td>${pct(row.curve_pct,1)}</td><td>${number(row.netflow_w1,2)} → ${number(row.netflow_w2,2)} → <b class="positive">${number(row.netflow_w3,2)}</b></td><td>${accel}</td><td>${row.unique_buyers_w1} → ${row.unique_buyers_w2} → ${row.unique_buyers_w3}</td><td class="${tone(row.return_5s)}">${pct(row.return_5s)}</td></tr>`;
       }).join('');
     }
 
     function renderBacktest(result) {
       const m = result.metrics;
-      const selection = result.analysisWindow?.signalSelection || {};
+      const s = result.analysisWindow?.signalSelection || {};
       const warning = document.querySelector('#backtest-warning');
       const messages = (result.warnings || []).map(item => escapeHtml(item.message || item.code));
       warning.hidden = messages.length === 0;
       warning.innerHTML = messages.join('<br>');
+      const reasons = m.exitReasons || {};
       const items = [
-        ['信号版本', escapeHtml(result.parameters.signalVariant)],
-        ['Selected Signals', number(result.analysisWindow?.selectedSignals)],
-        ['首信号过滤', number(selection.filteredByFirstSignal)],
-        ['冷却过滤', number(selection.filteredByCooldown)],
-        ['Resolved Signals', number(m.samples)], ['Completed Trades', number(m.completedSamples)],
-        ['Execution Rate', pct(m.executionRatePct,1)], ['Round-trip Rate', pct(m.roundTripCompletionRatePct,1)],
-        ['No Entry', number(m.noEntry)], ['No Exit', number(m.noExit)],
-        ['Graduated Before Entry', number(m.graduatedBeforeEntry)], ['Right Censored', number(m.rightCensored)],
-        ['每信号胜率（含未入场）', pct(m.winRatePct,1)],
-        ['每信号平均（未入场=0）', pct(m.averageNetReturnPct)],
-        ['每信号中位数', pct(m.medianNetReturnPct)],
+        ['可用原始信号', number(s.availableSignals)],
+        ['禁入规则过滤', number(s.filteredByProhibitionRules)],
+        ['买入条件过滤', number(s.filteredByBuyConditions)],
+        ['原始合格信号', number(result.analysisWindow?.selectedSignals)],
+        ['实际评估信号', number(result.analysisWindow?.executionEligibleSignals)],
+        ['黑名单过滤', number(s.filteredByExcludedMint)],
+        ['冷却过滤', number(s.filteredByCooldown)],
+        ['已有仓位过滤', number(s.filteredByOpenPosition)],
+        ['价格跳升过滤', number(s.filteredByEntryPriceJump)],
+        ['首信号过滤', number(s.filteredByFirstSignal)],
+        ['完成交易', number(m.completedSamples)],
         ['已入场平均净收益', pct(m.averageExecutedNetReturnPct)],
         ['已入场中位数', pct(m.medianExecutedNetReturnPct)],
         ['已入场胜率', pct(m.executedWinRatePct,1)],
         ['已入场 Profit Factor', number(m.executedProfitFactor,2)],
-        ['Unique Mints', number(m.uniqueMints)],
-        ['Mint 等权（已入场）', pct(m.executedRobustness?.mintEqualWeightedReturnPct)],
-        ['Mint 95% CI Low', pct(m.executedRobustness?.mintBootstrap95Pct?.lowerPct)],
-        ['Mint 95% CI High', pct(m.executedRobustness?.mintBootstrap95Pct?.upperPct)],
-        ['已入场 Top 5 盈利占比', pct(m.executedRobustness?.topWinnerContributionPct?.top5)],
-        ['已入场去除 Top 5', pct(m.executedRobustness?.averageWithoutTopWinnersPct?.top5)],
-        ['样本外已入场收益', pct(result.validation?.test?.averageExecutedNetReturnPct)],
-        ['样本外已入场 PF', number(result.validation?.test?.executedProfitFactor,2)],
-        ['Profit Factor', number(m.profitFactor,2)], ['Expectancy', pct(m.expectancyPct)],
-        ['Avg MFE', pct(m.averageMfePct)], ['Avg MAE', pct(m.averageMaePct)],
-        ['Total Cost', pct(result.parameters.totalCostPct)],
-        ['Observed Entry Gap', Number.isFinite(m.averageMarketObservedEntryDelayMs) ? `${number(m.averageMarketObservedEntryDelayMs)} ms` : '—'],
-        ['Latency Move', pct(m.averageLatencyMovePct)],
+        ['样本外净收益', pct(result.validation?.test?.averageExecutedNetReturnPct)],
+        ['样本外 PF', number(result.validation?.test?.executedProfitFactor,2)],
+        ['止盈退出', number(reasons.TAKE_PROFIT)],
+        ['止损退出', number(reasons.STOP_LOSS)],
+        ['移动止损退出', number(reasons.TRAILING_STOP)],
+        ['流量衰减退出', number(reasons.FLOW_DECAY)],
+        ['钱包 SELL 退出', number(reasons.SMART_WALLET_SELL)],
+        ['最大持仓退出', number(reasons.TIME_EXIT)],
+        ['无法入场', number(m.noEntry)],
+        ['无法出场', number(m.noExit)],
+        ['Mint 等权收益', pct(m.executedRobustness?.mintEqualWeightedReturnPct)],
+        ['去除 Top5 收益', pct(m.executedRobustness?.averageWithoutTopWinnersPct?.top5)],
+        ['总成本', pct(result.parameters.totalCostPct)],
+        ['平均入场价格跳升', pct(m.averageLatencyMovePct)],
       ];
       document.querySelector('#backtest-results').innerHTML = items.map(([label,value]) => `<div class="result"><span>${label}</span><b>${value}</b></div>`).join('');
     }
 
+    function renderSignalQuality(data) {
+      const items = [
+        ['Primary 总数', number(data.primarySignals)],
+        ['独立 Mint', number(data.uniqueMints)],
+        ['信号批次', number(data.signalEpisodes)],
+        ['同 Mint 后续信号', number(data.laterSignals)],
+        ['后续信号占比', pct(data.laterSignalPct,1)],
+      ];
+      document.querySelector('#signal-quality').innerHTML = items.map(([label,value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
+    }
+
     function renderWallets(rows) {
-      document.querySelector('#wallet-cards').innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">Smart Wallet Label</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>买入 Curve</span><b>${pct(row.averageBuyCurvePct,1)}</b></div><div><span>买入 AGE</span><b>${age(row.averageBuyAgeMs)}</b></div><div><span>Signal 重合率</span><b>${pct(row.flowSignalOverlapPct,1)}</b></div></div></article>`).join('');
+      document.querySelector('#wallet-cards').innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">Smart Wallet Label</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
     function renderHealth(data) {
-      const labelCensorRate = data.database.labels?.total
-        ? data.database.labels.right_censored / data.database.labels.total * 100
-        : null;
-      const labelCoverage = ['1s','5s','10s','30s','60s'].map(horizon => {
-        const observed = data.database.labels?.[`observed_${horizon}`];
-        const total = data.database.labels?.total;
-        return `${horizon} ${Number.isFinite(observed) && total ? number(observed / total * 100, 1) : '—'}%`;
-      }).join(' · ');
-      const regions = data.stream.regions.map(region => {
-        const role = region.active ? '当前' : (region.configuredRole === 'primary' ? '首选' : '备用');
-        return `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${role}`;
-      }).join('<br>') || '未连接';
+      const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${region.active ? '当前' : '备用'}`).join('<br>') || '未连接';
       const cards = [
-        ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['停滞切换', number(data.stream.staleFailovers)], ['错误', number(data.stream.errors)]]],
+        ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Primary Signals', number(data.engine.signalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Primary Signals', number(data.database.primarySignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Label Censor Rate', pct(labelCensorRate, 1)], ['各周期标签覆盖', labelCoverage], ['时间戳修正', number(data.database.timestampCorrections)], ['Pending Writes', number(data.database.pendingWrites)], ['最近写入耗时', Number.isFinite(data.database.lastFlushMs) ? `${number(data.database.lastFlushMs)} ms` : '—'], ['写入错误', number(data.database.writeErrors)]]],
-        ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['AGE / Curve', 'Record only'], ['链上交易', 'Disabled'], ['未来标签', '1s → 60s']]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Primary Signals', number(data.database.primarySignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始信号', '全部保留'], ['同 Mint 仓位', '回测默认单仓'], ['链上交易', 'Disabled']]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const live = data.status === 'streaming';
@@ -419,30 +393,27 @@
     const signalVariantInput = document.querySelector('[name="signalVariant"]');
     const minFlowAccelInput = document.querySelector('[name="minFlowAccel"]');
     signalVariantInput.addEventListener('change', () => {
-      if (['shadow_netflow_breakout', '*'].includes(signalVariantInput.value) && minFlowAccelInput.value === '1.2') {
-        minFlowAccelInput.value = '0';
-      } else if (!['shadow_netflow_breakout', '*'].includes(signalVariantInput.value) && minFlowAccelInput.value === '0') {
-        minFlowAccelInput.value = '1.2';
-      }
+      if (['shadow_netflow_breakout','*'].includes(signalVariantInput.value) && minFlowAccelInput.value === '1.2') minFlowAccelInput.value = '0';
+      else if (!['shadow_netflow_breakout','*'].includes(signalVariantInput.value) && minFlowAccelInput.value === '0') minFlowAccelInput.value = '1.2';
     });
 
     document.querySelector('#backtest-form').addEventListener('submit', async event => {
       event.preventDefault();
       const query = new URLSearchParams(new FormData(event.currentTarget));
       const target = document.querySelector('#backtest-results');
-      target.innerHTML = '<div class="card empty">正在计算延迟与成本后的结果…</div>';
+      target.innerHTML = '<div class="card empty">正在计算三层过滤和动态退出…</div>';
       try { renderBacktest(await json(`/api/backtest?${query}`)); }
       catch (error) { target.innerHTML = `<div class="card empty error">回测失败：${escapeHtml(error.message)}</div>`; }
     });
 
     async function refresh() {
-      const jobs = [
+      await Promise.allSettled([
         json('/api/overview').then(renderOverview),
         json('/api/signals?limit=200').then(renderSignals),
         json('/api/smart-wallets').then(renderWallets),
+        json('/api/signal-repetition').then(renderSignalQuality),
         json('/api/health').then(renderHealth),
-      ];
-      await Promise.allSettled(jobs);
+      ]);
     }
     document.querySelector('#backtest-form').requestSubmit();
     refresh();

@@ -16,6 +16,8 @@ const EXIT_REASON = Object.freeze({
   TAKE_PROFIT: 'TAKE_PROFIT',
   STOP_LOSS: 'STOP_LOSS',
   TRAILING_STOP: 'TRAILING_STOP',
+  FLOW_DECAY: 'FLOW_DECAY',
+  SMART_WALLET_SELL: 'SMART_WALLET_SELL',
 });
 
 function finite(value, fallback) {
@@ -44,6 +46,12 @@ function boolean(value, fallback = false) {
   if (value == null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function stringSet(value) {
+  if (value == null || value === '') return new Set();
+  const values = Array.isArray(value) ? value : String(value).split(/[\s,;]+/);
+  return new Set(values.map((item) => String(item).trim()).filter(Boolean));
 }
 
 function average(values) {
@@ -128,8 +136,23 @@ function returnPct(price, entryPrice) {
 function findExitTrigger(path, entry, options) {
   const deadline = entry.timestamp_ms + options.holdMs;
   let peakReturnPct = 0;
+  let flowNetSol = 0;
+  let flowStartIndex = 0;
+  let weakFlowObservations = 0;
+  const observedFlowTrades = [];
   for (const trade of path) {
     if (trade.timestamp_ms <= entry.timestamp_ms || trade.timestamp_ms > deadline) continue;
+    const signedSol = trade.side === 'BUY'
+      ? trade.sol_amount
+      : trade.side === 'SELL' ? -trade.sol_amount : 0;
+    observedFlowTrades.push({ timestampMs: trade.timestamp_ms, signedSol });
+    flowNetSol += signedSol;
+    const flowCutoff = trade.timestamp_ms - options.flowExitWindowMs;
+    while (flowStartIndex < observedFlowTrades.length
+      && observedFlowTrades[flowStartIndex].timestampMs < flowCutoff) {
+      flowNetSol -= observedFlowTrades[flowStartIndex].signedSol;
+      flowStartIndex += 1;
+    }
     const value = returnPct(trade.price, entry.price);
     peakReturnPct = Math.max(peakReturnPct, value);
     if (options.stopLossPct != null && value <= -options.stopLossPct) {
@@ -142,6 +165,20 @@ function findExitTrigger(path, entry, options) {
       && peakReturnPct >= options.trailingActivationPct
       && peakReturnPct - value >= options.trailingStopPct) {
       return { ...trade, reason: EXIT_REASON.TRAILING_STOP };
+    }
+    if (options.exitOnSmartWalletSell
+      && trade.side === 'SELL'
+      && options.smartWallets.has(trade.wallet)) {
+      return { ...trade, reason: EXIT_REASON.SMART_WALLET_SELL };
+    }
+    if (options.flowExitNetFlowThresholdSol != null
+      && trade.timestamp_ms >= entry.timestamp_ms + options.flowExitMinHoldMs) {
+      weakFlowObservations = flowNetSol <= options.flowExitNetFlowThresholdSol
+        ? weakFlowObservations + 1
+        : 0;
+      if (weakFlowObservations >= options.flowExitConfirmations) {
+        return { ...trade, reason: EXIT_REASON.FLOW_DECAY, observedNetFlowSol: flowNetSol };
+      }
     }
   }
   return { timestamp_ms: deadline, price: null, market: null, reason: EXIT_REASON.TIME_EXIT };
@@ -347,12 +384,21 @@ function runBacktest(db, options = {}) {
   const minNetFlowW3 = Math.max(0, finite(options.minNetFlowW3, 0));
   const maxNetFlowW3 = optionalNonNegative(options.maxNetFlowW3);
   const minFlowAccel = Math.max(0, finite(options.minFlowAccel, 0));
+  const minAgeMs = optionalNonNegative(options.minAgeMs);
+  const maxAgeMs = optionalNonNegative(options.maxAgeMs);
   const minCurvePct = optionalNonNegative(options.minCurvePct);
   const maxCurvePct = optionalNonNegative(options.maxCurvePct);
+  const minDeltaNetFlow12 = optionalFinite(options.minDeltaNetFlow12);
+  const minDeltaNetFlow23 = optionalFinite(options.minDeltaNetFlow23);
+  const minBuyTxW3 = optionalNonNegative(options.minBuyTxW3);
+  const minUniqueBuyersW3 = optionalNonNegative(options.minUniqueBuyersW3);
   const maxBuyTxW3 = optionalNonNegative(options.maxBuyTxW3);
   const maxUniqueBuyersW3 = optionalNonNegative(options.maxUniqueBuyersW3);
+  const excludedMints = stringSet(options.excludedMints);
+  const maxEntryPriceJumpPct = optionalNonNegative(options.maxEntryPriceJumpPct);
   const firstSignalOnly = boolean(options.firstSignalOnly, false);
   const signalCooldownMs = Math.max(0, finite(options.signalCooldownMs, 0));
+  const singlePositionPerMint = boolean(options.singlePositionPerMint, false);
   const signalVariant = String(options.signalVariant || 'primary_3w').trim() || 'primary_3w';
   const limit = Math.min(100_000, Math.max(1, Math.trunc(finite(options.limit, 10_000))));
   const fromMs = optionalFinite(options.fromMs);
@@ -363,6 +409,9 @@ function runBacktest(db, options = {}) {
   if (maxNetFlowW3 != null && maxNetFlowW3 < minNetFlowW3) {
     throw new Error('maxNetFlowW3 must be >= minNetFlowW3');
   }
+  if (minAgeMs != null && maxAgeMs != null && minAgeMs > maxAgeMs) {
+    throw new Error('minAgeMs must be <= maxAgeMs');
+  }
   if (minCurvePct != null && maxCurvePct != null && minCurvePct > maxCurvePct) {
     throw new Error('minCurvePct must be <= maxCurvePct');
   }
@@ -371,6 +420,15 @@ function runBacktest(db, options = {}) {
   const stopLossPct = optionalPositive(options.stopLossPct);
   const trailingStopPct = optionalPositive(options.trailingStopPct);
   const trailingActivationPct = Math.max(0, finite(options.trailingActivationPct, 0));
+  const flowExitNetFlowThresholdSol = optionalFinite(options.flowExitNetFlowThresholdSol);
+  const flowExitWindowMs = Math.max(250, finite(options.flowExitWindowMs, 2_000));
+  const flowExitMinHoldMs = Math.max(0, finite(options.flowExitMinHoldMs, 1_000));
+  const flowExitConfirmations = Math.max(
+    1,
+    Math.trunc(finite(options.flowExitConfirmations, 2)),
+  );
+  const exitOnSmartWalletSell = boolean(options.exitOnSmartWalletSell, false);
+  const smartWallets = stringSet(options.smartWallets);
   const exitExecutionDelayMs = Math.max(0, finite(options.exitExecutionDelayMs, 0));
   const exitRetryCount = Math.min(20, Math.max(0, Math.trunc(finite(options.exitRetryCount, 0))));
   const exitRetryDelayMs = Math.max(0, finite(options.exitRetryDelayMs, 500));
@@ -390,28 +448,43 @@ function runBacktest(db, options = {}) {
       AND (s.flow_accel_2 IS NULL OR s.flow_accel_2 >= @minFlowAccel)
     ))`
     : '(@minFlowAccel <= 0 OR s.flow_accel_2 IS NULL OR s.flow_accel_2 >= @minFlowAccel)';
-  const conditions = [
+  const buyConditions = [
     's.netflow_w3 >= @minNetFlowW3',
     accelerationCondition,
   ];
-  if (maxNetFlowW3 != null) conditions.push('s.netflow_w3 <= @maxNetFlowW3');
-  if (minCurvePct != null) conditions.push('s.curve_pct >= @minCurvePct');
-  if (maxCurvePct != null) conditions.push('s.curve_pct <= @maxCurvePct');
-  if (maxBuyTxW3 != null) conditions.push('s.buy_tx_w3 <= @maxBuyTxW3');
-  if (maxUniqueBuyersW3 != null) {
-    conditions.push('s.unique_buyers_w3 <= @maxUniqueBuyersW3');
+  const prohibitionConditions = [];
+  const baseConditions = [];
+  if (maxNetFlowW3 != null) prohibitionConditions.push('s.netflow_w3 <= @maxNetFlowW3');
+  if (minAgeMs != null) buyConditions.push('s.age_ms >= @minAgeMs');
+  if (maxAgeMs != null) prohibitionConditions.push('s.age_ms <= @maxAgeMs');
+  if (minCurvePct != null) buyConditions.push('s.curve_pct >= @minCurvePct');
+  if (maxCurvePct != null) prohibitionConditions.push('s.curve_pct <= @maxCurvePct');
+  if (minDeltaNetFlow12 != null) {
+    buyConditions.push('s.delta_netflow_12 >= @minDeltaNetFlow12');
   }
-  if (fromMs != null) conditions.push('s.timestamp_ms >= @fromMs');
-  if (toMs != null) conditions.push('s.timestamp_ms <= @toMs');
+  if (minDeltaNetFlow23 != null) {
+    buyConditions.push('s.delta_netflow_23 >= @minDeltaNetFlow23');
+  }
+  if (minBuyTxW3 != null) buyConditions.push('s.buy_tx_w3 >= @minBuyTxW3');
+  if (minUniqueBuyersW3 != null) {
+    buyConditions.push('s.unique_buyers_w3 >= @minUniqueBuyersW3');
+  }
+  if (maxBuyTxW3 != null) prohibitionConditions.push('s.buy_tx_w3 <= @maxBuyTxW3');
+  if (maxUniqueBuyersW3 != null) {
+    prohibitionConditions.push('s.unique_buyers_w3 <= @maxUniqueBuyersW3');
+  }
+  if (fromMs != null) baseConditions.push('s.timestamp_ms >= @fromMs');
+  if (toMs != null) baseConditions.push('s.timestamp_ms <= @toMs');
   const signalColumns = new Set(
     db.prepare('PRAGMA table_info(flow_signals)').all().map((column) => column.name),
   );
   const supportsSignalVariant = signalColumns.has('signal_variant');
   if (supportsSignalVariant && signalVariant !== '*') {
-    conditions.push('s.signal_variant = @signalVariant');
+    baseConditions.push('s.signal_variant = @signalVariant');
   } else if (!supportsSignalVariant && !['*', 'primary_3w'].includes(signalVariant)) {
-    conditions.push('1 = 0');
+    baseConditions.push('1 = 0');
   }
+  const conditions = [...baseConditions, ...prohibitionConditions, ...buyConditions];
   conditions.push(`(
     @cursorTimestampMs IS NULL
     OR s.timestamp_ms > @cursorTimestampMs
@@ -421,8 +494,14 @@ function runBacktest(db, options = {}) {
     minNetFlowW3,
     minFlowAccel,
     maxNetFlowW3,
+    minAgeMs,
+    maxAgeMs,
     minCurvePct,
     maxCurvePct,
+    minDeltaNetFlow12,
+    minDeltaNetFlow23,
+    minBuyTxW3,
+    minUniqueBuyersW3,
     maxBuyTxW3,
     maxUniqueBuyersW3,
     signalVariant,
@@ -432,6 +511,15 @@ function runBacktest(db, options = {}) {
   };
   if (fromMs != null) signalParameters.fromMs = fromMs;
   if (toMs != null) signalParameters.toMs = toMs;
+  const countSignals = (countConditions) => db.prepare(`
+    SELECT COUNT(*) AS n FROM flow_signals s
+    WHERE ${countConditions.length ? countConditions.join(' AND ') : '1 = 1'}
+  `).get(signalParameters).n;
+  const availableSignals = countSignals(baseConditions);
+  const afterProhibitionRules = countSignals([...baseConditions, ...prohibitionConditions]);
+  const afterBuyConditions = countSignals([
+    ...baseConditions, ...prohibitionConditions, ...buyConditions,
+  ]);
   const signalPage = db.prepare(`
     SELECT s.*, t.graduated_at
     FROM flow_signals s
@@ -444,10 +532,16 @@ function runBacktest(db, options = {}) {
   const seenMints = new Set();
   const lastAcceptedByMint = new Map();
   const signalSelection = {
+    availableSignals,
+    filteredByProhibitionRules: availableSignals - afterProhibitionRules,
+    filteredByBuyConditions: afterProhibitionRules - afterBuyConditions,
     fetchedSignals: 0,
     scannedSignals: 0,
+    filteredByExcludedMint: 0,
     filteredByFirstSignal: 0,
     filteredByCooldown: 0,
+    filteredByEntryPriceJump: 0,
+    filteredByOpenPosition: 0,
     limitReached: false,
   };
   while (signals.length < limit) {
@@ -459,6 +553,10 @@ function runBacktest(db, options = {}) {
       if (!supportsSignalVariant) {
         signal.signal_variant = 'primary_3w';
         signal.is_primary = 1;
+      }
+      if (excludedMints.has(signal.mint)) {
+        signalSelection.filteredByExcludedMint += 1;
+        continue;
       }
       if (firstSignalOnly && seenMints.has(signal.mint)) {
         signalSelection.filteredByFirstSignal += 1;
@@ -489,21 +587,27 @@ function runBacktest(db, options = {}) {
     FROM raw_trades WHERE timestamp_ms <= ?
   `).get(dataCutoffMs);
   const firstCurveTradeBetween = db.prepare(`
-    SELECT timestamp_ms, price, market
+    SELECT timestamp_ms, price, market, side, sol_amount, wallet
     FROM raw_trades
     WHERE mint = ? AND market = 'PUMP_BONDING_CURVE'
       AND timestamp_ms >= ? AND timestamp_ms <= ? AND price > 0
     ORDER BY timestamp_ms, id LIMIT 1
   `);
   const pathBetween = db.prepare(`
-    SELECT timestamp_ms, price, market
+    SELECT timestamp_ms, price, market, side, sol_amount, wallet
     FROM raw_trades
     WHERE mint = ? AND timestamp_ms >= ? AND timestamp_ms <= ? AND price > 0
     ORDER BY timestamp_ms, id
   `);
 
   const rows = [];
+  const openUntilByMint = new Map();
   for (const signal of signals) {
+    const openUntil = openUntilByMint.get(signal.mint);
+    if (singlePositionPerMint && Number.isFinite(openUntil) && signal.timestamp_ms < openUntil) {
+      signalSelection.filteredByOpenPosition += 1;
+      continue;
+    }
     const entryTarget = signal.timestamp_ms + executionDelayMs;
     const entryWindowEnd = Math.min(entryTarget + entryTimeoutMs, dataCutoffMs);
     const graduatedAt = Number.isFinite(signal.graduated_at) ? signal.graduated_at : null;
@@ -535,6 +639,12 @@ function runBacktest(db, options = {}) {
       continue;
     }
 
+    const signalToEntryPct = returnPct(entry.price, signal.p0);
+    if (maxEntryPriceJumpPct != null && signalToEntryPct > maxEntryPriceJumpPct) {
+      signalSelection.filteredByEntryPriceJump += 1;
+      continue;
+    }
+
     const maximumPathEnd = entry.timestamp_ms + holdMs + exitExecutionDelayMs
       + exitRetryCount * exitRetryDelayMs + exitTimeoutMs;
     const pathEnd = Math.min(maximumPathEnd, dataCutoffMs);
@@ -545,6 +655,12 @@ function runBacktest(db, options = {}) {
       stopLossPct,
       trailingStopPct,
       trailingActivationPct,
+      flowExitNetFlowThresholdSol,
+      flowExitWindowMs,
+      flowExitMinHoldMs,
+      flowExitConfirmations,
+      exitOnSmartWalletSell,
+      smartWallets,
     });
     const exitTarget = trigger.timestamp_ms + exitExecutionDelayMs
       + exitRetryCount * exitRetryDelayMs;
@@ -571,13 +687,13 @@ function runBacktest(db, options = {}) {
         baseRow.netReturnPct = baseRow.rawReturnPct - rowCosts.deterministicCostPct;
         baseRow.expectedNetReturnPct = expectedNetReturnPct(baseRow.rawReturnPct, rowCosts);
       }
+      if (singlePositionPerMint) openUntilByMint.set(signal.mint, Number.MAX_SAFE_INTEGER);
       rows.push(baseRow);
       continue;
     }
 
     const rawReturnPct = returnPct(exit.price, entry.price);
     const netReturnPct = rawReturnPct - rowCosts.deterministicCostPct;
-    const signalToEntryPct = returnPct(entry.price, signal.p0);
     const prices = path.filter((trade) => trade.timestamp_ms <= exit.timestamp_ms)
       .map((trade) => trade.price);
     const { mfe, mae } = excursion([entry.price, ...prices], entry.price);
@@ -594,6 +710,7 @@ function runBacktest(db, options = {}) {
       mfePct: mfe,
       maePct: mae,
     });
+    if (singlePositionPerMint) openUntilByMint.set(signal.mint, exit.timestamp_ms);
   }
 
   const bootstrapSamples = Math.max(0, Math.trunc(finite(options.bootstrapSamples, 500)));
@@ -627,6 +744,13 @@ function runBacktest(db, options = {}) {
       message: 'firstSignalOnly already keeps one eligible signal per mint; signalCooldownMs has no additional effect.',
     });
   }
+  if (takeProfitPct == null && stopLossPct == null && trailingStopPct == null
+    && flowExitNetFlowThresholdSol == null && !exitOnSmartWalletSell) {
+    warnings.push({
+      code: 'FIXED_TIME_EXIT_ONLY',
+      message: 'Only the maximum hold-time exit is active. Enable at least one dynamic exit for strategy research.',
+    });
+  }
 
   return {
     parameters: {
@@ -639,6 +763,11 @@ function runBacktest(db, options = {}) {
       stopLossPct,
       trailingStopPct,
       trailingActivationPct,
+      flowExitNetFlowThresholdSol,
+      flowExitWindowMs,
+      flowExitMinHoldMs,
+      flowExitConfirmations,
+      exitOnSmartWalletSell,
       exitExecutionDelayMs,
       exitRetryCount,
       exitRetryDelayMs,
@@ -655,18 +784,28 @@ function runBacktest(db, options = {}) {
       minNetFlowW3,
       maxNetFlowW3,
       minFlowAccel,
+      minAgeMs,
+      maxAgeMs,
       minCurvePct,
       maxCurvePct,
+      minDeltaNetFlow12,
+      minDeltaNetFlow23,
+      minBuyTxW3,
+      minUniqueBuyersW3,
       maxBuyTxW3,
       maxUniqueBuyersW3,
+      excludedMints: [...excludedMints],
+      maxEntryPriceJumpPct,
       firstSignalOnly,
       signalCooldownMs,
+      singlePositionPerMint,
       signalVariant,
     },
     analysisWindow: {
       selectedSignalFirstMs: signals[0]?.timestamp_ms ?? null,
       selectedSignalLastMs: signals.at(-1)?.timestamp_ms ?? null,
       selectedSignals: signals.length,
+      executionEligibleSignals: rows.length,
       selectedMints: new Set(signals.map((signal) => signal.mint)).size,
       signalSelection,
       rawFirstMs: coverage.min_timestamp_ms,

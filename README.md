@@ -93,8 +93,8 @@ Dashboard 默认地址：<http://127.0.0.1:3001>
 
 1. **Overview**：今日 Raw Trades、活跃 Token、Candidate、Flow Signal、Smart Wallet 事件。
 2. **Signal Monitor**：Symbol、CA、AGE、Curve、三窗口 NetFlow、Buyers、Buy TX 与未来收益。
-3. **Backtest**：选择 Hold Time、Execution Delay，并拆分平台费、滑点、价格冲击、优先费、Jito 小费和失败成本。
-4. **Smart Wallet**：两地址的交易次数、买入币种、持仓、Curve、AGE 与 Signal 重合率。
+3. **Backtest**：按“禁止开单过滤、买入信号条件、动态卖出策略”三层回测，并拆分执行延迟与全部成本。
+4. **Smart Wallet**：分别显示 OPEN / ADD、OPEN 5/10/30 秒 Primary 覆盖率、ADD 覆盖率与同 Mint 信号再触发率。
 5. **System Health**：数据流、解析量、Buffer、标签、数据库写入和错误。
 
 ## 回测
@@ -103,7 +103,7 @@ Dashboard 可直接运行常用组合。命令行支持更细的成本拆分：
 
 ```bash
 pnpm run backtest -- \
-  --hold-ms=5000 \
+  --hold-ms=60000 \
   --delay-ms=200 \
   --entry-timeout-ms=2000 \
   --exit-timeout-ms=5000 \
@@ -122,6 +122,11 @@ pnpm run backtest -- \
   --stop-loss-pct=8 \
   --trailing-stop-pct=4 \
   --trailing-activation-pct=6 \
+  --flow-exit-window-ms=2000 \
+  --flow-exit-netflow-sol=0 \
+  --flow-exit-min-hold-ms=1000 \
+  --flow-exit-confirmations=2 \
+  --exit-on-smart-wallet-sell=false \
   --exit-delay-ms=200 \
   --exit-retry-count=1 \
   --exit-retry-delay-ms=500 \
@@ -129,18 +134,25 @@ pnpm run backtest -- \
   --bootstrap-samples=500 \
   --signal-variant=primary_3w \
   --first-signal-only=false \
-  --signal-cooldown-ms=30000 \
+  --signal-cooldown-ms=5000 \
+  --single-position-per-mint=true \
+  --max-age-ms=120000 \
+  --max-entry-price-jump-pct=20 \
   --max-curve-pct=60 \
   --max-buy-tx-w3=3 \
   --max-buyers-w3=3 \
   --max-net-w3=3 \
   --min-net-w3=1 \
+  --min-delta-12=1 \
+  --min-delta-23=1 \
+  --min-buy-tx-w3=5 \
+  --min-buyers-w3=5 \
   --min-accel=1.2
 ```
 
 Dashboard、命令行回测和批量分析默认使用 200ms 买入延迟及 200ms 卖出延迟。`exit-delay-ms=0` 只代表理想化成交价格；结果会返回 `IDEALIZED_ZERO_DELAY_EXIT` 警告，不能作为可执行策略结论。
 
-每 Mint 首信号与冷却只在回测选择阶段应用，不会从采集库删除原始信号。`first-signal-only` 保留分析窗口内每个 Mint 的首个合格信号；`signal-cooldown-ms` 按上一个已接受信号执行状态化冷却。
+每 Mint 首信号与冷却只在回测选择阶段应用，不会从采集库删除原始信号。信号表保存 `signal_episode_id`、`signal_rank_in_mint` 和 `previous_signal_gap_ms`。默认回测使用 5 秒冷却并限制同一 Mint 同时只有一个开放仓位；`first-signal-only` 仅作为激进过滤的诊断选项。
 
 程序并行保存三个研究版本：
 
@@ -150,11 +162,13 @@ Dashboard、命令行回测和批量分析默认使用 200ms 买入延迟及 200
 
 影子信号只用于 Future Label 和回测研究，不会触发链上交易；Signal Monitor 和 Smart Wallet 重合默认仍以 `primary_3w` 为准。
 
+Smart Wallet 事件保存 `OPEN / ADD / CLOSE` 生命周期。真实 OPEN 会写入 `smart_signal_confirmations`，记录最近 30 秒 Primary 信号、确认延迟与开仓 SOL；这些是离线监督标签，不会作为同一时点的实时买入条件。Dashboard 原来的“Signal 重合率”已改为明确的 OPEN / ADD 时间窗口覆盖率，避免把连续加仓误读成重复信号。
+
 入场只接受 `Signal Time + Execution Delay` 之后、入场等待上限以内且毕业之前的 Bonding Curve 成交，绝不会用 PumpSwap 反推买入。持仓时间从实际模拟入场开始计算；出场可使用 Bonding Curve 或毕业后的 PumpSwap 成交。没有入场、毕业前未成交、没有出场、历史数据缺口和数据右删失会分别统计，不再静默丢弃。没有出场的已入场样本默认按 `-100%` 再扣确定性成本。
 
 平台费、双边滑点、价格冲击和固定链上费用构成成功成交的确定性成本。Future Label 只扣除这些确定性成本，不再把随机执行失败混入市场收益标签。买入失败表示没有建仓，只损失失败尝试成本；卖出失败使用 `exit-retry-count`、重试间隔和失败费用沿真实逐笔价格路径重新执行。若正常策略本身为负，买入失败可能在数学上改善每信号收益，因此输出同时提供条件于已执行交易的收益并给出警告，不能把它误读成策略改善。
 
-止盈、止损和移动止损按逐笔路径判断谁先触发；触发以后再应用卖出延迟与失败重试。默认这些动态条件为关闭，保持固定持仓回测兼容。`Actual Delay` 已改名为 `Observed Entry Gap`，它是信号到下一笔可观察市场成交的间隔，不代表机器人真实上链延迟。
+止盈、止损、移动止损、滚动 NetFlow 衰减和 Smart Wallet SELL 按逐笔路径判断谁先触发；触发以后再应用卖出延迟与失败重试。`hold-ms` 现在表示动态条件都未触发时的最大持仓兜底。若全部动态退出均关闭，结果会返回 `FIXED_TIME_EXIT_ONLY` 警告。`Observed Entry Gap` 是信号到下一笔可观察市场成交的间隔，不代表机器人真实上链延迟。
 
 ### 可复现分析
 

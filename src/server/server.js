@@ -5,8 +5,14 @@ const express = require('express');
 const { runBacktest } = require('../core/FlowBacktester');
 
 function numeric(value, fallback) {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function secondsToMs(value, fallback) {
+  const seconds = numeric(value, null);
+  return seconds == null ? fallback : seconds * 1_000;
 }
 
 function boolean(value, fallback = false) {
@@ -48,7 +54,7 @@ class ResearchServer {
         ? 0
         : this.config.strategy.minAccelerationRatio;
       const result = runBacktest(this.store.db, {
-        holdMs: numeric(request.query.holdMs, 5_000),
+        holdMs: numeric(request.query.holdMs, 60_000),
         executionDelayMs: numeric(
           request.query.executionDelayMs,
           this.config.backtest?.executionDelayMs ?? 200,
@@ -69,6 +75,15 @@ class ResearchServer {
         stopLossPct: numeric(request.query.stopLossPct, 0),
         trailingStopPct: numeric(request.query.trailingStopPct, 0),
         trailingActivationPct: numeric(request.query.trailingActivationPct, 0),
+        flowExitNetFlowThresholdSol: numeric(
+          request.query.flowExitNetFlowThresholdSol,
+          undefined,
+        ),
+        flowExitWindowMs: numeric(request.query.flowExitWindowMs, 2_000),
+        flowExitMinHoldMs: numeric(request.query.flowExitMinHoldMs, 1_000),
+        flowExitConfirmations: numeric(request.query.flowExitConfirmations, 2),
+        exitOnSmartWalletSell: boolean(request.query.exitOnSmartWalletSell, false),
+        smartWallets: this.config.smartWallets,
         exitExecutionDelayMs: numeric(
           request.query.exitExecutionDelayMs,
           this.config.backtest?.exitExecutionDelayMs ?? 200,
@@ -99,12 +114,27 @@ class ResearchServer {
         minNetFlowW3: numeric(request.query.minNetFlowW3, this.config.strategy.minNetFlowW3Sol),
         maxNetFlowW3: numeric(request.query.maxNetFlowW3, undefined),
         minFlowAccel: numeric(request.query.minFlowAccel, defaultMinFlowAccel),
+        minAgeMs: secondsToMs(request.query.minAgeSec, undefined),
+        maxAgeMs: secondsToMs(request.query.maxAgeSec, undefined),
         minCurvePct: numeric(request.query.minCurvePct, undefined),
         maxCurvePct: numeric(request.query.maxCurvePct, undefined),
+        minDeltaNetFlow12: numeric(request.query.minDeltaNetFlow12, undefined),
+        minDeltaNetFlow23: numeric(request.query.minDeltaNetFlow23, undefined),
+        minBuyTxW3: numeric(request.query.minBuyTxW3, undefined),
+        minUniqueBuyersW3: numeric(request.query.minUniqueBuyersW3, undefined),
         maxBuyTxW3: numeric(request.query.maxBuyTxW3, undefined),
         maxUniqueBuyersW3: numeric(request.query.maxUniqueBuyersW3, undefined),
+        excludedMints: request.query.excludedMints,
+        maxEntryPriceJumpPct: numeric(request.query.maxEntryPriceJumpPct, undefined),
         firstSignalOnly: boolean(request.query.firstSignalOnly, false),
-        signalCooldownMs: numeric(request.query.signalCooldownMs, 0),
+        signalCooldownMs: numeric(
+          request.query.signalCooldownMs,
+          this.config.backtest?.signalCooldownMs ?? 5_000,
+        ),
+        singlePositionPerMint: boolean(
+          request.query.singlePositionPerMint,
+          this.config.backtest?.singlePositionPerMint ?? true,
+        ),
         signalVariant,
         fromMs: request.query.fromMs,
         toMs: request.query.toMs,
@@ -118,6 +148,10 @@ class ResearchServer {
 
     this.app.get('/api/smart-wallets', (_request, response) => {
       response.json(this.store.smartWalletStats(this.config.smartWallets));
+    });
+
+    this.app.get('/api/signal-repetition', (_request, response) => {
+      response.json(this.store.signalRepetitionStats());
     });
 
     this.app.get('/api/health', (_request, response) => {

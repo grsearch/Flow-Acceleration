@@ -15,6 +15,12 @@ function integerEnv(name, fallback, bounds = {}) {
   return Math.trunc(numberEnv(name, fallback, bounds));
 }
 
+function booleanEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
 function listEnv(name, fallback = []) {
   const raw = process.env[name];
   if (raw == null || raw.trim() === '') return [...fallback];
@@ -126,6 +132,8 @@ const config = {
     exitExecutionDelayMs: integerEnv('FLOW_BACKTEST_EXIT_DELAY_MS', 200, { min: 0 }),
     exitTimeoutMs: integerEnv('FLOW_BACKTEST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
     noExitLossPct: numberEnv('FLOW_BACKTEST_NO_EXIT_LOSS_PCT', 100, { min: 0 }),
+    signalCooldownMs: integerEnv('FLOW_BACKTEST_SIGNAL_COOLDOWN_MS', 5_000, { min: 0 }),
+    singlePositionPerMint: booleanEnv('FLOW_BACKTEST_SINGLE_POSITION_PER_MINT', true),
   },
 
   smartWallets: listEnv('FLOW_SMART_WALLETS', [

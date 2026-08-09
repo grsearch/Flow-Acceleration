@@ -30,5 +30,7 @@ assert.strictEqual(costs.entryFailureCostPct, 5);
 assert.ok(Math.abs(expectedNetReturnPct(10, costs) - 6.34) < 1e-12);
 assert.strictEqual(config.backtest.executionDelayMs, 200);
 assert.strictEqual(config.backtest.exitExecutionDelayMs, 200);
+assert.strictEqual(config.backtest.signalCooldownMs, 5_000);
+assert.strictEqual(config.backtest.singlePositionPerMint, true);
 
 console.log('test-config-cost: ok');
