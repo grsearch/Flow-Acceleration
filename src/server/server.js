@@ -155,12 +155,22 @@ class ResearchServer {
       response.json(this.store.signalRepetitionStats());
     });
 
-    this.app.get('/api/live-trading', (_request, response) => {
-      response.json(this.trader?.health() || {
+    this.app.get('/api/live-trading', (request, response) => {
+      const runtime = this.trader?.health() || {
         mode: 'DISABLED',
         enabled: false,
         dryRun: true,
         activePositions: 0,
+      };
+      response.json({
+        generatedAt: Date.now(),
+        runtime,
+        monitoredWallets: this.config.smartWallets,
+        ...this.store.liveTradingDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          orderLimit: numeric(request.query.orderLimit, 100),
+          decisionLimit: numeric(request.query.decisionLimit, 100),
+        }),
       });
     });
 

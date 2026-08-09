@@ -2,7 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { evaluateSmartOpen } = require('./SmartOpenStrategy');
+const { evaluateSmartOpen, RULE_VERSION } = require('./SmartOpenStrategy');
+
+const SMART_SELL_EXIT_STRATEGY = 'SMART_WALLET_SELL_60S';
+const SMART_SELL_MAX_HOLD_MS = 60_000;
 
 function errorText(error) {
   return String(error?.message || error || 'Unknown error')
@@ -41,6 +44,7 @@ class LiveTradingManager {
     this.store = store;
     this.executor = executor;
     this.now = now;
+    this.exitStrategy = config.exitStrategy || SMART_SELL_EXIT_STRATEGY;
     this.mode = !config.enabled ? 'DISABLED' : (config.dryRun ? 'DRY_RUN' : 'LIVE');
     this.positions = new Map();
     this.timers = new Map();
@@ -81,16 +85,50 @@ class LiveTradingManager {
   }
 
   health() {
+    const smartSellOnly = this.exitStrategy === SMART_SELL_EXIT_STRATEGY;
+    const entry = {
+      phase: 'OPEN',
+      market: 'PUMP_BONDING_CURVE',
+      minSmartOpenSol: this.config.minSmartOpenSol,
+      minPreBuyers: this.config.minPreBuyers,
+      preBuyWindowMs: this.config.preBuyWindowMs,
+      maxSignalAgeMs: this.config.maxSignalAgeMs,
+      maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
+    };
     return {
       mode: this.mode,
       enabled: this.config.enabled,
       dryRun: this.config.dryRun,
-      rule: {
-        phase: 'OPEN',
-        market: 'PUMP_BONDING_CURVE',
-        minSmartOpenSol: this.config.minSmartOpenSol,
-        minPreBuyers: this.config.minPreBuyers,
-        preBuyWindowMs: this.config.preBuyWindowMs,
+      rule: entry,
+      strategy: {
+        name: 'Smart Wallet OPEN / Bonding Curve',
+        ruleVersion: RULE_VERSION,
+        entry,
+        exit: {
+          policy: this.exitStrategy,
+          exitOnTriggerWalletSell: smartSellOnly || this.config.exitOnTriggerWalletSell,
+          stopLossPct: smartSellOnly ? 0 : this.config.stopLossPct,
+          takeProfitPct: smartSellOnly ? 0 : this.config.takeProfitPct,
+          trailingActivationPct: smartSellOnly ? 0 : this.config.trailingActivationPct,
+          trailingStopPct: smartSellOnly ? 0 : this.config.trailingStopPct,
+          minHoldMs: smartSellOnly ? 0 : this.config.minHoldMs,
+          maxHoldMs: smartSellOnly ? SMART_SELL_MAX_HOLD_MS : this.config.maxHoldMs,
+          exitRetryCount: this.config.exitRetryCount,
+          exitRetryDelayMs: this.config.exitRetryDelayMs,
+        },
+        risk: {
+          positionSizeSol: this.config.positionSizeSol,
+          maxConcurrentPositions: this.config.maxConcurrentPositions,
+          maxDailySpendSol: this.config.maxDailySpendSol,
+          minWalletReserveSol: this.config.minWalletReserveSol,
+          mintCooldownMs: this.config.mintCooldownMs,
+        },
+        execution: {
+          slippagePct: this.config.slippagePct,
+          computeUnitLimit: this.config.computeUnitLimit,
+          priorityFeeMicroLamports: this.config.priorityFeeMicroLamports,
+          commitment: this.config.commitment,
+        },
       },
       activePositions: this.positions.size,
       killSwitchActive: this._killSwitchActive(),
@@ -162,6 +200,7 @@ class LiveTradingManager {
       position.highestPrice = highest;
       this.store.updateLivePosition(position.id, { highestPrice: highest });
     }
+    if (this.exitStrategy === SMART_SELL_EXIT_STRATEGY) return;
     if (now - openedAt < this.config.minHoldMs || !(position.entryPrice > 0)) return;
     const returnPct = ((trade.price / position.entryPrice) - 1) * 100;
     if (this.config.stopLossPct > 0 && returnPct <= -this.config.stopLossPct) {
@@ -353,18 +392,23 @@ class LiveTradingManager {
   }
 
   _considerSmartExit(event) {
-    if (!this.config.exitOnTriggerWalletSell || event.side !== 'SELL') return;
+    const smartSellOnly = this.exitStrategy === SMART_SELL_EXIT_STRATEGY;
+    if ((!smartSellOnly && !this.config.exitOnTriggerWalletSell) || event.side !== 'SELL') return;
     const position = this.positions.get(event.mint);
     if (!position || position.triggerWallet !== event.wallet || position.status !== 'OPEN') return;
     const openedAt = position.openedAt || position.createdAt || 0;
-    if (this.now() - openedAt < this.config.minHoldMs) return;
+    const minimumHoldMs = smartSellOnly ? 0 : this.config.minHoldMs;
+    if (this.now() - openedAt < minimumHoldMs) return;
     this._requestExit(position, `SMART_WALLET_${event.positionPhase || 'SELL'}`, event.price);
   }
 
   _scheduleMaxHold(position) {
     if (this.timers.has(position.id)) clearTimeout(this.timers.get(position.id));
     const openedAt = position.openedAt || position.createdAt || this.now();
-    const delay = Math.max(0, openedAt + this.config.maxHoldMs - this.now());
+    const maxHoldMs = this.exitStrategy === SMART_SELL_EXIT_STRATEGY
+      ? SMART_SELL_MAX_HOLD_MS
+      : this.config.maxHoldMs;
+    const delay = Math.max(0, openedAt + maxHoldMs - this.now());
     const timer = setTimeout(() => {
       this.timers.delete(position.id);
       this._requestExit(position, 'MAX_HOLD', null);

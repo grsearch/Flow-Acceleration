@@ -26,6 +26,12 @@ async function main() {
   assert.ok(dashboard.includes('name="minDeltaNetFlow12"'));
   assert.ok(dashboard.includes('OPEN 10秒覆盖'));
   assert.ok(dashboard.includes('value="shadow_2w"'));
+  assert.ok(dashboard.includes('aria-controls="live-trading"'));
+  assert.ok(dashboard.includes('id="live-trading"'));
+  assert.ok(dashboard.includes('id="live-position-rows"'));
+  assert.ok(dashboard.includes('id="live-order-rows"'));
+  assert.ok(dashboard.includes('id="live-decision-rows"'));
+  assert.ok(dashboard.includes('Current live strategy'));
 
   const runtimeConfig = {
     ...config,
@@ -52,6 +58,16 @@ async function main() {
     entryLookupPlan.some(({ detail }) => detail.includes('idx_raw_trades_mint_ts')),
     'backtest entry lookup should use the mint/timestamp index',
   );
+  const liveOrderPlan = runtime.store.db.prepare(`
+    EXPLAIN QUERY PLAN
+    SELECT * FROM live_orders
+    ORDER BY created_at DESC, id DESC
+    LIMIT 100
+  `).all();
+  assert.ok(
+    liveOrderPlan.some(({ detail }) => detail.includes('idx_live_orders_created_id')),
+    'live order dashboard should use the recent-order index',
+  );
 
   try {
     await runtime.server.start();
@@ -72,6 +88,24 @@ async function main() {
       assert.strictEqual(response.status, 200, `${route} should return 200`);
       assert.ok((await response.text()).length > 0, `${route} should return a body`);
     }
+    const liveTrading = await (await fetch(
+      `http://127.0.0.1:${port}/api/live-trading`,
+    )).json();
+    assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
+    assert.strictEqual(liveTrading.runtime.strategy.entry.phase, 'OPEN');
+    assert.strictEqual(liveTrading.runtime.strategy.entry.market, 'PUMP_BONDING_CURVE');
+    assert.strictEqual(liveTrading.runtime.strategy.entry.minSmartOpenSol, 1);
+    assert.strictEqual(liveTrading.runtime.strategy.entry.minPreBuyers, 2);
+    assert.strictEqual(
+      liveTrading.runtime.strategy.exit.policy,
+      'SMART_WALLET_SELL_60S',
+    );
+    assert.strictEqual(liveTrading.runtime.strategy.exit.maxHoldMs, 60_000);
+    assert.strictEqual(liveTrading.runtime.strategy.exit.stopLossPct, 0);
+    assert.ok(Array.isArray(liveTrading.positions));
+    assert.ok(Array.isArray(liveTrading.orders));
+    assert.ok(Array.isArray(liveTrading.decisions));
+    assert.strictEqual(liveTrading.stats.decisions, 0);
     const dynamicResponse = await fetch(
       `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&stopLossPct=3`
       + '&trailingStopPct=2&exitRetryCount=1&splitRatio=0.6'

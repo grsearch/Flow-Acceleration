@@ -92,13 +92,14 @@ pnpm start
 
 Dashboard 默认地址：<http://127.0.0.1:3001>
 
-五个页面：
+六个页面：
 
 1. **Overview**：今日 Raw Trades、活跃 Token、Candidate、Flow Signal、Smart Wallet 事件。
 2. **Signal Monitor**：Symbol、CA、AGE、Curve、三窗口 NetFlow、Buyers、Buy TX 与未来收益。
 3. **Backtest**：按“禁止开单过滤、买入信号条件、动态卖出策略”三层回测，并拆分执行延迟与全部成本。
 4. **Smart Wallet**：分别显示 OPEN / ADD、OPEN 5/10/30 秒 Primary 覆盖率、ADD 覆盖率与同 Mint 信号再触发率。
-5. **System Health**：数据流、解析量、Buffer、标签、数据库写入和错误。
+5. **Live Trading**：当前执行模式与完整策略参数、持久化统计、仓位、订单和最近策略判定。
+6. **System Health**：数据流、解析量、Buffer、标签、数据库写入和错误。
 
 ## 回测
 
@@ -210,7 +211,7 @@ AND 该笔买入发生前 2 秒独立 Buyers >= 2
 
 实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。
 
-卖出不是单一固定时间：触发钱包减仓/清仓、止损、止盈和移动止损按逐笔价格先到先执行；`FLOW_LIVE_MAX_HOLD_MS` 只是最终安全上限。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
+当前实盘卖出策略固定为 `SMART_WALLET_SELL_60S`：触发开仓的 Smart Wallet 首次出现 SELL 时立即跟随退出；如果60秒内没有 SELL，则在满60秒时强制退出。该策略不启用止损、止盈、移动止损或 Flow 衰减退出，旧环境中的对应阈值会被忽略。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
 
 先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`smart_open_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
 

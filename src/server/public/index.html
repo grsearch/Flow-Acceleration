@@ -105,6 +105,34 @@
     .quality-grid span { display: block; color: var(--muted); font-size: 11px; }
     .quality-grid b { display: block; margin-top: 6px; font-size: 19px; }
     .health-grid { grid-template-columns: 1fr 1fr; }
+    .live-summary { grid-template-columns: 1.1fr .9fr; margin-bottom: 14px; }
+    .mode-card { position: relative; overflow: hidden; min-height: 220px; }
+    .mode-card::after { content: ''; position: absolute; width: 180px; height: 180px; top: -92px; right: -60px; border-radius: 50%; background: var(--muted); opacity: .1; filter: blur(8px); }
+    .mode-card.live::after { background: var(--red); opacity: .26; }
+    .mode-card.dry::after { background: var(--cyan); opacity: .2; }
+    .mode-badge, .status-chip { display: inline-flex; align-items: center; width: fit-content; border: 1px solid var(--line); border-radius: 999px; font-weight: 850; letter-spacing: .04em; }
+    .mode-badge { margin: 7px 0 14px; padding: 8px 12px; font-size: 14px; }
+    .mode-badge.live { border-color: rgba(255,122,113,.55); background: rgba(255,122,113,.12); color: var(--red); }
+    .mode-badge.dry { border-color: rgba(85,216,208,.55); background: rgba(85,216,208,.1); color: var(--cyan); }
+    .mode-badge.disabled { color: var(--muted); }
+    .mode-description { max-width: 660px; margin: 0; color: var(--muted); line-height: 1.6; }
+    .runtime-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 22px; color: var(--muted); font-size: 12px; }
+    .runtime-strip b { color: var(--text); }
+    .strategy-expression { margin: 7px 0 14px; color: var(--lime); font-size: clamp(18px, 2vw, 25px); font-weight: 850; line-height: 1.45; }
+    .wallet-mini { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+    .live-metric-grid { grid-template-columns: repeat(4, minmax(0,1fr)); margin-bottom: 14px; }
+    .live-metric-grid .metric { min-height: 124px; }
+    .strategy-grid { grid-template-columns: repeat(4, minmax(0,1fr)); margin-bottom: 14px; }
+    .strategy-card h3 { margin: 0 0 15px; font-size: 16px; }
+    .strategy-card .health-row { font-size: 12px; }
+    .record-section { margin-top: 14px; }
+    .status-chip { padding: 5px 8px; font-size: 10px; }
+    .status-chip.good { border-color: rgba(183,243,74,.4); background: rgba(183,243,74,.08); color: var(--lime); }
+    .status-chip.warn { border-color: rgba(245,189,98,.45); background: rgba(245,189,98,.08); color: var(--amber); }
+    .status-chip.bad { border-color: rgba(255,122,113,.45); background: rgba(255,122,113,.08); color: var(--red); }
+    .status-chip.neutral { color: var(--muted); }
+    .wrap-cell { min-width: 180px; max-width: 320px; white-space: normal; line-height: 1.45; overflow-wrap: anywhere; }
+    .table-note { color: var(--muted); font-size: 11px; }
     .health-list { display: grid; gap: 12px; }
     .health-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
     .health-row:last-child { padding: 0; border: 0; }
@@ -112,15 +140,15 @@
     .empty { padding: 40px 20px; color: var(--muted); text-align: center; }
     .error { color: var(--red); }
     @media (max-width: 980px) {
-      .metric-grid, .quality-grid { grid-template-columns: repeat(2,1fr); }
-      .research-note, .wallet-grid, .health-grid { grid-template-columns: 1fr; }
+      .metric-grid, .quality-grid, .live-metric-grid, .strategy-grid { grid-template-columns: repeat(2,1fr); }
+      .research-note, .wallet-grid, .health-grid, .live-summary { grid-template-columns: 1fr; }
       .form-grid, .result-grid { grid-template-columns: repeat(2,1fr); }
     }
     @media (max-width: 620px) {
       .shell { padding: 18px 14px; }
       .masthead { display: block; }
       .live-pill { margin-top: 18px; }
-      .metric-grid, .quality-grid, .form-grid, .result-grid { grid-template-columns: 1fr; }
+      .metric-grid, .quality-grid, .live-metric-grid, .strategy-grid, .form-grid, .result-grid { grid-template-columns: 1fr; }
       .wide { grid-column: auto; }
       .wallet-metrics { grid-template-columns: repeat(2,1fr); }
       .section-title { display: block; }
@@ -144,6 +172,7 @@
       <button class="tab" role="tab" aria-selected="false" aria-controls="signals">Signal Monitor</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="backtest">Backtest</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="wallets">Smart Wallet</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="live-trading">Live Trading</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="health">System Health</button>
     </nav>
 
@@ -268,6 +297,51 @@
       <div class="grid wallet-grid" id="wallet-cards"></div>
     </section>
 
+    <section class="panel" role="tabpanel" id="live-trading" hidden>
+      <div class="grid live-summary">
+        <article class="card mode-card disabled" id="live-mode-card">
+          <p class="eyebrow">Execution state</p>
+          <div class="mode-badge disabled" id="live-mode-badge">DISABLED</div>
+          <h2 id="live-mode-title">实盘执行已关闭</h2>
+          <p class="mode-description" id="live-mode-description">仅记录策略判定和完整研究数据，不会签名或发送链上交易。</p>
+          <div class="runtime-strip" id="live-runtime-strip"></div>
+        </article>
+        <article class="card">
+          <p class="eyebrow">Current live strategy</p>
+          <div class="strategy-expression" id="live-strategy-expression">OPEN + Bonding Curve + 金额 ≥1 SOL + 买入前 Buyers ≥2</div>
+          <p class="mode-description">页面展示服务器当前实际加载的参数，不是回测表单中的临时设置。完整原始数据始终继续采集。</p>
+          <div class="wallet-mini" id="live-monitored-wallets">等待策略配置…</div>
+        </article>
+      </div>
+
+      <div class="grid live-metric-grid" id="live-metrics"></div>
+      <div class="grid strategy-grid" id="live-strategy-cards"></div>
+
+      <article class="card record-section">
+        <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；收益为价格粗收益，未扣滑点和链上费用</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / 钱包</th><th>仓位</th><th>入场 / 最高 / 出场价</th><th>粗收益</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
+          <tbody id="live-position-rows"></tbody>
+        </table></div>
+      </article>
+
+      <article class="card record-section">
+        <div class="section-title"><h2>最近订单</h2><p id="live-order-summary">买入与卖出尝试均保留</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>提交时间</th><th>方向</th><th>Mint</th><th>场所</th><th>尝试</th><th>请求数量</th><th>状态</th><th>签名 / 错误</th></tr></thead>
+          <tbody id="live-order-rows"></tbody>
+        </table></div>
+      </article>
+
+      <article class="card record-section">
+        <div class="section-title"><h2>最近策略判定</h2><p>包含未命中和风控拒绝，便于核对为什么没有开仓</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>事件时间</th><th>规则</th><th>执行状态</th><th>钱包 / Mint</th><th>阶段 / 市场</th><th>Smart 金额</th><th>前置 Buyers / NetFlow</th><th>事件延迟</th><th>拒绝原因</th></tr></thead>
+          <tbody id="live-decision-rows"></tbody>
+        </table></div>
+      </article>
+    </section>
+
     <section class="panel" role="tabpanel" id="health" hidden>
       <div class="grid health-grid" id="health-cards"></div>
     </section>
@@ -277,9 +351,33 @@
     const escapeHtml = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     const number = (value, digits = 0) => Number.isFinite(value) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value) : '—';
     const pct = (value, digits = 2) => Number.isFinite(value) ? `${value >= 0 ? '+' : ''}${number(value, digits)}%` : '—';
+    const rate = (value, digits = 1) => Number.isFinite(value) ? `${number(value, digits)}%` : '—';
     const age = ms => !Number.isFinite(ms) ? '—' : ms < 60000 ? `${number(ms/1000,0)}s` : `${number(ms/60000,1)}m`;
     const time = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+    const dateTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : '—';
     const tone = value => Number.isFinite(value) ? (value >= 0 ? 'positive' : 'negative') : 'muted';
+    const yesNo = value => value ? '开启' : '关闭';
+    const enabledPct = (value, prefix = '') => Number.isFinite(value) && value > 0 ? `${prefix}${rate(value)}` : '关闭';
+    const short = value => {
+      const text = String(value || '');
+      return text.length > 13 ? `${text.slice(0,6)}…${text.slice(-4)}` : text || '—';
+    };
+    function recordTone(status) {
+      if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED'].includes(status)) return 'good';
+      if (['OPENING','EXITING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN'].includes(status)) return 'warn';
+      if (String(status || '').includes('FAILED') || status === 'RISK_REJECTED') return 'bad';
+      return 'neutral';
+    }
+    const statusChip = status => `<span class="status-chip ${recordTone(status)}">${escapeHtml(status || '—')}</span>`;
+    const mintLink = mint => mint ? `<a class="mint" href="https://gmgn.ai/sol/token/${encodeURIComponent(mint)}" target="_blank" rel="noreferrer" title="${escapeHtml(mint)}">${escapeHtml(short(mint))}</a>` : '—';
+    const walletLink = wallet => wallet ? `<a class="mint" href="https://solscan.io/account/${encodeURIComponent(wallet)}" target="_blank" rel="noreferrer" title="${escapeHtml(wallet)}">${escapeHtml(short(wallet))}</a>` : '—';
+    function transactionLink(signature, label) {
+      if (!signature) return '';
+      const safe = escapeHtml(short(signature));
+      return String(signature).startsWith('DRY-')
+        ? `<span class="muted">${escapeHtml(label)} ${safe}</span>`
+        : `<a class="mint" href="https://solscan.io/tx/${encodeURIComponent(signature)}" target="_blank" rel="noreferrer">${escapeHtml(label)} ${safe}</a>`;
+    }
     async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
 
     const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -376,6 +474,100 @@
       document.querySelector('#wallet-cards').innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">Smart Wallet Label</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
+    function renderLiveTrading(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || { entry: runtime.rule || {}, exit: {}, risk: {}, execution: {} };
+      const entry = strategy.entry || {};
+      const exit = strategy.exit || {};
+      const risk = strategy.risk || {};
+      const execution = strategy.execution || {};
+      const stats = data.stats || {};
+      const mode = ['LIVE','DRY_RUN'].includes(runtime.mode) ? runtime.mode : 'DISABLED';
+      const modeClass = mode === 'LIVE' ? 'live' : mode === 'DRY_RUN' ? 'dry' : 'disabled';
+      const modeCopy = {
+        LIVE: ['真实交易已开启', '命中规则并通过风控后，将签名并发送真实链上交易。请持续关注紧急开关、失败订单和活动仓位。'],
+        DRY_RUN: ['模拟实盘运行中', '执行完整判定、风控、开仓和退出流程，但不会签名或发送真实链上交易。'],
+        DISABLED: ['实盘执行已关闭', '仅记录策略判定和完整研究数据，不会签名或发送链上交易。'],
+      }[mode];
+      const modeCard = document.querySelector('#live-mode-card');
+      modeCard.className = `card mode-card ${modeClass}`;
+      const badge = document.querySelector('#live-mode-badge');
+      badge.className = `mode-badge ${modeClass}`;
+      badge.textContent = mode;
+      document.querySelector('#live-mode-title').textContent = modeCopy[0];
+      document.querySelector('#live-mode-description').textContent = modeCopy[1];
+      document.querySelector('#live-runtime-strip').innerHTML = [
+        ['本次运行评估', number(runtime.evaluated)],
+        ['命中', number(runtime.matched)],
+        ['开仓', number(runtime.entries)],
+        ['平仓', number(runtime.exits)],
+        ['失败', number((runtime.entryFailures || 0) + (runtime.exitFailures || 0))],
+        ['紧急开关', runtime.killSwitchActive ? '<span class="negative">已触发</span>' : '<span class="positive">正常</span>'],
+      ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
+
+      document.querySelector('#live-strategy-expression').textContent = `OPEN + Bonding Curve + 金额 ≥${number(entry.minSmartOpenSol,2)} SOL + 买入前 Buyers ≥${number(entry.minPreBuyers)}`;
+      const wallets = data.monitoredWallets || [];
+      document.querySelector('#live-monitored-wallets').innerHTML = `<b>监控钱包 ${number(wallets.length)} 个</b><br>${wallets.length ? wallets.map(walletLink).join(' · ') : '未配置'}`;
+
+      const matchRate = stats.decisions > 0 ? stats.matched / stats.decisions * 100 : null;
+      const metrics = [
+        ['策略判定', stats.decisions, `命中率 ${rate(matchRate)}`],
+        ['规则命中', stats.matched, `规则拒绝 ${number(stats.rule_rejected)}`],
+        ['仓位记录', stats.positions, `活动 ${number(stats.active_positions)}`],
+        ['已关闭仓位', stats.closed_positions, `可计价 ${number(stats.priced_closed_positions)}`],
+        ['可计价胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
+        ['平均粗收益', pct(stats.average_gross_return_pct), '未扣滑点和费用'],
+        ['累计开仓规模', `${number(stats.deployed_sol,4)} SOL`, `平均持仓 ${age(stats.average_hold_ms)}`],
+        ['订单确认 / 失败', `${number(stats.confirmed_orders)} / ${number(stats.failed_orders)}`, `状态未知 ${number(stats.unknown_orders)}`],
+      ];
+      document.querySelector('#live-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+
+      const cards = [
+        ['买入条件', [
+          ['规则版本', strategy.ruleVersion || '—'], ['阶段', entry.phase || 'OPEN'], ['市场', entry.market || 'PUMP_BONDING_CURVE'],
+          ['Smart 金额', `≥ ${number(entry.minSmartOpenSol,2)} SOL`], ['买入前 Buyers', `≥ ${number(entry.minPreBuyers)}`],
+          ['前置窗口', `${number(entry.preBuyWindowMs)} ms`], ['最大事件延迟', `${number(entry.maxSignalAgeMs)} ms`], ['最大入场跳价', rate(entry.maxEntryPriceJumpPct)],
+        ]],
+        ['卖出策略', [
+          ['策略模式', exit.policy || '—'], ['跟随触发钱包 SELL', yesNo(exit.exitOnTriggerWalletSell)], ['止损', enabledPct(exit.stopLossPct, '−')], ['止盈', enabledPct(exit.takeProfitPct, '+')],
+          ['移动止损', exit.trailingStopPct > 0 ? `盈利 ${rate(exit.trailingActivationPct)} 后回撤 ${rate(exit.trailingStopPct)}` : '关闭'], ['最短持仓', age(exit.minHoldMs)],
+          ['最大持仓兜底', age(exit.maxHoldMs)], ['退出重试', `${number(exit.exitRetryCount)} 次`], ['重试间隔', `${number(exit.exitRetryDelayMs)} ms`],
+        ]],
+        ['仓位与风控', [
+          ['单笔仓位', `${number(risk.positionSizeSol,4)} SOL`], ['最大并发', `${number(risk.maxConcurrentPositions)} 仓`],
+          ['每日开仓上限', `${number(risk.maxDailySpendSol,4)} SOL`], ['钱包最低保留', `${number(risk.minWalletReserveSol,4)} SOL`],
+          ['同 Mint 冷却', age(risk.mintCooldownMs)], ['当前活动仓位', number(runtime.activePositions)],
+          ['紧急开关', runtime.killSwitchActive ? '已禁止开仓' : '正常'], ['当前模式', mode],
+        ]],
+        ['链上执行', [
+          ['允许滑点', rate(execution.slippagePct)], ['Compute Unit', number(execution.computeUnitLimit)],
+          ['优先费', `${number(execution.priorityFeeMicroLamports)} μLamports`], ['确认级别', execution.commitment || '—'],
+          ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
+        ]],
+      ];
+      document.querySelector('#live-strategy-cards').innerHTML = cards.map(([title,rows]) => `<article class="card strategy-card"><h3>${title}</h3><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${escapeHtml(value)}</b></div>`).join('')}</div></article>`).join('');
+
+      const positions = data.positions || [];
+      document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
+        const signatures = [transactionLink(row.entry_signature, '买'), transactionLink(row.exit_signature, '卖')].filter(Boolean).join('<br>') || '—';
+        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br>${walletLink(row.trigger_wallet)}</td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${pct(row.gross_return_pct)}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(row.exit_reason || row.entry_error || row.exit_error || '—')}</td><td>${signatures}</td></tr>`;
+      }).join('') : '<tr><td colspan="10" class="empty">暂无仓位记录；策略判定仍会继续采集</td></tr>';
+
+      document.querySelector('#live-order-summary').textContent = `共 ${number(stats.orders)} 笔 · 确认 ${number(stats.confirmed_orders)} · 失败 ${number(stats.failed_orders)} · 状态未知 ${number(stats.unknown_orders)}`;
+      const orders = data.orders || [];
+      document.querySelector('#live-order-rows').innerHTML = orders.length ? orders.map(row => {
+        const requested = row.side === 'BUY' ? `${number(row.requested_sol,4)} SOL` : row.requested_token_raw ? `${escapeHtml(row.requested_token_raw)} raw` : '—';
+        const detail = transactionLink(row.signature, 'Tx') || `<span class="${row.error ? 'error' : 'muted'}">${escapeHtml(row.error || '—')}</span>`;
+        return `<tr><td>${dateTime(row.submitted_at || row.created_at)}</td><td>${statusChip(row.side)}</td><td>${mintLink(row.mint)}</td><td>${escapeHtml(row.venue || '—')}</td><td>${number(row.attempt)}</td><td>${requested}</td><td>${statusChip(row.status)}</td><td class="wrap-cell">${detail}</td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">暂无订单记录</td></tr>';
+
+      const decisions = data.decisions || [];
+      document.querySelector('#live-decision-rows').innerHTML = decisions.length ? decisions.map(row => {
+        const rejection = (row.rejection_reasons || []).join(', ') || row.action_reason || '—';
+        return `<tr><td>${dateTime(row.timestamp_ms)}</td><td>${statusChip(row.rule_matched ? 'MATCHED' : 'NOT_MATCHED')}</td><td>${statusChip(row.action_status)}</td><td>${walletLink(row.wallet)}<br>${mintLink(row.mint)}</td><td>${escapeHtml(row.position_phase || '—')}<br><span class="table-note">${escapeHtml(row.market || '—')}</span></td><td>${number(row.smart_sol,4)} SOL</td><td>${number(row.prebuy_buyers)} / ${number(row.prebuy_net_flow_sol,4)} SOL</td><td>${number(row.event_age_ms)} ms</td><td class="wrap-cell">${escapeHtml(rejection)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；Smart Wallet OPEN 事件到达后会自动记录</td></tr>';
+    }
+
     function renderHealth(data) {
       const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${region.active ? '当前' : '备用'}`).join('<br>') || '未连接';
       const trading = data.trading || { mode: 'DISABLED', activePositions: 0 };
@@ -414,6 +606,7 @@
         json('/api/signals?limit=200').then(renderSignals),
         json('/api/smart-wallets').then(renderWallets),
         json('/api/signal-repetition').then(renderSignalQuality),
+        json('/api/live-trading?positionLimit=100&orderLimit=100&decisionLimit=100').then(renderLiveTrading),
         json('/api/health').then(renderHealth),
       ]);
     }

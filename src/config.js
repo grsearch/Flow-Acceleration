@@ -168,6 +168,7 @@ const config = {
       min: 0,
     }),
     commitment: process.env.FLOW_LIVE_COMMITMENT || 'confirmed',
+    exitStrategy: process.env.FLOW_LIVE_EXIT_STRATEGY || 'SMART_WALLET_SELL_60S',
     stopLossPct: numberEnv('FLOW_LIVE_STOP_LOSS_PCT', 12, { min: 0 }),
     takeProfitPct: numberEnv('FLOW_LIVE_TAKE_PROFIT_PCT', 20, { min: 0 }),
     trailingActivationPct: numberEnv('FLOW_LIVE_TRAILING_ACTIVATION_PCT', 8, { min: 0 }),
@@ -206,6 +207,9 @@ function validateConfig() {
   }
   if (config.strategy.signalWindowMs * 3 > config.strategy.bufferMs) {
     errors.push('FLOW_BUFFER_MS must cover all three signal windows');
+  }
+  if (!['SMART_WALLET_SELL_60S', 'DYNAMIC'].includes(config.liveTrading.exitStrategy)) {
+    errors.push('FLOW_LIVE_EXIT_STRATEGY must be SMART_WALLET_SELL_60S or DYNAMIC');
   }
   if (config.liveTrading.enabled && !config.liveTrading.dryRun) {
     if (!config.liveTrading.rpcUrl) errors.push('FLOW_RPC_URL is required for live trading');

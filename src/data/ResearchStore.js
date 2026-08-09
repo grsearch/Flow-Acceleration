@@ -341,6 +341,8 @@ class ResearchStore {
       );
       CREATE INDEX IF NOT EXISTS idx_live_orders_position
         ON live_orders(position_id, id);
+      CREATE INDEX IF NOT EXISTS idx_live_orders_created_id
+        ON live_orders(created_at DESC, id DESC);
     `);
 
     const signalColumns = new Set(
@@ -1270,6 +1272,94 @@ class ResearchStore {
       updatedAt: now,
     });
     return Number(result.lastInsertRowid);
+  }
+
+  liveTradingDashboard({ positionLimit = 100, orderLimit = 100, decisionLimit = 100 } = {}) {
+    const safeLimit = (value) => Math.min(500, Math.max(1, Math.trunc(Number(value) || 100)));
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE
+          WHEN opened_at IS NOT NULL AND closed_at IS NOT NULL THEN closed_at - opened_at
+          ELSE NULL
+        END AS hold_ms,
+        CASE
+          WHEN entry_price > 0 AND exit_price > 0 THEN ((exit_price / entry_price) - 1) * 100
+          ELSE NULL
+        END AS gross_return_pct
+      FROM live_positions
+      ORDER BY
+        CASE WHEN status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED') THEN 0 ELSE 1 END,
+        updated_at DESC,
+        id DESC
+      LIMIT ?
+    `).all(safeLimit(positionLimit));
+    const orders = this.db.prepare(`
+      SELECT * FROM live_orders
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(safeLimit(orderLimit));
+    const decisions = this.db.prepare(`
+      SELECT * FROM smart_open_decisions
+      ORDER BY timestamp_ms DESC, id DESC
+      LIMIT ?
+    `).all(safeLimit(decisionLimit)).map((row) => {
+      let rejectionReasons = [];
+      try {
+        const parsed = JSON.parse(row.rejection_reasons_json || '[]');
+        if (Array.isArray(parsed)) rejectionReasons = parsed;
+      } catch (_) {
+        rejectionReasons = ['INVALID_REJECTION_REASONS'];
+      }
+      return { ...row, rejection_reasons: rejectionReasons };
+    });
+    const decisionStats = this.db.prepare(`
+      SELECT
+        COUNT(*) AS decisions,
+        COALESCE(SUM(rule_matched = 1), 0) AS matched,
+        COALESCE(SUM(action_status = 'RULE_REJECTED'), 0) AS rule_rejected,
+        COALESCE(SUM(action_status = 'MATCHED_DISABLED'), 0) AS matched_disabled,
+        COALESCE(SUM(action_status = 'RISK_REJECTED'), 0) AS risk_rejected
+      FROM smart_open_decisions
+    `).get();
+    const positionStats = this.db.prepare(`
+      SELECT
+        COUNT(*) AS positions,
+        COALESCE(SUM(status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED')), 0) AS active_positions,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+        COALESCE(SUM(status = 'ENTRY_FAILED'), 0) AS entry_failed_positions,
+        COALESCE(SUM(status = 'EXIT_FAILED'), 0) AS exit_failed_positions,
+        COALESCE(SUM(CASE WHEN opened_at IS NOT NULL THEN position_sol ELSE 0 END), 0) AS deployed_sol,
+        AVG(CASE WHEN opened_at IS NOT NULL AND closed_at IS NOT NULL THEN closed_at - opened_at END) AS average_hold_ms,
+        COALESCE(SUM(status = 'CLOSED' AND entry_price > 0 AND exit_price > 0), 0) AS priced_closed_positions,
+        COALESCE(SUM(status = 'CLOSED' AND entry_price > 0 AND exit_price > entry_price), 0) AS wins,
+        AVG(CASE
+          WHEN status = 'CLOSED' AND entry_price > 0 AND exit_price > 0
+            THEN ((exit_price / entry_price) - 1) * 100
+        END) AS average_gross_return_pct
+      FROM live_positions
+    `).get();
+    const orderStats = this.db.prepare(`
+      SELECT
+        COUNT(*) AS orders,
+        COALESCE(SUM(status IN ('CONFIRMED', 'ALREADY_EMPTY')), 0) AS confirmed_orders,
+        COALESCE(SUM(status = 'FAILED'), 0) AS failed_orders,
+        COALESCE(SUM(status = 'CONFIRMATION_UNKNOWN'), 0) AS unknown_orders
+      FROM live_orders
+    `).get();
+    const pricedClosed = Number(positionStats.priced_closed_positions) || 0;
+    const wins = Number(positionStats.wins) || 0;
+
+    return {
+      stats: {
+        ...decisionStats,
+        ...positionStats,
+        ...orderStats,
+        win_rate_pct: pricedClosed > 0 ? (wins / pricedClosed) * 100 : null,
+      },
+      positions,
+      orders,
+      decisions,
+    };
   }
 
   overview(now = Date.now(), candidateCount = 0) {

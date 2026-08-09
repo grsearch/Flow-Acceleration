@@ -26,6 +26,11 @@ function managerConfig(overrides = {}) {
     minWalletReserveSol: 0.05,
     mintCooldownMs: 600_000,
     maxEntryPriceJumpPct: 10,
+    slippagePct: 5,
+    computeUnitLimit: 250_000,
+    priorityFeeMicroLamports: 20_000,
+    commitment: 'confirmed',
+    exitStrategy: 'SMART_WALLET_SELL_60S',
     stopLossPct: 12,
     takeProfitPct: 20,
     trailingActivationPct: 8,
@@ -134,6 +139,14 @@ async function main() {
     'OPEN',
   );
 
+  now = 10_050;
+  manager.observeTrade({
+    mint: 'smart-mint', market: 'PUMP_BONDING_CURVE', price: 0.001, timestampMs: now,
+  });
+  await Promise.allSettled([...manager.pending]);
+  assert.strictEqual(calls.sell, 0, 'price stop must be disabled by SMART_WALLET_SELL_60S');
+  assert.strictEqual(store.activeLivePositions().length, 1);
+
   now = 10_100;
   const add = store.recordSmartWalletEvent(smartTrade({
     timestampMs: now, signature: 'smart-add', tokenAmount: 10,
@@ -142,7 +155,7 @@ async function main() {
   manager.onSmartWalletEvent(add, { ...context, receivedAtMs: now });
   assert.strictEqual(calls.buy, 1, 'ADD must never open another live position');
 
-  now = 11_000;
+  now = 10_200;
   const close = store.recordSmartWalletEvent(smartTrade({
     side: 'SELL', timestampMs: now, signature: 'smart-close', tokenAmount: 110,
   }));
@@ -160,6 +173,27 @@ async function main() {
     3,
     'OPEN, ADD and CLOSE decisions must all be retained',
   );
+  const dashboard = store.liveTradingDashboard();
+  assert.strictEqual(dashboard.stats.decisions, 3);
+  assert.strictEqual(dashboard.stats.matched, 1);
+  assert.strictEqual(dashboard.stats.positions, 1);
+  assert.strictEqual(dashboard.stats.closed_positions, 1);
+  assert.strictEqual(dashboard.stats.confirmed_orders, 2);
+  assert.strictEqual(dashboard.positions[0].status, 'CLOSED');
+  assert.strictEqual(dashboard.orders.length, 2);
+  assert.ok(Array.isArray(dashboard.decisions[0].rejection_reasons));
+  const health = manager.health();
+  assert.strictEqual(health.strategy.ruleVersion, 'smart-open-curve-v1');
+  assert.strictEqual(health.strategy.entry.minSmartOpenSol, 1);
+  assert.strictEqual(health.strategy.exit.maxHoldMs, 60_000);
+  assert.strictEqual(health.strategy.exit.policy, 'SMART_WALLET_SELL_60S');
+  assert.strictEqual(health.strategy.exit.exitOnTriggerWalletSell, true);
+  assert.strictEqual(health.strategy.exit.minHoldMs, 0);
+  assert.strictEqual(health.strategy.exit.stopLossPct, 0);
+  assert.strictEqual(health.strategy.exit.takeProfitPct, 0);
+  assert.strictEqual(health.strategy.exit.trailingStopPct, 0);
+  assert.strictEqual(health.strategy.risk.positionSizeSol, 0.05);
+  assert.strictEqual(health.strategy.execution.slippagePct, 5);
 
   await manager.stop();
   store.close();

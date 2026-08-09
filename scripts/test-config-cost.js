@@ -37,5 +37,6 @@ assert.strictEqual(config.liveTrading.dryRun, true);
 assert.strictEqual(config.liveTrading.minSmartOpenSol, 1);
 assert.strictEqual(config.liveTrading.minPreBuyers, 2);
 assert.strictEqual(config.liveTrading.preBuyWindowMs, 2_000);
+assert.strictEqual(config.liveTrading.exitStrategy, 'SMART_WALLET_SELL_60S');
 
 console.log('test-config-cost: ok');
