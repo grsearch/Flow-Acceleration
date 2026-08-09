@@ -540,9 +540,9 @@
           ['紧急开关', runtime.killSwitchActive ? '已禁止开仓' : '正常'], ['当前模式', mode],
         ]],
         ['链上执行', [
-          ['允许滑点', rate(execution.slippagePct)], ['Compute Unit', number(execution.computeUnitLimit)],
+          ['买入滑点', rate(execution.buySlippagePct)], ['卖出滑点', rate(execution.sellSlippagePct)], ['Compute Unit', number(execution.computeUnitLimit)],
           ['优先费', `${number(execution.priorityFeeMicroLamports)} μLamports`], ['确认级别', execution.commitment || '—'],
-          ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
+          ['买入状态核对', `${number(execution.entryReconcileCount)} × ${number(execution.entryReconcileDelayMs)} ms`], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
         ]],
       ];
       document.querySelector('#live-strategy-cards').innerHTML = cards.map(([title,rows]) => `<article class="card strategy-card"><h3>${title}</h3><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${escapeHtml(value)}</b></div>`).join('')}</div></article>`).join('');

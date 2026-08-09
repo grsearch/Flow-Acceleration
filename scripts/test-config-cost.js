@@ -38,5 +38,8 @@ assert.strictEqual(config.liveTrading.minSmartOpenSol, 1);
 assert.strictEqual(config.liveTrading.minPreBuyers, 2);
 assert.strictEqual(config.liveTrading.preBuyWindowMs, 2_000);
 assert.strictEqual(config.liveTrading.exitStrategy, 'SMART_WALLET_SELL_60S');
+assert.strictEqual(config.liveTrading.buySlippagePct, 10);
+assert.strictEqual(config.liveTrading.sellSlippagePct, 15);
+assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
 
 console.log('test-config-cost: ok');

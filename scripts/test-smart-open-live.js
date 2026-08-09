@@ -3,6 +3,10 @@
 const assert = require('assert');
 const FlowAccelerationEngine = require('../src/core/FlowAccelerationEngine');
 const LiveTradingManager = require('../src/core/LiveTradingManager');
+const {
+  classifyBuyReconciliation,
+  confirmedTransactionFailure,
+} = require('../src/core/PumpTradeExecutor');
 const { evaluateSmartOpen, REJECT } = require('../src/core/SmartOpenStrategy');
 const { ResearchStore } = require('../src/data/ResearchStore');
 
@@ -26,7 +30,8 @@ function managerConfig(overrides = {}) {
     minWalletReserveSol: 0.05,
     mintCooldownMs: 600_000,
     maxEntryPriceJumpPct: 10,
-    slippagePct: 5,
+    buySlippagePct: 10,
+    sellSlippagePct: 15,
     computeUnitLimit: 250_000,
     priorityFeeMicroLamports: 20_000,
     commitment: 'confirmed',
@@ -40,6 +45,8 @@ function managerConfig(overrides = {}) {
     exitOnTriggerWalletSell: true,
     exitRetryCount: 1,
     exitRetryDelayMs: 1,
+    entryReconcileCount: 1,
+    entryReconcileDelayMs: 1,
     killSwitchFile: '',
     ...overrides,
   };
@@ -65,6 +72,27 @@ function smartTrade({ side = 'BUY', timestampMs, signature, tokenAmount = 100 })
 }
 
 async function main() {
+  const confirmedFailure = confirmedTransactionFailure(
+    'failed-chain-signature',
+    { InstructionError: [3, { Custom: 6002 }] },
+  );
+  assert.strictEqual(confirmedFailure.code, 'TRANSACTION_FAILED');
+  assert.strictEqual(confirmedFailure.signature, 'failed-chain-signature');
+  assert.strictEqual(confirmedFailure.transactionFailed, true);
+  assert.strictEqual(classifyBuyReconciliation({
+    err: { InstructionError: [3, { Custom: 6002 }] },
+    confirmationStatus: 'confirmed',
+  }, 0n).state, 'FAILED');
+  assert.strictEqual(classifyBuyReconciliation({
+    err: null,
+    confirmationStatus: 'confirmed',
+  }, 500n).state, 'CONFIRMED');
+  assert.strictEqual(classifyBuyReconciliation({
+    err: null,
+    confirmationStatus: 'finalized',
+  }, 0n).state, 'EMPTY');
+  assert.strictEqual(classifyBuyReconciliation(null, 0n).state, 'UNKNOWN');
+
   const exact = evaluateSmartOpen({
     positionPhase: 'OPEN', market: 'PUMP_BONDING_CURVE', solAmount: 1,
     timestampMs: 10_000,
@@ -193,10 +221,109 @@ async function main() {
   assert.strictEqual(health.strategy.exit.takeProfitPct, 0);
   assert.strictEqual(health.strategy.exit.trailingStopPct, 0);
   assert.strictEqual(health.strategy.risk.positionSizeSol, 0.05);
-  assert.strictEqual(health.strategy.execution.slippagePct, 5);
+  assert.strictEqual(health.strategy.execution.buySlippagePct, 10);
+  assert.strictEqual(health.strategy.execution.sellSlippagePct, 15);
 
   await manager.stop();
   store.close();
+
+  const failedStore = makeStore();
+  let failedNow = 20_000;
+  let failedSellCalls = 0;
+  const failedManager = new LiveTradingManager({
+    config: managerConfig(),
+    store: failedStore,
+    now: () => failedNow,
+    executor: {
+      async buy() {
+        throw confirmedTransactionFailure(
+          'too-much-sol-signature',
+          { InstructionError: [3, { Custom: 6002 }] },
+        );
+      },
+      async sell() { failedSellCalls += 1; },
+      async reconcileBuy() { throw new Error('deterministic failure must not be reconciled'); },
+    },
+  });
+  failedManager.start();
+  const failedOpen = failedStore.recordSmartWalletEvent(smartTrade({
+    timestampMs: failedNow,
+    signature: 'failed-smart-open',
+  }));
+  failedManager.onSmartWalletEvent(failedOpen, { ...context, receivedAtMs: failedNow });
+  await failedManager.entryQueue;
+  const failedPosition = failedStore.db.prepare('SELECT * FROM live_positions').get();
+  const failedOrder = failedStore.db.prepare('SELECT * FROM live_orders').get();
+  assert.strictEqual(failedPosition.status, 'ENTRY_FAILED');
+  assert.strictEqual(failedPosition.exit_reason, 'ENTRY_TRANSACTION_FAILED');
+  assert.strictEqual(failedOrder.status, 'FAILED');
+  assert.strictEqual(failedOrder.signature, 'too-much-sol-signature');
+  assert.strictEqual(failedSellCalls, 0, 'confirmed chain failure must never trigger a sell');
+  assert.strictEqual(failedStore.activeLivePositions().length, 0);
+  await failedManager.stop();
+  failedStore.close();
+
+  const unknownStore = makeStore();
+  let unknownNow = 30_000;
+  let unknownSellCalls = 0;
+  const unknownManager = new LiveTradingManager({
+    config: managerConfig(),
+    store: unknownStore,
+    now: () => unknownNow,
+    executor: {
+      async buy() {
+        const error = new Error('RPC confirmation timed out');
+        error.signature = 'unknown-buy-signature';
+        throw error;
+      },
+      async reconcileBuy() { return { state: 'UNKNOWN', tokenAmountRaw: '0' }; },
+      async sell() { unknownSellCalls += 1; },
+    },
+  });
+  unknownManager.start();
+  const unknownOpen = unknownStore.recordSmartWalletEvent(smartTrade({
+    timestampMs: unknownNow,
+    signature: 'unknown-smart-open',
+  }));
+  unknownManager.onSmartWalletEvent(unknownOpen, { ...context, receivedAtMs: unknownNow });
+  await unknownManager.entryQueue;
+  assert.strictEqual(
+    unknownStore.db.prepare('SELECT status FROM live_positions').get().status,
+    'EXIT_FAILED',
+  );
+  assert.strictEqual(
+    unknownStore.db.prepare('SELECT COUNT(*) AS n FROM live_orders').get().n,
+    1,
+    'unknown entry must not generate blind sell orders',
+  );
+  assert.strictEqual(unknownSellCalls, 0);
+  await unknownManager.stop();
+
+  unknownNow = 31_000;
+  const recoveryManager = new LiveTradingManager({
+    config: managerConfig(),
+    store: unknownStore,
+    now: () => unknownNow,
+    executor: {
+      async reconcileBuy() {
+        return { state: 'FAILED', error: 'Transaction failed on chain: Custom 6002' };
+      },
+      async sell() { unknownSellCalls += 1; },
+    },
+  });
+  recoveryManager.start();
+  await Promise.allSettled([...recoveryManager.pending]);
+  assert.strictEqual(
+    unknownStore.db.prepare('SELECT status FROM live_positions').get().status,
+    'ENTRY_FAILED',
+    'restart recovery should release a known-failed entry',
+  );
+  assert.strictEqual(unknownStore.db.prepare('SELECT status FROM live_orders').get().status, 'FAILED');
+  assert.strictEqual(unknownSellCalls, 0);
+  assert.strictEqual(unknownStore.activeLivePositions().length, 0);
+  await recoveryManager.stop();
+  unknownStore.close();
+
   console.log('test-smart-open-live: ok');
 }
 

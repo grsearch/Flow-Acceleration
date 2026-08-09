@@ -32,9 +32,14 @@ function restoredPosition(row) {
     tokenAmountRaw: row.token_amount_raw,
     entryMarket: row.entry_market,
     entryPrice: row.entry_price,
+    entrySignature: row.entry_signature,
+    entryError: row.entry_error,
     highestPrice: row.highest_price,
+    exitReason: row.exit_reason,
+    exitError: row.exit_error,
     openedAt: row.opened_at,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -57,6 +62,8 @@ class LiveTradingManager {
       riskRejected: 0,
       entries: 0,
       entryFailures: 0,
+      entryUnknown: 0,
+      entryRecoveries: 0,
       exits: 0,
       exitFailures: 0,
       lastActionAt: null,
@@ -70,6 +77,19 @@ class LiveTradingManager {
       this.positions.set(position.mint, position);
       if (position.mode === 'LIVE' && this.mode !== 'LIVE') {
         this.metrics.lastError = 'ACTIVE_LIVE_POSITION_REQUIRES_LIVE_MODE';
+        continue;
+      }
+      const unresolvedEntry = position.mode === 'LIVE'
+        && !position.tokenAmountRaw
+        && (position.status === 'OPENING'
+          || position.exitReason === 'ENTRY_CONFIRMATION_UNKNOWN');
+      if (unresolvedEntry && this.mode === 'LIVE') {
+        const order = this.store.latestLiveOrderForPositionSide(position.id, 'BUY');
+        const recovery = this._recoverUnknownEntry(position, {
+          orderId: order?.id || null,
+          initialError: position.entryError || position.exitError,
+        });
+        this._track(recovery);
         continue;
       }
       if (position.status === 'OPENING' || position.status === 'EXITING') {
@@ -124,7 +144,10 @@ class LiveTradingManager {
           mintCooldownMs: this.config.mintCooldownMs,
         },
         execution: {
-          slippagePct: this.config.slippagePct,
+          buySlippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
+          sellSlippagePct: this.config.sellSlippagePct ?? this.config.slippagePct,
+          entryReconcileCount: this.config.entryReconcileCount,
+          entryReconcileDelayMs: this.config.entryReconcileDelayMs,
           computeUnitLimit: this.config.computeUnitLimit,
           priorityFeeMicroLamports: this.config.priorityFeeMicroLamports,
           commitment: this.config.commitment,
@@ -345,8 +368,9 @@ class LiveTradingManager {
       this._scheduleMaxHold(position);
     } catch (error) {
       const failedAt = this.now();
-      const confirmationUnknown = Boolean(error.signature);
-      this.store.recordLiveOrder({
+      const transactionFailed = error.transactionFailed || error.code === 'TRANSACTION_FAILED';
+      const confirmationUnknown = Boolean(error.signature) && !transactionFailed;
+      const orderId = this.store.recordLiveOrder({
         positionId: position.id,
         decisionId: decision.id,
         mint: position.mint,
@@ -362,6 +386,9 @@ class LiveTradingManager {
       if (confirmationUnknown) {
         position.status = 'EXIT_FAILED';
         position.tokenAmountRaw = null;
+        position.entrySignature = error.signature;
+        position.entryError = errorText(error);
+        position.exitReason = 'ENTRY_CONFIRMATION_UNKNOWN';
         this.store.updateLivePosition(position.id, {
           status: 'EXIT_FAILED',
           entrySignature: error.signature,
@@ -373,15 +400,16 @@ class LiveTradingManager {
           'ENTRY_CONFIRMATION_UNKNOWN',
           errorText(error),
         );
-        this.metrics.entryFailures += 1;
         this.metrics.lastActionAt = failedAt;
         this._rememberError(error);
-        this._requestExit(position, 'ENTRY_CONFIRMATION_UNKNOWN', null);
+        await this._recoverUnknownEntry(position, { orderId, initialError: error });
         return;
       }
       this.store.updateLivePosition(position.id, {
         status: 'ENTRY_FAILED',
+        entrySignature: error.signature,
         entryError: errorText(error),
+        exitReason: transactionFailed ? 'ENTRY_TRANSACTION_FAILED' : 'ENTRY_REJECTED',
       });
       this.store.updateSmartOpenDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
       this.positions.delete(position.mint);
@@ -389,6 +417,144 @@ class LiveTradingManager {
       this.metrics.lastActionAt = failedAt;
       this._rememberError(error);
     }
+  }
+
+  async _recoverUnknownEntry(position, { orderId = null, initialError = null } = {}) {
+    const attempts = Math.max(1, Number(this.config.entryReconcileCount) || 5);
+    const delayMs = Math.max(100, Number(this.config.entryReconcileDelayMs) || 1_000);
+    let result = { state: 'UNKNOWN' };
+    let lastError = initialError;
+
+    if (!this.executor || typeof this.executor.reconcileBuy !== 'function') {
+      lastError = new Error('Executor cannot reconcile an unknown buy transaction');
+    } else {
+      for (let attempt = 1; attempt <= attempts && !this.stopping; attempt += 1) {
+        try {
+          result = await this.executor.reconcileBuy({
+            mint: position.mint,
+            signature: position.entrySignature || null,
+          });
+        } catch (error) {
+          lastError = error;
+          result = { state: 'UNKNOWN' };
+        }
+        if (result?.state && result.state !== 'UNKNOWN') break;
+        if (attempt < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    }
+
+    const reconciledAt = this.now();
+    const signature = position.entrySignature || null;
+    if (result.state === 'FAILED') {
+      const failure = result.error || errorText(lastError || initialError || 'Transaction failed');
+      if (orderId) this.store.updateLiveOrder(orderId, { status: 'FAILED', error: failure });
+      position.status = 'ENTRY_FAILED';
+      position.entryError = failure;
+      position.exitReason = 'ENTRY_TRANSACTION_FAILED';
+      this.store.updateLivePosition(position.id, {
+        status: 'ENTRY_FAILED',
+        entrySignature: signature,
+        entryError: failure,
+        exitReason: 'ENTRY_TRANSACTION_FAILED',
+        exitError: null,
+      });
+      this.store.updateSmartOpenDecision(position.decisionId, 'ENTRY_FAILED', failure);
+      this.positions.delete(position.mint);
+      this.metrics.entryFailures += 1;
+      this.metrics.lastActionAt = reconciledAt;
+      return 'FAILED';
+    }
+
+    if (result.state === 'EMPTY') {
+      const reason = result.error || 'Buy confirmed without a token balance';
+      if (orderId) {
+        this.store.updateLiveOrder(orderId, {
+          status: 'CONFIRMED',
+          requestedTokenRaw: '0',
+          error: reason,
+          confirmedAt: reconciledAt,
+        });
+      }
+      position.status = 'CLOSED';
+      position.exitReason = 'ENTRY_CONFIRMED_EMPTY';
+      this.store.updateLivePosition(position.id, {
+        status: 'CLOSED',
+        tokenAmountRaw: '0',
+        entrySignature: signature,
+        entryError: reason,
+        exitReason: 'ENTRY_CONFIRMED_EMPTY',
+        closedAt: reconciledAt,
+      });
+      this.store.updateSmartOpenDecision(position.decisionId, 'CLOSED', reason);
+      this.positions.delete(position.mint);
+      this.metrics.entryRecoveries += 1;
+      this.metrics.lastActionAt = reconciledAt;
+      return 'EMPTY';
+    }
+
+    if (result.state === 'CONFIRMED' && result.tokenAmountRaw !== '0') {
+      const openedAt = position.openedAt || position.createdAt || reconciledAt;
+      if (orderId) {
+        this.store.updateLiveOrder(orderId, {
+          status: 'CONFIRMED',
+          requestedTokenRaw: result.tokenAmountRaw,
+          error: null,
+          confirmedAt: reconciledAt,
+        });
+      }
+      position.status = 'OPEN';
+      position.tokenAmountRaw = result.tokenAmountRaw;
+      position.openedAt = openedAt;
+      position.exitReason = 'ENTRY_RECONCILED';
+      this.store.updateLivePosition(position.id, {
+        status: 'OPEN',
+        tokenAmountRaw: result.tokenAmountRaw,
+        entrySignature: signature,
+        entryError: null,
+        exitReason: 'ENTRY_RECONCILED',
+        exitError: null,
+        openedAt,
+      });
+      this.store.updateSmartOpenDecision(position.decisionId, 'OPEN', 'ENTRY_RECONCILED');
+      this.metrics.entries += 1;
+      this.metrics.entryRecoveries += 1;
+      this.metrics.lastActionAt = reconciledAt;
+      if (reconciledAt - openedAt >= SMART_SELL_MAX_HOLD_MS) {
+        this._requestExit(position, 'ENTRY_RECONCILED_MAX_HOLD', null);
+      } else {
+        this._scheduleMaxHold(position);
+      }
+      return 'CONFIRMED';
+    }
+
+    const unresolved = errorText(lastError || initialError || 'Transaction status is still unknown');
+    if (orderId) {
+      this.store.updateLiveOrder(orderId, {
+        status: 'CONFIRMATION_UNKNOWN',
+        error: unresolved,
+      });
+    }
+    position.status = 'EXIT_FAILED';
+    position.entryError = unresolved;
+    position.exitReason = 'ENTRY_CONFIRMATION_UNKNOWN';
+    this.store.updateLivePosition(position.id, {
+      status: 'EXIT_FAILED',
+      entrySignature: signature,
+      entryError: unresolved,
+      exitReason: 'ENTRY_CONFIRMATION_UNKNOWN',
+      exitError: unresolved,
+    });
+    this.store.updateSmartOpenDecision(
+      position.decisionId,
+      'ENTRY_CONFIRMATION_UNKNOWN',
+      unresolved,
+    );
+    this.metrics.entryUnknown += 1;
+    this.metrics.lastActionAt = reconciledAt;
+    this.metrics.lastError = unresolved;
+    return 'UNKNOWN';
   }
 
   _considerSmartExit(event) {

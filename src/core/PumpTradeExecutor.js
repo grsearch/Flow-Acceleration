@@ -47,6 +47,49 @@ function errorWithCode(message, code) {
   return error;
 }
 
+function confirmedTransactionFailure(signature, transactionError) {
+  const error = errorWithCode(
+    `Transaction failed on chain: ${JSON.stringify(transactionError)}`,
+    'TRANSACTION_FAILED',
+  );
+  error.signature = signature;
+  error.transactionFailed = true;
+  error.transactionError = transactionError;
+  return error;
+}
+
+function classifyBuyReconciliation(status, tokenBalanceRaw) {
+  const tokenBalance = BigInt(tokenBalanceRaw || 0);
+  if (tokenBalance > 0n) {
+    return {
+      state: 'CONFIRMED',
+      tokenAmountRaw: tokenBalance.toString(),
+      confirmationStatus: status?.confirmationStatus || null,
+    };
+  }
+  if (status?.err) {
+    return {
+      state: 'FAILED',
+      tokenAmountRaw: '0',
+      confirmationStatus: status.confirmationStatus || null,
+      error: `Transaction failed on chain: ${JSON.stringify(status.err)}`,
+    };
+  }
+  if (status && ['confirmed', 'finalized'].includes(status.confirmationStatus)) {
+    return {
+      state: 'EMPTY',
+      tokenAmountRaw: '0',
+      confirmationStatus: status.confirmationStatus,
+      error: 'Buy transaction confirmed but the trading wallet has no token balance',
+    };
+  }
+  return {
+    state: 'UNKNOWN',
+    tokenAmountRaw: '0',
+    confirmationStatus: status?.confirmationStatus || null,
+  };
+}
+
 class PumpTradeExecutor {
   constructor(config) {
     this.config = config;
@@ -143,13 +186,26 @@ class PumpTradeExecutor {
         lastValidBlockHeight: latest.lastValidBlockHeight,
       }, this.config.commitment);
       if (confirmation.value.err) {
-        throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+        throw confirmedTransactionFailure(signature, confirmation.value.err);
       }
       return signature;
     } catch (error) {
       if (signature) error.signature = signature;
       throw error;
     }
+  }
+
+  async reconcileBuy({ mint: mintValue, signature = null }) {
+    const mint = new PublicKey(mintValue);
+    const tokenProgram = await this._tokenProgram(mint);
+    const [statusResponse, tokenBalance] = await Promise.all([
+      signature
+        ? this.connection.getSignatureStatuses([signature], { searchTransactionHistory: true })
+        : Promise.resolve({ value: [null] }),
+      this._tokenBalanceRaw(mint, tokenProgram),
+    ]);
+    const status = statusResponse?.value?.[0] || null;
+    return classifyBuyReconciliation(status, tokenBalance);
   }
 
   async buy({ mint: mintValue, solAmount, referencePrice, maxPriceJumpPct }) {
@@ -208,7 +264,7 @@ class PumpTradeExecutor {
       user: this.signer.publicKey,
       amount,
       quoteAmount,
-      slippage: this.config.slippagePct,
+      slippage: this.config.buySlippagePct ?? this.config.slippagePct,
       tokenProgram,
       quoteTokenProgram: TOKEN_PROGRAM_ID,
     });
@@ -255,7 +311,7 @@ class PumpTradeExecutor {
         user: this.signer.publicKey,
         amount,
         quoteAmount,
-        slippage: this.config.slippagePct,
+        slippage: this.config.sellSlippagePct ?? this.config.slippagePct,
         tokenProgram,
         quoteTokenProgram: TOKEN_PROGRAM_ID,
       });
@@ -271,7 +327,7 @@ class PumpTradeExecutor {
     const instructions = await PUMP_AMM_SDK.sellBaseInput(
       state,
       amount,
-      this.config.slippagePct,
+      this.config.sellSlippagePct ?? this.config.slippagePct,
     );
     const signature = await this._send(instructions);
     return { signature, venue: 'PUMP_AMM', tokenAmountRaw: sellRaw.toString() };
@@ -280,5 +336,7 @@ class PumpTradeExecutor {
 
 module.exports = {
   PumpTradeExecutor,
+  classifyBuyReconciliation,
+  confirmedTransactionFailure,
   secretBytes,
 };

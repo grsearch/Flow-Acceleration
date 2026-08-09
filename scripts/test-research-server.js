@@ -102,6 +102,8 @@ async function main() {
     );
     assert.strictEqual(liveTrading.runtime.strategy.exit.maxHoldMs, 60_000);
     assert.strictEqual(liveTrading.runtime.strategy.exit.stopLossPct, 0);
+    assert.strictEqual(liveTrading.runtime.strategy.execution.buySlippagePct, 10);
+    assert.strictEqual(liveTrading.runtime.strategy.execution.sellSlippagePct, 15);
     assert.ok(Array.isArray(liveTrading.positions));
     assert.ok(Array.isArray(liveTrading.orders));
     assert.ok(Array.isArray(liveTrading.decisions));

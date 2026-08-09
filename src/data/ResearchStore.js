@@ -861,6 +861,21 @@ class ResearchStore {
           @submittedAt, @confirmedAt, @createdAt, @updatedAt
         )
       `),
+      updateLiveOrder: this.db.prepare(`
+        UPDATE live_orders SET
+          status = COALESCE(@status, status),
+          requested_token_raw = COALESCE(@requestedTokenRaw, requested_token_raw),
+          error = @error,
+          confirmed_at = COALESCE(@confirmedAt, confirmed_at),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      latestLiveOrderForPositionSide: this.db.prepare(`
+        SELECT * FROM live_orders
+        WHERE position_id = ? AND side = ?
+        ORDER BY id DESC
+        LIMIT 1
+      `),
     };
 
     this._writeTrades = this.db.transaction((trades) => {
@@ -1272,6 +1287,22 @@ class ResearchStore {
       updatedAt: now,
     });
     return Number(result.lastInsertRowid);
+  }
+
+  updateLiveOrder(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    this.stmts.updateLiveOrder.run({
+      id,
+      status: value('status'),
+      requestedTokenRaw: value('requestedTokenRaw'),
+      error: value('error'),
+      confirmedAt: value('confirmedAt'),
+      updatedAt: Date.now(),
+    });
+  }
+
+  latestLiveOrderForPositionSide(positionId, side) {
+    return this.stmts.latestLiveOrderForPositionSide.get(positionId, side) || null;
   }
 
   liveTradingDashboard({ positionLimit = 100, orderLimit = 100, decisionLimit = 100 } = {}) {

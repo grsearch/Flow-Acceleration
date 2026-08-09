@@ -209,9 +209,11 @@ AND 该笔买入发生前 2 秒独立 Buyers >= 2
 - `DRY_RUN`：设置 `FLOW_LIVE_TRADING_ENABLED=true`、保留 `FLOW_LIVE_DRY_RUN=true`，模拟仓位和动态退出，不签名。
 - `LIVE`：还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写 `FLOW_LIVE_POSITION_SOL`。
 
-实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。
+实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制，旧的单一 `FLOW_LIVE_SLIPPAGE_PCT` 不再使用。
 
 当前实盘卖出策略固定为 `SMART_WALLET_SELL_60S`：触发开仓的 Smart Wallet 首次出现 SELL 时立即跟随退出；如果60秒内没有 SELL，则在满60秒时强制退出。该策略不启用止损、止盈、移动止损或 Flow 衰减退出，旧环境中的对应阈值会被忽略。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
+
+买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时先查询签名历史和交易钱包的Token余额，只有确认持有Token后才恢复仓位。仍无法确认时保留 `ENTRY_CONFIRMATION_UNKNOWN` 阻止同 Mint 再开仓，但不会盲目发送卖出重试。服务重启时会自动重新核对这类历史卡仓。
 
 先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`smart_open_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
 

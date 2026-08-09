@@ -159,7 +159,8 @@ const config = {
       min: 0,
       max: 100,
     }),
-    slippagePct: numberEnv('FLOW_LIVE_SLIPPAGE_PCT', 5, { min: 0.1, max: 50 }),
+    buySlippagePct: numberEnv('FLOW_LIVE_BUY_SLIPPAGE_PCT', 10, { min: 0.1, max: 50 }),
+    sellSlippagePct: numberEnv('FLOW_LIVE_SELL_SLIPPAGE_PCT', 15, { min: 0.1, max: 50 }),
     computeUnitLimit: integerEnv('FLOW_LIVE_COMPUTE_UNIT_LIMIT', 250_000, {
       min: 100_000,
       max: 1_400_000,
@@ -178,6 +179,14 @@ const config = {
     exitOnTriggerWalletSell: booleanEnv('FLOW_LIVE_EXIT_ON_SMART_SELL', true),
     exitRetryCount: integerEnv('FLOW_LIVE_EXIT_RETRY_COUNT', 10, { min: 0, max: 60 }),
     exitRetryDelayMs: integerEnv('FLOW_LIVE_EXIT_RETRY_DELAY_MS', 1_000, { min: 100 }),
+    entryReconcileCount: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_COUNT', 5, {
+      min: 1,
+      max: 30,
+    }),
+    entryReconcileDelayMs: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_DELAY_MS', 1_000, {
+      min: 100,
+      max: 30_000,
+    }),
     killSwitchFile: process.env.FLOW_LIVE_KILL_SWITCH_FILE || './data/LIVE_TRADING_DISABLED',
   },
 
