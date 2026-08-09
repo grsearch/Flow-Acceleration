@@ -45,5 +45,11 @@ assert.strictEqual(config.liveTrading.readCommitment, 'processed');
 assert.strictEqual(config.liveTrading.confirmationCommitment, 'confirmed');
 assert.strictEqual(config.liveTrading.contextSlotRetryCount, 2);
 assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 25);
+assert.strictEqual(config.signalShadow.enabled, true);
+assert.strictEqual(config.signalShadow.minNetFlowW3Sol, 10);
+assert.strictEqual(config.signalShadow.minUniqueBuyersW3, 7);
+assert.strictEqual(config.signalShadow.trailingStopPct, 7.5);
+assert.strictEqual(config.signalShadow.positionSizeSol, 0.05);
+assert.ok(Math.abs(costBreakdown(config.signalShadow.costModel).deterministicCostPct - 3.22) < 1e-12);
 
 console.log('test-config-cost: ok');

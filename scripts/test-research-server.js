@@ -31,6 +31,8 @@ async function main() {
   assert.ok(dashboard.includes('id="live-position-rows"'));
   assert.ok(dashboard.includes('id="live-order-rows"'));
   assert.ok(dashboard.includes('id="live-decision-rows"'));
+  assert.ok(dashboard.includes('id="signal-shadow-position-rows"'));
+  assert.ok(dashboard.includes('id="signal-shadow-metrics"'));
   assert.ok(dashboard.includes('Current live strategy'));
 
   const runtimeConfig = {
@@ -80,6 +82,7 @@ async function main() {
       '/api/smart-wallets',
       '/api/signal-repetition',
       '/api/live-trading',
+      '/api/primary-signal-shadow',
       '/api/health',
     ];
 
@@ -108,6 +111,16 @@ async function main() {
     assert.ok(Array.isArray(liveTrading.orders));
     assert.ok(Array.isArray(liveTrading.decisions));
     assert.strictEqual(liveTrading.stats.decisions, 0);
+    const signalShadow = await (await fetch(
+      `http://127.0.0.1:${port}/api/primary-signal-shadow`,
+    )).json();
+    assert.strictEqual(signalShadow.runtime.mode, 'SHADOW');
+    assert.strictEqual(signalShadow.runtime.strategy.entry.minNetFlowW3Sol, 10);
+    assert.strictEqual(signalShadow.runtime.strategy.entry.minUniqueBuyersW3, 7);
+    assert.strictEqual(signalShadow.runtime.strategy.exit.trailingActivationPct, 0);
+    assert.strictEqual(signalShadow.runtime.strategy.exit.trailingStopPct, 7.5);
+    assert.strictEqual(signalShadow.runtime.strategy.risk.sendsTransactions, false);
+    assert.ok(Array.isArray(signalShadow.positions));
     const dynamicResponse = await fetch(
       `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&stopLossPct=3`
       + '&trailingStopPct=2&exitRetryCount=1&splitRatio=0.6'

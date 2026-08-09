@@ -6,6 +6,7 @@ const PumpFlowStream = require('./core/PumpFlowStream');
 const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
 const SignalLabeler = require('./core/SignalLabeler');
 const LiveTradingManager = require('./core/LiveTradingManager');
+const { PrimarySignalShadowManager } = require('./core/PrimarySignalShadowManager');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -32,6 +33,11 @@ function createRuntime(runtimeConfig = config) {
     executor,
   });
   trader.start();
+  const signalShadow = new PrimarySignalShadowManager({
+    config: runtimeConfig.signalShadow,
+    store,
+  });
+  signalShadow.start();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
@@ -39,6 +45,7 @@ function createRuntime(runtimeConfig = config) {
     stream,
     labeler,
     trader,
+    signalShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
@@ -66,12 +73,17 @@ function createRuntime(runtimeConfig = config) {
         + `→${signal.uniqueBuyersW3} `
         + `tx=${signal.buyTxW1}→${signal.buyTxW2}→${signal.buyTxW3}`,
       );
+      return saved;
     } catch (error) {
       console.error('[Signal] persistence failed:', error.message);
+      return null;
     }
   };
 
-  engine.on('signal', (signal) => persistSignal(signal, 'FLOW_ACCEL_SIGNAL'));
+  engine.on('signal', (signal) => {
+    const saved = persistSignal(signal, 'FLOW_ACCEL_SIGNAL');
+    if (saved) signalShadow.onSignal(saved);
+  });
   engine.on('shadowSignal', (signal) => persistSignal(signal, 'FLOW_SHADOW_SIGNAL'));
 
   stream.on('transaction', (transaction, context) => {
@@ -128,6 +140,7 @@ function createRuntime(runtimeConfig = config) {
           )
           : null;
         store.queueRawTrade(trade);
+        signalShadow.observeTrade(trade, { isSmartWallet: isSmartWalletTrade });
         engine.handleTrade(trade, store.getToken(trade.mint));
         labeler.onTrade(trade);
         trader.observeTrade(trade);
@@ -168,6 +181,7 @@ function createRuntime(runtimeConfig = config) {
       const now = Date.now();
       engine.cleanup(now);
       labeler.advanceTime(now);
+      signalShadow.advanceTime(now);
       const graduatedPending = labeler.pendingMints().filter((mint) => store.getToken(mint)?.graduated_at);
       stream.setAmmMints(graduatedPending);
     }, 1_000);
@@ -195,6 +209,7 @@ function createRuntime(runtimeConfig = config) {
     archiveTimer = null;
     await stream.stop();
     await trader.stop();
+    signalShadow.stop();
     await server.stop();
     store.close();
   }
@@ -207,10 +222,13 @@ function createRuntime(runtimeConfig = config) {
       stream: stream.health(),
       database: store.health(),
       trading: trader.health(),
+      signalShadow: signalShadow.health(),
     };
   }
 
-  return { start, stop, health, store, engine, labeler, parser, stream, server, trader };
+  return {
+    start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
+  };
 }
 
 async function main() {

@@ -190,6 +190,14 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 
 分析输出包括前 70% / 后 30% 时间外验证、按 Mint 等权收益、收益分位数、最大赢家贡献、去掉最大 1/3/5 笔后的平均收益，以及按 Mint 重采样的 Bootstrap 95% 置信区间。低于实时采集门槛的参数无法从已有数据库恢复；研究阶段应保持 `FLOW_MIN_NET_W3_SOL=1` 的宽口径采集，在回测参数中筛选 W3≥8/10，而不是提前丢弃低门槛信号。
 
+## Primary 信号独立 Shadow 策略
+
+程序会把自有 `primary_3w` 信号送入完全独立的模拟执行路径。该路径固定为 `SHADOW`，没有交易执行器，也不会读取私钥、签名或发送链上交易，因此不会改变 Smart OPEN 实盘策略。
+
+默认规则为：信号所在批次第一笔、此前30秒没有 Smart Wallet 买入、W3 NetFlow≥10 SOL、W3 独立 Buyers≥7；信号后200ms开始寻找 Bonding Curve 模拟成交，2秒内没有成交或追价超过10%则不入场。入场后立即启用峰值价格回撤7.5%退出，30秒内≥0.1 SOL 的 Smart Wallet BUY作为确认；确认钱包后续 SELL 也会触发退出，未确认仓位30秒退出，所有仓位最长60秒。
+
+模拟仓位、净收益、Smart确认和退出原因保存在 `primary_signal_shadow_positions`。Dashboard 的“实盘交易”页面会把它与真实 Smart OPEN 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。默认模拟仓位为0.05 SOL并使用完整成本模型；相关参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量。
+
 ## Smart OPEN 模拟与实盘
 
 实时入场规则固定为：

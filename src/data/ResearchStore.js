@@ -344,6 +344,50 @@ class ResearchStore {
         ON live_orders(position_id, id);
       CREATE INDEX IF NOT EXISTS idx_live_orders_created_id
         ON live_orders(created_at DESC, id DESC);
+
+      CREATE TABLE IF NOT EXISTS primary_signal_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id INTEGER NOT NULL UNIQUE
+          REFERENCES flow_signals(signal_id) ON DELETE CASCADE,
+        signal_episode_id TEXT,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rule_matched INTEGER NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        entry_target_at INTEGER,
+        entry_deadline_at INTEGER,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        highest_price REAL,
+        smart_confirmed_at INTEGER,
+        confirming_wallets_json TEXT NOT NULL DEFAULT '[]',
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        netflow_w3 REAL,
+        unique_buyers_w3 INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_primary_shadow_episode
+        ON primary_signal_shadow_positions(signal_episode_id)
+        WHERE signal_episode_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_primary_shadow_status
+        ON primary_signal_shadow_positions(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_primary_shadow_mint
+        ON primary_signal_shadow_positions(mint, signal_at DESC);
     `);
 
     const signalColumns = new Set(
@@ -884,6 +928,57 @@ class ResearchStore {
         ORDER BY id DESC
         LIMIT 1
       `),
+      insertPrimarySignalShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO primary_signal_shadow_positions (
+          signal_id, signal_episode_id, mint, symbol, status, rule_matched,
+          rejection_reason, position_sol, configured_cost_pct,
+          signal_at, signal_price, entry_target_at, entry_deadline_at,
+          netflow_w3, unique_buyers_w3, created_at, updated_at
+        ) VALUES (
+          @signalId, @signalEpisodeId, @mint, @symbol, @status, @ruleMatched,
+          @rejectionReason, @positionSol, @configuredCostPct,
+          @signalAt, @signalPrice, @entryTargetAt, @entryDeadlineAt,
+          @netFlowW3, @uniqueBuyersW3, @createdAt, @updatedAt
+        )
+      `),
+      getPrimarySignalShadowPositionBySignal: this.db.prepare(`
+        SELECT * FROM primary_signal_shadow_positions WHERE signal_id = ?
+      `),
+      getPrimarySignalShadowPositionByEpisode: this.db.prepare(`
+        SELECT * FROM primary_signal_shadow_positions WHERE signal_episode_id = ?
+      `),
+      updatePrimarySignalShadowPosition: this.db.prepare(`
+        UPDATE primary_signal_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          smart_confirmed_at = COALESCE(@smartConfirmedAt, smart_confirmed_at),
+          confirming_wallets_json = COALESCE(@confirmingWalletsJson, confirming_wallets_json),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activePrimarySignalShadowPositions: this.db.prepare(`
+        SELECT * FROM primary_signal_shadow_positions
+        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY signal_at, id
+      `),
+      recentSmartWalletEvents: this.db.prepare(`
+        SELECT * FROM smart_wallet_events
+        WHERE timestamp_ms >= ?
+        ORDER BY timestamp_ms, id
+      `),
     };
 
     this._writeTrades = this.db.transaction((trades) => {
@@ -1315,6 +1410,134 @@ class ResearchStore {
     return this.stmts.latestLiveOrderForPositionSide.get(positionId, side) || null;
   }
 
+  createPrimarySignalShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      signalId: position.signalId,
+      signalEpisodeId: position.signalEpisodeId || null,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      ruleMatched: Number(position.ruleMatched === true),
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      signalAt: position.signalAt,
+      signalPrice: position.signalPrice,
+      entryTargetAt: position.entryTargetAt || null,
+      entryDeadlineAt: position.entryDeadlineAt || null,
+      netFlowW3: finiteOrNull(position.netFlowW3),
+      uniqueBuyersW3: Number.isFinite(position.uniqueBuyersW3)
+        ? Math.trunc(position.uniqueBuyersW3)
+        : null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertPrimarySignalShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    if (row.signalEpisodeId) {
+      const existing = this.stmts.getPrimarySignalShadowPositionByEpisode.get(row.signalEpisodeId);
+      return existing ? { ...existing, inserted: false } : null;
+    }
+    const existing = this.stmts.getPrimarySignalShadowPositionBySignal.get(row.signalId);
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updatePrimarySignalShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    this.stmts.updatePrimarySignalShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      smartConfirmedAt: value('smartConfirmedAt'),
+      confirmingWalletsJson: value('confirmingWallets')
+        ? JSON.stringify(value('confirmingWallets'))
+        : value('confirmingWalletsJson'),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activePrimarySignalShadowPositions() {
+    return this.stmts.activePrimarySignalShadowPositions.all();
+  }
+
+  recentSmartWalletEvents(timestampMs) {
+    return this.stmts.recentSmartWalletEvents.all(timestampMs);
+  }
+
+  primarySignalShadowDashboard({ positionLimit = 200 } = {}) {
+    const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE
+          WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL THEN exit_at - entry_at
+          ELSE NULL
+        END AS hold_ms
+      FROM primary_signal_shadow_positions
+      ORDER BY
+        CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit).map((row) => {
+      let confirmingWallets = [];
+      try {
+        const parsed = JSON.parse(row.confirming_wallets_json || '[]');
+        if (Array.isArray(parsed)) confirmingWallets = parsed;
+      } catch (_) {
+        confirmingWallets = [];
+      }
+      return { ...row, confirming_wallets: confirmingWallets };
+    });
+    const stats = this.db.prepare(`
+      SELECT
+        COUNT(*) AS evaluated,
+        COALESCE(SUM(rule_matched = 1), 0) AS matched,
+        COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rule_rejected,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+        COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+        COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(smart_confirmed_at IS NOT NULL), 0) AS smart_confirmed,
+        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+          AS average_net_return_pct,
+        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0) AS wins,
+        AVG(CASE
+          WHEN status = 'CLOSED' AND entry_at IS NOT NULL AND exit_at IS NOT NULL
+            THEN exit_at - entry_at
+        END) AS average_hold_ms
+      FROM primary_signal_shadow_positions
+    `).get();
+    const resolved = Number(stats.closed_positions || 0) + Number(stats.no_exit || 0);
+    const confirmedDenominator = resolved + Number(stats.active_positions || 0);
+    return {
+      stats: {
+        ...stats,
+        win_rate_pct: resolved > 0 ? (Number(stats.wins) / resolved) * 100 : null,
+        confirmation_rate_pct: confirmedDenominator > 0
+          ? (Number(stats.smart_confirmed) / confirmedDenominator) * 100
+          : null,
+      },
+      positions,
+    };
+  }
+
   liveTradingDashboard({ positionLimit = 100, orderLimit = 100, decisionLimit = 100 } = {}) {
     const safeLimit = (value) => Math.min(500, Math.max(1, Math.trunc(Number(value) || 100)));
     const positions = this.db.prepare(`
@@ -1585,6 +1808,13 @@ class ResearchStore {
         COALESCE(SUM(status IN ('ENTRY_FAILED', 'EXIT_FAILED')), 0) AS failed
       FROM live_positions
     `).get();
+    const primarySignalShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit
+      FROM primary_signal_shadow_positions
+    `).get();
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -1608,6 +1838,7 @@ class ResearchStore {
       smartSignalConfirmations,
       smartOpenDecisions,
       livePositions,
+      primarySignalShadowPositions,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };

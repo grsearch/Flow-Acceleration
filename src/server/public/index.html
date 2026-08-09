@@ -318,6 +318,19 @@
       <div class="grid strategy-grid" id="live-strategy-cards"></div>
 
       <article class="card record-section">
+        <div class="section-title">
+          <h2>Primary 信号模拟策略</h2>
+          <p>独立 Shadow 路径，永不签名或发送链上交易</p>
+        </div>
+        <div class="strategy-expression" id="signal-shadow-expression">Primary + W3 NetFlow ≥10 SOL + Buyers ≥7 → 立即移动止盈7.5%</div>
+        <div class="grid live-metric-grid" id="signal-shadow-metrics"></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>信号时间</th><th>状态</th><th>Mint</th><th>W3 NetFlow / Buyers</th><th>入场 / 最高 / 出场价</th><th>净收益</th><th>持仓</th><th>Smart 确认</th><th>退出 / 拒绝原因</th></tr></thead>
+          <tbody id="signal-shadow-position-rows"></tbody>
+        </table></div>
+      </article>
+
+      <article class="card record-section">
         <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；收益为价格粗收益，未扣滑点和链上费用</p></div>
         <div class="table-wrap"><table>
           <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / 钱包</th><th>仓位</th><th>入场 / 最高 / 出场价</th><th>粗收益</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
@@ -364,8 +377,8 @@
     };
     function recordTone(status) {
       if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED'].includes(status)) return 'good';
-      if (['OPENING','EXITING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN'].includes(status)) return 'warn';
-      if (String(status || '').includes('FAILED') || status === 'RISK_REJECTED') return 'bad';
+      if (['OPENING','EXITING','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','PRICE_JUMP','NO_ENTRY'].includes(status)) return 'warn';
+      if (String(status || '').includes('FAILED') || ['RISK_REJECTED','NO_EXIT'].includes(status)) return 'bad';
       return 'neutral';
     }
     const statusChip = status => `<span class="status-chip ${recordTone(status)}">${escapeHtml(status || '—')}</span>`;
@@ -572,14 +585,47 @@
       }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；Smart Wallet OPEN 事件到达后会自动记录</td></tr>';
     }
 
+    function renderPrimarySignalShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const entry = strategy.entry || {};
+      const confirmation = strategy.confirmation || {};
+      const exit = strategy.exit || {};
+      const risk = strategy.risk || {};
+      const stats = data.stats || {};
+      document.querySelector('#signal-shadow-expression').textContent = `Primary + W3 NetFlow ≥${number(entry.minNetFlowW3Sol,1)} SOL + Buyers ≥${number(entry.minUniqueBuyersW3)} → 入场即激活、峰值回撤${number(exit.trailingStopPct,1)}%`;
+      const metrics = [
+        ['运行模式', runtime.enabled ? 'SHADOW' : '关闭', '不会发链上交易'],
+        ['策略命中', number(stats.matched), `评估 ${number(stats.evaluated)}`],
+        ['活动 / 待入场', `${number(stats.active_positions)} / ${number(runtime.pendingEntries)}`, `仓位 ${number(risk.simulatedPositionSol,4)} SOL`],
+        ['已关闭', number(stats.closed_positions), `无法退出 ${number(stats.no_exit)}`],
+        ['Smart 确认率', rate(stats.confirmation_rate_pct), `≥${number(confirmation.minSmartBuySol,2)} SOL / ${age(confirmation.windowMs)}`],
+        ['净胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
+        ['平均净收益', pct(stats.average_net_return_pct), `成本 ${rate(risk.configuredCostPct)}`],
+        ['平均持仓', age(stats.average_hold_ms), `60秒兜底 ${age(exit.maxHoldMs)}`],
+      ];
+      document.querySelector('#signal-shadow-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+
+      const rows = data.positions || [];
+      document.querySelector('#signal-shadow-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const confirmed = row.smart_confirmed_at
+          ? `${dateTime(row.smart_confirmed_at)}<br><span class="table-note">${(row.confirming_wallets || []).map(walletLink).join(' · ') || '—'}</span>`
+          : '—';
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${number(row.netflow_w3,2)} SOL / ${number(row.unique_buyers_w3)}</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}</td><td>${age(row.hold_ms)}</td><td>${confirmed}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">等待符合条件的 Primary 信号；完整原始数据仍在持续采集</td></tr>';
+    }
+
     function renderHealth(data) {
       const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${region.active ? '当前' : '备用'}`).join('<br>') || '未连接';
       const trading = data.trading || { mode: 'DISABLED', activePositions: 0 };
+      const signalShadow = data.signalShadow || { mode: 'SHADOW', enabled: false, activePositions: 0, pendingEntries: 0 };
       const cards = [
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Primary Signals', number(data.engine.signalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
         ['Database', [['Raw Rows', number(data.database.rawRows)], ['Primary Signals', number(data.database.primarySignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', 'OPEN + Curve + ≥1 SOL + 前置 Buyers≥2'], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
+        ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则', 'W3 Flow≥10 + Buyers≥7'], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
@@ -611,6 +657,7 @@
         json('/api/smart-wallets').then(renderWallets),
         json('/api/signal-repetition').then(renderSignalQuality),
         json('/api/live-trading?positionLimit=100&orderLimit=100&decisionLimit=100').then(renderLiveTrading),
+        json('/api/primary-signal-shadow?positionLimit=200').then(renderPrimarySignalShadow),
         json('/api/health').then(renderHealth),
       ]);
     }

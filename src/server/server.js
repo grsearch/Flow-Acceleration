@@ -22,13 +22,14 @@ function boolean(value, fallback = false) {
 }
 
 class ResearchServer {
-  constructor({ config, store, engine, stream, labeler, trader = null }) {
+  constructor({ config, store, engine, stream, labeler, trader = null, signalShadow = null }) {
     this.config = config;
     this.store = store;
     this.engine = engine;
     this.stream = stream;
     this.labeler = labeler;
     this.trader = trader;
+    this.signalShadow = signalShadow;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -174,6 +175,21 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/primary-signal-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.signalShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW',
+          activePositions: 0,
+          pendingEntries: 0,
+        },
+        ...this.store.primarySignalShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 200),
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -188,6 +204,7 @@ class ResearchServer {
         stream: this.stream.health(),
         database: this.store.health(),
         trading: this.trader?.health() || null,
+        signalShadow: this.signalShadow?.health() || null,
       });
     });
 

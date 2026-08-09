@@ -207,6 +207,36 @@ const config = {
     killSwitchFile: process.env.FLOW_LIVE_KILL_SWITCH_FILE || './data/LIVE_TRADING_DISABLED',
   },
 
+  // Research-only execution path. It never creates or signs a transaction.
+  signalShadow: {
+    enabled: booleanEnv('FLOW_SIGNAL_SHADOW_ENABLED', true),
+    positionSizeSol: numberEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
+    minNetFlowW3Sol: numberEnv('FLOW_SIGNAL_SHADOW_MIN_NETFLOW_W3_SOL', 10, { min: 0 }),
+    minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_MIN_BUYERS_W3', 7, { min: 0 }),
+    priorSmartExclusionMs: integerEnv('FLOW_SIGNAL_SHADOW_PRIOR_SMART_MS', 30_000, { min: 0 }),
+    confirmWindowMs: integerEnv('FLOW_SIGNAL_SHADOW_CONFIRM_MS', 30_000, { min: 1_000 }),
+    confirmMinSol: numberEnv('FLOW_SIGNAL_SHADOW_CONFIRM_MIN_SOL', 0.1, { min: 0 }),
+    entryDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SIGNAL_SHADOW_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    trailingStopPct: numberEnv('FLOW_SIGNAL_SHADOW_TRAILING_STOP_PCT', 7.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    maxHoldMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),
