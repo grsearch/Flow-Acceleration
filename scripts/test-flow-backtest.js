@@ -160,6 +160,38 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
 
 {
   const store = makeStore();
+  const timestamp = 18_000_000;
+  addSignal(store, 'smart-lifecycle', timestamp);
+  const smartTrade = (side, offset, solAmount) => store.recordSmartWalletEvent({
+    timestampMs: timestamp + offset,
+    slot: 1,
+    signature: `smart-${side}-${offset}`,
+    eventIndex: 0,
+    wallet: 'smart-wallet',
+    mint: 'smart-lifecycle',
+    side,
+    market: 'PUMP_BONDING_CURVE',
+    solAmount,
+    tokenAmount: 100,
+    price: 1,
+    curvePct: 40,
+    ageMs: 5_000,
+  });
+  assert.strictEqual(smartTrade('BUY', 1_000, 2).positionPhase, 'OPEN');
+  assert.strictEqual(smartTrade('BUY', 2_000, 0.2).positionPhase, 'ADD');
+  assert.strictEqual(smartTrade('SELL', 5_000, 2.2).positionPhase, 'CLOSE');
+  const stats = store.smartWalletStats(['smart-wallet'])[0];
+  assert.strictEqual(stats.openBuys, 1);
+  assert.strictEqual(stats.addBuys, 1);
+  assert.strictEqual(stats.averageHoldMs, 4_000);
+  assert.strictEqual(stats.openSignalOverlap5Pct, 100);
+  assert.strictEqual(stats.addSignalOverlap30Pct, 100);
+  assert.strictEqual(store.db.prepare('SELECT COUNT(*) AS n FROM smart_signal_confirmations').get().n, 1);
+  store.close();
+}
+
+{
+  const store = makeStore();
   const start = 16_000_000;
   const researchSignal = {
     curvePct: 30,
@@ -170,6 +202,14 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   addSignal(store, 'cooldown-filter', start, researchSignal);
   addSignal(store, 'cooldown-filter', start + 10_000, researchSignal);
   addSignal(store, 'cooldown-filter', start + 20_000, researchSignal);
+  const episodes = store.db.prepare(`
+    SELECT signal_rank_in_mint, previous_signal_gap_ms, signal_episode_id
+    FROM flow_signals WHERE mint = 'cooldown-filter' ORDER BY timestamp_ms
+  `).all();
+  assert.deepStrictEqual(episodes.map((row) => row.signal_rank_in_mint), [1, 2, 3]);
+  assert.deepStrictEqual(episodes.map((row) => row.previous_signal_gap_ms), [null, 10_000, 10_000]);
+  assert.strictEqual(new Set(episodes.map((row) => row.signal_episode_id)).size, 1,
+    'signals no more than 30s apart must share a research episode');
   addSignal(store, 'late-curve', start + 25_000, { ...researchSignal, curvePct: 85 });
   addSignal(store, 'shadow-only', start + 30_000, {
     ...researchSignal,
@@ -191,6 +231,8 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
     ...zeroVariableCosts,
   });
   assert.strictEqual(firstOnly.analysisWindow.selectedSignals, 1);
+  assert.strictEqual(firstOnly.analysisWindow.signalSelection.availableSignals, 4);
+  assert.strictEqual(firstOnly.analysisWindow.signalSelection.filteredByProhibitionRules, 1);
   assert.strictEqual(firstOnly.analysisWindow.signalSelection.filteredByFirstSignal, 2);
   assert.strictEqual(firstOnly.rows[0].mint, 'cooldown-filter');
 
@@ -374,6 +416,94 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   assert.strictEqual(result.rows[0].exitReason, EXIT_REASON.TRAILING_STOP);
   assert.strictEqual(result.rows[0].exitAt, 9_000_600);
   assert.ok(Math.abs(result.rows[0].rawReturnPct - 6) < 1e-9);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  addSignal(store, 'dynamic-flow-decay', 9_100_000);
+  addTrade(store, 'dynamic-flow-decay', 9_100_200, 1);
+  addTrade(store, 'dynamic-flow-decay', 9_100_500, 1.1);
+  store.rawBuffer.at(-1).solAmount = 2;
+  store.rawBuffer.at(-1).side = 'BUY';
+  addTrade(store, 'dynamic-flow-decay', 9_101_000, 1.05);
+  store.rawBuffer.at(-1).solAmount = 3;
+  store.rawBuffer.at(-1).side = 'SELL';
+  addTrade(store, 'dynamic-flow-decay', 9_101_200, 1.04);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    flowExitWindowMs: 2_000,
+    flowExitNetFlowThresholdSol: 0,
+    flowExitMinHoldMs: 0,
+    flowExitConfirmations: 1,
+    exitExecutionDelayMs: 200,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows[0].exitReason, EXIT_REASON.FLOW_DECAY);
+  assert.strictEqual(result.rows[0].triggerAt, 9_101_000);
+  assert.strictEqual(result.rows[0].exitAt, 9_101_200);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  addSignal(store, 'smart-wallet-exit', 9_200_000);
+  addTrade(store, 'smart-wallet-exit', 9_200_200, 1);
+  addTrade(store, 'smart-wallet-exit', 9_200_500, 1.08);
+  store.rawBuffer.at(-1).side = 'SELL';
+  store.rawBuffer.at(-1).wallet = 'tracked-smart-wallet';
+  addTrade(store, 'smart-wallet-exit', 9_200_700, 1.06);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    exitOnSmartWalletSell: true,
+    smartWallets: ['tracked-smart-wallet'],
+    exitExecutionDelayMs: 200,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows[0].exitReason, EXIT_REASON.SMART_WALLET_SELL);
+  assert.strictEqual(result.rows[0].exitAt, 9_200_700);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  addSignal(store, 'entry-guard', 9_300_000);
+  addTrade(store, 'entry-guard', 9_300_200, 1.5);
+  addTrade(store, 'coverage-entry-guard', 9_310_000, 1);
+  store.flushRawTrades();
+  const guarded = runBacktest(store.db, {
+    executionDelayMs: 200,
+    maxEntryPriceJumpPct: 10,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(guarded.rows.length, 0);
+  assert.strictEqual(guarded.analysisWindow.signalSelection.filteredByEntryPriceJump, 1);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  addSignal(store, 'single-position', 9_400_000);
+  addSignal(store, 'single-position', 9_401_000);
+  addTrade(store, 'single-position', 9_400_200, 1);
+  addTrade(store, 'single-position', 9_405_200, 1.1);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    singlePositionPerMint: true,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows.length, 1);
+  assert.strictEqual(result.analysisWindow.signalSelection.filteredByOpenPosition, 1);
   store.close();
 }
 

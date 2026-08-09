@@ -174,6 +174,9 @@ class ResearchStore {
         flow_accel REAL,
         signal_variant TEXT NOT NULL DEFAULT 'primary_3w',
         is_primary INTEGER NOT NULL DEFAULT 1,
+        signal_episode_id TEXT,
+        signal_rank_in_mint INTEGER,
+        previous_signal_gap_ms INTEGER,
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_flow_signals_ts ON flow_signals(timestamp_ms);
@@ -211,10 +214,13 @@ class ResearchStore {
         wallet TEXT NOT NULL,
         mint TEXT NOT NULL,
         side TEXT NOT NULL,
+        market TEXT,
         sol_amount REAL NOT NULL,
+        token_amount REAL,
         price REAL,
         curve_pct REAL,
         age_ms INTEGER,
+        position_phase TEXT,
         nearest_flow_signal INTEGER,
         time_from_flow_signal_ms INTEGER,
         UNIQUE(signature, event_index, wallet)
@@ -223,6 +229,22 @@ class ResearchStore {
         ON smart_wallet_events(wallet, timestamp_ms);
       CREATE INDEX IF NOT EXISTS idx_smart_wallet_events_mint_ts
         ON smart_wallet_events(mint, timestamp_ms);
+
+      CREATE TABLE IF NOT EXISTS smart_signal_confirmations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id INTEGER NOT NULL REFERENCES flow_signals(signal_id) ON DELETE CASCADE,
+        smart_event_id INTEGER NOT NULL REFERENCES smart_wallet_events(id) ON DELETE CASCADE,
+        wallet TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        open_timestamp_ms INTEGER NOT NULL,
+        delay_ms INTEGER NOT NULL,
+        open_sol REAL NOT NULL,
+        UNIQUE(signal_id, smart_event_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_smart_signal_confirmations_signal
+        ON smart_signal_confirmations(signal_id);
+      CREATE INDEX IF NOT EXISTS idx_smart_signal_confirmations_mint_ts
+        ON smart_signal_confirmations(mint, open_timestamp_ms);
     `);
 
     const signalColumns = new Set(
@@ -237,6 +259,12 @@ class ResearchStore {
         'is_primary',
         'ALTER TABLE flow_signals ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 1',
       ],
+      ['signal_episode_id', 'ALTER TABLE flow_signals ADD COLUMN signal_episode_id TEXT'],
+      ['signal_rank_in_mint', 'ALTER TABLE flow_signals ADD COLUMN signal_rank_in_mint INTEGER'],
+      [
+        'previous_signal_gap_ms',
+        'ALTER TABLE flow_signals ADD COLUMN previous_signal_gap_ms INTEGER',
+      ],
     ];
     for (const [column, sql] of signalMigrations) {
       if (!signalColumns.has(column)) this.db.exec(sql);
@@ -244,6 +272,107 @@ class ResearchStore {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_flow_signals_variant_ts
       ON flow_signals(signal_variant, timestamp_ms)
+    `);
+    this.db.exec('DROP INDEX IF EXISTS idx_flow_signals_episode_id');
+    this.db.exec(`
+      WITH gaps AS (
+        SELECT signal_id, mint, signal_variant, timestamp_ms,
+          ROW_NUMBER() OVER (
+            PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
+          ) AS signal_rank,
+          timestamp_ms - LAG(timestamp_ms) OVER (
+            PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
+          ) AS signal_gap
+        FROM flow_signals
+      ), grouped AS (
+        SELECT *, SUM(CASE WHEN signal_gap IS NULL OR signal_gap > 30000 THEN 1 ELSE 0 END)
+          OVER (
+            PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
+          ) AS episode_rank
+        FROM gaps
+      ), episodes AS (
+        SELECT *, MIN(timestamp_ms) OVER (
+          PARTITION BY mint, signal_variant, episode_rank
+        ) AS episode_started_at
+        FROM grouped
+      )
+      UPDATE flow_signals SET
+        signal_rank_in_mint = (
+          SELECT signal_rank FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
+        ),
+        previous_signal_gap_ms = (
+          SELECT signal_gap FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
+        ),
+        signal_episode_id = mint || ':' || signal_variant || ':' || (
+          SELECT episode_started_at FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
+        )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_flow_signals_episode_id
+      ON flow_signals(signal_episode_id) WHERE signal_episode_id IS NOT NULL
+    `);
+
+    const smartEventColumns = new Set(
+      this.db.prepare('PRAGMA table_info(smart_wallet_events)').all()
+        .map((column) => column.name),
+    );
+    const smartEventMigrations = [
+      ['market', 'ALTER TABLE smart_wallet_events ADD COLUMN market TEXT'],
+      ['token_amount', 'ALTER TABLE smart_wallet_events ADD COLUMN token_amount REAL'],
+      ['position_phase', 'ALTER TABLE smart_wallet_events ADD COLUMN position_phase TEXT'],
+    ];
+    for (const [column, sql] of smartEventMigrations) {
+      if (!smartEventColumns.has(column)) this.db.exec(sql);
+    }
+    this.db.exec(`
+      UPDATE smart_wallet_events AS event SET
+        market = COALESCE(market, (
+          SELECT trade.market FROM raw_trades AS trade
+          WHERE trade.signature = event.signature
+            AND trade.event_index = event.event_index
+            AND trade.mint = event.mint
+            AND trade.wallet = event.wallet
+          ORDER BY trade.id LIMIT 1
+        )),
+        token_amount = COALESCE(token_amount, (
+          SELECT trade.token_amount FROM raw_trades AS trade
+          WHERE trade.signature = event.signature
+            AND trade.event_index = event.event_index
+            AND trade.mint = event.mint
+            AND trade.wallet = event.wallet
+          ORDER BY trade.id LIMIT 1
+        ))
+      WHERE market IS NULL OR token_amount IS NULL
+    `);
+    this.db.exec(`
+      WITH phased AS (
+        SELECT id, side,
+          LAG(side) OVER (
+            PARTITION BY wallet, mint ORDER BY timestamp_ms, id
+          ) AS previous_side
+        FROM smart_wallet_events
+      )
+      UPDATE smart_wallet_events SET position_phase = COALESCE(
+        position_phase,
+        (SELECT CASE
+          WHEN phased.side = 'BUY' AND phased.previous_side = 'BUY' THEN 'ADD'
+          WHEN phased.side = 'BUY' THEN 'OPEN'
+          WHEN phased.side = 'SELL' AND phased.previous_side = 'BUY' THEN 'CLOSE'
+          ELSE 'SELL'
+        END FROM phased WHERE phased.id = smart_wallet_events.id)
+      )
+      WHERE position_phase IS NULL
+    `);
+    this.db.exec(`
+      INSERT OR IGNORE INTO smart_signal_confirmations (
+        signal_id, smart_event_id, wallet, mint, open_timestamp_ms, delay_ms, open_sol
+      )
+      SELECT nearest_flow_signal, id, wallet, mint, timestamp_ms,
+        time_from_flow_signal_ms, sol_amount
+      FROM smart_wallet_events
+      WHERE position_phase = 'OPEN'
+        AND nearest_flow_signal IS NOT NULL
+        AND time_from_flow_signal_ms BETWEEN 0 AND 30000
     `);
 
     const returnColumns = new Set(
@@ -408,7 +537,8 @@ class ResearchStore {
           unique_buyers_w1, unique_buyers_w2, unique_buyers_w3,
           buy_tx_w1, buy_tx_w2, buy_tx_w3,
           flow_accel_1, flow_accel_2, flow_accel,
-          signal_variant, is_primary, created_at
+          signal_variant, is_primary, signal_episode_id, signal_rank_in_mint,
+          previous_signal_gap_ms, created_at
         ) VALUES (
           @timestampMs, @slot, @signature, @mint, @symbol, @ageMs, @curvePct, @price,
           @buyFlowW1, @buyFlowW2, @buyFlowW3,
@@ -418,8 +548,16 @@ class ResearchStore {
           @uniqueBuyersW1, @uniqueBuyersW2, @uniqueBuyersW3,
           @buyTxW1, @buyTxW2, @buyTxW3,
           @flowAccel1, @flowAccel2, @flowAccel,
-          @signalVariant, @isPrimary, @createdAt
+          @signalVariant, @isPrimary, @signalEpisodeId, @signalRankInMint,
+          @previousSignalGapMs, @createdAt
         )
+      `),
+      latestSignalEpisode: this.db.prepare(`
+        SELECT signal_id, timestamp_ms, signal_rank_in_mint, signal_episode_id
+        FROM flow_signals
+        WHERE mint = ? AND signal_variant = ?
+        ORDER BY timestamp_ms DESC, signal_id DESC
+        LIMIT 1
       `),
       insertReturn: this.db.prepare(`
         INSERT INTO signal_returns (
@@ -446,13 +584,29 @@ class ResearchStore {
         ORDER BY timestamp_ms DESC
         LIMIT 1
       `),
+      latestSmartWalletEvent: this.db.prepare(`
+        SELECT id, side, position_phase
+        FROM smart_wallet_events
+        WHERE wallet = ? AND mint = ?
+        ORDER BY timestamp_ms DESC, id DESC
+        LIMIT 1
+      `),
       insertSmartWallet: this.db.prepare(`
         INSERT OR IGNORE INTO smart_wallet_events (
-          timestamp_ms, slot, signature, event_index, wallet, mint, side,
-          sol_amount, price, curve_pct, age_ms, nearest_flow_signal, time_from_flow_signal_ms
+          timestamp_ms, slot, signature, event_index, wallet, mint, side, market,
+          sol_amount, token_amount, price, curve_pct, age_ms, position_phase,
+          nearest_flow_signal, time_from_flow_signal_ms
         ) VALUES (
-          @timestampMs, @slot, @signature, @eventIndex, @wallet, @mint, @side,
-          @solAmount, @price, @curvePct, @ageMs, @nearestFlowSignal, @timeFromFlowSignalMs
+          @timestampMs, @slot, @signature, @eventIndex, @wallet, @mint, @side, @market,
+          @solAmount, @tokenAmount, @price, @curvePct, @ageMs, @positionPhase,
+          @nearestFlowSignal, @timeFromFlowSignalMs
+        )
+      `),
+      insertSmartSignalConfirmation: this.db.prepare(`
+        INSERT OR IGNORE INTO smart_signal_confirmations (
+          signal_id, smart_event_id, wallet, mint, open_timestamp_ms, delay_ms, open_sol
+        ) VALUES (
+          @signalId, @smartEventId, @wallet, @mint, @openTimestampMs, @delayMs, @openSol
         )
       `),
     };
@@ -591,6 +745,13 @@ class ResearchStore {
     const createdAt = Date.now();
     const acceleration = [signal.flowAccel1, signal.flowAccel2].filter(Number.isFinite);
     const signalVariant = signal.signalVariant || 'primary_3w';
+    const previous = this.stmts.latestSignalEpisode.get(signal.mint, signalVariant);
+    const signalRankInMint = Number.isFinite(previous?.signal_rank_in_mint)
+      ? previous.signal_rank_in_mint + 1
+      : 1;
+    const previousSignalGapMs = Number.isFinite(previous?.timestamp_ms)
+      ? signal.timestampMs - previous.timestamp_ms
+      : null;
     const signalRow = {
       ...signal,
       signalVariant,
@@ -600,6 +761,12 @@ class ResearchStore {
       flowAccel: Number.isFinite(signal.flowAccel)
         ? signal.flowAccel
         : acceleration.length ? Math.min(...acceleration) : null,
+      signalEpisodeId: signal.signalEpisodeId
+        || (Number.isFinite(previousSignalGapMs) && previousSignalGapMs <= 30_000
+          ? previous.signal_episode_id
+          : `${signal.mint}:${signalVariant}:${signal.timestampMs}`),
+      signalRankInMint,
+      previousSignalGapMs,
       createdAt,
     };
     const result = this.stmts.insertSignal.run(signalRow);
@@ -665,7 +832,12 @@ class ResearchStore {
 
   recordSmartWalletEvent(trade) {
     const nearest = this.findNearestSignal(trade.mint, trade.timestampMs);
-    this.stmts.insertSmartWallet.run({
+    const previous = this.stmts.latestSmartWalletEvent.get(trade.wallet, trade.mint);
+    const positionOpen = previous?.side === 'BUY';
+    const positionPhase = trade.side === 'BUY'
+      ? (positionOpen ? 'ADD' : 'OPEN')
+      : (positionOpen ? 'CLOSE' : 'SELL');
+    const row = {
       timestampMs: trade.timestampMs,
       slot: trade.slot || null,
       signature: trade.signature || null,
@@ -673,13 +845,29 @@ class ResearchStore {
       wallet: trade.wallet,
       mint: trade.mint,
       side: trade.side,
+      market: trade.market || null,
       solAmount: trade.solAmount,
+      tokenAmount: finiteOrNull(trade.tokenAmount),
       price: finiteOrNull(trade.price),
       curvePct: finiteOrNull(trade.curvePct),
       ageMs: Number.isFinite(trade.ageMs) ? trade.ageMs : null,
+      positionPhase,
       nearestFlowSignal: nearest?.signal_id || null,
       timeFromFlowSignalMs: nearest ? trade.timestampMs - nearest.timestamp_ms : null,
-    });
+    };
+    const result = this.stmts.insertSmartWallet.run(row);
+    if (result.changes > 0 && positionPhase === 'OPEN' && nearest) {
+      this.stmts.insertSmartSignalConfirmation.run({
+        signalId: nearest.signal_id,
+        smartEventId: Number(result.lastInsertRowid),
+        wallet: trade.wallet,
+        mint: trade.mint,
+        openTimestampMs: trade.timestampMs,
+        delayMs: trade.timestampMs - nearest.timestamp_ms,
+        openSol: trade.solAmount,
+      });
+    }
+    return { ...row, id: result.changes > 0 ? Number(result.lastInsertRowid) : null };
   }
 
   overview(now = Date.now(), candidateCount = 0) {
@@ -719,18 +907,30 @@ class ResearchStore {
     `);
     for (const wallet of wallets) {
       const events = eventStatement.all(wallet);
-      const buys = events.filter((event) => event.side === 'BUY');
       const open = new Map();
       const holds = [];
+      const phasedBuys = [];
       for (const event of events) {
-        if (event.side === 'BUY' && !open.has(event.mint)) open.set(event.mint, event.timestamp_ms);
+        if (event.side === 'BUY') {
+          const phase = open.has(event.mint) ? 'ADD' : 'OPEN';
+          phasedBuys.push({ ...event, phase });
+          if (!open.has(event.mint)) open.set(event.mint, event.timestamp_ms);
+        }
         if (event.side === 'SELL' && open.has(event.mint)) {
           holds.push(event.timestamp_ms - open.get(event.mint));
           open.delete(event.mint);
         }
       }
+      const buys = phasedBuys;
+      const openingBuys = buys.filter((event) => event.phase === 'OPEN');
+      const addBuys = buys.filter((event) => event.phase === 'ADD');
       const average = (values) => values.length
         ? values.reduce((total, value) => total + value, 0) / values.length
+        : null;
+      const overlapPct = (rows, windowMs) => rows.length
+        ? (rows.filter((event) => Number.isFinite(event.time_from_flow_signal_ms)
+          && event.time_from_flow_signal_ms >= 0
+          && event.time_from_flow_signal_ms <= windowMs).length / rows.length) * 100
         : null;
       result.push({
         wallet,
@@ -739,15 +939,61 @@ class ResearchStore {
         averageHoldMs: average(holds),
         averageBuyCurvePct: average(buys.map((event) => event.curve_pct).filter(Number.isFinite)),
         averageBuyAgeMs: average(buys.map((event) => event.age_ms).filter(Number.isFinite)),
-        flowSignalOverlapPct: buys.length
-          ? (buys.filter((event) => event.nearest_flow_signal != null).length / buys.length) * 100
-          : null,
+        buyEvents: buys.length,
+        openBuys: openingBuys.length,
+        addBuys: addBuys.length,
+        primaryOverlap30Pct: overlapPct(buys, 30_000),
+        openSignalOverlap5Pct: overlapPct(openingBuys, 5_000),
+        openSignalOverlap10Pct: overlapPct(openingBuys, 10_000),
+        openSignalOverlap30Pct: overlapPct(openingBuys, 30_000),
+        addSignalOverlap30Pct: overlapPct(addBuys, 30_000),
+        flowSignalOverlapPct: overlapPct(buys, 30_000),
         averageTimeFromSignalMs: average(
           buys.map((event) => event.time_from_flow_signal_ms).filter(Number.isFinite),
         ),
       });
     }
     return result;
+  }
+
+  signalRepetitionStats() {
+    const signals = this.db.prepare(`
+      SELECT signal_id, mint, timestamp_ms, signal_episode_id
+      FROM flow_signals
+      WHERE is_primary = 1
+      ORDER BY timestamp_ms, signal_id
+    `).all();
+    const lastByMint = new Map();
+    let laterSignals = 0;
+    let within5s = 0;
+    let within10s = 0;
+    let within30s = 0;
+    for (const signal of signals) {
+      const previous = lastByMint.get(signal.mint);
+      if (Number.isFinite(previous)) {
+        laterSignals += 1;
+        const gap = signal.timestamp_ms - previous;
+        if (gap <= 5_000) within5s += 1;
+        if (gap <= 10_000) within10s += 1;
+        if (gap <= 30_000) within30s += 1;
+      }
+      lastByMint.set(signal.mint, signal.timestamp_ms);
+    }
+    const ratio = (value, denominator) => denominator ? value / denominator * 100 : null;
+    return {
+      primarySignals: signals.length,
+      uniqueMints: lastByMint.size,
+      signalEpisodes: new Set(signals.map((signal) => signal.signal_episode_id)
+        .filter(Boolean)).size,
+      laterSignals,
+      laterSignalPct: ratio(laterSignals, signals.length),
+      repeatedWithin5s: within5s,
+      repeatedWithin5sPct: ratio(within5s, laterSignals),
+      repeatedWithin10s: within10s,
+      repeatedWithin10sPct: ratio(within10s, laterSignals),
+      repeatedWithin30s: within30s,
+      repeatedWithin30sPct: ratio(within30s, laterSignals),
+    };
   }
 
   archiveExpiredRawTrades(now = Date.now(), limit = 100_000) {
@@ -780,6 +1026,9 @@ class ResearchStore {
     const primarySignalRows = this.db.prepare(`
       SELECT COUNT(*) AS n FROM flow_signals WHERE is_primary = 1
     `).get().n;
+    const smartSignalConfirmations = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM smart_signal_confirmations
+    `).get().n;
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -800,6 +1049,7 @@ class ResearchStore {
       signalRows,
       primarySignalRows,
       shadowSignalRows: signalRows - primarySignalRows,
+      smartSignalConfirmations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };

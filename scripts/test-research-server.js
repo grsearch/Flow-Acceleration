@@ -20,6 +20,11 @@ async function main() {
   assert.ok(dashboard.includes('name="exitExecutionDelayMs" type="number" min="0" step="50" value="200"'));
   assert.ok(dashboard.includes('name="firstSignalOnly"'));
   assert.ok(dashboard.includes('name="signalCooldownMs"'));
+  assert.ok(dashboard.includes('name="singlePositionPerMint"'));
+  assert.ok(dashboard.includes('name="flowExitNetFlowThresholdSol"'));
+  assert.ok(dashboard.includes('name="exitOnSmartWalletSell"'));
+  assert.ok(dashboard.includes('name="minDeltaNetFlow12"'));
+  assert.ok(dashboard.includes('OPEN 10秒覆盖'));
   assert.ok(dashboard.includes('value="shadow_2w"'));
 
   const runtimeConfig = {
@@ -57,6 +62,7 @@ async function main() {
       '/api/signals',
       '/api/backtest',
       '/api/smart-wallets',
+      '/api/signal-repetition',
       '/api/health',
     ];
 
@@ -90,6 +96,25 @@ async function main() {
       `http://127.0.0.1:${port}/api/backtest?signalVariant=shadow_netflow_breakout`,
     )).json();
     assert.strictEqual(breakout.parameters.minFlowAccel, 0);
+    const layered = await (await fetch(
+      `http://127.0.0.1:${port}/api/backtest?maxNetFlowW3=&maxCurvePct=`
+      + '&minAgeSec=5&maxAgeSec=120&minDeltaNetFlow12=1&minDeltaNetFlow23=2'
+      + '&minBuyTxW3=5&minUniqueBuyersW3=4&maxEntryPriceJumpPct=20'
+      + '&singlePositionPerMint=true&flowExitNetFlowThresholdSol=0'
+      + '&flowExitWindowMs=2000&flowExitMinHoldMs=1000&flowExitConfirmations=2'
+      + '&exitOnSmartWalletSell=true',
+    )).json();
+    assert.strictEqual(layered.parameters.maxNetFlowW3, null,
+      'blank optional maximum must stay disabled');
+    assert.strictEqual(layered.parameters.maxCurvePct, null,
+      'blank optional Curve maximum must stay disabled');
+    assert.strictEqual(layered.parameters.minAgeMs, 5_000);
+    assert.strictEqual(layered.parameters.maxAgeMs, 120_000);
+    assert.strictEqual(layered.parameters.minDeltaNetFlow12, 1);
+    assert.strictEqual(layered.parameters.minDeltaNetFlow23, 2);
+    assert.strictEqual(layered.parameters.singlePositionPerMint, true);
+    assert.strictEqual(layered.parameters.flowExitNetFlowThresholdSol, 0);
+    assert.strictEqual(layered.parameters.exitOnSmartWalletSell, true);
   } finally {
     await runtime.stop('server-smoke-test');
   }
