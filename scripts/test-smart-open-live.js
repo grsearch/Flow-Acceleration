@@ -2,10 +2,12 @@
 
 const assert = require('assert');
 const { PublicKey, TransactionInstruction } = require('@solana/web3.js');
+const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const { PUMP_PROGRAM_ID } = require('@pump-fun/pump-sdk');
 const FlowAccelerationEngine = require('../src/core/FlowAccelerationEngine');
 const LiveTradingManager = require('../src/core/LiveTradingManager');
 const {
+  PumpTradeExecutor,
   classifyBuyReconciliation,
   confirmedTransactionFailure,
   exactQuoteInInstructionData,
@@ -39,6 +41,10 @@ function managerConfig(overrides = {}) {
     sellSlippagePct: 15,
     computeUnitLimit: 250_000,
     priorityFeeMicroLamports: 20_000,
+    readCommitment: 'processed',
+    confirmationCommitment: 'confirmed',
+    contextSlotRetryCount: 2,
+    contextSlotRetryDelayMs: 25,
     commitment: 'confirmed',
     exitStrategy: 'SMART_WALLET_SELL_60S',
     stopLossPct: 12,
@@ -105,6 +111,64 @@ async function main() {
   assert.ok(replacedInstructions[1].keys[0].pubkey.equals(originalKey));
   assert.deepStrictEqual(replacedInstructions[1].data, exactInputData);
 
+  const stateExecutor = Object.create(PumpTradeExecutor.prototype);
+  const stateMint = PublicKey.unique();
+  const stateSigner = PublicKey.unique();
+  const stateMintInfo = { owner: TOKEN_PROGRAM_ID, data: Buffer.alloc(82) };
+  const stateCurveInfo = { owner: PUMP_PROGRAM_ID, data: Buffer.from([1]) };
+  const stateAtaData = Buffer.alloc(165);
+  stateAtaData.writeBigUInt64LE(42n, 64);
+  const stateAtaInfo = { owner: TOKEN_PROGRAM_ID, data: stateAtaData };
+  let stateReadConfig = null;
+  let stateReadCalls = 0;
+  stateExecutor.signer = { publicKey: stateSigner };
+  stateExecutor.readCommitment = 'processed';
+  stateExecutor.config = { contextSlotRetryCount: 1, contextSlotRetryDelayMs: 0 };
+  stateExecutor.tokenPrograms = new Map();
+  stateExecutor.pump = {
+    decodeBondingCurve(accountInfo) {
+      assert.strictEqual(accountInfo, stateCurveInfo);
+      return { complete: false };
+    },
+  };
+  stateExecutor.connection = {
+    async getMultipleAccountsInfoAndContext(keys, config) {
+      assert.strictEqual(keys.length, 4);
+      assert.ok(keys[0].equals(stateMint));
+      stateReadConfig = config;
+      stateReadCalls += 1;
+      if (stateReadCalls === 1) {
+        const error = new Error('Minimum context slot has not been reached');
+        error.code = -32016;
+        throw error;
+      }
+      return {
+        context: { slot: 123_460 },
+        value: [stateMintInfo, stateCurveInfo, stateAtaInfo, null],
+      };
+    },
+  };
+  const synchronizedState = await stateExecutor._buyStateAtSignalSlot(stateMint, 123_456);
+  assert.deepStrictEqual(stateReadConfig, {
+    commitment: 'processed',
+    minContextSlot: 123_456,
+  });
+  assert.strictEqual(synchronizedState.contextSlot, 123_460);
+  assert.strictEqual(synchronizedState.contextRetries, 1);
+  assert.strictEqual(stateReadCalls, 2);
+  assert.ok(synchronizedState.tokenProgram.equals(TOKEN_PROGRAM_ID));
+  assert.strictEqual(synchronizedState.balanceBefore, 42n);
+  stateExecutor.config.contextSlotRetryCount = 0;
+  stateExecutor.connection.getMultipleAccountsInfoAndContext = async () => {
+    const error = new Error('Minimum context slot has not been reached');
+    error.code = -32016;
+    throw error;
+  };
+  await assert.rejects(
+    stateExecutor._buyStateAtSignalSlot(stateMint, 123_500),
+    (error) => error.code === 'RPC_CONTEXT_BEHIND' && error.contextRetries === 0,
+  );
+
   const confirmedFailure = confirmedTransactionFailure(
     'failed-chain-signature',
     { InstructionError: [3, { Custom: 6002 }] },
@@ -167,10 +231,11 @@ async function main() {
 
   const store = makeStore();
   let now = 10_000;
-  const calls = { buy: 0, sell: 0 };
+  const calls = { buy: 0, buyRequest: null, sell: 0 };
   const executor = {
-    async buy() {
+    async buy(request) {
       calls.buy += 1;
+      calls.buyRequest = request;
       return {
         signature: 'live-buy-signature', venue: 'PUMP_BONDING_CURVE',
         tokenAmountRaw: '5000000', expectedPrice: 0.01,
@@ -199,6 +264,7 @@ async function main() {
   manager.onSmartWalletEvent(open, { ...context, receivedAtMs: now });
   await manager.entryQueue;
   assert.strictEqual(calls.buy, 1);
+  assert.strictEqual(calls.buyRequest.signalSlot, 1);
   assert.strictEqual(store.activeLivePositions().length, 1);
   assert.strictEqual(
     store.db.prepare('SELECT action_status FROM smart_open_decisions').get().action_status,
@@ -267,6 +333,11 @@ async function main() {
   assert.strictEqual(health.strategy.execution.sellSlippagePct, 15);
   assert.strictEqual(health.strategy.execution.buyMode, 'EXACT_QUOTE_IN_V2_FIXED_SOL');
   assert.strictEqual(health.strategy.execution.hardSpendCap, true);
+  assert.strictEqual(health.strategy.execution.readCommitment, 'processed');
+  assert.strictEqual(health.strategy.execution.preflightCommitment, 'processed');
+  assert.strictEqual(health.strategy.execution.confirmationCommitment, 'confirmed');
+  assert.strictEqual(health.strategy.execution.contextSlotRetryCount, 2);
+  assert.strictEqual(health.strategy.execution.contextSlotRetryDelayMs, 25);
 
   await manager.stop();
   store.close();

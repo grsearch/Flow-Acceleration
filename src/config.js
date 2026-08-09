@@ -168,7 +168,24 @@ const config = {
     priorityFeeMicroLamports: integerEnv('FLOW_LIVE_PRIORITY_FEE_MICROLAMPORTS', 20_000, {
       min: 0,
     }),
-    commitment: process.env.FLOW_LIVE_COMMITMENT || 'confirmed',
+    // The transaction stream is processed-level. Quote against the same newest view,
+    // but retain confirmed-level finality for position state and reconciliation.
+    readCommitment: process.env.FLOW_LIVE_READ_COMMITMENT || 'processed',
+    confirmationCommitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
+      || process.env.FLOW_LIVE_COMMITMENT
+      || 'confirmed',
+    contextSlotRetryCount: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRIES', 2, {
+      min: 0,
+      max: 10,
+    }),
+    contextSlotRetryDelayMs: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRY_DELAY_MS', 25, {
+      min: 0,
+      max: 500,
+    }),
+    // Backward-compatible alias consumed by older dashboard/export code.
+    commitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
+      || process.env.FLOW_LIVE_COMMITMENT
+      || 'confirmed',
     exitStrategy: process.env.FLOW_LIVE_EXIT_STRATEGY || 'SMART_WALLET_SELL_60S',
     stopLossPct: numberEnv('FLOW_LIVE_STOP_LOSS_PCT', 12, { min: 0 }),
     takeProfitPct: numberEnv('FLOW_LIVE_TAKE_PROFIT_PCT', 20, { min: 0 }),

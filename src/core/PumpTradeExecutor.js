@@ -10,6 +10,7 @@ const {
   TransactionInstruction,
 } = require('@solana/web3.js');
 const {
+  AccountLayout,
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
@@ -19,6 +20,7 @@ const {
   OnlinePumpSdk,
   PumpSdk,
   PUMP_PROGRAM_ID,
+  bondingCurvePda,
   getBuyTokenAmountFromSolAmount,
   getSellSolAmountFromTokenAmount,
   pumpIdl,
@@ -47,6 +49,23 @@ if (JSON.stringify(BUY_V2.accounts) !== JSON.stringify(EXACT_QUOTE_IN_V2.account
 }
 const EXACT_QUOTE_IN_V2_DISCRIMINATOR = Buffer.from(EXACT_QUOTE_IN_V2.discriminator);
 const U64_MAX = (1n << 64n) - 1n;
+
+function normalizedSlot(value) {
+  const slot = Number(value);
+  return Number.isSafeInteger(slot) && slot >= 0 ? slot : null;
+}
+
+function commitmentConfig(commitment, minContextSlot = null) {
+  const config = { commitment };
+  const slot = normalizedSlot(minContextSlot);
+  if (slot !== null) config.minContextSlot = slot;
+  return config;
+}
+
+function isMinimumContextSlotError(error) {
+  return Number(error?.code) === -32016
+    || /minimum context slot|minimum ledger slot/i.test(String(error?.message || error));
+}
 
 function u64(value, name) {
   const raw = BigInt(value?.toString?.() ?? value);
@@ -146,8 +165,12 @@ function classifyBuyReconciliation(status, tokenBalanceRaw) {
 class PumpTradeExecutor {
   constructor(config) {
     this.config = config;
+    this.readCommitment = config.readCommitment || 'processed';
+    this.confirmationCommitment = config.confirmationCommitment
+      || config.commitment
+      || 'confirmed';
     this.connection = new Connection(config.rpcUrl, {
-      commitment: config.commitment,
+      commitment: this.readCommitment,
       confirmTransactionInitialTimeout: 20_000,
     });
     const secret = secretBytes(config.privateKey);
@@ -166,7 +189,7 @@ class PumpTradeExecutor {
   }
 
   async walletBalanceSol() {
-    return (await this.connection.getBalance(this.signer.publicKey, this.config.commitment))
+    return (await this.connection.getBalance(this.signer.publicKey, this.readCommitment))
       / LAMPORTS_PER_SOL;
   }
 
@@ -181,11 +204,14 @@ class PumpTradeExecutor {
     return this.cachedProtocol;
   }
 
-  async _tokenProgram(mint) {
+  async _tokenProgram(mint, minContextSlot = null) {
     const key = mint.toBase58();
     const cached = this.tokenPrograms.get(key);
     if (cached) return cached;
-    const info = await this.connection.getAccountInfo(mint, this.config.commitment);
+    const info = await this.connection.getAccountInfo(
+      mint,
+      commitmentConfig(this.readCommitment, minContextSlot),
+    );
     if (!info) throw errorWithCode(`Mint account not found: ${mint.toBase58()}`, 'MINT_NOT_FOUND');
     if (info.owner.equals(TOKEN_2022_PROGRAM_ID)) {
       this.tokenPrograms.set(key, TOKEN_2022_PROGRAM_ID);
@@ -198,7 +224,7 @@ class PumpTradeExecutor {
     throw errorWithCode(`Unsupported token program: ${info.owner.toBase58()}`, 'TOKEN_PROGRAM');
   }
 
-  async _tokenBalanceRaw(mint, tokenProgram) {
+  async _tokenBalanceRaw(mint, tokenProgram, commitment = this.readCommitment) {
     const ata = getAssociatedTokenAddressSync(
       mint,
       this.signer.publicKey,
@@ -206,13 +232,94 @@ class PumpTradeExecutor {
       tokenProgram,
     );
     try {
-      const balance = await this.connection.getTokenAccountBalance(ata, this.config.commitment);
+      const balance = await this.connection.getTokenAccountBalance(ata, commitment);
       return BigInt(balance.value.amount);
     } catch (error) {
       const message = String(error?.message || error);
       if (/could not find account|Invalid param|not found/i.test(message)) return 0n;
       throw error;
     }
+  }
+
+  async _buyStateAtSignalSlot(mint, signalSlot = null) {
+    const legacyAta = getAssociatedTokenAddressSync(
+      mint,
+      this.signer.publicKey,
+      true,
+      TOKEN_PROGRAM_ID,
+    );
+    const token2022Ata = getAssociatedTokenAddressSync(
+      mint,
+      this.signer.publicKey,
+      true,
+      TOKEN_2022_PROGRAM_ID,
+    );
+    const accountKeys = [mint, bondingCurvePda(mint), legacyAta, token2022Ata];
+    const retryLimit = Math.max(0, Number(this.config?.contextSlotRetryCount ?? 2));
+    const retryDelayMs = Math.max(0, Number(this.config?.contextSlotRetryDelayMs ?? 25));
+    let response;
+    let contextRetries = 0;
+    while (true) {
+      try {
+        response = await this.connection.getMultipleAccountsInfoAndContext(
+          accountKeys,
+          commitmentConfig(this.readCommitment, signalSlot),
+        );
+        break;
+      } catch (error) {
+        if (!isMinimumContextSlotError(error)) throw error;
+        if (contextRetries >= retryLimit) {
+          const contextError = errorWithCode(
+            `RPC did not reach signal slot ${normalizedSlot(signalSlot)} after ${contextRetries + 1} reads`,
+            'RPC_CONTEXT_BEHIND',
+          );
+          contextError.contextRetries = contextRetries;
+          contextError.cause = error;
+          throw contextError;
+        }
+        contextRetries += 1;
+        if (retryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+      }
+    }
+    const [mintAccountInfo, bondingCurveAccountInfo, legacyAtaInfo, token2022AtaInfo]
+      = response.value;
+    if (!mintAccountInfo) {
+      throw errorWithCode(`Mint account not found: ${mint.toBase58()}`, 'MINT_NOT_FOUND');
+    }
+    let tokenProgram;
+    let associatedUserAccountInfo;
+    if (mintAccountInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+      tokenProgram = TOKEN_2022_PROGRAM_ID;
+      associatedUserAccountInfo = token2022AtaInfo;
+    } else if (mintAccountInfo.owner.equals(TOKEN_PROGRAM_ID)) {
+      tokenProgram = TOKEN_PROGRAM_ID;
+      associatedUserAccountInfo = legacyAtaInfo;
+    } else {
+      throw errorWithCode(
+        `Unsupported token program: ${mintAccountInfo.owner.toBase58()}`,
+        'TOKEN_PROGRAM',
+      );
+    }
+    if (!bondingCurveAccountInfo) {
+      throw errorWithCode(
+        `Bonding curve account not found for mint: ${mint.toBase58()}`,
+        'CURVE_NOT_FOUND',
+      );
+    }
+    this.tokenPrograms.set(mint.toBase58(), tokenProgram);
+    return {
+      tokenProgram,
+      balanceBefore: associatedUserAccountInfo
+        ? AccountLayout.decode(associatedUserAccountInfo.data).amount
+        : 0n,
+      bondingCurveAccountInfo,
+      bondingCurve: this.pump.decodeBondingCurve(bondingCurveAccountInfo),
+      associatedUserAccountInfo,
+      contextSlot: response.context.slot,
+      contextRetries,
+    };
   }
 
   _budgetInstructions() {
@@ -232,7 +339,7 @@ class PumpTradeExecutor {
       if (typeof onStage === 'function') onStage(name);
     };
     const latest = latestBlockhash
-      || await this.connection.getLatestBlockhash(this.config.commitment);
+      || await this.connection.getLatestBlockhash(this.readCommitment);
     stage('blockhash_ready_ms');
     const transaction = new Transaction({
       feePayer: this.signer.publicKey,
@@ -247,14 +354,14 @@ class PumpTradeExecutor {
       signature = await this.connection.sendRawTransaction(transaction.serialize(), {
         skipPreflight: false,
         maxRetries: 2,
-        preflightCommitment: this.config.commitment,
+        preflightCommitment: this.readCommitment,
       });
       stage('submitted_ms');
       const confirmation = await this.connection.confirmTransaction({
         signature,
         blockhash: latest.blockhash,
         lastValidBlockHeight: latest.lastValidBlockHeight,
-      }, this.config.commitment);
+      }, this.confirmationCommitment);
       if (confirmation.value.err) {
         throw confirmedTransactionFailure(signature, confirmation.value.err);
       }
@@ -273,19 +380,32 @@ class PumpTradeExecutor {
       signature
         ? this.connection.getSignatureStatuses([signature], { searchTransactionHistory: true })
         : Promise.resolve({ value: [null] }),
-      this._tokenBalanceRaw(mint, tokenProgram),
+      this._tokenBalanceRaw(mint, tokenProgram, this.confirmationCommitment),
     ]);
     const status = statusResponse?.value?.[0] || null;
     return classifyBuyReconciliation(status, tokenBalance);
   }
 
-  async buy({ mint: mintValue, solAmount, referencePrice, maxPriceJumpPct }) {
+  async buy({
+    mint: mintValue,
+    solAmount,
+    referencePrice,
+    maxPriceJumpPct,
+    signalSlot = null,
+  }) {
     const startedAt = Date.now();
+    const minimumContextSlot = normalizedSlot(signalSlot);
     const execution = {
-      version: 1,
+      version: 2,
       buyMode: 'EXACT_QUOTE_IN_V2_FIXED_SOL',
+      hardSpendCap: true,
       positionSol: solAmount,
       slippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
+      signalSlot: minimumContextSlot,
+      readCommitment: this.readCommitment,
+      preflightCommitment: this.readCommitment,
+      confirmationCommitment: this.confirmationCommitment,
+      skipPreflight: false,
       startedAt,
       timelineMs: {},
     };
@@ -295,44 +415,42 @@ class PumpTradeExecutor {
 
     try {
       const mint = new PublicKey(mintValue);
-      const tokenProgramPromise = this._tokenProgram(mint).then((tokenProgram) => {
-        mark('token_program_ready_ms');
-        return tokenProgram;
-      });
+      const readConfig = commitmentConfig(this.readCommitment);
+      const buyStatePromise = this._buyStateAtSignalSlot(mint, minimumContextSlot);
       const protocolPromise = this._protocolState();
-      const latestBlockhashPromise = this.connection.getLatestBlockhash(this.config.commitment);
-      const balanceLamportsPromise = this.connection.getBalance(
+      const latestBlockhashPromise = this.connection.getLatestBlockhashAndContext(readConfig);
+      const balanceLamportsPromise = this.connection.getBalanceAndContext(
         this.signer.publicKey,
-        this.config.commitment,
-      );
-      const balanceBeforePromise = tokenProgramPromise.then(
-        (tokenProgram) => this._tokenBalanceRaw(mint, tokenProgram),
-      );
-      const buyStatePromise = tokenProgramPromise.then(
-        (tokenProgram) => this.onlinePump.fetchBuyState(
-          mint,
-          this.signer.publicKey,
-          tokenProgram,
-        ),
+        readConfig,
       );
 
       const spendLamports = BigInt(Math.round(solAmount * LAMPORTS_PER_SOL));
       execution.spendableQuoteRaw = spendLamports.toString();
       const [
-        tokenProgram,
-        balanceBefore,
-        balanceLamports,
-        protocol,
         state,
-        latestBlockhash,
+        balanceResponse,
+        protocol,
+        blockhashResponse,
       ] = await Promise.all([
-        tokenProgramPromise,
-        balanceBeforePromise,
+        buyStatePromise,
         balanceLamportsPromise,
         protocolPromise,
-        buyStatePromise,
         latestBlockhashPromise,
       ]);
+      const { tokenProgram, balanceBefore } = state;
+      const balanceLamports = balanceResponse.value;
+      const latestBlockhash = blockhashResponse.value;
+      execution.rpcContextSlot = state.contextSlot;
+      execution.slotLag = minimumContextSlot === null
+        ? null
+        : state.contextSlot - minimumContextSlot;
+      execution.contextRetries = state.contextRetries;
+      execution.rpcSlots = {
+        minimumContextSlot,
+        quoteContextSlot: state.contextSlot,
+        walletContextSlot: balanceResponse.context.slot,
+        blockhashContextSlot: blockhashResponse.context.slot,
+      };
       mark('state_and_blockhash_ready_ms');
       if (balanceBefore > 0n) {
         throw errorWithCode(
@@ -409,7 +527,11 @@ class PumpTradeExecutor {
         latestBlockhash,
         onStage: mark,
       });
-      const balanceAfter = await this._tokenBalanceRaw(mint, tokenProgram);
+      const balanceAfter = await this._tokenBalanceRaw(
+        mint,
+        tokenProgram,
+        this.confirmationCommitment,
+      );
       const acquired = balanceAfter > balanceBefore
         ? balanceAfter - balanceBefore
         : BigInt(amount.toString());
@@ -429,6 +551,9 @@ class PumpTradeExecutor {
       };
     } catch (error) {
       mark('total_ms');
+      if (Number.isFinite(error.contextRetries)) {
+        execution.contextRetries = error.contextRetries;
+      }
       error.execution = execution;
       throw error;
     }

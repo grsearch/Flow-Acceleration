@@ -24,6 +24,7 @@ function orderExecution(execution, event, submittedAt, finishedAt) {
   return {
     ...(execution || {}),
     manager: {
+      eventSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
       eventTimestampMs: event.timestampMs || null,
       eventReceivedAtMs: event.receivedAtMs || null,
       entryStartedAtMs: submittedAt,
@@ -171,7 +172,16 @@ class LiveTradingManager {
           entryReconcileDelayMs: this.config.entryReconcileDelayMs,
           computeUnitLimit: this.config.computeUnitLimit,
           priorityFeeMicroLamports: this.config.priorityFeeMicroLamports,
-          commitment: this.config.commitment,
+          readCommitment: this.config.readCommitment || 'processed',
+          preflightCommitment: this.config.readCommitment || 'processed',
+          confirmationCommitment: this.config.confirmationCommitment
+            || this.config.commitment
+            || 'confirmed',
+          contextSlotRetryCount: this.config.contextSlotRetryCount ?? 2,
+          contextSlotRetryDelayMs: this.config.contextSlotRetryDelayMs ?? 25,
+          commitment: this.config.confirmationCommitment
+            || this.config.commitment
+            || 'confirmed',
         },
       },
       activePositions: this.positions.size,
@@ -346,9 +356,14 @@ class LiveTradingManager {
           tokenAmountRaw: raw.toString(),
           expectedPrice: event.price,
           execution: {
-            version: 1,
+            version: 2,
             buyMode: 'DRY_RUN_FIXED_SOL',
             positionSol: this.config.positionSizeSol,
+            signalSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
+            readCommitment: this.config.readCommitment || 'processed',
+            confirmationCommitment: this.config.confirmationCommitment
+              || this.config.commitment
+              || 'confirmed',
           },
         };
       } else {
@@ -357,6 +372,7 @@ class LiveTradingManager {
           solAmount: this.config.positionSizeSol,
           referencePrice: event.price,
           maxPriceJumpPct: this.config.maxEntryPriceJumpPct,
+          signalSlot: event.slot,
         });
       }
       const openedAt = this.now();

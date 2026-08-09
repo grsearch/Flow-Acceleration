@@ -522,6 +522,9 @@
       ];
       document.querySelector('#live-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
 
+      const commitmentPath = execution.readCommitment && execution.confirmationCommitment
+        ? `${execution.readCommitment} → ${execution.confirmationCommitment}`
+        : execution.commitment || '—';
       const cards = [
         ['买入条件', [
           ['规则版本', strategy.ruleVersion || '—'], ['阶段', entry.phase || 'OPEN'], ['市场', entry.market || 'PUMP_BONDING_CURVE'],
@@ -541,7 +544,8 @@
         ]],
         ['链上执行', [
           ['买入滑点', rate(execution.buySlippagePct)], ['卖出滑点', rate(execution.sellSlippagePct)], ['Compute Unit', number(execution.computeUnitLimit)],
-          ['优先费', `${number(execution.priorityFeeMicroLamports)} μLamports`], ['确认级别', execution.commitment || '—'],
+          ['优先费', `${number(execution.priorityFeeMicroLamports)} μLamports`], ['读取 → 确认', commitmentPath],
+          ['Slot 同步重试', `${number(execution.contextSlotRetryCount)} × ${number(execution.contextSlotRetryDelayMs)} ms`],
           ['买入状态核对', `${number(execution.entryReconcileCount)} × ${number(execution.entryReconcileDelayMs)} ms`], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
         ]],
       ];
