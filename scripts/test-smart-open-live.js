@@ -1,11 +1,16 @@
 'use strict';
 
 const assert = require('assert');
+const { PublicKey, TransactionInstruction } = require('@solana/web3.js');
+const { PUMP_PROGRAM_ID } = require('@pump-fun/pump-sdk');
 const FlowAccelerationEngine = require('../src/core/FlowAccelerationEngine');
 const LiveTradingManager = require('../src/core/LiveTradingManager');
 const {
   classifyBuyReconciliation,
   confirmedTransactionFailure,
+  exactQuoteInInstructionData,
+  minimumTokensOut,
+  replaceBuyV2WithExactQuoteIn,
 } = require('../src/core/PumpTradeExecutor');
 const { evaluateSmartOpen, REJECT } = require('../src/core/SmartOpenStrategy');
 const { ResearchStore } = require('../src/data/ResearchStore');
@@ -72,6 +77,34 @@ function smartTrade({ side = 'BUY', timestampMs, signature, tokenAmount = 100 })
 }
 
 async function main() {
+  const exactInputData = exactQuoteInInstructionData(50_000_000n, 900_000n);
+  assert.strictEqual(exactInputData.length, 24);
+  assert.deepStrictEqual([...exactInputData.subarray(0, 8)], [194, 171, 28, 70, 104, 77, 91, 47]);
+  assert.strictEqual(exactInputData.readBigUInt64LE(8), 50_000_000n);
+  assert.strictEqual(exactInputData.readBigUInt64LE(16), 900_000n);
+  assert.strictEqual(minimumTokensOut('1000000', 10).toString(), '900000');
+  assert.strictEqual(minimumTokensOut('1000000', 12.34).toString(), '876600');
+  const originalKey = PublicKey.unique();
+  const setupInstruction = new TransactionInstruction({
+    programId: PublicKey.unique(),
+    keys: [],
+    data: Buffer.from([1]),
+  });
+  const templateInstruction = new TransactionInstruction({
+    programId: PUMP_PROGRAM_ID,
+    keys: [{ pubkey: originalKey, isSigner: true, isWritable: true }],
+    data: Buffer.from([2]),
+  });
+  const replacedInstructions = replaceBuyV2WithExactQuoteIn(
+    [setupInstruction, templateInstruction],
+    50_000_000n,
+    900_000n,
+  );
+  assert.strictEqual(replacedInstructions[0], setupInstruction);
+  assert.ok(replacedInstructions[1].programId.equals(PUMP_PROGRAM_ID));
+  assert.ok(replacedInstructions[1].keys[0].pubkey.equals(originalKey));
+  assert.deepStrictEqual(replacedInstructions[1].data, exactInputData);
+
   const confirmedFailure = confirmedTransactionFailure(
     'failed-chain-signature',
     { InstructionError: [3, { Custom: 6002 }] },
@@ -141,6 +174,11 @@ async function main() {
       return {
         signature: 'live-buy-signature', venue: 'PUMP_BONDING_CURVE',
         tokenAmountRaw: '5000000', expectedPrice: 0.01,
+        execution: {
+          version: 1,
+          buyMode: 'EXACT_QUOTE_IN_V2_FIXED_SOL',
+          timelineMs: { submitted_ms: 12, confirmed_ms: 24 },
+        },
       };
     },
     async sell() {
@@ -209,6 +247,10 @@ async function main() {
   assert.strictEqual(dashboard.stats.confirmed_orders, 2);
   assert.strictEqual(dashboard.positions[0].status, 'CLOSED');
   assert.strictEqual(dashboard.orders.length, 2);
+  const dashboardBuy = dashboard.orders.find((order) => order.side === 'BUY');
+  assert.strictEqual(dashboardBuy.execution.buyMode, 'EXACT_QUOTE_IN_V2_FIXED_SOL');
+  assert.strictEqual(dashboardBuy.execution.timelineMs.submitted_ms, 12);
+  assert.strictEqual(dashboardBuy.execution.manager.eventToEntryStartMs, 0);
   assert.ok(Array.isArray(dashboard.decisions[0].rejection_reasons));
   const health = manager.health();
   assert.strictEqual(health.strategy.ruleVersion, 'smart-open-curve-v1');
@@ -223,6 +265,8 @@ async function main() {
   assert.strictEqual(health.strategy.risk.positionSizeSol, 0.05);
   assert.strictEqual(health.strategy.execution.buySlippagePct, 10);
   assert.strictEqual(health.strategy.execution.sellSlippagePct, 15);
+  assert.strictEqual(health.strategy.execution.buyMode, 'EXACT_QUOTE_IN_V2_FIXED_SOL');
+  assert.strictEqual(health.strategy.execution.hardSpendCap, true);
 
   await manager.stop();
   store.close();
@@ -236,10 +280,16 @@ async function main() {
     now: () => failedNow,
     executor: {
       async buy() {
-        throw confirmedTransactionFailure(
+        const error = confirmedTransactionFailure(
           'too-much-sol-signature',
           { InstructionError: [3, { Custom: 6002 }] },
         );
+        error.execution = {
+          version: 1,
+          buyMode: 'EXACT_QUOTE_IN_V2_FIXED_SOL',
+          timelineMs: { submitted_ms: 10, total_ms: 15 },
+        };
+        throw error;
       },
       async sell() { failedSellCalls += 1; },
       async reconcileBuy() { throw new Error('deterministic failure must not be reconciled'); },
@@ -258,6 +308,10 @@ async function main() {
   assert.strictEqual(failedPosition.exit_reason, 'ENTRY_TRANSACTION_FAILED');
   assert.strictEqual(failedOrder.status, 'FAILED');
   assert.strictEqual(failedOrder.signature, 'too-much-sol-signature');
+  assert.strictEqual(
+    JSON.parse(failedOrder.execution_json).buyMode,
+    'EXACT_QUOTE_IN_V2_FIXED_SOL',
+  );
   assert.strictEqual(failedSellCalls, 0, 'confirmed chain failure must never trigger a sell');
   assert.strictEqual(failedStore.activeLivePositions().length, 0);
   await failedManager.stop();

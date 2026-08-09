@@ -20,6 +20,25 @@ function startOfLocalDay(now) {
   return date.getTime();
 }
 
+function orderExecution(execution, event, submittedAt, finishedAt) {
+  return {
+    ...(execution || {}),
+    manager: {
+      eventTimestampMs: event.timestampMs || null,
+      eventReceivedAtMs: event.receivedAtMs || null,
+      entryStartedAtMs: submittedAt,
+      entryFinishedAtMs: finishedAt,
+      eventToEntryStartMs: Number.isFinite(event.timestampMs)
+        ? submittedAt - event.timestampMs
+        : null,
+      receiveToEntryStartMs: Number.isFinite(event.receivedAtMs)
+        ? submittedAt - event.receivedAtMs
+        : null,
+      managerElapsedMs: finishedAt - submittedAt,
+    },
+  };
+}
+
 function restoredPosition(row) {
   return {
     id: row.id,
@@ -144,6 +163,8 @@ class LiveTradingManager {
           mintCooldownMs: this.config.mintCooldownMs,
         },
         execution: {
+          buyMode: 'EXACT_QUOTE_IN_V2_FIXED_SOL',
+          hardSpendCap: true,
           buySlippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
           sellSlippagePct: this.config.sellSlippagePct ?? this.config.slippagePct,
           entryReconcileCount: this.config.entryReconcileCount,
@@ -324,6 +345,11 @@ class LiveTradingManager {
           venue: 'PUMP_BONDING_CURVE',
           tokenAmountRaw: raw.toString(),
           expectedPrice: event.price,
+          execution: {
+            version: 1,
+            buyMode: 'DRY_RUN_FIXED_SOL',
+            positionSol: this.config.positionSizeSol,
+          },
         };
       } else {
         result = await this.executor.buy({
@@ -350,6 +376,7 @@ class LiveTradingManager {
         requestedTokenRaw: result.tokenAmountRaw,
         status: 'CONFIRMED',
         signature: result.signature,
+        execution: orderExecution(result.execution, event, submittedAt, openedAt),
         submittedAt,
         confirmedAt: openedAt,
       });
@@ -381,6 +408,7 @@ class LiveTradingManager {
         status: confirmationUnknown ? 'CONFIRMATION_UNKNOWN' : 'FAILED',
         signature: error.signature,
         error: errorText(error),
+        execution: orderExecution(error.execution, event, submittedAt, failedAt),
         submittedAt,
       });
       if (confirmationUnknown) {

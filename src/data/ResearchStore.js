@@ -334,6 +334,7 @@ class ResearchStore {
         status TEXT NOT NULL,
         signature TEXT,
         error TEXT,
+        execution_json TEXT,
         submitted_at INTEGER,
         confirmed_at INTEGER,
         created_at INTEGER NOT NULL,
@@ -430,6 +431,12 @@ class ResearchStore {
     ];
     for (const [column, sql] of smartEventMigrations) {
       if (!smartEventColumns.has(column)) this.db.exec(sql);
+    }
+    const liveOrderColumns = new Set(
+      this.db.prepare('PRAGMA table_info(live_orders)').all().map((column) => column.name),
+    );
+    if (!liveOrderColumns.has('execution_json')) {
+      this.db.exec('ALTER TABLE live_orders ADD COLUMN execution_json TEXT');
     }
     this.db.exec(`
       UPDATE smart_wallet_events AS event SET
@@ -854,11 +861,11 @@ class ResearchStore {
         INSERT INTO live_orders (
           position_id, decision_id, mint, side, venue, attempt,
           requested_sol, requested_token_raw, status, signature, error,
-          submitted_at, confirmed_at, created_at, updated_at
+          execution_json, submitted_at, confirmed_at, created_at, updated_at
         ) VALUES (
           @positionId, @decisionId, @mint, @side, @venue, @attempt,
           @requestedSol, @requestedTokenRaw, @status, @signature, @error,
-          @submittedAt, @confirmedAt, @createdAt, @updatedAt
+          @executionJson, @submittedAt, @confirmedAt, @createdAt, @updatedAt
         )
       `),
       updateLiveOrder: this.db.prepare(`
@@ -866,6 +873,7 @@ class ResearchStore {
           status = COALESCE(@status, status),
           requested_token_raw = COALESCE(@requestedTokenRaw, requested_token_raw),
           error = @error,
+          execution_json = COALESCE(@executionJson, execution_json),
           confirmed_at = COALESCE(@confirmedAt, confirmed_at),
           updated_at = @updatedAt
         WHERE id = @id
@@ -1281,6 +1289,7 @@ class ResearchStore {
       status: order.status,
       signature: order.signature || null,
       error: order.error || null,
+      executionJson: order.execution ? JSON.stringify(order.execution) : null,
       submittedAt: order.submittedAt || null,
       confirmedAt: order.confirmedAt || null,
       createdAt: now,
@@ -1296,6 +1305,7 @@ class ResearchStore {
       status: value('status'),
       requestedTokenRaw: value('requestedTokenRaw'),
       error: value('error'),
+      executionJson: value('execution') ? JSON.stringify(value('execution')) : null,
       confirmedAt: value('confirmedAt'),
       updatedAt: Date.now(),
     });
@@ -1328,7 +1338,15 @@ class ResearchStore {
       SELECT * FROM live_orders
       ORDER BY created_at DESC, id DESC
       LIMIT ?
-    `).all(safeLimit(orderLimit));
+    `).all(safeLimit(orderLimit)).map((row) => {
+      let execution = null;
+      try {
+        execution = row.execution_json ? JSON.parse(row.execution_json) : null;
+      } catch (_) {
+        execution = { parseError: true };
+      }
+      return { ...row, execution };
+    });
     const decisions = this.db.prepare(`
       SELECT * FROM smart_open_decisions
       ORDER BY timestamp_ms DESC, id DESC
