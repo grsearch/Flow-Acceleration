@@ -5,6 +5,8 @@ const { PumpEventParser } = require('./core/PumpEventParser');
 const PumpFlowStream = require('./core/PumpFlowStream');
 const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
 const SignalLabeler = require('./core/SignalLabeler');
+const LiveTradingManager = require('./core/LiveTradingManager');
+const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
 
@@ -12,6 +14,7 @@ function createRuntime(runtimeConfig = config) {
   const store = new ResearchStore(runtimeConfig.storage, runtimeConfig.labels);
   const engine = new FlowAccelerationEngine(runtimeConfig.strategy);
   engine.hydrateTokens(store.allTokens());
+  engine.hydrateTrades(store.recentCurveTrades(Date.now() - runtimeConfig.strategy.bufferMs));
   const labeler = new SignalLabeler({ store, config: runtimeConfig.labels });
   labeler.restore(store.restorePendingSignals());
   const parser = new PumpEventParser({
@@ -20,12 +23,22 @@ function createRuntime(runtimeConfig = config) {
     wsolMint: runtimeConfig.pump.wsolMint,
   });
   const stream = new PumpFlowStream({ config: runtimeConfig, tokenForEndpoint: streamTokenFor });
+  const executor = runtimeConfig.liveTrading.enabled && !runtimeConfig.liveTrading.dryRun
+    ? new PumpTradeExecutor(runtimeConfig.liveTrading)
+    : null;
+  const trader = new LiveTradingManager({
+    config: runtimeConfig.liveTrading,
+    store,
+    executor,
+  });
+  trader.start();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
     engine,
     stream,
     labeler,
+    trader,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
@@ -105,10 +118,26 @@ function createRuntime(runtimeConfig = config) {
         }
 
         const trade = store.enrichTrade(event);
+        const isSmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
+        const preBuyContext = isSmartWalletTrade
+          ? engine.recentBuyContext(
+            trade.mint,
+            trade.timestampMs,
+            runtimeConfig.liveTrading.preBuyWindowMs,
+            trade.wallet,
+          )
+          : null;
         store.queueRawTrade(trade);
         engine.handleTrade(trade, store.getToken(trade.mint));
         labeler.onTrade(trade);
-        if (trade.wallet && smartWallets.has(trade.wallet)) store.recordSmartWalletEvent(trade);
+        trader.observeTrade(trade);
+        if (isSmartWalletTrade) {
+          const smartEvent = store.recordSmartWalletEvent(trade);
+          trader.onSmartWalletEvent(smartEvent, {
+            ...preBuyContext,
+            receivedAtMs: trade.receivedAtMs,
+          });
+        }
       } catch (error) {
         runtimeMetrics.parseErrors += 1;
         console.error(`[Runtime] ${event.type} failed:`, error.message);
@@ -123,7 +152,7 @@ function createRuntime(runtimeConfig = config) {
   async function start() {
     await server.start();
     console.log(`Flow Acceleration dashboard: http://127.0.0.1:${runtimeConfig.server.port}`);
-    console.log('Mode: RESEARCH ONLY — no wallet key, BUY, or SELL path is loaded.');
+    console.log(`Trading mode: ${trader.mode}. Full research capture remains enabled.`);
     console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
       + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `
@@ -165,6 +194,7 @@ function createRuntime(runtimeConfig = config) {
     maintenanceTimer = null;
     archiveTimer = null;
     await stream.stop();
+    await trader.stop();
     await server.stop();
     store.close();
   }
@@ -176,10 +206,11 @@ function createRuntime(runtimeConfig = config) {
       labels: labeler.stats(),
       stream: stream.health(),
       database: store.health(),
+      trading: trader.health(),
     };
   }
 
-  return { start, stop, health, store, engine, labeler, parser, stream, server };
+  return { start, stop, health, store, engine, labeler, parser, stream, server, trader };
 }
 
 async function main() {

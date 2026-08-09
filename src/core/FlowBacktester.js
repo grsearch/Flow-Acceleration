@@ -648,7 +648,13 @@ function runBacktest(db, options = {}) {
     const maximumPathEnd = entry.timestamp_ms + holdMs + exitExecutionDelayMs
       + exitRetryCount * exitRetryDelayMs + exitTimeoutMs;
     const pathEnd = Math.min(maximumPathEnd, dataCutoffMs);
-    const path = pathBetween.all(signal.mint, entry.timestamp_ms, pathEnd);
+    const path = pathBetween.all(signal.mint, entry.timestamp_ms, pathEnd).filter((trade) => {
+      if (trade.market === 'PUMP_BONDING_CURVE') return true;
+      if (trade.market !== 'PUMP_AMM' || graduatedAt == null
+        || trade.timestamp_ms < graduatedAt) return false;
+      const crossMarketRatio = trade.price / entry.price;
+      return crossMarketRatio >= 0.05 && crossMarketRatio <= 20;
+    });
     const trigger = findExitTrigger(path, entry, {
       holdMs,
       takeProfitPct,

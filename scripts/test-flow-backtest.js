@@ -162,7 +162,7 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   const store = makeStore();
   const timestamp = 18_000_000;
   addSignal(store, 'smart-lifecycle', timestamp);
-  const smartTrade = (side, offset, solAmount) => store.recordSmartWalletEvent({
+  const smartTrade = (side, offset, solAmount, tokenAmount = 100) => store.recordSmartWalletEvent({
     timestampMs: timestamp + offset,
     slot: 1,
     signature: `smart-${side}-${offset}`,
@@ -172,14 +172,14 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
     side,
     market: 'PUMP_BONDING_CURVE',
     solAmount,
-    tokenAmount: 100,
+    tokenAmount,
     price: 1,
     curvePct: 40,
     ageMs: 5_000,
   });
   assert.strictEqual(smartTrade('BUY', 1_000, 2).positionPhase, 'OPEN');
   assert.strictEqual(smartTrade('BUY', 2_000, 0.2).positionPhase, 'ADD');
-  assert.strictEqual(smartTrade('SELL', 5_000, 2.2).positionPhase, 'CLOSE');
+  assert.strictEqual(smartTrade('SELL', 5_000, 2.2, 200).positionPhase, 'CLOSE');
   const stats = store.smartWalletStats(['smart-wallet'])[0];
   assert.strictEqual(stats.openBuys, 1);
   assert.strictEqual(stats.addBuys, 1);
@@ -532,6 +532,27 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   assert.ok(Number.isFinite(result.metrics.robustness.mintBootstrap95Pct.lowerPct));
   assert.ok(result.metrics.robustness.topWinnerContributionPct.top1 > 80);
   assert.ok(result.metrics.robustness.averageWithoutTopWinnersPct.top1 < 0);
+  store.close();
+}
+
+{
+  const store = makeStore();
+  const timestamp = 14_000_000;
+  addSignal(store, 'cross-market-guard', timestamp);
+  addTrade(store, 'cross-market-guard', timestamp + 200, 1);
+  addTrade(store, 'cross-market-guard', timestamp + 1_200, 1_000, 'PUMP_AMM');
+  addTrade(store, 'coverage-only', timestamp + 10_000, 1);
+  store.flushRawTrades();
+  const result = runBacktest(store.db, {
+    holdMs: 1_000,
+    executionDelayMs: 200,
+    platformFeePct: 0,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(result.rows.length, 1);
+  assert.notStrictEqual(result.rows[0].status, STATUS.COMPLETED,
+    'PumpSwap prices must not be used before a recorded graduation');
+  assert.strictEqual(result.rows[0].exitMarket, null);
   store.close();
 }
 

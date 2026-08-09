@@ -22,12 +22,13 @@ function boolean(value, fallback = false) {
 }
 
 class ResearchServer {
-  constructor({ config, store, engine, stream, labeler }) {
+  constructor({ config, store, engine, stream, labeler, trader = null }) {
     this.config = config;
     this.store = store;
     this.engine = engine;
     this.stream = stream;
     this.labeler = labeler;
+    this.trader = trader;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -154,6 +155,15 @@ class ResearchServer {
       response.json(this.store.signalRepetitionStats());
     });
 
+    this.app.get('/api/live-trading', (_request, response) => {
+      response.json(this.trader?.health() || {
+        mode: 'DISABLED',
+        enabled: false,
+        dryRun: true,
+        activePositions: 0,
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -167,6 +177,7 @@ class ResearchServer {
         labels: this.labeler.stats(),
         stream: this.stream.health(),
         database: this.store.health(),
+        trading: this.trader?.health() || null,
       });
     });
 

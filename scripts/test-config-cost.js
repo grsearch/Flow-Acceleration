@@ -32,5 +32,10 @@ assert.strictEqual(config.backtest.executionDelayMs, 200);
 assert.strictEqual(config.backtest.exitExecutionDelayMs, 200);
 assert.strictEqual(config.backtest.signalCooldownMs, 5_000);
 assert.strictEqual(config.backtest.singlePositionPerMint, true);
+assert.strictEqual(config.liveTrading.enabled, false);
+assert.strictEqual(config.liveTrading.dryRun, true);
+assert.strictEqual(config.liveTrading.minSmartOpenSol, 1);
+assert.strictEqual(config.liveTrading.minPreBuyers, 2);
+assert.strictEqual(config.liveTrading.preBuyWindowMs, 2_000);
 
 console.log('test-config-cost: ok');

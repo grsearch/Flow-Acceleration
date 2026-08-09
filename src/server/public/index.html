@@ -378,11 +378,13 @@
 
     function renderHealth(data) {
       const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${region.active ? '当前' : '备用'}`).join('<br>') || '未连接';
+      const trading = data.trading || { mode: 'DISABLED', activePositions: 0 };
       const cards = [
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Primary Signals', number(data.engine.signalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
         ['Database', [['Raw Rows', number(data.database.rawRows)], ['Primary Signals', number(data.database.primarySignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
-        ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始信号', '全部保留'], ['同 Mint 仓位', '回测默认单仓'], ['链上交易', 'Disabled']]],
+        ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', 'OPEN + Curve + ≥1 SOL + 前置 Buyers≥2'], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
+        ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const live = data.status === 'streaming';

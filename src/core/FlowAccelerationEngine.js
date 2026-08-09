@@ -49,6 +49,44 @@ class FlowAccelerationEngine extends EventEmitter {
     }
   }
 
+  hydrateTrades(trades) {
+    const ordered = [...(trades || [])]
+      .filter((trade) => trade?.market === 'PUMP_BONDING_CURVE'
+        && trade.mint && Number.isFinite(trade.timestampMs))
+      .sort((left, right) => left.timestampMs - right.timestampMs);
+    for (const trade of ordered) {
+      const state = this._state(trade.mint);
+      state.events.push(trade);
+      state.lastTradeAt = Math.max(state.lastTradeAt, trade.timestampMs);
+    }
+    const now = Date.now();
+    for (const state of this.states.values()) this._prune(state, now);
+  }
+
+  recentBuyContext(mint, timestampMs, windowMs = 2_000, excludeWallet = null) {
+    const state = this.states.get(mint);
+    const width = Math.max(1, Number(windowMs) || 2_000);
+    const start = timestampMs - width;
+    const events = (state?.events || []).filter((event) => (
+      event.timestampMs >= start
+      && event.timestampMs <= timestampMs
+      && (!excludeWallet || event.wallet !== excludeWallet)
+    ));
+    const buys = events.filter((event) => event.side === 'BUY');
+    const sells = events.filter((event) => event.side === 'SELL');
+    const buyFlowSol = sum(buys, (event) => event.solAmount);
+    const sellFlowSol = sum(sells, (event) => event.solAmount);
+    return {
+      windowMs: width,
+      uniqueBuyers: uniqueWallets(buys),
+      buyTx: buys.length,
+      sellTx: sells.length,
+      buyFlowSol: round(buyFlowSol, 8),
+      sellFlowSol: round(sellFlowSol, 8),
+      netFlowSol: round(buyFlowSol - sellFlowSol, 8),
+    };
+  }
+
   handleCreate(token) {
     const current = this.tokens.get(token.mint) || {};
     const merged = { ...current, ...token };

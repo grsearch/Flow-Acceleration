@@ -208,6 +208,7 @@ class ResearchStore {
       CREATE TABLE IF NOT EXISTS smart_wallet_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp_ms INTEGER NOT NULL,
+        received_at_ms INTEGER,
         slot INTEGER,
         signature TEXT,
         event_index INTEGER NOT NULL DEFAULT 0,
@@ -221,6 +222,8 @@ class ResearchStore {
         curve_pct REAL,
         age_ms INTEGER,
         position_phase TEXT,
+        token_balance_before REAL,
+        token_balance_after REAL,
         nearest_flow_signal INTEGER,
         time_from_flow_signal_ms INTEGER,
         UNIQUE(signature, event_index, wallet)
@@ -245,6 +248,99 @@ class ResearchStore {
         ON smart_signal_confirmations(signal_id);
       CREATE INDEX IF NOT EXISTS idx_smart_signal_confirmations_mint_ts
         ON smart_signal_confirmations(mint, open_timestamp_ms);
+
+      CREATE TABLE IF NOT EXISTS smart_wallet_positions (
+        wallet TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        token_balance REAL NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(wallet, mint)
+      );
+
+      CREATE TABLE IF NOT EXISTS smart_open_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        smart_event_id INTEGER NOT NULL UNIQUE
+          REFERENCES smart_wallet_events(id) ON DELETE CASCADE,
+        timestamp_ms INTEGER NOT NULL,
+        received_at_ms INTEGER,
+        wallet TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        rule_version TEXT NOT NULL,
+        market TEXT,
+        position_phase TEXT,
+        smart_sol REAL NOT NULL,
+        smart_price REAL,
+        prebuy_window_ms INTEGER NOT NULL,
+        prebuy_buyers INTEGER NOT NULL,
+        prebuy_buy_tx INTEGER NOT NULL,
+        prebuy_buy_flow_sol REAL NOT NULL,
+        prebuy_sell_flow_sol REAL NOT NULL,
+        prebuy_net_flow_sol REAL NOT NULL,
+        event_age_ms INTEGER NOT NULL,
+        rule_matched INTEGER NOT NULL,
+        rejection_reasons_json TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        action_status TEXT NOT NULL,
+        action_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_smart_open_decisions_ts
+        ON smart_open_decisions(timestamp_ms);
+      CREATE INDEX IF NOT EXISTS idx_smart_open_decisions_match_ts
+        ON smart_open_decisions(rule_matched, timestamp_ms);
+
+      CREATE TABLE IF NOT EXISTS live_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id INTEGER NOT NULL REFERENCES smart_open_decisions(id),
+        mint TEXT NOT NULL,
+        trigger_wallet TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        position_sol REAL NOT NULL,
+        token_amount_raw TEXT,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_signature TEXT,
+        entry_error TEXT,
+        highest_price REAL,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_signature TEXT,
+        exit_reason TEXT,
+        exit_error TEXT,
+        opened_at INTEGER,
+        exit_requested_at INTEGER,
+        closed_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_live_positions_status
+        ON live_positions(status, updated_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_live_positions_one_active_mint
+        ON live_positions(mint)
+        WHERE status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED');
+
+      CREATE TABLE IF NOT EXISTS live_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        position_id INTEGER NOT NULL REFERENCES live_positions(id),
+        decision_id INTEGER NOT NULL REFERENCES smart_open_decisions(id),
+        mint TEXT NOT NULL,
+        side TEXT NOT NULL,
+        venue TEXT,
+        attempt INTEGER NOT NULL,
+        requested_sol REAL,
+        requested_token_raw TEXT,
+        status TEXT NOT NULL,
+        signature TEXT,
+        error TEXT,
+        submitted_at INTEGER,
+        confirmed_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_live_orders_position
+        ON live_orders(position_id, id);
     `);
 
     const signalColumns = new Set(
@@ -317,15 +413,32 @@ class ResearchStore {
         .map((column) => column.name),
     );
     const smartEventMigrations = [
+      ['received_at_ms', 'ALTER TABLE smart_wallet_events ADD COLUMN received_at_ms INTEGER'],
       ['market', 'ALTER TABLE smart_wallet_events ADD COLUMN market TEXT'],
       ['token_amount', 'ALTER TABLE smart_wallet_events ADD COLUMN token_amount REAL'],
       ['position_phase', 'ALTER TABLE smart_wallet_events ADD COLUMN position_phase TEXT'],
+      [
+        'token_balance_before',
+        'ALTER TABLE smart_wallet_events ADD COLUMN token_balance_before REAL',
+      ],
+      [
+        'token_balance_after',
+        'ALTER TABLE smart_wallet_events ADD COLUMN token_balance_after REAL',
+      ],
     ];
     for (const [column, sql] of smartEventMigrations) {
       if (!smartEventColumns.has(column)) this.db.exec(sql);
     }
     this.db.exec(`
       UPDATE smart_wallet_events AS event SET
+        received_at_ms = COALESCE(received_at_ms, (
+          SELECT trade.received_at_ms FROM raw_trades AS trade
+          WHERE trade.signature = event.signature
+            AND trade.event_index = event.event_index
+            AND trade.mint = event.mint
+            AND trade.wallet = event.wallet
+          ORDER BY trade.id LIMIT 1
+        ), timestamp_ms),
         market = COALESCE(market, (
           SELECT trade.market FROM raw_trades AS trade
           WHERE trade.signature = event.signature
@@ -342,28 +455,74 @@ class ResearchStore {
             AND trade.wallet = event.wallet
           ORDER BY trade.id LIMIT 1
         ))
-      WHERE market IS NULL OR token_amount IS NULL
+      WHERE received_at_ms IS NULL OR market IS NULL OR token_amount IS NULL
+    `);
+    const needsSmartPositionRebuild = this.db.prepare(`
+      SELECT EXISTS(
+        SELECT 1 FROM smart_wallet_events
+        WHERE token_balance_before IS NULL OR token_balance_after IS NULL
+        LIMIT 1
+      ) AS needed
+    `).get().needed === 1;
+    const smartRows = needsSmartPositionRebuild ? this.db.prepare(`
+      SELECT id, wallet, mint, side, token_amount, timestamp_ms
+      FROM smart_wallet_events
+      ORDER BY wallet, mint, timestamp_ms, id
+    `).all() : [];
+    const updateSmartPhase = this.db.prepare(`
+      UPDATE smart_wallet_events SET
+        position_phase = ?, token_balance_before = ?, token_balance_after = ?
+      WHERE id = ?
+    `);
+    const upsertSmartPosition = this.db.prepare(`
+      INSERT INTO smart_wallet_positions (wallet, mint, token_balance, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(wallet, mint) DO UPDATE SET
+        token_balance = excluded.token_balance,
+        updated_at = excluded.updated_at
+    `);
+    const rebuildSmartPositions = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM smart_wallet_positions').run();
+      const balances = new Map();
+      for (const event of smartRows) {
+        const key = `${event.wallet}:${event.mint}`;
+        const before = balances.get(key) || 0;
+        const amount = Math.max(0, Number(event.token_amount) || 0);
+        let after = before;
+        let phase;
+        if (event.side === 'BUY') {
+          phase = before > 0 ? 'ADD' : 'OPEN';
+          after = before + amount;
+        } else if (before <= 0) {
+          phase = 'SELL';
+          after = 0;
+        } else {
+          after = Math.max(0, before - amount);
+          const dust = Math.max(1e-9, before * 0.005);
+          phase = after <= dust ? 'CLOSE' : 'REDUCE';
+          if (phase === 'CLOSE') after = 0;
+        }
+        balances.set(key, after);
+        updateSmartPhase.run(phase, before, after, event.id);
+        upsertSmartPosition.run(event.wallet, event.mint, after, event.timestamp_ms);
+      }
+    });
+    if (needsSmartPositionRebuild) rebuildSmartPositions();
+    this.db.exec(`
+      INSERT OR IGNORE INTO smart_wallet_positions (wallet, mint, token_balance, updated_at)
+      SELECT event.wallet, event.mint, COALESCE(event.token_balance_after, 0), event.timestamp_ms
+      FROM smart_wallet_events AS event
+      WHERE event.id = (
+        SELECT latest.id FROM smart_wallet_events AS latest
+        WHERE latest.wallet = event.wallet AND latest.mint = event.mint
+        ORDER BY latest.timestamp_ms DESC, latest.id DESC LIMIT 1
+      )
     `);
     this.db.exec(`
-      WITH phased AS (
-        SELECT id, side,
-          LAG(side) OVER (
-            PARTITION BY wallet, mint ORDER BY timestamp_ms, id
-          ) AS previous_side
-        FROM smart_wallet_events
-      )
-      UPDATE smart_wallet_events SET position_phase = COALESCE(
-        position_phase,
-        (SELECT CASE
-          WHEN phased.side = 'BUY' AND phased.previous_side = 'BUY' THEN 'ADD'
-          WHEN phased.side = 'BUY' THEN 'OPEN'
-          WHEN phased.side = 'SELL' AND phased.previous_side = 'BUY' THEN 'CLOSE'
-          ELSE 'SELL'
-        END FROM phased WHERE phased.id = smart_wallet_events.id)
-      )
-      WHERE position_phase IS NULL
-    `);
-    this.db.exec(`
+      DELETE FROM smart_signal_confirmations
+      WHERE smart_event_id IN (
+        SELECT id FROM smart_wallet_events WHERE position_phase != 'OPEN'
+      );
       INSERT OR IGNORE INTO smart_signal_confirmations (
         signal_id, smart_event_id, wallet, mint, open_timestamp_ms, delay_ms, open_sol
       )
@@ -584,22 +743,35 @@ class ResearchStore {
         ORDER BY timestamp_ms DESC
         LIMIT 1
       `),
-      latestSmartWalletEvent: this.db.prepare(`
-        SELECT id, side, position_phase
-        FROM smart_wallet_events
+      recentCurveTrades: this.db.prepare(`
+        SELECT timestamp_ms AS timestampMs, received_at_ms AS receivedAtMs,
+          market, mint, wallet, side, sol_amount AS solAmount,
+          token_amount AS tokenAmount, price
+        FROM raw_trades
+        WHERE market = 'PUMP_BONDING_CURVE' AND timestamp_ms >= ?
+        ORDER BY timestamp_ms, id
+      `),
+      smartWalletPosition: this.db.prepare(`
+        SELECT token_balance
+        FROM smart_wallet_positions
         WHERE wallet = ? AND mint = ?
-        ORDER BY timestamp_ms DESC, id DESC
-        LIMIT 1
+      `),
+      upsertSmartWalletPosition: this.db.prepare(`
+        INSERT INTO smart_wallet_positions (wallet, mint, token_balance, updated_at)
+        VALUES (@wallet, @mint, @tokenBalance, @updatedAt)
+        ON CONFLICT(wallet, mint) DO UPDATE SET
+          token_balance = excluded.token_balance,
+          updated_at = excluded.updated_at
       `),
       insertSmartWallet: this.db.prepare(`
         INSERT OR IGNORE INTO smart_wallet_events (
-          timestamp_ms, slot, signature, event_index, wallet, mint, side, market,
+          timestamp_ms, received_at_ms, slot, signature, event_index, wallet, mint, side, market,
           sol_amount, token_amount, price, curve_pct, age_ms, position_phase,
-          nearest_flow_signal, time_from_flow_signal_ms
+          token_balance_before, token_balance_after, nearest_flow_signal, time_from_flow_signal_ms
         ) VALUES (
-          @timestampMs, @slot, @signature, @eventIndex, @wallet, @mint, @side, @market,
+          @timestampMs, @receivedAtMs, @slot, @signature, @eventIndex, @wallet, @mint, @side, @market,
           @solAmount, @tokenAmount, @price, @curvePct, @ageMs, @positionPhase,
-          @nearestFlowSignal, @timeFromFlowSignalMs
+          @tokenBalanceBefore, @tokenBalanceAfter, @nearestFlowSignal, @timeFromFlowSignalMs
         )
       `),
       insertSmartSignalConfirmation: this.db.prepare(`
@@ -607,6 +779,84 @@ class ResearchStore {
           signal_id, smart_event_id, wallet, mint, open_timestamp_ms, delay_ms, open_sol
         ) VALUES (
           @signalId, @smartEventId, @wallet, @mint, @openTimestampMs, @delayMs, @openSol
+        )
+      `),
+      insertSmartOpenDecision: this.db.prepare(`
+        INSERT OR IGNORE INTO smart_open_decisions (
+          smart_event_id, timestamp_ms, received_at_ms, wallet, mint, rule_version,
+          market, position_phase, smart_sol, smart_price, prebuy_window_ms,
+          prebuy_buyers, prebuy_buy_tx, prebuy_buy_flow_sol, prebuy_sell_flow_sol,
+          prebuy_net_flow_sol, event_age_ms, rule_matched, rejection_reasons_json,
+          mode, action_status, action_reason, created_at, updated_at
+        ) VALUES (
+          @smartEventId, @timestampMs, @receivedAtMs, @wallet, @mint, @ruleVersion,
+          @market, @positionPhase, @smartSol, @smartPrice, @preBuyWindowMs,
+          @preBuyers, @preBuyTx, @preBuyFlowSol, @preSellFlowSol,
+          @preNetFlowSol, @eventAgeMs, @ruleMatched, @rejectionReasonsJson,
+          @mode, @actionStatus, @actionReason, @createdAt, @updatedAt
+        )
+      `),
+      getSmartOpenDecisionByEvent: this.db.prepare(`
+        SELECT * FROM smart_open_decisions WHERE smart_event_id = ?
+      `),
+      updateSmartOpenDecision: this.db.prepare(`
+        UPDATE smart_open_decisions SET
+          action_status = @actionStatus,
+          action_reason = @actionReason,
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      insertLivePosition: this.db.prepare(`
+        INSERT INTO live_positions (
+          decision_id, mint, trigger_wallet, mode, status, position_sol,
+          entry_market, entry_price, highest_price, created_at, updated_at
+        ) VALUES (
+          @decisionId, @mint, @triggerWallet, @mode, @status, @positionSol,
+          @entryMarket, @entryPrice, @highestPrice, @createdAt, @updatedAt
+        )
+      `),
+      updateLivePosition: this.db.prepare(`
+        UPDATE live_positions SET
+          status = COALESCE(@status, status),
+          token_amount_raw = COALESCE(@tokenAmountRaw, token_amount_raw),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_signature = COALESCE(@entrySignature, entry_signature),
+          entry_error = @entryError,
+          highest_price = COALESCE(@highestPrice, highest_price),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_signature = COALESCE(@exitSignature, exit_signature),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          exit_error = @exitError,
+          opened_at = COALESCE(@openedAt, opened_at),
+          exit_requested_at = COALESCE(@exitRequestedAt, exit_requested_at),
+          closed_at = COALESCE(@closedAt, closed_at),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeLivePositions: this.db.prepare(`
+        SELECT * FROM live_positions
+        WHERE status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED')
+        ORDER BY created_at
+      `),
+      lastLivePositionForMint: this.db.prepare(`
+        SELECT * FROM live_positions WHERE mint = ? ORDER BY created_at DESC LIMIT 1
+      `),
+      liveSpendSince: this.db.prepare(`
+        SELECT COALESCE(SUM(position_sol), 0) AS total
+        FROM live_positions
+        WHERE mode = ? AND status != 'ENTRY_FAILED' AND created_at >= ?
+      `),
+      insertLiveOrder: this.db.prepare(`
+        INSERT INTO live_orders (
+          position_id, decision_id, mint, side, venue, attempt,
+          requested_sol, requested_token_raw, status, signature, error,
+          submitted_at, confirmed_at, created_at, updated_at
+        ) VALUES (
+          @positionId, @decisionId, @mint, @side, @venue, @attempt,
+          @requestedSol, @requestedTokenRaw, @status, @signature, @error,
+          @submittedAt, @confirmedAt, @createdAt, @updatedAt
         )
       `),
     };
@@ -619,6 +869,48 @@ class ResearchStore {
           this.metrics.tradesWritten += 1;
         }
       }
+    });
+
+    this._writeSmartWalletEvent = this.db.transaction((row) => {
+      const current = this.stmts.smartWalletPosition.get(row.wallet, row.mint);
+      const before = Math.max(0, Number(current?.token_balance) || 0);
+      const amount = Math.max(0, Number(row.tokenAmount) || 0);
+      let after = before;
+      if (row.side === 'BUY') {
+        row.positionPhase = before > 0 ? 'ADD' : 'OPEN';
+        after = before + amount;
+      } else if (before <= 0) {
+        row.positionPhase = 'SELL';
+        after = 0;
+      } else {
+        after = Math.max(0, before - amount);
+        const dust = Math.max(1e-9, before * 0.005);
+        row.positionPhase = after <= dust ? 'CLOSE' : 'REDUCE';
+        if (row.positionPhase === 'CLOSE') after = 0;
+      }
+      row.tokenBalanceBefore = before;
+      row.tokenBalanceAfter = after;
+      const result = this.stmts.insertSmartWallet.run(row);
+      if (result.changes === 0) return { ...row, id: null, inserted: false };
+      this.stmts.upsertSmartWalletPosition.run({
+        wallet: row.wallet,
+        mint: row.mint,
+        tokenBalance: after,
+        updatedAt: row.timestampMs,
+      });
+      const id = Number(result.lastInsertRowid);
+      if (row.positionPhase === 'OPEN' && row.nearestFlowSignal) {
+        this.stmts.insertSmartSignalConfirmation.run({
+          signalId: row.nearestFlowSignal,
+          smartEventId: id,
+          wallet: row.wallet,
+          mint: row.mint,
+          openTimestampMs: row.timestampMs,
+          delayMs: row.timeFromFlowSignalMs,
+          openSol: row.solAmount,
+        });
+      }
+      return { ...row, id, inserted: true };
     });
   }
 
@@ -830,15 +1122,15 @@ class ResearchStore {
     return this.stmts.nearestSignal.get(mint, timestampMs, timestampMs - lookbackMs) || null;
   }
 
+  recentCurveTrades(sinceMs) {
+    return this.stmts.recentCurveTrades.all(sinceMs);
+  }
+
   recordSmartWalletEvent(trade) {
     const nearest = this.findNearestSignal(trade.mint, trade.timestampMs);
-    const previous = this.stmts.latestSmartWalletEvent.get(trade.wallet, trade.mint);
-    const positionOpen = previous?.side === 'BUY';
-    const positionPhase = trade.side === 'BUY'
-      ? (positionOpen ? 'ADD' : 'OPEN')
-      : (positionOpen ? 'CLOSE' : 'SELL');
     const row = {
       timestampMs: trade.timestampMs,
+      receivedAtMs: receivedTimestampMs(trade.receivedAtMs, trade.timestampMs),
       slot: trade.slot || null,
       signature: trade.signature || null,
       eventIndex: trade.eventIndex || 0,
@@ -851,23 +1143,133 @@ class ResearchStore {
       price: finiteOrNull(trade.price),
       curvePct: finiteOrNull(trade.curvePct),
       ageMs: Number.isFinite(trade.ageMs) ? trade.ageMs : null,
-      positionPhase,
+      positionPhase: null,
+      tokenBalanceBefore: null,
+      tokenBalanceAfter: null,
       nearestFlowSignal: nearest?.signal_id || null,
       timeFromFlowSignalMs: nearest ? trade.timestampMs - nearest.timestamp_ms : null,
     };
-    const result = this.stmts.insertSmartWallet.run(row);
-    if (result.changes > 0 && positionPhase === 'OPEN' && nearest) {
-      this.stmts.insertSmartSignalConfirmation.run({
-        signalId: nearest.signal_id,
-        smartEventId: Number(result.lastInsertRowid),
-        wallet: trade.wallet,
-        mint: trade.mint,
-        openTimestampMs: trade.timestampMs,
-        delayMs: trade.timestampMs - nearest.timestamp_ms,
-        openSol: trade.solAmount,
-      });
-    }
-    return { ...row, id: result.changes > 0 ? Number(result.lastInsertRowid) : null };
+    return this._writeSmartWalletEvent(row);
+  }
+
+  recordSmartOpenDecision(decision) {
+    const now = Date.now();
+    const row = {
+      smartEventId: decision.smartEventId,
+      timestampMs: decision.timestampMs,
+      receivedAtMs: decision.receivedAtMs || decision.timestampMs,
+      wallet: decision.wallet,
+      mint: decision.mint,
+      ruleVersion: decision.ruleVersion,
+      market: decision.market || null,
+      positionPhase: decision.positionPhase || null,
+      smartSol: decision.smartSol,
+      smartPrice: finiteOrNull(decision.smartPrice),
+      preBuyWindowMs: decision.preBuyWindowMs,
+      preBuyers: decision.preBuyers,
+      preBuyTx: decision.preBuyTx,
+      preBuyFlowSol: decision.preBuyFlowSol,
+      preSellFlowSol: decision.preSellFlowSol,
+      preNetFlowSol: decision.preNetFlowSol,
+      eventAgeMs: decision.eventAgeMs,
+      ruleMatched: Number(decision.ruleMatched === true),
+      rejectionReasonsJson: JSON.stringify(decision.rejectionReasons || []),
+      mode: decision.mode,
+      actionStatus: decision.actionStatus,
+      actionReason: decision.actionReason || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertSmartOpenDecision.run(row);
+    const saved = result.changes > 0
+      ? { ...row, id: Number(result.lastInsertRowid) }
+      : this.stmts.getSmartOpenDecisionByEvent.get(decision.smartEventId);
+    return saved;
+  }
+
+  updateSmartOpenDecision(id, actionStatus, actionReason = null) {
+    this.stmts.updateSmartOpenDecision.run({
+      id,
+      actionStatus,
+      actionReason,
+      updatedAt: Date.now(),
+    });
+  }
+
+  createLivePosition(position) {
+    const now = Date.now();
+    const row = {
+      decisionId: position.decisionId,
+      mint: position.mint,
+      triggerWallet: position.triggerWallet,
+      mode: position.mode,
+      status: position.status || 'OPENING',
+      positionSol: position.positionSol,
+      entryMarket: position.entryMarket || 'PUMP_BONDING_CURVE',
+      entryPrice: finiteOrNull(position.entryPrice),
+      highestPrice: finiteOrNull(position.entryPrice),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertLivePosition.run(row);
+    return { ...row, id: Number(result.lastInsertRowid) };
+  }
+
+  updateLivePosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    this.stmts.updateLivePosition.run({
+      id,
+      status: value('status'),
+      tokenAmountRaw: value('tokenAmountRaw'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entrySignature: value('entrySignature'),
+      entryError: value('entryError'),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitSignature: value('exitSignature'),
+      exitReason: value('exitReason'),
+      exitError: value('exitError'),
+      openedAt: value('openedAt'),
+      exitRequestedAt: value('exitRequestedAt'),
+      closedAt: value('closedAt'),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeLivePositions() {
+    return this.stmts.activeLivePositions.all();
+  }
+
+  lastLivePositionForMint(mint) {
+    return this.stmts.lastLivePositionForMint.get(mint) || null;
+  }
+
+  liveSpendSince(timestampMs, mode = 'LIVE') {
+    return Number(this.stmts.liveSpendSince.get(mode, timestampMs)?.total) || 0;
+  }
+
+  recordLiveOrder(order) {
+    const now = Date.now();
+    const result = this.stmts.insertLiveOrder.run({
+      positionId: order.positionId,
+      decisionId: order.decisionId,
+      mint: order.mint,
+      side: order.side,
+      venue: order.venue || null,
+      attempt: order.attempt || 1,
+      requestedSol: finiteOrNull(order.requestedSol),
+      requestedTokenRaw: order.requestedTokenRaw || null,
+      status: order.status,
+      signature: order.signature || null,
+      error: order.error || null,
+      submittedAt: order.submittedAt || null,
+      confirmedAt: order.confirmedAt || null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return Number(result.lastInsertRowid);
   }
 
   overview(now = Date.now(), candidateCount = 0) {
@@ -912,11 +1314,11 @@ class ResearchStore {
       const phasedBuys = [];
       for (const event of events) {
         if (event.side === 'BUY') {
-          const phase = open.has(event.mint) ? 'ADD' : 'OPEN';
+          const phase = event.position_phase || (open.has(event.mint) ? 'ADD' : 'OPEN');
           phasedBuys.push({ ...event, phase });
-          if (!open.has(event.mint)) open.set(event.mint, event.timestamp_ms);
+          if (phase === 'OPEN') open.set(event.mint, event.timestamp_ms);
         }
-        if (event.side === 'SELL' && open.has(event.mint)) {
+        if (event.position_phase === 'CLOSE' && open.has(event.mint)) {
           holds.push(event.timestamp_ms - open.get(event.mint));
           open.delete(event.mint);
         }
@@ -1029,6 +1431,21 @@ class ResearchStore {
     const smartSignalConfirmations = this.db.prepare(`
       SELECT COUNT(*) AS n FROM smart_signal_confirmations
     `).get().n;
+    const smartOpenDecisions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(rule_matched = 1), 0) AS matched,
+        COALESCE(SUM(action_status = 'OPEN'), 0) AS opened,
+        COALESCE(SUM(action_status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(action_status IN ('ENTRY_FAILED', 'EXIT_FAILED')), 0) AS failed
+      FROM smart_open_decisions
+    `).get();
+    const livePositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status IN ('ENTRY_FAILED', 'EXIT_FAILED')), 0) AS failed
+      FROM live_positions
+    `).get();
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -1050,6 +1467,8 @@ class ResearchStore {
       primarySignalRows,
       shadowSignalRows: signalRows - primarySignalRows,
       smartSignalConfirmations,
+      smartOpenDecisions,
+      livePositions,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };

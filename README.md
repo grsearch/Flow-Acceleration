@@ -1,10 +1,10 @@
-# Pump.fun Flow Acceleration Research V1
+# Pump.fun Flow Acceleration Research + Smart OPEN Executor
 
-这是一个严格限定在 **Pump.fun Bonding Curve（毕业前）** 的研究项目。它只验证一个假设：
+这是一个研究信号严格限定在 **Pump.fun Bonding Curve（毕业前）** 的全量采集项目，并带有默认关闭的 Smart Wallet 实盘执行模块。研究主线验证：
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
 
-V1 不加载钱包私钥，不提交 BUY/SELL，不使用 RSI、EMA、MACD、社交数据、Holder 变化、KOL、AI 评分或聪明钱包跟单。
+全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。实盘模块只使用明确的 Smart OPEN 规则，不使用 RSI、EMA、MACD、社交数据、Holder 变化、KOL 或 AI 评分；默认 `DISABLED`，不会读取私钥或提交交易。
 
 ## 数据链路
 
@@ -69,6 +69,9 @@ W3 = T-2s ~ T
 - `flow_signals`：三个窗口的买卖流、净流入、独立买家、买单数、绝对增量和 ratio。
 - `signal_returns`：1/2/3/5/8/10/15/20/30/60 秒 Raw Return、确定性成本后的 Net Return、每个 horizon 的观测 lag、`COMPLETE/RIGHT_CENSORED` 标签状态，以及 5/10/30 秒 MFE/MAE。某个 horizon 后首笔成交超过 `FLOW_LABEL_MAX_OBSERVATION_LAG_MS`，或 MFE/MAE 时间窗没有完整观测覆盖时，不会用旧价格或 0% 补值。
 - `smart_wallet_events`：两个研究钱包的成交、Curve、AGE、最近 Flow Signal 与时间差。
+- `smart_wallet_positions`：按实际 Token 数量维护的 Smart Wallet 仓位；买卖被区分为 `OPEN / ADD / REDUCE / CLOSE / SELL`。
+- `smart_open_decisions`：每一笔 Smart Wallet 事件的规则判定、买入前 2 秒上下文、拒绝原因和执行状态。未成交、被过滤和禁用模式也不会丢失。
+- `live_positions` / `live_orders`：模拟或实盘的仓位、每次买卖尝试、签名、失败原因与退出原因。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
 SQLite 使用 WAL 和批量写入。默认保留 168 小时热数据；超过 `FLOW_RAW_RETENTION_HOURS` 的 Raw Trade 会先压缩为 `data/archive/*.ndjson.gz`，成功写入归档后才从热库删除；Signals 与 Future Labels 不删除。
@@ -162,7 +165,7 @@ Dashboard、命令行回测和批量分析默认使用 200ms 买入延迟及 200
 
 影子信号只用于 Future Label 和回测研究，不会触发链上交易；Signal Monitor 和 Smart Wallet 重合默认仍以 `primary_3w` 为准。
 
-Smart Wallet 事件保存 `OPEN / ADD / CLOSE` 生命周期。真实 OPEN 会写入 `smart_signal_confirmations`，记录最近 30 秒 Primary 信号、确认延迟与开仓 SOL；这些是离线监督标签，不会作为同一时点的实时买入条件。Dashboard 原来的“Signal 重合率”已改为明确的 OPEN / ADD 时间窗口覆盖率，避免把连续加仓误读成重复信号。
+Smart Wallet 事件按 Token 余额保存 `OPEN / ADD / REDUCE / CLOSE / SELL` 生命周期。真实 OPEN 会写入 `smart_signal_confirmations`，记录最近 30 秒 Primary 信号、确认延迟与开仓 SOL；这些仍是离线监督标签，不会用未来信息反推更早的 Flow Signal 买点。Dashboard 原来的“Signal 重合率”已改为明确的 OPEN / ADD 时间窗口覆盖率，避免把连续加仓误读成重复信号。
 
 入场只接受 `Signal Time + Execution Delay` 之后、入场等待上限以内且毕业之前的 Bonding Curve 成交，绝不会用 PumpSwap 反推买入。持仓时间从实际模拟入场开始计算；出场可使用 Bonding Curve 或毕业后的 PumpSwap 成交。没有入场、毕业前未成交、没有出场、历史数据缺口和数据右删失会分别统计，不再静默丢弃。没有出场的已入场样本默认按 `-100%` 再扣确定性成本。
 
@@ -185,6 +188,31 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 ```
 
 分析输出包括前 70% / 后 30% 时间外验证、按 Mint 等权收益、收益分位数、最大赢家贡献、去掉最大 1/3/5 笔后的平均收益，以及按 Mint 重采样的 Bootstrap 95% 置信区间。低于实时采集门槛的参数无法从已有数据库恢复；研究阶段应保持 `FLOW_MIN_NET_W3_SOL=1` 的宽口径采集，在回测参数中筛选 W3≥8/10，而不是提前丢弃低门槛信号。
+
+## Smart OPEN 模拟与实盘
+
+实时入场规则固定为：
+
+```text
+Smart Wallet position_phase = OPEN
+AND market = PUMP_BONDING_CURVE
+AND Smart Wallet 本笔买入金额 >= 1 SOL
+AND 该笔买入发生前 2 秒独立 Buyers >= 2
+```
+
+“买入前”上下文在把 Smart Wallet 当前交易放入滚动缓冲区之前计算，并排除触发钱包自身，避免当前买单自我满足 Buyers 条件。重启时会从 SQLite 恢复最近滚动交易。每一笔 Smart Wallet 事件都会写入 `smart_open_decisions`，所以完整数据、规则未命中样本和风控拒绝样本都可继续分析。
+
+执行模块有三种模式：
+
+- `DISABLED`：默认模式，只保存规则判定。
+- `DRY_RUN`：设置 `FLOW_LIVE_TRADING_ENABLED=true`、保留 `FLOW_LIVE_DRY_RUN=true`，模拟仓位和动态退出，不签名。
+- `LIVE`：还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写 `FLOW_LIVE_POSITION_SOL`。
+
+实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。
+
+卖出不是单一固定时间：触发钱包减仓/清仓、止损、止盈和移动止损按逐笔价格先到先执行；`FLOW_LIVE_MAX_HOLD_MS` 只是最终安全上限。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
+
+先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`smart_open_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
 
 ## 部署
 

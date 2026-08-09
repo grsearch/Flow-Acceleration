@@ -1,4 +1,5 @@
 allowBuilds:
   better-sqlite3: false
+  bigint-buffer: false
   bufferutil: true
   utf-8-validate: true

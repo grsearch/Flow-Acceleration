@@ -141,6 +141,45 @@ const config = {
     '7yd579zXmWPoxEE22BUYTzAo8nyMmQtPyEWS3g1BFhH4',
   ]),
 
+  liveTrading: {
+    enabled: booleanEnv('FLOW_LIVE_TRADING_ENABLED', false),
+    dryRun: booleanEnv('FLOW_LIVE_DRY_RUN', true),
+    rpcUrl: process.env.FLOW_RPC_URL || '',
+    privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
+    minSmartOpenSol: numberEnv('FLOW_LIVE_MIN_SMART_OPEN_SOL', 1, { min: 0 }),
+    minPreBuyers: integerEnv('FLOW_LIVE_MIN_PREBUY_BUYERS', 2, { min: 0 }),
+    preBuyWindowMs: integerEnv('FLOW_LIVE_PREBUY_WINDOW_MS', 2_000, { min: 100 }),
+    maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
+    positionSizeSol: numberEnv('FLOW_LIVE_POSITION_SOL', 0.05, { min: 0.000001 }),
+    maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 1, { min: 1, max: 20 }),
+    maxDailySpendSol: numberEnv('FLOW_LIVE_MAX_DAILY_SPEND_SOL', 1, { min: 0.000001 }),
+    minWalletReserveSol: numberEnv('FLOW_LIVE_MIN_WALLET_RESERVE_SOL', 0.05, { min: 0 }),
+    mintCooldownMs: integerEnv('FLOW_LIVE_MINT_COOLDOWN_MS', 10 * 60_000, { min: 0 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_MAX_ENTRY_PRICE_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    slippagePct: numberEnv('FLOW_LIVE_SLIPPAGE_PCT', 5, { min: 0.1, max: 50 }),
+    computeUnitLimit: integerEnv('FLOW_LIVE_COMPUTE_UNIT_LIMIT', 250_000, {
+      min: 100_000,
+      max: 1_400_000,
+    }),
+    priorityFeeMicroLamports: integerEnv('FLOW_LIVE_PRIORITY_FEE_MICROLAMPORTS', 20_000, {
+      min: 0,
+    }),
+    commitment: process.env.FLOW_LIVE_COMMITMENT || 'confirmed',
+    stopLossPct: numberEnv('FLOW_LIVE_STOP_LOSS_PCT', 12, { min: 0 }),
+    takeProfitPct: numberEnv('FLOW_LIVE_TAKE_PROFIT_PCT', 20, { min: 0 }),
+    trailingActivationPct: numberEnv('FLOW_LIVE_TRAILING_ACTIVATION_PCT', 8, { min: 0 }),
+    trailingStopPct: numberEnv('FLOW_LIVE_TRAILING_STOP_PCT', 5, { min: 0 }),
+    minHoldMs: integerEnv('FLOW_LIVE_MIN_HOLD_MS', 500, { min: 0 }),
+    maxHoldMs: integerEnv('FLOW_LIVE_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    exitOnTriggerWalletSell: booleanEnv('FLOW_LIVE_EXIT_ON_SMART_SELL', true),
+    exitRetryCount: integerEnv('FLOW_LIVE_EXIT_RETRY_COUNT', 10, { min: 0, max: 60 }),
+    exitRetryDelayMs: integerEnv('FLOW_LIVE_EXIT_RETRY_DELAY_MS', 1_000, { min: 100 }),
+    killSwitchFile: process.env.FLOW_LIVE_KILL_SWITCH_FILE || './data/LIVE_TRADING_DISABLED',
+  },
+
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),
@@ -167,6 +206,15 @@ function validateConfig() {
   }
   if (config.strategy.signalWindowMs * 3 > config.strategy.bufferMs) {
     errors.push('FLOW_BUFFER_MS must cover all three signal windows');
+  }
+  if (config.liveTrading.enabled && !config.liveTrading.dryRun) {
+    if (!config.liveTrading.rpcUrl) errors.push('FLOW_RPC_URL is required for live trading');
+    if (!config.liveTrading.privateKey) {
+      errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
+    }
+    if (!process.env.FLOW_LIVE_POSITION_SOL) {
+      errors.push('FLOW_LIVE_POSITION_SOL must be explicitly set for live trading');
+    }
   }
   return errors;
 }

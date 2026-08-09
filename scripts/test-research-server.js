@@ -63,6 +63,7 @@ async function main() {
       '/api/backtest',
       '/api/smart-wallets',
       '/api/signal-repetition',
+      '/api/live-trading',
       '/api/health',
     ];
 
