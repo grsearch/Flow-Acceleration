@@ -13,12 +13,6 @@ function errorText(error) {
     .slice(0, 1_000);
 }
 
-function startOfLocalDay(now) {
-  const date = new Date(now);
-  date.setHours(0, 0, 0, 0);
-  return date.getTime();
-}
-
 function orderExecution(execution, event, submittedAt, finishedAt) {
   return {
     ...(execution || {}),
@@ -165,7 +159,6 @@ class LiveTradingManager {
         risk: {
           positionSizeSol: this.config.positionSizeSol,
           maxConcurrentPositions: this.config.maxConcurrentPositions,
-          maxDailySpendSol: this.config.maxDailySpendSol,
           minWalletReserveSol: this.config.minWalletReserveSol,
           mintCooldownMs: this.config.mintCooldownMs,
         },
@@ -310,10 +303,6 @@ class LiveTradingManager {
     const last = this.store.lastLivePositionForMint(event.mint);
     if (last && this.now() - Number(last.updated_at || last.created_at) < this.config.mintCooldownMs) {
       return 'MINT_COOLDOWN';
-    }
-    const spent = this.store.liveSpendSince(startOfLocalDay(this.now()), this.mode);
-    if (spent + this.config.positionSizeSol > this.config.maxDailySpendSol) {
-      return 'DAILY_SPEND_LIMIT';
     }
     return null;
   }
@@ -670,13 +659,30 @@ class LiveTradingManager {
           }
           : await this.executor.sell({
             mint: position.mint,
-            tokenAmountRaw: position.tokenAmountRaw,
           });
         if (result.alreadyEmpty
           && ['ENTRY_CONFIRMATION_UNKNOWN', 'RESTART_RECOVERY'].includes(reason)) {
           throw new Error('Entry state is still unresolved; no token balance is visible yet');
         }
         const closedAt = this.now();
+        const remainingTokenAmountRaw = result.remainingTokenAmountRaw == null
+          ? null
+          : BigInt(result.remainingTokenAmountRaw);
+        const residualBalance = remainingTokenAmountRaw !== null
+          && remainingTokenAmountRaw > 0n;
+        const balanceUnverified = result.balanceVerified === false;
+        const incompleteReason = balanceUnverified
+          ? `Sell confirmed but balance verification failed: ${result.balanceCheckError || 'unknown error'}`
+          : residualBalance
+            ? `Sell confirmed with ${remainingTokenAmountRaw.toString()} raw tokens remaining`
+            : null;
+        const orderStatus = result.alreadyEmpty
+          ? 'ALREADY_EMPTY'
+          : balanceUnverified
+            ? 'CONFIRMED_UNVERIFIED'
+            : residualBalance
+              ? 'CONFIRMED_PARTIAL'
+              : 'CONFIRMED';
         this.store.recordLiveOrder({
           positionId: position.id,
           decisionId: position.decisionId,
@@ -685,12 +691,25 @@ class LiveTradingManager {
           side: 'SELL',
           venue: result.venue,
           attempt,
-          requestedTokenRaw: position.tokenAmountRaw,
-          status: result.alreadyEmpty ? 'ALREADY_EMPTY' : 'CONFIRMED',
+          requestedTokenRaw: result.tokenAmountRaw || position.tokenAmountRaw,
+          status: orderStatus,
           signature: result.signature,
+          error: incompleteReason,
           submittedAt,
           confirmedAt: closedAt,
         });
+        if (balanceUnverified || residualBalance) {
+          lastError = new Error(incompleteReason);
+          this.store.updateLivePosition(position.id, {
+            exitMarket: result.venue,
+            exitSignature: result.signature,
+            exitError: incompleteReason,
+          });
+          if (attempt < attempts) {
+            await new Promise((resolve) => setTimeout(resolve, this.config.exitRetryDelayMs));
+          }
+          continue;
+        }
         this.store.updateLivePosition(position.id, {
           status: 'CLOSED',
           exitMarket: result.venue,

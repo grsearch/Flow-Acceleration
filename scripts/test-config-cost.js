@@ -37,6 +37,7 @@ assert.strictEqual(config.liveTrading.dryRun, true);
 assert.strictEqual(config.liveTrading.signalVariant, 'primary_early_5_4');
 assert.strictEqual(config.liveTrading.minNetFlowW3Sol, 5);
 assert.strictEqual(config.liveTrading.minUniqueBuyersW3, 4);
+assert.strictEqual(config.liveTrading.maxDailySpendSol, undefined);
 assert.strictEqual(config.liveTrading.trailingStopPct, 7.5);
 assert.strictEqual(config.liveTrading.maxHoldMs, 60_000);
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);

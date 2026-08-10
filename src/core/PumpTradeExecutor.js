@@ -559,14 +559,49 @@ class PumpTradeExecutor {
     }
   }
 
-  async sell({ mint: mintValue, tokenAmountRaw }) {
+  async _confirmedSellResult({ mint, tokenProgram, signature, venue, soldRaw }) {
+    try {
+      const remaining = await this._tokenBalanceRaw(
+        mint,
+        tokenProgram,
+        this.confirmationCommitment,
+      );
+      return {
+        signature,
+        venue,
+        tokenAmountRaw: soldRaw.toString(),
+        remainingTokenAmountRaw: remaining.toString(),
+        balanceVerified: true,
+      };
+    } catch (error) {
+      return {
+        signature,
+        venue,
+        tokenAmountRaw: soldRaw.toString(),
+        remainingTokenAmountRaw: null,
+        balanceVerified: false,
+        balanceCheckError: String(error?.message || error).slice(0, 1_000),
+      };
+    }
+  }
+
+  async sell({ mint: mintValue }) {
     const mint = new PublicKey(mintValue);
     const tokenProgram = await this._tokenProgram(mint);
     const walletBalance = await this._tokenBalanceRaw(mint, tokenProgram);
-    const requested = BigInt(tokenAmountRaw || '0');
-    const sellRaw = requested > 0n && requested < walletBalance ? requested : walletBalance;
+    // Entry rejects pre-existing holdings for the mint, so the live wallet balance belongs
+    // to this position. Always sell that complete balance instead of the possibly stale
+    // amount cached immediately after the buy confirmation.
+    const sellRaw = walletBalance;
     if (sellRaw <= 0n) {
-      return { signature: null, venue: 'NONE', tokenAmountRaw: '0', alreadyEmpty: true };
+      return {
+        signature: null,
+        venue: 'NONE',
+        tokenAmountRaw: '0',
+        remainingTokenAmountRaw: '0',
+        balanceVerified: true,
+        alreadyEmpty: true,
+      };
     }
     const amount = new BN(sellRaw.toString());
 
@@ -596,7 +631,13 @@ class PumpTradeExecutor {
         quoteTokenProgram: TOKEN_PROGRAM_ID,
       });
       const signature = await this._send(instructions);
-      return { signature, venue: 'PUMP_BONDING_CURVE', tokenAmountRaw: sellRaw.toString() };
+      return this._confirmedSellResult({
+        mint,
+        tokenProgram,
+        signature,
+        venue: 'PUMP_BONDING_CURVE',
+        soldRaw: sellRaw,
+      });
     } catch (error) {
       if (error.signature || !['CURVE_COMPLETE', 'MINT_NOT_FOUND'].includes(error.code)
         && !/complete|not found|Bonding curve/i.test(String(error.message))) throw error;
@@ -610,7 +651,13 @@ class PumpTradeExecutor {
       this.config.sellSlippagePct ?? this.config.slippagePct,
     );
     const signature = await this._send(instructions);
-    return { signature, venue: 'PUMP_AMM', tokenAmountRaw: sellRaw.toString() };
+    return this._confirmedSellResult({
+      mint,
+      tokenProgram,
+      signature,
+      venue: 'PUMP_AMM',
+      soldRaw: sellRaw,
+    });
   }
 }
 

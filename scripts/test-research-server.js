@@ -31,6 +31,8 @@ async function main() {
   assert.ok(dashboard.includes('id="live-position-rows"'));
   assert.ok(dashboard.includes('id="live-order-rows"'));
   assert.ok(dashboard.includes('id="live-decision-rows"'));
+  assert.ok(dashboard.includes("['每日开仓额度', '不设上限']"));
+  assert.ok(!dashboard.includes('每日开仓上限'));
   assert.ok(dashboard.includes('id="signal-shadow-position-rows"'));
   assert.ok(dashboard.includes('id="signal-shadow-metrics"'));
   assert.ok(dashboard.includes('Current live strategy'));

@@ -176,7 +176,6 @@ const config = {
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     positionSizeSol: numberEnv('FLOW_LIVE_POSITION_SOL', 0.05, { min: 0.000001 }),
     maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 1, { min: 1, max: 20 }),
-    maxDailySpendSol: numberEnv('FLOW_LIVE_MAX_DAILY_SPEND_SOL', 1, { min: 0.000001 }),
     minWalletReserveSol: numberEnv('FLOW_LIVE_MIN_WALLET_RESERVE_SOL', 0.05, { min: 0 }),
     mintCooldownMs: integerEnv('FLOW_LIVE_MINT_COOLDOWN_MS', 10 * 60_000, { min: 0 }),
     maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_MAX_ENTRY_PRICE_JUMP_PCT', 10, {

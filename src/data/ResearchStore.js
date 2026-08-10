@@ -1077,11 +1077,6 @@ class ResearchStore {
       lastLivePositionForMint: this.db.prepare(`
         SELECT * FROM live_positions WHERE mint = ? ORDER BY created_at DESC LIMIT 1
       `),
-      liveSpendSince: this.db.prepare(`
-        SELECT COALESCE(SUM(position_sol), 0) AS total
-        FROM live_positions
-        WHERE mode = ? AND status != 'ENTRY_FAILED' AND created_at >= ?
-      `),
       insertLiveOrder: this.db.prepare(`
         INSERT INTO live_orders (
           position_id, decision_id, primary_decision_id, mint, side, venue, attempt,
@@ -1595,10 +1590,6 @@ class ResearchStore {
     return this.stmts.lastLivePositionForMint.get(mint) || null;
   }
 
-  liveSpendSince(timestampMs, mode = 'LIVE') {
-    return Number(this.stmts.liveSpendSince.get(mode, timestampMs)?.total) || 0;
-  }
-
   recordLiveOrder(order) {
     const now = Date.now();
     const result = this.stmts.insertLiveOrder.run({
@@ -1854,7 +1845,9 @@ class ResearchStore {
     const orderStats = this.db.prepare(`
       SELECT
         COUNT(*) AS orders,
-        COALESCE(SUM(status IN ('CONFIRMED', 'ALREADY_EMPTY')), 0) AS confirmed_orders,
+        COALESCE(SUM(status IN (
+          'CONFIRMED', 'CONFIRMED_PARTIAL', 'CONFIRMED_UNVERIFIED', 'ALREADY_EMPTY'
+        )), 0) AS confirmed_orders,
         COALESCE(SUM(status = 'FAILED'), 0) AS failed_orders,
         COALESCE(SUM(status = 'CONFIRMATION_UNKNOWN'), 0) AS unknown_orders
       FROM live_orders
