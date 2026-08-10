@@ -6,6 +6,43 @@ const zlib = require('zlib');
 const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 
+const LAUNCH_QUALITY_COLUMNS = Object.freeze({
+  status: 'status',
+  completedAt: 'completed_at',
+  censorReason: 'censor_reason',
+  firstTradeAt: 'first_trade_at',
+  baselinePrice: 'baseline_price',
+  lastTradeAt: 'last_trade_at',
+  lastPrice: 'last_price',
+  peakAt: 'peak_at',
+  peakPrice: 'peak_price',
+  maxReturnPct: 'max_return_pct',
+  pump25At: 'pump_25_at',
+  pump50At: 'pump_50_at',
+  pump100At: 'pump_100_at',
+  referencePeakAt: 'reference_peak_at',
+  referencePeakPrice: 'reference_peak_price',
+  firstPullbackAt: 'first_pullback_at',
+  pullbackLowPrice: 'pullback_low_price',
+  maxPullbackPct: 'max_pullback_pct',
+  reboundAt: 'rebound_at',
+  reboundPrice: 'rebound_price',
+  referenceFeaturesJson: 'reference_features_json',
+  labelStatus: 'label_status',
+  return3s: 'return_3s',
+  return5s: 'return_5s',
+  return10s: 'return_10s',
+  return30s: 'return_30s',
+  mfe3s: 'mfe_3s',
+  mae3s: 'mae_3s',
+  mfe5s: 'mfe_5s',
+  mae5s: 'mae_5s',
+  mfe10s: 'mfe_10s',
+  mae10s: 'mae_10s',
+  mfe30s: 'mfe_30s',
+  mae30s: 'mae_30s',
+});
+
 function ensureParent(filePath) {
   if (filePath === ':memory:') return;
   fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
@@ -71,6 +108,7 @@ class ResearchStore {
     for (const token of this.stmts.allTokens.all()) this.tokens.set(token.mint, token);
     this.rawBuffer = [];
     this.returnUpdateStatements = new Map();
+    this.launchQualityUpdateStatements = new Map();
     this.dashboardStatsCache = new Map();
     this.metrics = {
       tradesQueued: 0,
@@ -573,6 +611,91 @@ class ResearchStore {
         ON smart_open_shadow_positions(cohort_id, status, updated_at);
       CREATE INDEX IF NOT EXISTS idx_smart_open_shadow_mint
         ON smart_open_shadow_positions(mint, smart_open_at DESC);
+
+      CREATE TABLE IF NOT EXISTS launch_quality_observations (
+        mint TEXT PRIMARY KEY,
+        symbol TEXT,
+        creator TEXT,
+        created_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OBSERVING',
+        completed_at INTEGER,
+        censor_reason TEXT,
+        first_trade_at INTEGER,
+        baseline_price REAL,
+        last_trade_at INTEGER,
+        last_price REAL,
+        peak_at INTEGER,
+        peak_price REAL,
+        max_return_pct REAL,
+        pump_25_at INTEGER,
+        pump_50_at INTEGER,
+        pump_100_at INTEGER,
+        reference_peak_at INTEGER,
+        reference_peak_price REAL,
+        first_pullback_at INTEGER,
+        pullback_low_price REAL,
+        max_pullback_pct REAL,
+        rebound_at INTEGER,
+        rebound_price REAL,
+        reference_features_json TEXT,
+        label_status TEXT NOT NULL DEFAULT 'WAITING_REFERENCE',
+        return_3s REAL,
+        return_5s REAL,
+        return_10s REAL,
+        return_30s REAL,
+        mfe_3s REAL,
+        mae_3s REAL,
+        mfe_5s REAL,
+        mae_5s REAL,
+        mfe_10s REAL,
+        mae_10s REAL,
+        mfe_30s REAL,
+        mae_30s REAL,
+        record_created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_launch_quality_status
+        ON launch_quality_observations(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_launch_quality_reference
+        ON launch_quality_observations(rebound_at DESC)
+        WHERE rebound_at IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS launch_quality_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mint TEXT NOT NULL REFERENCES launch_quality_observations(mint) ON DELETE CASCADE,
+        horizon_ms INTEGER NOT NULL,
+        observed_at INTEGER NOT NULL,
+        last_trade_at INTEGER,
+        observation_lag_ms INTEGER NOT NULL,
+        price REAL,
+        price_return_pct REAL,
+        peak_return_pct REAL,
+        drawdown_pct REAL,
+        buyers INTEGER NOT NULL,
+        recent_buyers INTEGER NOT NULL,
+        new_buyers INTEGER NOT NULL,
+        buy_tx INTEGER NOT NULL,
+        sell_tx INTEGER NOT NULL,
+        buy_sol REAL NOT NULL,
+        sell_sol REAL NOT NULL,
+        net_flow_sol REAL NOT NULL,
+        top1_share_pct REAL,
+        top3_share_pct REAL,
+        retention_pct REAL,
+        creator_share_pct REAL,
+        sell_sol_since_peak REAL NOT NULL,
+        buy_sol_since_peak REAL NOT NULL,
+        sell_impact_pct_per_sol REAL,
+        sell_depth_fraction_pct REAL,
+        depth_adjusted_sell_impact REAL,
+        sell_decay_ratio REAL,
+        curve_pct REAL,
+        virtual_sol_reserves REAL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(mint, horizon_ms)
+      );
+      CREATE INDEX IF NOT EXISTS idx_launch_quality_snapshots_horizon
+        ON launch_quality_snapshots(horizon_ms, observed_at DESC);
     `);
 
     this._migrateLiveTradingSchema();
@@ -1102,7 +1225,8 @@ class ResearchStore {
       recentCurveTrades: this.db.prepare(`
         SELECT timestamp_ms AS timestampMs, received_at_ms AS receivedAtMs,
           market, mint, wallet, side, sol_amount AS solAmount,
-          token_amount AS tokenAmount, price
+          token_amount AS tokenAmount, price, reserve_price AS reservePrice,
+          curve_pct AS curvePct, virtual_sol_reserves_raw AS virtualSolReservesRaw
         FROM raw_trades
         WHERE market = 'PUMP_BONDING_CURVE' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
@@ -1461,6 +1585,36 @@ class ResearchStore {
         SELECT * FROM smart_open_shadow_positions
         WHERE cohort_id = ? AND status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY smart_open_at, id
+      `),
+      insertLaunchQualityObservation: this.db.prepare(`
+        INSERT OR IGNORE INTO launch_quality_observations (
+          mint, symbol, creator, created_at, status, label_status,
+          record_created_at, updated_at
+        ) VALUES (
+          @mint, @symbol, @creator, @createdAt, 'OBSERVING', 'WAITING_REFERENCE',
+          @recordCreatedAt, @updatedAt
+        )
+      `),
+      insertLaunchQualitySnapshot: this.db.prepare(`
+        INSERT OR IGNORE INTO launch_quality_snapshots (
+          mint, horizon_ms, observed_at, last_trade_at, observation_lag_ms,
+          price, price_return_pct, peak_return_pct, drawdown_pct,
+          buyers, recent_buyers, new_buyers, buy_tx, sell_tx,
+          buy_sol, sell_sol, net_flow_sol, top1_share_pct, top3_share_pct,
+          retention_pct, creator_share_pct, sell_sol_since_peak, buy_sol_since_peak,
+          sell_impact_pct_per_sol, sell_depth_fraction_pct,
+          depth_adjusted_sell_impact, sell_decay_ratio, curve_pct,
+          virtual_sol_reserves, created_at
+        ) VALUES (
+          @mint, @horizonMs, @observedAt, @lastTradeAt, @observationLagMs,
+          @price, @priceReturnPct, @peakReturnPct, @drawdownPct,
+          @buyers, @recentBuyers, @newBuyers, @buyTx, @sellTx,
+          @buySol, @sellSol, @netFlowSol, @top1SharePct, @top3SharePct,
+          @retentionPct, @creatorSharePct, @sellSolSincePeak, @buySolSincePeak,
+          @sellImpactPctPerSol, @sellDepthFractionPct,
+          @depthAdjustedSellImpact, @sellDecayRatio, @curvePct,
+          @virtualSolReserves, @createdAt
+        )
       `),
       recentSmartWalletEvents: this.db.prepare(`
         SELECT * FROM smart_wallet_events
@@ -2213,6 +2367,138 @@ class ResearchStore {
     return this.stmts.activeSmartOpenShadowPositions.all(cohortId);
   }
 
+  createLaunchQualityObservation(token) {
+    const now = Date.now();
+    const createdAt = Number(token.createdAt ?? token.created_at);
+    if (!token.mint || !Number.isFinite(createdAt)) return null;
+    const row = {
+      mint: token.mint,
+      symbol: token.symbol || null,
+      creator: token.creator || null,
+      createdAt,
+      recordCreatedAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertLaunchQualityObservation.run(row);
+    return { ...row, inserted: result.changes > 0 };
+  }
+
+  updateLaunchQualityObservation(mint, patch = {}) {
+    if (!mint) return;
+    const normalized = { ...patch };
+    if (Object.prototype.hasOwnProperty.call(normalized, 'referenceFeatures')) {
+      normalized.referenceFeaturesJson = normalized.referenceFeatures == null
+        ? null
+        : JSON.stringify(normalized.referenceFeatures);
+      delete normalized.referenceFeatures;
+    }
+    const keys = Object.keys(normalized)
+      .filter((key) => Object.prototype.hasOwnProperty.call(LAUNCH_QUALITY_COLUMNS, key))
+      .filter((key) => normalized[key] !== undefined)
+      .sort();
+    if (keys.length === 0) return;
+    const cacheKey = keys.join(',');
+    let statement = this.launchQualityUpdateStatements.get(cacheKey);
+    if (!statement) {
+      statement = this.db.prepare(`
+        UPDATE launch_quality_observations SET
+          ${keys.map((key) => `${LAUNCH_QUALITY_COLUMNS[key]} = @${key}`).join(', ')},
+          updated_at = @updatedAt
+        WHERE mint = @mint
+      `);
+      this.launchQualityUpdateStatements.set(cacheKey, statement);
+    }
+    const values = { mint, updatedAt: Date.now() };
+    for (const key of keys) {
+      const value = normalized[key];
+      values[key] = typeof value === 'number' ? finiteOrNull(value) : value;
+    }
+    statement.run(values);
+  }
+
+  recordLaunchQualitySnapshot(snapshot) {
+    const row = {
+      mint: snapshot.mint,
+      horizonMs: Math.max(1, Math.trunc(Number(snapshot.horizonMs) || 1)),
+      observedAt: Math.trunc(Number(snapshot.observedAt) || Date.now()),
+      lastTradeAt: Number.isFinite(snapshot.lastTradeAt)
+        ? Math.trunc(snapshot.lastTradeAt) : null,
+      observationLagMs: Math.max(0, Math.trunc(Number(snapshot.observationLagMs) || 0)),
+      price: finiteOrNull(snapshot.price),
+      priceReturnPct: finiteOrNull(snapshot.priceReturnPct),
+      peakReturnPct: finiteOrNull(snapshot.peakReturnPct),
+      drawdownPct: finiteOrNull(snapshot.drawdownPct),
+      buyers: Math.max(0, Math.trunc(Number(snapshot.buyers) || 0)),
+      recentBuyers: Math.max(0, Math.trunc(Number(snapshot.recentBuyers) || 0)),
+      newBuyers: Math.max(0, Math.trunc(Number(snapshot.newBuyers) || 0)),
+      buyTx: Math.max(0, Math.trunc(Number(snapshot.buyTx) || 0)),
+      sellTx: Math.max(0, Math.trunc(Number(snapshot.sellTx) || 0)),
+      buySol: finiteOrNull(snapshot.buySol) ?? 0,
+      sellSol: finiteOrNull(snapshot.sellSol) ?? 0,
+      netFlowSol: finiteOrNull(snapshot.netFlowSol) ?? 0,
+      top1SharePct: finiteOrNull(snapshot.top1SharePct),
+      top3SharePct: finiteOrNull(snapshot.top3SharePct),
+      retentionPct: finiteOrNull(snapshot.retentionPct),
+      creatorSharePct: finiteOrNull(snapshot.creatorSharePct),
+      sellSolSincePeak: finiteOrNull(snapshot.sellSolSincePeak) ?? 0,
+      buySolSincePeak: finiteOrNull(snapshot.buySolSincePeak) ?? 0,
+      sellImpactPctPerSol: finiteOrNull(snapshot.sellImpactPctPerSol),
+      sellDepthFractionPct: finiteOrNull(snapshot.sellDepthFractionPct),
+      depthAdjustedSellImpact: finiteOrNull(snapshot.depthAdjustedSellImpact),
+      sellDecayRatio: finiteOrNull(snapshot.sellDecayRatio),
+      curvePct: finiteOrNull(snapshot.curvePct),
+      virtualSolReserves: finiteOrNull(snapshot.virtualSolReserves),
+      createdAt: Date.now(),
+    };
+    const result = this.stmts.insertLaunchQualitySnapshot.run(row);
+    return { ...row, inserted: result.changes > 0 };
+  }
+
+  launchQualityDashboard({ observationLimit = 30, snapshotLimit = 60 } = {}) {
+    const safeLimit = (value, fallback) => Math.min(
+      200,
+      Math.max(1, Math.trunc(Number(value) || fallback)),
+    );
+    const stats = this.db.prepare(`
+      SELECT
+        COUNT(*) AS observations,
+        COALESCE(SUM(status = 'OBSERVING'), 0) AS observing,
+        COALESCE(SUM(rebound_at IS NOT NULL), 0) AS reference_pullbacks,
+        COALESCE(SUM(label_status = 'COMPLETE'), 0) AS complete_labels,
+        COALESCE(SUM(label_status = 'RIGHT_CENSORED'), 0) AS right_censored,
+        COALESCE(SUM(label_status = 'NO_REFERENCE'), 0) AS no_reference,
+        AVG(CASE WHEN label_status = 'COMPLETE' THEN return_3s END) AS average_return_3s,
+        AVG(CASE WHEN label_status = 'COMPLETE' THEN return_5s END) AS average_return_5s,
+        AVG(CASE WHEN label_status = 'COMPLETE' THEN return_10s END) AS average_return_10s,
+        AVG(CASE WHEN label_status = 'COMPLETE' THEN return_30s END) AS average_return_30s
+      FROM launch_quality_observations
+    `).get();
+    const observations = this.db.prepare(`
+      SELECT * FROM launch_quality_observations
+      ORDER BY
+        CASE WHEN status = 'OBSERVING' THEN 0 ELSE 1 END,
+        updated_at DESC, created_at DESC
+      LIMIT ?
+    `).all(safeLimit(observationLimit, 30)).map((row) => {
+      let referenceFeatures = null;
+      try {
+        referenceFeatures = row.reference_features_json
+          ? JSON.parse(row.reference_features_json) : null;
+      } catch (_) {
+        referenceFeatures = { parseError: true };
+      }
+      return { ...row, reference_features: referenceFeatures };
+    });
+    const snapshots = this.db.prepare(`
+      SELECT snapshot.*, observation.symbol, observation.creator
+      FROM launch_quality_snapshots AS snapshot
+      JOIN launch_quality_observations AS observation USING(mint)
+      ORDER BY snapshot.observed_at DESC, snapshot.id DESC
+      LIMIT ?
+    `).all(safeLimit(snapshotLimit, 60));
+    return { stats, observations, snapshots };
+  }
+
   recentSmartWalletEvents(timestampMs) {
     return this.stmts.recentSmartWalletEvents.all(timestampMs);
   }
@@ -2914,6 +3200,15 @@ class ResearchStore {
         COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected
       FROM smart_open_shadow_positions
     `).get();
+    const launchQualityObservations = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
+        COALESCE(SUM(rebound_at IS NOT NULL), 0) AS reference_pullbacks,
+        COALESCE(SUM(label_status = 'COMPLETE'), 0) AS complete,
+        COALESCE(SUM(label_status = 'RIGHT_CENSORED'), 0) AS right_censored,
+        COALESCE(SUM(label_status = 'NO_REFERENCE'), 0) AS no_reference
+      FROM launch_quality_observations
+    `).get();
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -2942,6 +3237,7 @@ class ResearchStore {
       flowFirstShadowPositions,
       smartPullbackShadowPositions,
       smartOpenShadowPositions,
+      launchQualityObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };

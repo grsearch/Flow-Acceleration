@@ -122,6 +122,12 @@
     .wallet-mini { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
     .live-metric-grid { grid-template-columns: repeat(4, minmax(0,1fr)); margin-bottom: 14px; }
     .live-metric-grid .metric { min-height: 124px; }
+    .strategy-metric-groups { display: grid; gap: 14px; margin-bottom: 14px; }
+    .strategy-metric-group { display: grid; gap: 8px; }
+    .strategy-metric-group .live-metric-grid { margin-bottom: 0; }
+    .strategy-metric-label { display: flex; align-items: baseline; gap: 9px; padding: 0 4px; }
+    .strategy-metric-label b { font-size: 13px; }
+    .strategy-metric-label span { color: var(--muted); font-size: 11px; }
     .strategy-grid { grid-template-columns: repeat(4, minmax(0,1fr)); margin-bottom: 14px; }
     .strategy-card h3 { margin: 0 0 15px; font-size: 16px; }
     .strategy-card .health-row { font-size: 12px; }
@@ -158,7 +164,7 @@
       .form-grid, .result-grid { grid-template-columns: repeat(2,1fr); }
       .strategy-workspace { grid-template-columns: 1fr; }
       .strategy-sidebar { position: static; }
-      .strategy-selector { grid-template-columns: repeat(5, minmax(150px, 1fr)); overflow-x: auto; padding-bottom: 3px; }
+      .strategy-selector { grid-template-columns: repeat(6, minmax(150px, 1fr)); overflow-x: auto; padding-bottom: 3px; }
     }
     @media (max-width: 620px) {
       .shell { padding: 18px 14px; }
@@ -326,6 +332,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-open">
               <b>Smart OPEN · D</b><small>新建独立 Shadow，不混入旧数据</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-quality">
+              <b>Launch Quality · E</b><small>只观察选币、存活与首次回踩</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first">
               <b>Flow-First · C</b><small>Primary Episode 三种退出</small>
             </button>
@@ -387,10 +396,32 @@
                 <p>全新独立表，只研究真实 OPEN；永不签名或发送交易</p>
               </div>
               <div class="strategy-expression" id="smart-open-expression">OPEN + Bonding Curve + Smart金额≥1 SOL + 买入前2秒 Buyers≥2</div>
-              <div class="grid live-metric-grid" id="smart-open-metrics"></div>
+              <div class="strategy-metric-groups" id="smart-open-metrics"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>Smart OPEN</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>OPEN金额 / 前置买家</th><th>OPEN价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="smart-open-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="launch-quality" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Launch Quality / First Pullback Observer E</h2>
+                <p>独立观察表；不建立模拟仓位，永不签名或发送交易</p>
+              </div>
+              <div class="strategy-expression" id="launch-quality-expression">等待 Launch Quality 配置…</div>
+              <div class="strategy-metric-groups" id="launch-quality-metrics"></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Launch</th><th>状态</th><th>Mint</th><th>首波里程碑</th><th>首次回踩 / 反弹</th><th>参考点买家结构</th><th>Sell Impact</th><th>后续收益 / MFE / MAE</th></tr></thead>
+                <tbody id="launch-quality-observation-rows"></tbody>
+              </table></div>
+            </article>
+            <article class="card record-section">
+              <div class="section-title"><h2>最新 Launch 快照</h2><p>5 / 10 / 20 / 30 / 60 秒连续记录，阈值仅用于研究标签</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>时间</th><th>Mint</th><th>窗口</th><th>Buyers / 新增</th><th>Top1 / Top3</th><th>Retention / Creator</th><th>Buy / Sell / Net</th><th>回撤 / Sell Impact / 深度标准化</th></tr></thead>
+                <tbody id="launch-quality-snapshot-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -399,7 +430,7 @@
             <article class="card record-section">
               <div class="section-title"><h2>Flow-First Shadow C</h2><p>旧实验保持不变；同 Mint / 30秒 Episode 只模拟一次</p></div>
               <div class="strategy-expression" id="flow-first-expression">等待 Flow-First 配置…</div>
-              <div class="grid live-metric-grid" id="flow-first-metrics"></div>
+              <div class="strategy-metric-groups" id="flow-first-metrics"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint / Rank</th><th>W3 NetFlow / Buyers</th><th>信号价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="flow-first-position-rows"></tbody>
@@ -411,7 +442,7 @@
             <article class="card record-section">
               <div class="section-title"><h2>Smart Wallet 回踩 Shadow A/B</h2><p>旧实验保持不变，历史样本继续写入原表</p></div>
               <div class="strategy-expression" id="smart-pullback-expression">等待 Smart 回踩配置…</div>
-              <div class="grid live-metric-grid" id="smart-pullback-metrics"></div>
+              <div class="strategy-metric-groups" id="smart-pullback-metrics"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>Smart买入</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>Smart价 / 回踩低点</th><th>入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="smart-pullback-position-rows"></tbody>
@@ -423,7 +454,7 @@
             <article class="card record-section">
               <div class="section-title"><h2>Primary 信号模拟策略</h2><p>旧 Shadow 路径保持不变</p></div>
               <div class="strategy-expression" id="signal-shadow-expression">等待 Primary Early 配置…</div>
-              <div class="grid live-metric-grid" id="signal-shadow-metrics"></div>
+              <div class="strategy-metric-groups" id="signal-shadow-metrics"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint</th><th>W3 NetFlow / Buyers</th><th>入场 / 最高 / 出场价</th><th>净收益</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="signal-shadow-position-rows"></tbody>
@@ -455,8 +486,8 @@
       return text.length > 13 ? `${text.slice(0,6)}…${text.slice(-4)}` : text || '—';
     };
     function recordTone(status) {
-      if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED'].includes(status)) return 'good';
-      if (['OPENING','EXITING','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','PRICE_JUMP','NO_ENTRY'].includes(status)) return 'warn';
+      if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED','COMPLETE'].includes(status)) return 'good';
+      if (['OPENING','EXITING','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','PRICE_JUMP','NO_ENTRY','OBSERVING','RIGHT_CENSORED','NO_REFERENCE_PULLBACK'].includes(status)) return 'warn';
       if (String(status || '').includes('FAILED') || ['RISK_REJECTED','NO_EXIT'].includes(status)) return 'bad';
       return 'neutral';
     }
@@ -469,6 +500,21 @@
       return String(signature).startsWith('DRY-')
         ? `<span class="muted">${escapeHtml(label)} ${safe}</span>`
         : `<a class="mint" href="https://solscan.io/tx/${encodeURIComponent(signature)}" target="_blank" rel="noreferrer">${escapeHtml(label)} ${safe}</a>`;
+    }
+    function metricCards(metrics) {
+      return metrics.map(([label,value,note]) => `<article class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(note || '')}</small></article>`).join('');
+    }
+    function renderMetricGroups(selector, summary, groups = []) {
+      const sections = [
+        { label: '策略概览', note: '当前运行与样本状态', metrics: summary },
+        ...groups,
+      ].filter(group => group.metrics?.length);
+      document.querySelector(selector).innerHTML = sections.map(group => `
+        <section class="strategy-metric-group">
+          <div class="strategy-metric-label"><b>${escapeHtml(group.label)}</b><span>${escapeHtml(group.note || '')}</span></div>
+          <div class="grid live-metric-grid">${metricCards(group.metrics)}</div>
+        </section>
+      `).join('');
     }
     async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
 
@@ -688,6 +734,57 @@
       }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；Primary 信号到达后会自动记录</td></tr>';
     }
 
+    function renderLaunchQualityObserver(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const labels = strategy.referenceLabels || {};
+      const research = strategy.research || {};
+      const stats = data.stats || {};
+      const horizons = (strategy.observationHorizonsMs || []).map(value => age(value)).join(' / ');
+      document.querySelector('#launch-quality-expression').textContent = `Launch → ${horizons || '5s / 10s / 20s / 30s / 1m'} 快照 → 参考标签：首波+${number(labels.pumpPct,1)}%、回踩${number(labels.pullbackPct,1)}%、反弹${number(labels.reboundPct,1)}% → 观察3/5/10/30秒；阈值不作为入场条件`;
+      renderMetricGroups('#launch-quality-metrics', [
+        ['运行模式', runtime.enabled ? 'OBSERVER E' : '关闭', '不建仓、不签名、不发送交易'],
+        ['Launch总数', number(stats.observations), `当前观察 ${number(stats.observing)}`],
+        ['参考回踩', number(stats.reference_pullbacks), `活动状态 ${number(runtime.activeLaunches)}`],
+        ['完整 / 截尾标签', `${number(stats.complete_labels)} / ${number(stats.right_censored)}`, `无参考形态 ${number(stats.no_reference)}`],
+      ], [{
+        label: '参考点后收益标签',
+        note: '只统计完整标签，用于离线筛选特征',
+        metrics: [
+          ['3秒收益', pct(stats.average_return_3s), '保留短时启动反馈'],
+          ['5秒收益', pct(stats.average_return_5s), '完整标签均值'],
+          ['10秒收益', pct(stats.average_return_10s), '完整标签均值'],
+          ['30秒收益', pct(stats.average_return_30s), `最大允许观测延迟 ${age(research.maxObservationLagMs)}`],
+        ],
+      }]);
+
+      const observations = data.observations || [];
+      document.querySelector('#launch-quality-observation-rows').innerHTML = observations.length ? observations.map(row => {
+        const features = row.reference_features || {};
+        const milestone = [
+          `25% ${row.pump_25_at ? age(row.pump_25_at - row.created_at) : '—'}`,
+          `50% ${row.pump_50_at ? age(row.pump_50_at - row.created_at) : '—'}`,
+          `100% ${row.pump_100_at ? age(row.pump_100_at - row.created_at) : '—'}`,
+        ].join('<br>');
+        const pullback = row.first_pullback_at
+          ? `${age(row.first_pullback_at - row.created_at)} / ${row.rebound_at ? age(row.rebound_at - row.created_at) : '待反弹'}<br><span class="table-note">最大 ${pct(row.max_pullback_pct)}</span>`
+          : '—';
+        const structure = row.rebound_at
+          ? `${number(features.buyers)} buyers / +${number(features.newBuyers)}<br><span class="table-note">Top3 ${pct(features.top3SharePct)} · Ret ${pct(features.retentionPct)}</span>`
+          : '—';
+        const sellImpact = row.rebound_at
+          ? `${number(features.sellImpactPctPerSol,2)}%/SOL<br><span class="table-note">深度 ${pct(features.sellDepthFractionPct)} · 标准化 ${number(features.depthAdjustedSellImpact,2)}</span>`
+          : '—';
+        const outcome = `${pct(row.return_3s)} / ${pct(row.return_5s)} / ${pct(row.return_10s)} / ${pct(row.return_30s)}<br><span class="table-note">30s MFE ${pct(row.mfe_30s)} · MAE ${pct(row.mae_30s)}</span>`;
+        return `<tr><td>${dateTime(row.created_at)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${milestone}</td><td>${pullback}</td><td>${structure}</td><td>${sellImpact}</td><td class="${tone(row.return_30s)}">${outcome}</td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">等待新的 Bonding Curve Launch；本观察器不会创建任何模拟或实盘仓位</td></tr>';
+
+      const snapshots = data.snapshots || [];
+      document.querySelector('#launch-quality-snapshot-rows').innerHTML = snapshots.length ? snapshots.map(row => (
+        `<tr><td>${dateTime(row.observed_at)}</td><td>${mintLink(row.mint)}</td><td>${age(row.horizon_ms)}<br><span class="table-note">延迟 ${age(row.observation_lag_ms)}</span></td><td>${number(row.buyers)} / +${number(row.new_buyers)}<br><span class="table-note">近窗 ${number(row.recent_buyers)}</span></td><td>${pct(row.top1_share_pct)} / ${pct(row.top3_share_pct)}</td><td>${pct(row.retention_pct)} / ${pct(row.creator_share_pct)}</td><td>${number(row.buy_sol,2)} / ${number(row.sell_sol,2)} / ${number(row.net_flow_sol,2)} SOL</td><td>${pct(row.drawdown_pct)} / ${number(row.sell_impact_pct_per_sol,2)}<br><span class="table-note">深度 ${pct(row.sell_depth_fraction_pct)} · 标准化 ${number(row.depth_adjusted_sell_impact,2)}</span></td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待5/10/20/30/60秒 Launch快照</td></tr>';
+    }
+
     function renderFlowFirstShadow(data) {
       const runtime = data.runtime || {};
       const runtimeCohorts = runtime.cohorts || [];
@@ -704,18 +801,25 @@
       const cohortStats = runtimeCohorts.map(runtimeCohort => (
         (data.cohorts || []).find(cohort => cohort.cohort_id === runtimeCohort.cohortId)
       )).filter(Boolean);
-      const metrics = [
+      const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW C' : '关闭', '链上交易永不发送'],
         ['信号 / 独立Episode', `${number(runtime.signalsSeen)} / ${number(runtime.episodes)}`, `重复行去重 ${number(runtime.deduplicated)}`],
         ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `模拟仓位 ${number(research.simulatedPositionSol,4)} SOL`],
-        ...cohortStats.flatMap(cohort => [
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 净收益`, pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 独立胜率`, rate(cohort.win_rate_pct), `完成 ${number(cohort.resolved)} · Mint ${number(cohort.independent_mints)} · 平均入场跳价 ${pct(cohort.average_entry_jump_pct)}`],
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 去Top5`, pct(cohort.average_net_return_ex_top5_pct), `最大赢家 ${pct(cohort.max_winner_pct)} · Top5盈利贡献 ${rate(cohort.top_5_winner_contribution_pct)}`],
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 大赢家`, `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `MFE阈值 ${rate(cohort.big_winner_threshold_pct)} · 兑现率 ${rate(cohort.big_winner_realization_rate_pct)} · MFE捕获 ${rate(cohort.average_big_winner_capture_pct)}`],
-        ]),
       ];
-      document.querySelector('#flow-first-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+      const cohortGroups = cohortStats.map(cohort => {
+        const label = labels[cohort.cohort_id] || cohort.cohort_id;
+        return {
+          label,
+          note: '该组指标独立成行',
+          metrics: [
+            ['净收益', pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
+            ['独立胜率', rate(cohort.win_rate_pct), `完成 ${number(cohort.resolved)} · Mint ${number(cohort.independent_mints)} · 平均入场跳价 ${pct(cohort.average_entry_jump_pct)}`],
+            ['去Top5', pct(cohort.average_net_return_ex_top5_pct), `最大赢家 ${pct(cohort.max_winner_pct)} · Top5盈利贡献 ${rate(cohort.top_5_winner_contribution_pct)}`],
+            ['大赢家', `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `MFE阈值 ${rate(cohort.big_winner_threshold_pct)} · 兑现率 ${rate(cohort.big_winner_realization_rate_pct)} · MFE捕获 ${rate(cohort.average_big_winner_capture_pct)}`],
+          ],
+        };
+      });
+      renderMetricGroups('#flow-first-metrics', summaryMetrics, cohortGroups);
 
       const rows = data.positions || [];
       document.querySelector('#flow-first-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -743,26 +847,30 @@
       }).join(' · ');
       document.querySelector('#smart-open-expression').textContent = `真实 OPEN + ${entry.market || 'PUMP_BONDING_CURVE'} + Smart金额≥${number(entry.minSmartOpenSol,2)} SOL + 买入前${number(entry.preBuyWindowMs / 1000,1)}秒 Buyers≥${number(entry.minPreBuyers)} → ${number(entry.entryDelayMs)}ms后模拟入场；${exitText || '等待配置'}`;
 
-      const metrics = [
+      const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW D' : '关闭', `独立表 ${research.isolatedTable || 'smart_open_shadow_positions'}`],
         ['评估 / 合格OPEN', `${number(runtime.evaluated)} / ${number(runtime.qualifiedOpens)}`, `规则拒绝 ${number(runtime.rejected)}`],
         ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `模拟仓位 ${number(research.simulatedPositionSol,4)} SOL`],
-        ...runtimeCohorts.flatMap(runtimeCohort => {
-          const cohort = (data.cohorts || []).find(item => item.cohort_id === runtimeCohort.cohortId);
-          if (!cohort) return [];
-          const jumpSummary = (cohort.entry_jump_buckets || [])
-            .map(bucket => `${bucket.label}: ${number(bucket.resolved)}笔 / ${pct(bucket.average_net_return_pct)}`)
-            .join(' · ');
-          const label = labels[cohort.cohort_id] || cohort.cohort_id;
-          return [
-            [`${label} · 净收益`, pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
-            [`${label} · 胜率 / 去Top5`, `${rate(cohort.win_rate_pct)} / ${pct(cohort.average_net_return_ex_top5_pct)}`, `完成 ${number(cohort.resolved)} · 最大赢家 ${pct(cohort.max_winner_pct)}`],
-            [`${label} · 大赢家`, `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `兑现率 ${rate(cohort.big_winner_realization_rate_pct)} · MFE捕获 ${rate(cohort.average_big_winner_capture_pct)}`],
-            [`${label} · 入场跳价分层`, pct(cohort.average_entry_jump_pct), jumpSummary || '等待已完成样本'],
-          ];
-        }),
       ];
-      document.querySelector('#smart-open-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+      const cohortGroups = runtimeCohorts.map(runtimeCohort => {
+        const cohort = (data.cohorts || []).find(item => item.cohort_id === runtimeCohort.cohortId);
+        if (!cohort) return null;
+        const jumpSummary = (cohort.entry_jump_buckets || [])
+          .map(bucket => `${bucket.label}: ${number(bucket.resolved)}笔 / ${pct(bucket.average_net_return_pct)}`)
+          .join(' · ');
+        const label = labels[cohort.cohort_id] || cohort.cohort_id;
+        return {
+          label,
+          note: '该退出方案指标独立成行',
+          metrics: [
+            ['净收益', pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
+            ['胜率 / 去Top5', `${rate(cohort.win_rate_pct)} / ${pct(cohort.average_net_return_ex_top5_pct)}`, `完成 ${number(cohort.resolved)} · 最大赢家 ${pct(cohort.max_winner_pct)}`],
+            ['大赢家', `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `兑现率 ${rate(cohort.big_winner_realization_rate_pct)} · MFE捕获 ${rate(cohort.average_big_winner_capture_pct)}`],
+            ['入场跳价分层', pct(cohort.average_entry_jump_pct), jumpSummary || '等待已完成样本'],
+          ],
+        };
+      }).filter(Boolean);
+      renderMetricGroups('#smart-open-metrics', summaryMetrics, cohortGroups);
 
       const rows = data.positions || [];
       document.querySelector('#smart-open-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -778,18 +886,22 @@
       const research = runtimeCohorts[0]?.strategy?.research || {};
       document.querySelector('#smart-pullback-expression').textContent = `Smart BUY ≥${number(entry.smartBuyMinSol,2)} SOL → ${number(entry.confirmationWindowMs / 1000)}秒内峰值回踩${number(entry.pullbackPct,1)}% → 低点反弹${number(entry.reboundPct,1)}% / Buyers≥${number(entry.minReboundBuyers)} → 入场≤Smart价+${number(entry.maxEntryVsSmartBuyPct,1)}%`;
       const labels = Object.fromEntries(runtimeCohorts.map(cohort => [cohort.cohortId, cohort.cohortLabel]));
-      const metrics = [
+      const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW A/B' : '关闭', '链上交易永不发送'],
         ['候选 / 待入场', `${number(runtime.candidates)} / ${number(runtime.pendingEntries)}`, `活动 ${number(runtime.activePositions)}`],
         ['本次 Episode', number(runtime.episodes), `确认 ${number(runtime.confirmed)} · 开仓 ${number(runtime.opened)}`],
-        ...(data.cohorts || []).flatMap(cohort => [
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 净收益`, pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 胜率`, rate(cohort.win_rate_pct), `完成 ${number(cohort.resolved)} · 最大赢家 ${pct(cohort.max_winner_pct)}`],
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 大赢家`, `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `阈值 ${rate(cohort.big_winner_threshold_pct)} · 捕获率 ${rate(cohort.big_winner_realization_rate_pct)}`],
-          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 右尾贡献`, rate(cohort.top_5_winner_contribution_pct), `Top5盈利贡献 · 平均兑现MFE ${rate(cohort.average_big_winner_capture_pct)}`],
-        ]),
       ];
-      document.querySelector('#smart-pullback-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+      const cohortGroups = (data.cohorts || []).map(cohort => ({
+        label: labels[cohort.cohort_id] || cohort.cohort_id,
+        note: '该回撤方案指标独立成行',
+        metrics: [
+          ['净收益', pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
+          ['胜率', rate(cohort.win_rate_pct), `完成 ${number(cohort.resolved)} · 最大赢家 ${pct(cohort.max_winner_pct)}`],
+          ['大赢家', `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `阈值 ${rate(cohort.big_winner_threshold_pct)} · 捕获率 ${rate(cohort.big_winner_realization_rate_pct)}`],
+          ['右尾贡献', rate(cohort.top_5_winner_contribution_pct), `Top5盈利贡献 · 平均兑现MFE ${rate(cohort.average_big_winner_capture_pct)}`],
+        ],
+      }));
+      renderMetricGroups('#smart-pullback-metrics', summaryMetrics, cohortGroups);
 
       const rows = data.positions || [];
       document.querySelector('#smart-pullback-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -818,7 +930,7 @@
         + `${number(profile.strategy?.entry?.minUniqueBuyersW3)} Buyers`
       )).join(' · ');
       document.querySelector('#signal-shadow-expression').textContent = `${profileSummary || '等待 Shadow 配置'} → 入场即激活、峰值回撤${number(exit.trailingStopPct,1)}%`;
-      const metrics = [
+      const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW' : '关闭', '不会发链上交易'],
         ['策略命中', number(stats.matched), `评估 ${number(stats.evaluated)}`],
         ['活动 / 待入场', `${number(stats.active_positions)} / ${number(runtime.pendingEntries)}`, `仓位 ${number(risk.simulatedPositionSol,4)} SOL`],
@@ -826,13 +938,21 @@
         ['净胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
         ['平均净收益', pct(stats.average_net_return_pct), `成本 ${rate(risk.configuredCostPct)}`],
         ['平均持仓', age(stats.average_hold_ms), `60秒兜底 ${age(exit.maxHoldMs)}`],
-        ...(data.profiles || []).map(profile => [
-          profileLabels[profile.signal_variant] || profile.signal_variant,
-          pct(profile.average_net_return_pct),
-          `已完成 ${number(Number(profile.closed_positions || 0) + Number(profile.no_exit || 0))} · 胜率 ${rate(profile.win_rate_pct)}`,
-        ]),
       ];
-      document.querySelector('#signal-shadow-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+      const profileGroups = (data.profiles || []).map(profile => {
+        const completed = Number(profile.closed_positions || 0) + Number(profile.no_exit || 0);
+        return {
+          label: profileLabels[profile.signal_variant] || profile.signal_variant,
+          note: '该阈值组合指标独立成行',
+          metrics: [
+            ['平均净收益', pct(profile.average_net_return_pct), `样本 ${number(completed)}`],
+            ['净胜率', rate(profile.win_rate_pct), `赢家 ${number(profile.wins)}`],
+            ['策略命中', number(profile.matched), `评估 ${number(profile.evaluated)}`],
+            ['已完成 / 无法退出', `${number(profile.closed_positions)} / ${number(profile.no_exit)}`, `共 ${number(completed)}`],
+          ],
+        };
+      });
+      renderMetricGroups('#signal-shadow-metrics', summaryMetrics, profileGroups);
 
       const rows = data.positions || [];
       document.querySelector('#signal-shadow-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -849,6 +969,7 @@
       const flowFirst = data.flowFirstShadow || { mode: 'SHADOW_C', enabled: false, activePositions: 0, pendingEntries: 0, episodes: 0, deduplicated: 0, cohorts: [] };
       const smartPullback = data.smartPullbackShadow || { mode: 'SHADOW_AB', enabled: false, activePositions: 0, pendingEntries: 0, candidates: 0 };
       const smartOpen = data.smartOpenShadow || { mode: 'SHADOW_SMART_OPEN', enabled: false, activePositions: 0, pendingEntries: 0, qualifiedOpens: 0, rejected: 0 };
+      const launchQuality = data.launchQualityObserver || { mode: 'OBSERVER_ONLY', enabled: false, activeLaunches: 0, launchesObserved: 0, snapshotsWritten: 0, referencePullbacks: 0 };
       const liveEntry = trading.strategy?.entry || {};
       const shadowRules = (signalShadow.profiles || []).map(profile => (
         `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)}/${number(profile.strategy?.entry?.minUniqueBuyersW3)}`
@@ -856,12 +977,13 @@
       const cards = [
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', `Primary Early ${number(liveEntry.minNetFlowW3Sol,1)} SOL / ${number(liveEntry.minUniqueBuyersW3)} Buyers`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Flow-First C', [['模式', flowFirst.enabled ? 'SHADOW C' : '关闭'], ['Primary信号', number(flowFirst.signalsSeen)], ['独立Episode', number(flowFirst.episodes)], ['重复行去重', number(flowFirst.deduplicated)], ['待入场', number(flowFirst.pendingEntries)], ['活动模拟仓位', number(flowFirst.activePositions)], ['C组退出', '5秒 / 7.5% / 12.5%'], ['链上交易', '永不发送']]],
         ['Smart Pullback A/B', [['模式', smartPullback.enabled ? 'SHADOW A/B' : '关闭'], ['候选', number(smartPullback.candidates)], ['待入场', number(smartPullback.pendingEntries)], ['活动仓位', number(smartPullback.activePositions)], ['本次Episode', number(smartPullback.episodes)], ['确认', number(smartPullback.confirmed)], ['A / B', '7.5% / 12.5%'], ['链上交易', '永不发送']]],
         ['Smart OPEN D', [['模式', smartOpen.enabled ? 'SHADOW D' : '关闭'], ['合格OPEN', number(smartOpen.qualifiedOpens)], ['规则拒绝', number(smartOpen.rejected)], ['待入场', number(smartOpen.pendingEntries)], ['活动仓位', number(smartOpen.activePositions)], ['已关闭', number(smartOpen.closed)], ['数据表', '独立，不混入旧策略'], ['链上交易', '永不发送']]],
+        ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['参考回踩', number(launchQuality.referencePullbacks)], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
         ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
@@ -899,6 +1021,9 @@
         ],
         'smart-open': () => [
           json('/api/smart-open-shadow?positionLimit=30').then(renderSmartOpenShadow),
+        ],
+        'launch-quality': () => [
+          json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60').then(renderLaunchQualityObserver),
         ],
         'flow-first': () => [
           json('/api/flow-first-shadow?positionLimit=30').then(renderFlowFirstShadow),

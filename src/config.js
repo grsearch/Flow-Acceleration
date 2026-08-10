@@ -28,6 +28,14 @@ function listEnv(name, fallback = []) {
   return raw.split(',').map((value) => value.trim()).filter(Boolean);
 }
 
+function millisecondListEnv(name, fallbackSeconds = []) {
+  const values = listEnv(name, fallbackSeconds.map(String))
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((seconds) => Math.trunc(seconds * 1_000));
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
@@ -453,6 +461,48 @@ const config = {
     }),
   },
 
+  // Observer-only Launch Quality research. Reference percentages label market
+  // structure for later analysis; they never become an entry or execution rule.
+  launchQualityObserver: {
+    enabled: booleanEnv('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED', true),
+    snapshotHorizonsMs: millisecondListEnv(
+      'FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS',
+      [5, 10, 20, 30, 60],
+    ),
+    maxLaunchAgeMs: integerEnv('FLOW_LAUNCH_QUALITY_MAX_AGE_MS', 90_000, {
+      min: 30_000,
+      max: 10 * 60_000,
+    }),
+    pumpReferencePct: numberEnv('FLOW_LAUNCH_QUALITY_PUMP_REFERENCE_PCT', 25, {
+      min: 0.1,
+      max: 10_000,
+    }),
+    pullbackReferencePct: numberEnv(
+      'FLOW_LAUNCH_QUALITY_PULLBACK_REFERENCE_PCT',
+      7.5,
+      { min: 0.1, max: 100 },
+    ),
+    reboundReferencePct: numberEnv(
+      'FLOW_LAUNCH_QUALITY_REBOUND_REFERENCE_PCT',
+      3,
+      { min: 0, max: 1_000 },
+    ),
+    recentBuyerWindowMs: integerEnv(
+      'FLOW_LAUNCH_QUALITY_RECENT_BUYER_WINDOW_MS',
+      10_000,
+      { min: 500, max: 60_000 },
+    ),
+    retentionFloorPct: numberEnv('FLOW_LAUNCH_QUALITY_RETENTION_FLOOR_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    maxObservationLagMs: integerEnv(
+      'FLOW_LAUNCH_QUALITY_MAX_OBSERVATION_LAG_MS',
+      2_000,
+      { min: 0, max: 30_000 },
+    ),
+  },
+
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),
@@ -479,6 +529,9 @@ function validateConfig() {
   }
   if (config.strategy.signalWindowMs * 3 > config.strategy.bufferMs) {
     errors.push('FLOW_BUFFER_MS must cover all three signal windows');
+  }
+  if (config.launchQualityObserver.snapshotHorizonsMs.length === 0) {
+    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must contain at least one value');
   }
   if (config.liveTrading.enabled && !config.liveTrading.dryRun) {
     if (!config.liveTrading.rpcUrl) errors.push('FLOW_RPC_URL is required for live trading');
