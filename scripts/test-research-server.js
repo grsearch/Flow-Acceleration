@@ -40,6 +40,12 @@ async function main() {
   assert.ok(dashboard.includes('Flow-First Shadow C'));
   assert.ok(dashboard.includes('id="smart-pullback-metrics"'));
   assert.ok(dashboard.includes('id="smart-pullback-position-rows"'));
+  assert.ok(dashboard.includes('data-live-strategy="smart-open"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="smart-open"'));
+  assert.ok(dashboard.includes('id="smart-open-metrics"'));
+  assert.ok(dashboard.includes('id="smart-open-position-rows"'));
+  assert.ok(dashboard.includes("json('/api/smart-open-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes("let activeLiveStrategyId = 'execution';"));
   assert.ok(dashboard.includes('Current live strategy'));
   assert.ok(dashboard.includes("let activeTabId = 'overview';"));
   assert.ok(dashboard.includes('refreshInFlight'));
@@ -107,6 +113,7 @@ async function main() {
       '/api/primary-signal-shadow',
       '/api/flow-first-shadow',
       '/api/smart-pullback-shadow',
+      '/api/smart-open-shadow',
       '/api/health',
     ];
 
@@ -190,6 +197,26 @@ async function main() {
     );
     assert.ok(Array.isArray(smartPullback.cohorts));
     assert.ok(Array.isArray(smartPullback.positions));
+    const smartOpen = await (await fetch(
+      `http://127.0.0.1:${port}/api/smart-open-shadow`,
+    )).json();
+    assert.strictEqual(smartOpen.runtime.mode, 'SHADOW_SMART_OPEN');
+    assert.strictEqual(smartOpen.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      smartOpen.runtime.cohorts.map((cohort) => [
+        cohort.cohortId,
+        cohort.strategy.entry.positionPhase,
+        cohort.strategy.exit.policy,
+        cohort.strategy.research.isolatedTable,
+      ]),
+      [
+        ['D0', 'OPEN', 'FIXED_HOLD', 'smart_open_shadow_positions'],
+        ['D1', 'OPEN', 'DELAYED_TRAILING', 'smart_open_shadow_positions'],
+        ['D2', 'OPEN', 'SMART_REDUCE_OR_CLOSE', 'smart_open_shadow_positions'],
+      ],
+    );
+    assert.ok(Array.isArray(smartOpen.cohorts));
+    assert.ok(Array.isArray(smartOpen.positions));
     const dynamicResponse = await fetch(
       `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&stopLossPct=3`
       + '&trailingStopPct=2&exitRetryCount=1&splitRatio=0.6'

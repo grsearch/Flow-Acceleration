@@ -9,6 +9,7 @@ const LiveTradingManager = require('./core/LiveTradingManager');
 const { PrimarySignalShadowSuite } = require('./core/PrimarySignalShadowSuite');
 const { FlowFirstShadowSuite } = require('./core/FlowFirstShadowSuite');
 const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
+const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -50,6 +51,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   smartPullbackShadow.start();
+  const smartOpenShadow = new SmartOpenShadowSuite({
+    config: runtimeConfig.smartOpenShadow,
+    store,
+  });
+  smartOpenShadow.start();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
@@ -60,6 +66,7 @@ function createRuntime(runtimeConfig = config) {
     signalShadow,
     flowFirstShadow,
     smartPullbackShadow,
+    smartOpenShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
@@ -151,6 +158,14 @@ function createRuntime(runtimeConfig = config) {
 
         const trade = store.enrichTrade(event);
         const isSmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
+        const smartOpenContext = isSmartWalletTrade
+          ? engine.recentBuyContext(
+            trade.mint,
+            trade.timestampMs,
+            runtimeConfig.smartOpenShadow.preBuyWindowMs,
+            trade.wallet,
+          )
+          : null;
         store.queueRawTrade(trade);
         signalShadow.observeTrade(trade);
         engine.handleTrade(trade, store.getToken(trade.mint));
@@ -159,11 +174,16 @@ function createRuntime(runtimeConfig = config) {
         trader.observeTrade(trade);
         if (isSmartWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
-          if (smartEvent?.inserted && trade.side === 'BUY') {
-            smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id });
+          if (smartEvent?.inserted) {
+            const normalizedSmartEvent = { ...trade, ...smartEvent, id: smartEvent.id };
+            smartOpenShadow.onSmartWalletEvent(normalizedSmartEvent, smartOpenContext || {});
+            if (trade.side === 'BUY') {
+              smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id });
+            }
           }
         }
         smartPullbackShadow.observeTrade(trade);
+        smartOpenShadow.observeTrade(trade);
       } catch (error) {
         runtimeMetrics.parseErrors += 1;
         console.error(`[Runtime] ${event.type} failed:`, error.message);
@@ -205,6 +225,11 @@ function createRuntime(runtimeConfig = config) {
       )).join(', ')}; sends transactions=false.`,
     );
     console.log(
+      `Smart OPEN Shadow D: ${runtimeConfig.smartOpenShadow.cohorts.map((cohort) => (
+        `${cohort.id}=${cohort.exitMode}`
+      )).join(', ')}; isolated table; sends transactions=false.`,
+    );
+    console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
       + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `
       + `wallets>=${runtimeConfig.strategy.activityMinUniqueWallets}`,
@@ -222,6 +247,7 @@ function createRuntime(runtimeConfig = config) {
       signalShadow.advanceTime(now);
       flowFirstShadow.advanceTime(now);
       smartPullbackShadow.advanceTime(now);
+      smartOpenShadow.advanceTime(now);
       const graduatedPending = labeler.pendingMints().filter((mint) => store.getToken(mint)?.graduated_at);
       stream.setAmmMints(graduatedPending);
     }, 1_000);
@@ -252,6 +278,7 @@ function createRuntime(runtimeConfig = config) {
     signalShadow.stop();
     flowFirstShadow.stop();
     smartPullbackShadow.stop();
+    smartOpenShadow.stop();
     await server.stop();
     store.close();
   }
@@ -267,12 +294,13 @@ function createRuntime(runtimeConfig = config) {
       signalShadow: signalShadow.health(),
       flowFirstShadow: flowFirstShadow.health(),
       smartPullbackShadow: smartPullbackShadow.health(),
+      smartOpenShadow: smartOpenShadow.health(),
     };
   }
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
-    flowFirstShadow, smartPullbackShadow,
+    flowFirstShadow, smartPullbackShadow, smartOpenShadow,
   };
 }
 

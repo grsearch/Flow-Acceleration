@@ -126,6 +126,19 @@
     .strategy-card h3 { margin: 0 0 15px; font-size: 16px; }
     .strategy-card .health-row { font-size: 12px; }
     .record-section { margin-top: 14px; }
+    .strategy-workspace { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 14px; align-items: start; }
+    .strategy-sidebar { position: sticky; top: 14px; padding: 14px; }
+    .strategy-sidebar h2 { margin: 3px 6px 6px; font-size: 16px; }
+    .strategy-sidebar > p { margin: 0 6px 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .strategy-selector { display: grid; gap: 7px; }
+    .strategy-nav-item { width: 100%; min-height: 62px; border: 1px solid transparent; border-radius: 11px; padding: 10px 11px; background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
+    .strategy-nav-item:hover { border-color: var(--line); color: var(--text); background: rgba(85,216,208,.04); }
+    .strategy-nav-item[aria-current="true"] { border-color: rgba(183,243,74,.45); background: rgba(183,243,74,.09); color: var(--text); }
+    .strategy-nav-item b, .strategy-nav-item small { display: block; }
+    .strategy-nav-item b { margin-bottom: 4px; font-size: 13px; }
+    .strategy-nav-item small { color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .strategy-pane[hidden] { display: none; }
+    .strategy-pane > .record-section:first-child, .strategy-pane > .live-summary:first-child { margin-top: 0; }
     .status-chip { padding: 5px 8px; font-size: 10px; }
     .status-chip.good { border-color: rgba(183,243,74,.4); background: rgba(183,243,74,.08); color: var(--lime); }
     .status-chip.warn { border-color: rgba(245,189,98,.45); background: rgba(245,189,98,.08); color: var(--amber); }
@@ -143,6 +156,9 @@
       .metric-grid, .quality-grid, .live-metric-grid, .strategy-grid { grid-template-columns: repeat(2,1fr); }
       .research-note, .wallet-grid, .health-grid, .live-summary { grid-template-columns: 1fr; }
       .form-grid, .result-grid { grid-template-columns: repeat(2,1fr); }
+      .strategy-workspace { grid-template-columns: 1fr; }
+      .strategy-sidebar { position: static; }
+      .strategy-selector { grid-template-columns: repeat(5, minmax(150px, 1fr)); overflow-x: auto; padding-bottom: 3px; }
     }
     @media (max-width: 620px) {
       .shell { padding: 18px 14px; }
@@ -153,6 +169,7 @@
       .wallet-metrics { grid-template-columns: repeat(2,1fr); }
       .section-title { display: block; }
       .section-title p { margin-top: 6px; }
+      .strategy-sidebar { padding: 11px; }
     }
   </style>
 </head>
@@ -298,87 +315,123 @@
     </section>
 
     <section class="panel" role="tabpanel" id="live-trading" hidden>
-      <div class="grid live-summary">
-        <article class="card mode-card disabled" id="live-mode-card">
-          <p class="eyebrow">Execution state</p>
-          <div class="mode-badge disabled" id="live-mode-badge">DISABLED</div>
-          <h2 id="live-mode-title">实盘执行已关闭</h2>
-          <p class="mode-description" id="live-mode-description">仅记录策略判定和完整研究数据，不会签名或发送链上交易。</p>
-          <div class="runtime-strip" id="live-runtime-strip"></div>
-        </article>
-        <article class="card">
-          <p class="eyebrow">Current live strategy</p>
-          <div class="strategy-expression" id="live-strategy-expression">Primary Early + W3 NetFlow ≥5 SOL + Buyers ≥4 → 入场即激活、峰值回撤7.5%</div>
-          <p class="mode-description">页面展示服务器当前实际加载的参数，不是回测表单中的临时设置。完整原始数据始终继续采集。</p>
-          <div class="wallet-mini" id="live-monitored-wallets">等待策略配置…</div>
-        </article>
+      <div class="strategy-workspace">
+        <aside class="card strategy-sidebar" aria-label="策略列表">
+          <h2>策略列表</h2>
+          <p>每次只加载右侧选中的策略，历史数据与新实验彼此独立。</p>
+          <div class="strategy-selector">
+            <button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution">
+              <b>实盘执行</b><small>当前启停、仓位、订单与判定</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-open">
+              <b>Smart OPEN · D</b><small>新建独立 Shadow，不混入旧数据</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first">
+              <b>Flow-First · C</b><small>Primary Episode 三种退出</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-pullback">
+              <b>Smart 回踩 · A/B</b><small>旧回踩实验，规则保持不变</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="primary-shadow">
+              <b>Primary Early</b><small>旧 3/3、5/4、7/5 Shadow</small>
+            </button>
+          </div>
+        </aside>
+
+        <div class="strategy-content">
+          <div class="strategy-pane" data-live-strategy-pane="execution">
+            <div class="grid live-summary">
+              <article class="card mode-card disabled" id="live-mode-card">
+                <p class="eyebrow">Execution state</p>
+                <div class="mode-badge disabled" id="live-mode-badge">DISABLED</div>
+                <h2 id="live-mode-title">实盘执行已关闭</h2>
+                <p class="mode-description" id="live-mode-description">仅记录策略判定和完整研究数据，不会签名或发送链上交易。</p>
+                <div class="runtime-strip" id="live-runtime-strip"></div>
+              </article>
+              <article class="card">
+                <p class="eyebrow">Current live strategy</p>
+                <div class="strategy-expression" id="live-strategy-expression">等待服务器策略配置…</div>
+                <p class="mode-description">这里展示服务器实际加载的参数；完整原始数据始终继续采集。</p>
+                <div class="wallet-mini" id="live-monitored-wallets">等待策略配置…</div>
+              </article>
+            </div>
+            <div class="grid live-metric-grid" id="live-metrics"></div>
+            <div class="grid strategy-grid" id="live-strategy-cards"></div>
+            <article class="card record-section">
+              <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；收益为价格粗收益，未扣滑点和链上费用</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 出场价</th><th>粗收益</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
+                <tbody id="live-position-rows"></tbody>
+              </table></div>
+            </article>
+            <article class="card record-section">
+              <div class="section-title"><h2>最近订单</h2><p id="live-order-summary">买入与卖出尝试均保留</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>提交时间</th><th>方向</th><th>Mint</th><th>场所</th><th>尝试</th><th>请求数量</th><th>状态</th><th>签名 / 错误</th></tr></thead>
+                <tbody id="live-order-rows"></tbody>
+              </table></div>
+            </article>
+            <article class="card record-section">
+              <div class="section-title"><h2>最近策略判定</h2><p>包含未命中和风控拒绝，便于核对为什么没有开仓</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>规则</th><th>执行状态</th><th>Mint</th><th>信号类型</th><th>W3 NetFlow</th><th>Buyers</th><th>信号延迟</th><th>拒绝原因</th></tr></thead>
+                <tbody id="live-decision-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="smart-open" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Smart Wallet OPEN Shadow D0 / D1 / D2</h2>
+                <p>全新独立表，只研究真实 OPEN；永不签名或发送交易</p>
+              </div>
+              <div class="strategy-expression" id="smart-open-expression">OPEN + Bonding Curve + Smart金额≥1 SOL + 买入前2秒 Buyers≥2</div>
+              <div class="grid live-metric-grid" id="smart-open-metrics"></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Smart OPEN</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>OPEN金额 / 前置买家</th><th>OPEN价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+                <tbody id="smart-open-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="flow-first" hidden>
+            <article class="card record-section">
+              <div class="section-title"><h2>Flow-First Shadow C</h2><p>旧实验保持不变；同 Mint / 30秒 Episode 只模拟一次</p></div>
+              <div class="strategy-expression" id="flow-first-expression">等待 Flow-First 配置…</div>
+              <div class="grid live-metric-grid" id="flow-first-metrics"></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint / Rank</th><th>W3 NetFlow / Buyers</th><th>信号价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+                <tbody id="flow-first-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="smart-pullback" hidden>
+            <article class="card record-section">
+              <div class="section-title"><h2>Smart Wallet 回踩 Shadow A/B</h2><p>旧实验保持不变，历史样本继续写入原表</p></div>
+              <div class="strategy-expression" id="smart-pullback-expression">等待 Smart 回踩配置…</div>
+              <div class="grid live-metric-grid" id="smart-pullback-metrics"></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Smart买入</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>Smart价 / 回踩低点</th><th>入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+                <tbody id="smart-pullback-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="primary-shadow" hidden>
+            <article class="card record-section">
+              <div class="section-title"><h2>Primary 信号模拟策略</h2><p>旧 Shadow 路径保持不变</p></div>
+              <div class="strategy-expression" id="signal-shadow-expression">等待 Primary Early 配置…</div>
+              <div class="grid live-metric-grid" id="signal-shadow-metrics"></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint</th><th>W3 NetFlow / Buyers</th><th>入场 / 最高 / 出场价</th><th>净收益</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+                <tbody id="signal-shadow-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+        </div>
       </div>
-
-      <div class="grid live-metric-grid" id="live-metrics"></div>
-      <div class="grid strategy-grid" id="live-strategy-cards"></div>
-
-      <article class="card record-section">
-        <div class="section-title">
-          <h2>Flow-First Shadow C</h2>
-          <p>直接使用 Primary Flow Signal；同一 Mint / 30秒 Episode 只模拟一次，永不签名或发送交易</p>
-        </div>
-        <div class="strategy-expression" id="flow-first-expression">Primary Flow → 200ms实际模拟成交 → C5固定5秒 / C7.5回撤7.5% / C12.5回撤12.5%</div>
-        <div class="grid live-metric-grid" id="flow-first-metrics"></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint / Rank</th><th>W3 NetFlow / Buyers</th><th>信号价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
-          <tbody id="flow-first-position-rows"></tbody>
-        </table></div>
-      </article>
-
-      <article class="card record-section">
-        <div class="section-title">
-          <h2>Smart Wallet 回踩 Shadow A/B</h2>
-          <p>相同入场，A=峰值回撤7.5%，B=峰值回撤12.5%；永不签名或发送交易</p>
-        </div>
-        <div class="strategy-expression" id="smart-pullback-expression">Smart BUY ≥0.1 SOL → 回踩2.5% → 反弹7.5% → 入场≤Smart价+2%</div>
-        <div class="grid live-metric-grid" id="smart-pullback-metrics"></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Smart买入</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>Smart价 / 回踩低点</th><th>入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
-          <tbody id="smart-pullback-position-rows"></tbody>
-        </table></div>
-      </article>
-
-      <article class="card record-section">
-        <div class="section-title">
-          <h2>Primary 信号模拟策略</h2>
-          <p>独立 Shadow 路径，永不签名或发送链上交易</p>
-        </div>
-        <div class="strategy-expression" id="signal-shadow-expression">Primary Early Shadow：激进 3/3 · 均衡 5/4 · 保守 7/5</div>
-        <div class="grid live-metric-grid" id="signal-shadow-metrics"></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint</th><th>W3 NetFlow / Buyers</th><th>入场 / 最高 / 出场价</th><th>净收益</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
-          <tbody id="signal-shadow-position-rows"></tbody>
-        </table></div>
-      </article>
-
-      <article class="card record-section">
-        <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；收益为价格粗收益，未扣滑点和链上费用</p></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 出场价</th><th>粗收益</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
-          <tbody id="live-position-rows"></tbody>
-        </table></div>
-      </article>
-
-      <article class="card record-section">
-        <div class="section-title"><h2>最近订单</h2><p id="live-order-summary">买入与卖出尝试均保留</p></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>提交时间</th><th>方向</th><th>Mint</th><th>场所</th><th>尝试</th><th>请求数量</th><th>状态</th><th>签名 / 错误</th></tr></thead>
-          <tbody id="live-order-rows"></tbody>
-        </table></div>
-      </article>
-
-      <article class="card record-section">
-        <div class="section-title"><h2>最近策略判定</h2><p>包含未命中和风控拒绝，便于核对为什么没有开仓</p></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>信号时间</th><th>规则</th><th>执行状态</th><th>Mint</th><th>信号类型</th><th>W3 NetFlow</th><th>Buyers</th><th>信号延迟</th><th>拒绝原因</th></tr></thead>
-          <tbody id="live-decision-rows"></tbody>
-        </table></div>
-      </article>
     </section>
 
     <section class="panel" role="tabpanel" id="health" hidden>
@@ -420,7 +473,9 @@
     async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
 
     const tabs = [...document.querySelectorAll('[role="tab"]')];
+    const liveStrategyButtons = [...document.querySelectorAll('[data-live-strategy]')];
     let activeTabId = 'overview';
+    let activeLiveStrategyId = 'execution';
     let refreshInFlight = false;
     let refreshQueued = false;
     function selectTab(id) {
@@ -437,6 +492,19 @@
         const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
         selectTab(next.getAttribute('aria-controls')); next.focus();
       });
+    });
+    function selectLiveStrategy(id) {
+      activeLiveStrategyId = id;
+      liveStrategyButtons.forEach(button => {
+        button.setAttribute('aria-current', String(button.dataset.liveStrategy === id));
+      });
+      document.querySelectorAll('[data-live-strategy-pane]').forEach(pane => {
+        pane.hidden = pane.dataset.liveStrategyPane !== id;
+      });
+      if (activeTabId === 'live-trading') void refresh(true);
+    }
+    liveStrategyButtons.forEach(button => {
+      button.addEventListener('click', () => selectLiveStrategy(button.dataset.liveStrategy));
     });
 
     function renderOverview(data) {
@@ -656,6 +724,53 @@
       }).join('') : '<tr><td colspan="9" class="empty">等待 Primary Flow Signal；同一30秒Episode的重复Rank只建立一组模拟入场，完整原始信号仍会保留</td></tr>';
     }
 
+    function renderSmartOpenShadow(data) {
+      const runtime = data.runtime || {};
+      const runtimeCohorts = runtime.cohorts || [];
+      const entry = runtimeCohorts[0]?.strategy?.entry || {};
+      const research = runtimeCohorts[0]?.strategy?.research || {};
+      const labels = Object.fromEntries(runtimeCohorts.map(cohort => [
+        cohort.cohortId,
+        cohort.cohortLabel,
+      ]));
+      const exitText = runtimeCohorts.map(cohort => {
+        const exit = cohort.strategy?.exit || {};
+        if (exit.policy === 'FIXED_HOLD') return `${cohort.cohortId}=固定${age(exit.fixedHoldMs)}`;
+        if (exit.policy === 'DELAYED_TRAILING') {
+          return `${cohort.cohortId}=+${rate(exit.trailingActivationPct)}激活/回撤${rate(exit.trailingStopPct)}`;
+        }
+        return `${cohort.cohortId}=跟随Smart减仓或清仓/${age(exit.maxHoldMs)}兜底`;
+      }).join(' · ');
+      document.querySelector('#smart-open-expression').textContent = `真实 OPEN + ${entry.market || 'PUMP_BONDING_CURVE'} + Smart金额≥${number(entry.minSmartOpenSol,2)} SOL + 买入前${number(entry.preBuyWindowMs / 1000,1)}秒 Buyers≥${number(entry.minPreBuyers)} → ${number(entry.entryDelayMs)}ms后模拟入场；${exitText || '等待配置'}`;
+
+      const metrics = [
+        ['运行模式', runtime.enabled ? 'SHADOW D' : '关闭', `独立表 ${research.isolatedTable || 'smart_open_shadow_positions'}`],
+        ['评估 / 合格OPEN', `${number(runtime.evaluated)} / ${number(runtime.qualifiedOpens)}`, `规则拒绝 ${number(runtime.rejected)}`],
+        ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `模拟仓位 ${number(research.simulatedPositionSol,4)} SOL`],
+        ...runtimeCohorts.flatMap(runtimeCohort => {
+          const cohort = (data.cohorts || []).find(item => item.cohort_id === runtimeCohort.cohortId);
+          if (!cohort) return [];
+          const jumpSummary = (cohort.entry_jump_buckets || [])
+            .map(bucket => `${bucket.label}: ${number(bucket.resolved)}笔 / ${pct(bucket.average_net_return_pct)}`)
+            .join(' · ');
+          const label = labels[cohort.cohort_id] || cohort.cohort_id;
+          return [
+            [`${label} · 净收益`, pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
+            [`${label} · 胜率 / 去Top5`, `${rate(cohort.win_rate_pct)} / ${pct(cohort.average_net_return_ex_top5_pct)}`, `完成 ${number(cohort.resolved)} · 最大赢家 ${pct(cohort.max_winner_pct)}`],
+            [`${label} · 大赢家`, `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `兑现率 ${rate(cohort.big_winner_realization_rate_pct)} · MFE捕获 ${rate(cohort.average_big_winner_capture_pct)}`],
+            [`${label} · 入场跳价分层`, pct(cohort.average_entry_jump_pct), jumpSummary || '等待已完成样本'],
+          ];
+        }),
+      ];
+      document.querySelector('#smart-open-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+
+      const rows = data.positions || [];
+      document.querySelector('#smart-open-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        return `<tr><td>${dateTime(row.smart_open_at)}</td><td>${escapeHtml(labels[row.cohort_id] || row.cohort_id)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${walletLink(row.smart_wallet)}</span></td><td>${number(row.smart_open_sol,3)} SOL / ${number(row.prebuy_buyers)}<br><span class="table-note">${number(row.prebuy_buy_tx)}笔 · 净流 ${number(row.prebuy_net_flow_sol,2)} SOL</span></td><td>${number(row.smart_open_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)}</span></td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">等待被监控钱包的真实 OPEN；ADD 不会进入本策略，旧 Shadow 数据不会混入</td></tr>';
+    }
+
     function renderSmartPullbackShadow(data) {
       const runtime = data.runtime || {};
       const runtimeCohorts = runtime.cohorts || [];
@@ -733,6 +848,7 @@
       const signalShadow = data.signalShadow || { mode: 'SHADOW', enabled: false, activePositions: 0, pendingEntries: 0 };
       const flowFirst = data.flowFirstShadow || { mode: 'SHADOW_C', enabled: false, activePositions: 0, pendingEntries: 0, episodes: 0, deduplicated: 0, cohorts: [] };
       const smartPullback = data.smartPullbackShadow || { mode: 'SHADOW_AB', enabled: false, activePositions: 0, pendingEntries: 0, candidates: 0 };
+      const smartOpen = data.smartOpenShadow || { mode: 'SHADOW_SMART_OPEN', enabled: false, activePositions: 0, pendingEntries: 0, qualifiedOpens: 0, rejected: 0 };
       const liveEntry = trading.strategy?.entry || {};
       const shadowRules = (signalShadow.profiles || []).map(profile => (
         `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)}/${number(profile.strategy?.entry?.minUniqueBuyersW3)}`
@@ -740,11 +856,12 @@
       const cards = [
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', `Primary Early ${number(liveEntry.minNetFlowW3Sol,1)} SOL / ${number(liveEntry.minUniqueBuyersW3)} Buyers`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Flow-First C', [['模式', flowFirst.enabled ? 'SHADOW C' : '关闭'], ['Primary信号', number(flowFirst.signalsSeen)], ['独立Episode', number(flowFirst.episodes)], ['重复行去重', number(flowFirst.deduplicated)], ['待入场', number(flowFirst.pendingEntries)], ['活动模拟仓位', number(flowFirst.activePositions)], ['C组退出', '5秒 / 7.5% / 12.5%'], ['链上交易', '永不发送']]],
         ['Smart Pullback A/B', [['模式', smartPullback.enabled ? 'SHADOW A/B' : '关闭'], ['候选', number(smartPullback.candidates)], ['待入场', number(smartPullback.pendingEntries)], ['活动仓位', number(smartPullback.activePositions)], ['本次Episode', number(smartPullback.episodes)], ['确认', number(smartPullback.confirmed)], ['A / B', '7.5% / 12.5%'], ['链上交易', '永不发送']]],
+        ['Smart OPEN D', [['模式', smartOpen.enabled ? 'SHADOW D' : '关闭'], ['合格OPEN', number(smartOpen.qualifiedOpens)], ['规则拒绝', number(smartOpen.rejected)], ['待入场', number(smartOpen.pendingEntries)], ['活动仓位', number(smartOpen.activePositions)], ['已关闭', number(smartOpen.closed)], ['数据表', '独立，不混入旧策略'], ['链上交易', '永不发送']]],
         ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
@@ -776,6 +893,23 @@
         return;
       }
       refreshInFlight = true;
+      const liveStrategyRequests = {
+        execution: () => [
+          json('/api/live-trading?positionLimit=30&orderLimit=30&decisionLimit=30').then(renderLiveTrading),
+        ],
+        'smart-open': () => [
+          json('/api/smart-open-shadow?positionLimit=30').then(renderSmartOpenShadow),
+        ],
+        'flow-first': () => [
+          json('/api/flow-first-shadow?positionLimit=30').then(renderFlowFirstShadow),
+        ],
+        'smart-pullback': () => [
+          json('/api/smart-pullback-shadow?positionLimit=30').then(renderSmartPullbackShadow),
+        ],
+        'primary-shadow': () => [
+          json('/api/primary-signal-shadow?positionLimit=30').then(renderPrimarySignalShadow),
+        ],
+      };
       const requestsByTab = {
         overview: () => [
           json('/api/overview').then(renderOverview),
@@ -788,12 +922,7 @@
           json('/api/smart-wallets').then(renderWallets),
           json('/api/signal-repetition').then(renderSignalQuality),
         ],
-        'live-trading': () => [
-          json('/api/live-trading?positionLimit=30&orderLimit=30&decisionLimit=30').then(renderLiveTrading),
-          json('/api/primary-signal-shadow?positionLimit=30').then(renderPrimarySignalShadow),
-          json('/api/flow-first-shadow?positionLimit=30').then(renderFlowFirstShadow),
-          json('/api/smart-pullback-shadow?positionLimit=30').then(renderSmartPullbackShadow),
-        ],
+        'live-trading': () => (liveStrategyRequests[activeLiveStrategyId] || (() => []))(),
         health: () => [
           json('/api/health').then(renderHealth),
         ],
