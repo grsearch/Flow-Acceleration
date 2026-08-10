@@ -23,7 +23,9 @@ function orderExecution(execution, event, submittedAt, finishedAt) {
   return {
     ...(execution || {}),
     manager: {
-      triggerType: event.signalId ? 'PRIMARY_SIGNAL' : 'LEGACY_EVENT',
+      triggerType: event.signalVariant?.startsWith('primary_early_')
+        ? 'PRIMARY_THRESHOLD'
+        : (event.signalId ? 'PRIMARY_SIGNAL' : 'LEGACY_EVENT'),
       signalId: event.signalId || null,
       signalEpisodeId: event.signalEpisodeId || null,
       signalSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
@@ -136,7 +138,7 @@ class LiveTradingManager {
 
   health() {
     const entry = {
-      signalVariant: 'primary_3w',
+      signalVariant: this.config.signalVariant,
       market: 'PUMP_BONDING_CURVE',
       minNetFlowW3Sol: this.config.minNetFlowW3Sol,
       minUniqueBuyersW3: this.config.minUniqueBuyersW3,
@@ -149,7 +151,7 @@ class LiveTradingManager {
       dryRun: this.config.dryRun,
       rule: entry,
       strategy: {
-        name: 'Primary Signal Immediate Trailing Live',
+        name: 'Primary Early Threshold Immediate Trailing Live',
         ruleVersion: RULE_VERSION,
         entry,
         exit: {
@@ -240,10 +242,7 @@ class LiveTradingManager {
     if (!position || !Number.isFinite(trade.price) || trade.price <= 0) {
       return;
     }
-    const entryUnresolved = position.status === 'OPENING'
-      || (position.status === 'EXIT_FAILED'
-        && position.exitReason === 'ENTRY_CONFIRMATION_UNKNOWN');
-    if (position.status !== 'OPEN' && !entryUnresolved) return;
+    if (position.status !== 'OPEN') return;
     if (trade.market === 'PUMP_AMM') {
       const token = this.store.getToken(trade.mint);
       if (!token?.graduated_at || trade.timestampMs < token.graduated_at) return;
@@ -253,14 +252,13 @@ class LiveTradingManager {
       }
     } else if (trade.market !== 'PUMP_BONDING_CURVE') return;
 
-    if (entryUnresolved && !position.entryStartedAt) return;
     const highest = Math.max(Number(position.highestPrice) || 0, trade.price);
     position.lastObservedPrice = trade.price;
     if (highest !== position.highestPrice) {
       position.highestPrice = highest;
       this.store.updateLivePosition(position.id, { highestPrice: highest });
     }
-    if (position.status !== 'OPEN' || !(position.entryPrice > 0)) return;
+    if (!(position.entryPrice > 0)) return;
     const drawdownPct = ((trade.price / highest) - 1) * 100;
     if (this.config.trailingStopPct > 0
       && drawdownPct <= -this.config.trailingStopPct) {
@@ -334,7 +332,7 @@ class LiveTradingManager {
       position = this.store.createLivePosition({
         primaryDecisionId: decision.id,
         signalId: event.signalId,
-        sourceType: 'PRIMARY_SIGNAL',
+        sourceType: 'PRIMARY_THRESHOLD',
         mint: event.mint,
         triggerWallet: null,
         mode: this.mode,
@@ -391,10 +389,8 @@ class LiveTradingManager {
       position.status = 'OPEN';
       position.tokenAmountRaw = result.tokenAmountRaw;
       position.entryPrice = result.expectedPrice || event.price;
-      position.highestPrice = Math.max(
-        Number(position.highestPrice) || 0,
-        position.entryPrice,
-      );
+      position.highestPrice = position.entryPrice;
+      position.lastObservedPrice = null;
       position.openedAt = openedAt;
       this.store.recordLiveOrder({
         positionId: position.id,
@@ -567,11 +563,14 @@ class LiveTradingManager {
       position.tokenAmountRaw = result.tokenAmountRaw;
       position.openedAt = openedAt;
       position.exitReason = 'ENTRY_RECONCILED';
+      position.highestPrice = position.entryPrice;
+      position.lastObservedPrice = null;
       this.store.updateLivePosition(position.id, {
         status: 'OPEN',
         tokenAmountRaw: result.tokenAmountRaw,
         entrySignature: signature,
         entryError: null,
+        highestPrice: position.highestPrice,
         exitReason: 'ENTRY_RECONCILED',
         exitError: null,
         openedAt,
@@ -617,7 +616,9 @@ class LiveTradingManager {
   }
 
   _armPositionExit(position) {
-    const lastPrice = Number(position.lastObservedPrice);
+    const lastPrice = position.lastObservedPrice == null
+      ? Number.NaN
+      : Number(position.lastObservedPrice);
     const drawdownPct = Number.isFinite(lastPrice) && position.highestPrice > 0
       ? ((lastPrice / position.highestPrice) - 1) * 100
       : 0;

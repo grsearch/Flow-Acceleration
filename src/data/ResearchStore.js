@@ -1151,9 +1151,12 @@ class ResearchStore {
         WHERE id = @id
       `),
       activePrimarySignalShadowPositions: this.db.prepare(`
-        SELECT * FROM primary_signal_shadow_positions
-        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
-        ORDER BY signal_at, id
+        SELECT p.*
+        FROM primary_signal_shadow_positions p
+        JOIN flow_signals s ON s.signal_id = p.signal_id
+        WHERE p.status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+          AND s.signal_variant = ?
+        ORDER BY p.signal_at, p.id
       `),
       recentSmartWalletEvents: this.db.prepare(`
         SELECT * FROM smart_wallet_events
@@ -1699,8 +1702,8 @@ class ResearchStore {
     });
   }
 
-  activePrimarySignalShadowPositions() {
-    return this.stmts.activePrimarySignalShadowPositions.all();
+  activePrimarySignalShadowPositions(signalVariant = 'primary_3w') {
+    return this.stmts.activePrimarySignalShadowPositions.all(signalVariant);
   }
 
   recentSmartWalletEvents(timestampMs) {
@@ -1710,15 +1713,16 @@ class ResearchStore {
   primarySignalShadowDashboard({ positionLimit = 200 } = {}) {
     const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
     const positions = this.db.prepare(`
-      SELECT *,
+      SELECT p.*, s.signal_variant,
         CASE
-          WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL THEN exit_at - entry_at
+          WHEN p.entry_at IS NOT NULL AND p.exit_at IS NOT NULL THEN p.exit_at - p.entry_at
           ELSE NULL
         END AS hold_ms
-      FROM primary_signal_shadow_positions
+      FROM primary_signal_shadow_positions p
+      JOIN flow_signals s ON s.signal_id = p.signal_id
       ORDER BY
-        CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
-        updated_at DESC, id DESC
+        CASE WHEN p.status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        p.updated_at DESC, p.id DESC
       LIMIT ?
     `).all(limit);
     const stats = this.db.prepare(`
@@ -1741,12 +1745,36 @@ class ResearchStore {
         END) AS average_hold_ms
       FROM primary_signal_shadow_positions
     `).get();
+    const profiles = this.db.prepare(`
+      SELECT
+        s.signal_variant,
+        COUNT(*) AS evaluated,
+        COALESCE(SUM(p.rule_matched = 1), 0) AS matched,
+        COALESCE(SUM(p.status = 'CLOSED'), 0) AS closed_positions,
+        COALESCE(SUM(p.status = 'NO_EXIT'), 0) AS no_exit,
+        AVG(CASE WHEN p.status IN ('CLOSED', 'NO_EXIT') THEN p.net_return_pct END)
+          AS average_net_return_pct,
+        COALESCE(SUM(p.status IN ('CLOSED', 'NO_EXIT') AND p.net_return_pct > 0), 0) AS wins
+      FROM primary_signal_shadow_positions p
+      JOIN flow_signals s ON s.signal_id = p.signal_id
+      GROUP BY s.signal_variant
+      ORDER BY s.signal_variant
+    `).all().map((profile) => {
+      const profileResolved = Number(profile.closed_positions || 0) + Number(profile.no_exit || 0);
+      return {
+        ...profile,
+        win_rate_pct: profileResolved > 0
+          ? (Number(profile.wins) / profileResolved) * 100
+          : null,
+      };
+    });
     const resolved = Number(stats.closed_positions || 0) + Number(stats.no_exit || 0);
     return {
       stats: {
         ...stats,
         win_rate_pct: resolved > 0 ? (Number(stats.wins) / resolved) * 100 : null,
       },
+      profiles,
       positions,
     };
   }
@@ -1860,7 +1888,13 @@ class ResearchStore {
         SELECT COUNT(*) AS n FROM flow_signals WHERE timestamp_ms >= ? AND is_primary = 1
       `).get(since).n,
       shadowSignalsToday: this.db.prepare(`
-        SELECT COUNT(*) AS n FROM flow_signals WHERE timestamp_ms >= ? AND is_primary = 0
+        SELECT COUNT(*) AS n FROM flow_signals
+        WHERE timestamp_ms >= ? AND is_primary = 0
+          AND signal_variant NOT LIKE 'primary_early_%'
+      `).get(since).n,
+      earlyThresholdSignalsToday: this.db.prepare(`
+        SELECT COUNT(*) AS n FROM flow_signals
+        WHERE timestamp_ms >= ? AND signal_variant LIKE 'primary_early_%'
       `).get(since).n,
       smartWalletTradesToday: this.db.prepare('SELECT COUNT(*) AS n FROM smart_wallet_events WHERE timestamp_ms >= ?').get(since).n,
     };
@@ -2003,6 +2037,9 @@ class ResearchStore {
     const primarySignalRows = this.db.prepare(`
       SELECT COUNT(*) AS n FROM flow_signals WHERE is_primary = 1
     `).get().n;
+    const earlyThresholdSignalRows = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM flow_signals WHERE signal_variant LIKE 'primary_early_%'
+    `).get().n;
     const smartSignalConfirmations = this.db.prepare(`
       SELECT COUNT(*) AS n FROM smart_signal_confirmations
     `).get().n;
@@ -2047,7 +2084,8 @@ class ResearchStore {
       rawRows,
       signalRows,
       primarySignalRows,
-      shadowSignalRows: signalRows - primarySignalRows,
+      earlyThresholdSignalRows,
+      shadowSignalRows: signalRows - primarySignalRows - earlyThresholdSignalRows,
       smartSignalConfirmations,
       primaryLiveDecisions,
       livePositions,

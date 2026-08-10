@@ -1,6 +1,6 @@
 'use strict';
 
-const RULE_VERSION = 'primary-flow-w3-buyers-v1';
+const RULE_VERSION = 'primary-early-threshold-v2';
 
 const REJECT = Object.freeze({
   NOT_PRIMARY: 'NOT_PRIMARY',
@@ -22,11 +22,15 @@ function evaluatePrimarySignal(signal, config, now = Date.now()) {
   const signalAgeMs = Math.max(0, now - signalCreatedAt);
   const netFlowW3 = finite(signal?.netFlowW3, -Infinity);
   const uniqueBuyersW3 = Math.max(0, Math.trunc(finite(signal?.uniqueBuyersW3, -Infinity)));
+  const expectedVariant = config.signalVariant || 'primary_3w';
+  const isExpectedThreshold = signal?.signalVariant === expectedVariant
+    && expectedVariant.startsWith('primary_early_');
 
-  if (!(signal?.isPrimary === true || Number(signal?.isPrimary) === 1)) {
+  if (!isExpectedThreshold
+    && !(signal?.isPrimary === true || Number(signal?.isPrimary) === 1)) {
     reasons.push(REJECT.NOT_PRIMARY);
   }
-  if (signal?.signalVariant !== 'primary_3w') reasons.push(REJECT.WRONG_VARIANT);
+  if (signal?.signalVariant !== expectedVariant) reasons.push(REJECT.WRONG_VARIANT);
   if (netFlowW3 < config.minNetFlowW3Sol) reasons.push(REJECT.NETFLOW_W3_BELOW_MIN);
   if (uniqueBuyersW3 < config.minUniqueBuyersW3) reasons.push(REJECT.BUYERS_W3_BELOW_MIN);
   if (!(finite(signal?.price) > 0)) reasons.push(REJECT.INVALID_PRICE);

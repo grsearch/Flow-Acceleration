@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const { PrimarySignalShadowManager, STATUS } = require('../src/core/PrimarySignalShadowManager');
+const { PrimarySignalShadowSuite } = require('../src/core/PrimarySignalShadowSuite');
 const { ResearchStore } = require('../src/data/ResearchStore');
 
 function makeStore() {
@@ -13,9 +14,11 @@ function makeStore() {
 function config(overrides = {}) {
   return {
     enabled: true,
+    profileId: 'balanced',
+    signalVariant: 'primary_early_5_4',
     positionSizeSol: 0.05,
-    minNetFlowW3Sol: 10,
-    minUniqueBuyersW3: 7,
+    minNetFlowW3Sol: 5,
+    minUniqueBuyersW3: 4,
     maxSignalAgeMs: 1_500,
     entryDelayMs: 200,
     entryTimeoutMs: 2_000,
@@ -38,7 +41,8 @@ function config(overrides = {}) {
 }
 
 function primarySignal(store, {
-  mint, timestampMs, price = 1, netFlowW3 = 10, uniqueBuyersW3 = 7,
+  mint, timestampMs, price = 1, netFlowW3 = 5, uniqueBuyersW3 = 4,
+  signalVariant = 'primary_early_5_4',
 }) {
   return store.recordSignal({
     timestampMs,
@@ -51,7 +55,7 @@ function primarySignal(store, {
     price,
     buyFlowW1: 1,
     buyFlowW2: 5,
-    buyFlowW3: Math.max(10, netFlowW3),
+    buyFlowW3: Math.max(5, netFlowW3),
     sellFlowW1: 0,
     sellFlowW2: 0,
     sellFlowW3: 0,
@@ -69,8 +73,8 @@ function primarySignal(store, {
     flowAccel1: 5,
     flowAccel2: 2,
     flowAccel: 2,
-    signalVariant: 'primary_3w',
-    isPrimary: true,
+    signalVariant,
+    isPrimary: false,
   });
 }
 
@@ -133,7 +137,7 @@ function main() {
     'Smart Wallet activity must not be a hidden Primary entry filter');
 
   const weakSignal = primarySignal(store, {
-    mint: 'weak-mint', timestampMs: 500_000, netFlowW3: 9.9, uniqueBuyersW3: 6,
+    mint: 'weak-mint', timestampMs: 500_000, netFlowW3: 4.9, uniqueBuyersW3: 3,
   });
   manager.onSignal(weakSignal);
   dashboard = store.primarySignalShadowDashboard();
@@ -160,13 +164,60 @@ function main() {
 
   const health = manager.health();
   assert.strictEqual(health.mode, 'SHADOW');
-  assert.strictEqual(health.strategy.ruleVersion, 'primary-flow-w3-buyers-v1');
+  assert.strictEqual(health.strategy.ruleVersion, 'primary-early-threshold-v2');
+  assert.strictEqual(health.profileId, 'balanced');
   assert.strictEqual(health.strategy.exit.trailingActivationPct, 0);
   assert.strictEqual(health.strategy.exit.trailingStopPct, 7.5);
   assert.strictEqual(health.strategy.risk.sendsTransactions, false);
   assert.strictEqual(dashboard.stats.closed_positions, 2);
 
   store.close();
+
+  const suiteStore = makeStore();
+  const suiteConfig = config({
+    profiles: [
+      { id: 'aggressive', signalVariant: 'primary_early_3_3', minNetFlowW3Sol: 3, minUniqueBuyersW3: 3 },
+      { id: 'balanced', signalVariant: 'primary_early_5_4', minNetFlowW3Sol: 5, minUniqueBuyersW3: 4 },
+      { id: 'conservative', signalVariant: 'primary_early_7_5', minNetFlowW3Sol: 7, minUniqueBuyersW3: 5 },
+    ],
+  });
+  const suite = new PrimarySignalShadowSuite({ config: suiteConfig, store: suiteStore, now: () => 800_000 });
+  suite.start();
+  suite.onSignal(primarySignal(suiteStore, {
+    mint: 'cohort-mint', timestampMs: 800_000, netFlowW3: 3, uniqueBuyersW3: 3,
+    signalVariant: 'primary_early_3_3',
+  }));
+  suite.onSignal(primarySignal(suiteStore, {
+    mint: 'cohort-mint', timestampMs: 800_001, netFlowW3: 5, uniqueBuyersW3: 4,
+    signalVariant: 'primary_early_5_4',
+  }));
+  suite.onSignal(primarySignal(suiteStore, {
+    mint: 'cohort-mint', timestampMs: 800_002, netFlowW3: 7, uniqueBuyersW3: 5,
+    signalVariant: 'primary_early_7_5',
+  }));
+  const suiteHealth = suite.health();
+  assert.strictEqual(suiteHealth.profiles.length, 3);
+  assert.strictEqual(suiteHealth.pendingEntries, 3);
+  assert.deepStrictEqual(
+    suiteHealth.profiles.map((profile) => profile.profileId),
+    ['aggressive', 'balanced', 'conservative'],
+  );
+  const suiteDashboard = suiteStore.primarySignalShadowDashboard();
+  assert.strictEqual(suiteDashboard.profiles.length, 3);
+  assert.deepStrictEqual(
+    new Set(suiteDashboard.positions.map((position) => position.signal_variant)),
+    new Set(['primary_early_3_3', 'primary_early_5_4', 'primary_early_7_5']),
+  );
+  const suiteOverview = suiteStore.overview(800_002);
+  assert.strictEqual(suiteOverview.flowSignalsToday, 0,
+    'execution thresholds must not pollute the research Primary count');
+  assert.strictEqual(suiteOverview.earlyThresholdSignalsToday, 3);
+  assert.strictEqual(suiteOverview.shadowSignalsToday, 0);
+  const suiteDatabaseHealth = suiteStore.health();
+  assert.strictEqual(suiteDatabaseHealth.primarySignalRows, 0);
+  assert.strictEqual(suiteDatabaseHealth.earlyThresholdSignalRows, 3);
+  suite.stop();
+  suiteStore.close();
   console.log('primary signal shadow tests passed');
 }
 

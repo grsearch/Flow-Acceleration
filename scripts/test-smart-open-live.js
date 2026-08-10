@@ -102,8 +102,9 @@ function managerConfig(overrides = {}) {
   return {
     enabled: true,
     dryRun: false,
-    minNetFlowW3Sol: 10,
-    minUniqueBuyersW3: 7,
+    signalVariant: 'primary_early_5_4',
+    minNetFlowW3Sol: 5,
+    minUniqueBuyersW3: 4,
     maxSignalAgeMs: 1_500,
     positionSizeSol: 0.05,
     maxConcurrentPositions: 1,
@@ -132,8 +133,8 @@ function managerConfig(overrides = {}) {
 }
 
 function primarySignal(store, {
-  mint = 'primary-mint', timestampMs, price = 0.01, netFlowW3 = 10,
-  uniqueBuyersW3 = 7, signalVariant = 'primary_3w', isPrimary = true,
+  mint = 'primary-mint', timestampMs, price = 0.01, netFlowW3 = 5,
+  uniqueBuyersW3 = 4, signalVariant = 'primary_early_5_4', isPrimary = false,
 }) {
   return store.recordSignal({
     timestampMs,
@@ -146,7 +147,7 @@ function primarySignal(store, {
     price,
     buyFlowW1: 1,
     buyFlowW2: 5,
-    buyFlowW3: Math.max(10, netFlowW3),
+    buyFlowW3: Math.max(5, netFlowW3),
     sellFlowW1: 0,
     sellFlowW2: 0,
     sellFlowW3: 0,
@@ -279,10 +280,10 @@ async function main() {
   assert.strictEqual(classifyBuyReconciliation(null, 0n).state, 'UNKNOWN');
 
   const exact = evaluatePrimarySignal({
-    isPrimary: true,
-    signalVariant: 'primary_3w',
-    netFlowW3: 10,
-    uniqueBuyersW3: 7,
+    isPrimary: false,
+    signalVariant: 'primary_early_5_4',
+    netFlowW3: 5,
+    uniqueBuyersW3: 4,
     price: 1,
     timestampMs: 10_000,
     createdAt: 10_000,
@@ -291,8 +292,8 @@ async function main() {
   const rejected = evaluatePrimarySignal({
     isPrimary: false,
     signalVariant: 'two_window',
-    netFlowW3: 9.9,
-    uniqueBuyersW3: 6,
+    netFlowW3: 4.9,
+    uniqueBuyersW3: 3,
     price: 0,
     timestampMs: 1,
     createdAt: 1,
@@ -389,14 +390,15 @@ async function main() {
   const dashboardBuy = dashboard.orders.find((order) => order.side === 'BUY');
   assert.strictEqual(dashboardBuy.execution.buyMode, 'EXACT_QUOTE_IN_V2_FIXED_SOL');
   assert.strictEqual(dashboardBuy.execution.timelineMs.submitted_ms, 12);
-  assert.strictEqual(dashboardBuy.execution.manager.triggerType, 'PRIMARY_SIGNAL');
+  assert.strictEqual(dashboardBuy.execution.manager.triggerType, 'PRIMARY_THRESHOLD');
   assert.strictEqual(dashboardBuy.execution.manager.signalId, open.signalId);
   assert.ok(Number.isFinite(dashboardBuy.execution.manager.eventToEntryStartMs));
   assert.ok(Array.isArray(dashboard.decisions[0].rejection_reasons));
   const health = manager.health();
-  assert.strictEqual(health.strategy.ruleVersion, 'primary-flow-w3-buyers-v1');
-  assert.strictEqual(health.strategy.entry.minNetFlowW3Sol, 10);
-  assert.strictEqual(health.strategy.entry.minUniqueBuyersW3, 7);
+  assert.strictEqual(health.strategy.ruleVersion, 'primary-early-threshold-v2');
+  assert.strictEqual(health.strategy.entry.signalVariant, 'primary_early_5_4');
+  assert.strictEqual(health.strategy.entry.minNetFlowW3Sol, 5);
+  assert.strictEqual(health.strategy.entry.minUniqueBuyersW3, 4);
   assert.strictEqual(health.strategy.exit.maxHoldMs, 60_000);
   assert.strictEqual(health.strategy.exit.policy, 'PRIMARY_IMMEDIATE_TRAILING');
   assert.strictEqual(health.strategy.exit.trailingActivationPct, 0);
@@ -459,12 +461,20 @@ async function main() {
   });
   await latencyManager.entryQueue;
   await Promise.allSettled([...latencyManager.pending]);
-  assert.strictEqual(latencySellCalls, 1,
-    'the immediate trailing exit must retain peaks observed during entry confirmation');
-  assert.strictEqual(
-    latencyStore.db.prepare('SELECT exit_reason FROM live_positions').get().exit_reason,
-    'TRAILING_IMMEDIATE',
-  );
+  assert.strictEqual(latencySellCalls, 0,
+    'prices observed before the confirmed fill must not become the live trailing peak');
+  latencyNow = 15_150;
+  latencyManager.observeTrade({
+    mint: 'latency-mint', market: 'PUMP_BONDING_CURVE', price: 0.012,
+    timestampMs: latencyNow,
+  });
+  latencyNow = 15_200;
+  latencyManager.observeTrade({
+    mint: 'latency-mint', market: 'PUMP_BONDING_CURVE', price: 0.011,
+    timestampMs: latencyNow,
+  });
+  await Promise.allSettled([...latencyManager.pending]);
+  assert.strictEqual(latencySellCalls, 1, 'post-fill peak drawdown must still trigger the exit');
   await latencyManager.stop();
   latencyStore.close();
 

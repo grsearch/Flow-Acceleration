@@ -28,6 +28,14 @@ class FlowAccelerationEngine extends EventEmitter {
   constructor(config) {
     super();
     this.config = config;
+    this.primaryThresholdProfiles = (config.primaryThresholdProfiles || [])
+      .filter((profile) => profile?.id && profile?.signalVariant)
+      .map((profile) => ({
+        id: String(profile.id),
+        signalVariant: String(profile.signalVariant),
+        minNetFlowW3Sol: Math.max(0, Number(profile.minNetFlowW3Sol) || 0),
+        minUniqueBuyersW3: Math.max(0, Math.trunc(Number(profile.minUniqueBuyersW3) || 0)),
+      }));
     this.states = new Map();
     this.tokens = new Map();
     this.graduated = new Set();
@@ -36,6 +44,7 @@ class FlowAccelerationEngine extends EventEmitter {
       candidatesCreated: 0,
       signalsCreated: 0,
       shadowSignalsCreated: 0,
+      primaryThresholdSignalsCreated: 0,
       lastTradeAt: null,
       lastSignalAt: null,
       lastShadowSignalAt: null,
@@ -107,6 +116,7 @@ class FlowAccelerationEngine extends EventEmitter {
       state.candidateSince = null;
       state.signalActive = false;
       state.variantActive.clear();
+      state.triggeredPrimaryThresholds.clear();
     }
     this.emit('graduated', event);
   }
@@ -187,6 +197,31 @@ class FlowAccelerationEngine extends EventEmitter {
         this.emit('shadowSignal', signal);
       }
     }
+    const primaryMatches = variants[0][1];
+    for (const profile of this.primaryThresholdProfiles) {
+      if (!primaryMatches
+        || metrics.netFlowW3 < profile.minNetFlowW3Sol
+        || metrics.uniqueBuyersW3 < profile.minUniqueBuyersW3
+        || state.triggeredPrimaryThresholds.has(profile.id)) continue;
+
+      state.triggeredPrimaryThresholds.add(profile.id);
+      const signal = {
+        timestampMs: trade.timestampMs,
+        slot: trade.slot || null,
+        signature: trade.signature || null,
+        mint: trade.mint,
+        symbol: tokenInfo.symbol || null,
+        ageMs: Number.isFinite(trade.ageMs) ? trade.ageMs : null,
+        curvePct: Number.isFinite(trade.curvePct) ? trade.curvePct : null,
+        price: trade.price,
+        signalVariant: profile.signalVariant,
+        isPrimary: false,
+        thresholdProfile: profile.id,
+        ...metrics,
+      };
+      this.metrics.primaryThresholdSignalsCreated += 1;
+      this.emit('primaryThresholdSignal', signal);
+    }
     return primarySignal;
   }
 
@@ -198,6 +233,7 @@ class FlowAccelerationEngine extends EventEmitter {
         state.candidateSince = null;
         state.signalActive = false;
         state.variantActive.clear();
+        state.triggeredPrimaryThresholds.clear();
       }
       if (state.events.length === 0 && state.lastTradeAt < deleteBefore) this.states.delete(mint);
     }
@@ -227,6 +263,7 @@ class FlowAccelerationEngine extends EventEmitter {
         candidateSince: null,
         signalActive: false,
         variantActive: new Map(),
+        triggeredPrimaryThresholds: new Set(),
         lastSignalByVariant: new Map(),
         lastSignalAt: null,
         lastTradeAt: 0,
