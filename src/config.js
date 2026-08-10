@@ -380,6 +380,79 @@ const config = {
     }),
   },
 
+  // Isolated true Smart Wallet OPEN research. This path has its own table and
+  // never signs or sends a transaction; existing Shadow strategies are unchanged.
+  smartOpenShadow: {
+    enabled: booleanEnv('FLOW_SMART_OPEN_SHADOW_ENABLED', true),
+    minSmartOpenSol: numberEnv('FLOW_SMART_OPEN_SHADOW_MIN_SOL', 1, { min: 0.000001 }),
+    preBuyWindowMs: integerEnv('FLOW_SMART_OPEN_SHADOW_PREBUY_WINDOW_MS', 2_000, {
+      min: 100,
+    }),
+    minPreBuyers: integerEnv('FLOW_SMART_OPEN_SHADOW_MIN_PREBUY_BUYERS', 2, { min: 0 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_OPEN_SHADOW_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    positionSizeSol: numberEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL', 0.05, {
+      min: 0.000001,
+    }),
+    entryDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    bigWinnerPct: numberEnv('FLOW_SMART_OPEN_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'D0',
+        label: 'D0 · 真OPEN固定5秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D0_HOLD_MS', 5_000, { min: 250 }),
+        followSmartExit: false,
+      },
+      {
+        id: 'D1',
+        label: 'D1 · 延迟激活移动止盈',
+        exitMode: 'DELAYED_TRAILING',
+        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_HARD_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_SMART_OPEN_SHADOW_D1_TRAILING_ACTIVATION_PCT',
+          20,
+          { min: 0, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_TRAILING_STOP_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D1_MAX_HOLD_MS', 60_000, {
+          min: 1_000,
+        }),
+        followSmartExit: false,
+      },
+      {
+        id: 'D2',
+        label: 'D2 · 跟随Smart减仓/清仓',
+        exitMode: 'SMART_FOLLOW',
+        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D2_HARD_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D2_MAX_HOLD_MS', 180_000, {
+          min: 1_000,
+        }),
+        followSmartExit: true,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),

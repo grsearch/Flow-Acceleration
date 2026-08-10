@@ -102,6 +102,30 @@ assert.ok(
   Math.abs(costBreakdown(config.smartPullbackShadow.costModel).deterministicCostPct - 3.22)
     < 1e-12,
 );
+assert.strictEqual(config.smartOpenShadow.enabled, true);
+assert.strictEqual(config.smartOpenShadow.minSmartOpenSol, 1);
+assert.strictEqual(config.smartOpenShadow.preBuyWindowMs, 2_000);
+assert.strictEqual(config.smartOpenShadow.minPreBuyers, 2);
+assert.strictEqual(config.smartOpenShadow.maxEntryPriceJumpPct, 10);
+assert.deepStrictEqual(
+  config.smartOpenShadow.cohorts.map((cohort) => [
+    cohort.id,
+    cohort.exitMode,
+    cohort.fixedHoldMs ?? null,
+    cohort.trailingActivationPct ?? null,
+    cohort.trailingStopPct ?? null,
+    cohort.followSmartExit,
+  ]),
+  [
+    ['D0', 'FIXED_HOLD', 5_000, null, null, false],
+    ['D1', 'DELAYED_TRAILING', null, 20, 15, false],
+    ['D2', 'SMART_FOLLOW', null, null, null, true],
+  ],
+);
+assert.ok(
+  Math.abs(costBreakdown(config.smartOpenShadow.costModel).deterministicCostPct - 3.22)
+    < 1e-12,
+);
 
 assert.deepStrictEqual(liveTradingGuard(true, true, false), {
   enabled: false,

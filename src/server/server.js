@@ -24,7 +24,7 @@ function boolean(value, fallback = false) {
 class ResearchServer {
   constructor({
     config, store, engine, stream, labeler, trader = null, signalShadow = null,
-    flowFirstShadow = null, smartPullbackShadow = null,
+    flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
   }) {
     this.config = config;
     this.store = store;
@@ -35,6 +35,7 @@ class ResearchServer {
     this.signalShadow = signalShadow;
     this.flowFirstShadow = flowFirstShadow;
     this.smartPullbackShadow = smartPullbackShadow;
+    this.smartOpenShadow = smartOpenShadow;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -230,6 +231,23 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/smart-open-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.smartOpenShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_SMART_OPEN',
+          sendsTransactions: false,
+          cohorts: [],
+        },
+        ...this.store.smartOpenShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.smartOpenShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -247,6 +265,7 @@ class ResearchServer {
         signalShadow: this.signalShadow?.health() || null,
         flowFirstShadow: this.flowFirstShadow?.health() || null,
         smartPullbackShadow: this.smartPullbackShadow?.health() || null,
+        smartOpenShadow: this.smartOpenShadow?.health() || null,
       });
     });
 

@@ -73,6 +73,7 @@ W3 = T-2s ~ T
 - `primary_live_decisions`：每个 Primary 信号批次的 W3 NetFlow、Buyers、规则结果、风控拒绝和执行状态。
 - `smart_open_decisions`：仅用于兼容旧版 Smart OPEN 历史数据；新策略不再写入。
 - `live_positions` / `live_orders`：模拟或实盘的仓位、每次买卖尝试、签名、失败原因与退出原因。
+- `smart_open_shadow_positions`：独立的真实 Smart Wallet OPEN Shadow D0/D1/D2 样本；不与旧回踩或 Primary Shadow 混表。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
 SQLite 使用 WAL 和批量写入。默认保留 168 小时热数据；超过 `FLOW_RAW_RETENTION_HOURS` 的 Raw Trade 会先压缩为 `data/archive/*.ndjson.gz`，成功写入归档后才从热库删除；Signals 与 Future Labels 不删除。
@@ -99,7 +100,7 @@ Dashboard 默认地址：<http://127.0.0.1:3001>
 2. **Signal Monitor**：Symbol、CA、AGE、Curve、三窗口 NetFlow、Buyers、Buy TX 与未来收益。
 3. **Backtest**：按“禁止开单过滤、买入信号条件、动态卖出策略”三层回测，并拆分执行延迟与全部成本。
 4. **Smart Wallet**：分别显示 OPEN / ADD、OPEN 5/10/30 秒 Primary 覆盖率、ADD 覆盖率与同 Mint 信号再触发率。
-5. **Live Trading**：当前执行模式与完整策略参数、持久化统计、仓位、订单和最近策略判定。
+5. **Live Trading**：左侧选择实盘或任一 Shadow 策略，右侧只加载该策略的参数、统计和交易记录，避免一次刷新全部长表。
 6. **System Health**：数据流、解析量、Buffer、标签、数据库写入和错误。
 
 ## 回测
@@ -210,6 +211,18 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 
 模拟路径保存在 `smart_pullback_shadow_positions`，接口为 `GET /api/smart-pullback-shadow`。Dashboard 除平均收益、中位数、胜率和PF外，还统计最大赢家、Top5赢家对总盈利的贡献、MFE≥50%的大赢家机会、实际兑现的大赢家数量以及退出收益对MFE的兑现比例，用来验证“较低胜率 + 右尾大赢家”是否能覆盖全部亏损和成本。
 
+## Smart Wallet OPEN Shadow D
+
+这是一条全新的独立研究路径，不修改 A/B、C 或 Primary Early 的规则，也不复用它们的结果表。只有被监控钱包在 Bonding Curve 上从零仓位首次买入形成的真实 `OPEN` 才可能入场；`ADD` 会保留为规则拒绝样本，不能混入 OPEN 统计。公共入场条件为 Smart OPEN 金额至少1 SOL、OPEN 前2秒已有至少2个其他独立买家，200ms后按首个 Bonding Curve 成交模拟入场，追价超过10%或2秒无成交则拒绝。
+
+三个D组共享同一个 OPEN 和模拟入场，只比较退出方式：
+
+- D0：固定持有5秒。
+- D1：硬止损12.5%；盈利达到20%后才激活峰值回撤15%；60秒兜底。
+- D2：硬止损12.5%；跟随触发 OPEN 的同一 Smart Wallet 首次 `REDUCE / CLOSE`；180秒兜底。
+
+所有样本只写入 `smart_open_shadow_positions`，接口为 `GET /api/smart-open-shadow`。该路径没有执行器、不读取私钥，永不签名或发送交易。Dashboard 额外按实际入场跳价分层，显示大赢家机会、兑现率和MFE捕获，便于判断问题来自 Smart OPEN 本身、跟随延迟还是退出过早。
+
 ## Flow-First Shadow C
 
 `Flow-First Shadow C` 直接消费 Signal Monitor 对应的 `primary_3w` 主信号，不等待 Smart Wallet。它按数据库中的 `signal_episode_id` 去重：同一 Mint、同一30秒信号周期内即使 Rank 连续增长，也只建立一次模拟入场；原始信号行和 Future Label 仍全部保存，不会因去重而丢失。
@@ -233,7 +246,7 @@ AND W3 NetFlow >= 5 SOL
 AND W3 unique Buyers >= 4
 ```
 
-研究引擎仍以 `FLOW_MIN_NET_W3_SOL=1` 保存宽口径 `primary_3w`。实盘门槛在同一候选周期内独立观察，因此即使早期研究信号已经发出，后续第一次达到 `5 SOL / 4 Buyers` 仍会触发；每个候选周期只允许一次均衡组实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件继续完整采集，并且只触发上述Shadow A/B，不触发真实开仓。
+研究引擎仍以 `FLOW_MIN_NET_W3_SOL=1` 保存宽口径 `primary_3w`。实盘门槛在同一候选周期内独立观察，因此即使早期研究信号已经发出，后续第一次达到 `5 SOL / 4 Buyers` 仍会触发；每个候选周期只允许一次均衡组实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件继续完整采集，只触发独立的 Shadow A/B 与 D，不触发真实开仓。
 
 执行模块有三种模式：
 

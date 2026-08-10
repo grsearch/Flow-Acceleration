@@ -523,6 +523,56 @@ class ResearchStore {
         ON smart_pullback_shadow_positions(cohort_id, status, updated_at);
       CREATE INDEX IF NOT EXISTS idx_smart_pullback_shadow_mint
         ON smart_pullback_shadow_positions(mint, smart_buy_at DESC);
+
+      CREATE TABLE IF NOT EXISTS smart_open_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        smart_event_id INTEGER NOT NULL
+          REFERENCES smart_wallet_events(id) ON DELETE CASCADE,
+        smart_wallet TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        smart_open_at INTEGER NOT NULL,
+        smart_open_price REAL NOT NULL,
+        smart_open_sol REAL NOT NULL,
+        curve_pct REAL,
+        age_ms INTEGER,
+        prebuy_window_ms INTEGER NOT NULL,
+        prebuy_buyers INTEGER NOT NULL,
+        prebuy_buy_tx INTEGER NOT NULL,
+        prebuy_buy_flow_sol REAL NOT NULL,
+        prebuy_sell_flow_sol REAL NOT NULL,
+        prebuy_net_flow_sol REAL NOT NULL,
+        entry_target_at INTEGER,
+        entry_deadline_at INTEGER,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        highest_price REAL,
+        max_favorable_return_pct REAL,
+        trailing_activated_at INTEGER,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, smart_event_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_smart_open_shadow_status
+        ON smart_open_shadow_positions(cohort_id, status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_smart_open_shadow_mint
+        ON smart_open_shadow_positions(mint, smart_open_at DESC);
     `);
 
     this._migrateLiveTradingSchema();
@@ -1358,6 +1408,60 @@ class ResearchStore {
           )
         ORDER BY smart_buy_at, id
       `),
+      insertSmartOpenShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO smart_open_shadow_positions (
+          cohort_id, smart_event_id, smart_wallet, mint, symbol,
+          status, rejection_reason, position_sol, configured_cost_pct,
+          smart_open_at, smart_open_price, smart_open_sol, curve_pct, age_ms,
+          prebuy_window_ms, prebuy_buyers, prebuy_buy_tx, prebuy_buy_flow_sol,
+          prebuy_sell_flow_sol, prebuy_net_flow_sol, entry_target_at,
+          entry_deadline_at, created_at, updated_at
+        ) VALUES (
+          @cohortId, @smartEventId, @smartWallet, @mint, @symbol,
+          @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @smartOpenAt, @smartOpenPrice, @smartOpenSol, @curvePct, @ageMs,
+          @preBuyWindowMs, @preBuyers, @preBuyTx, @preBuyFlowSol,
+          @preSellFlowSol, @preNetFlowSol, @entryTargetAt,
+          @entryDeadlineAt, @createdAt, @updatedAt
+        )
+      `),
+      getSmartOpenShadowPosition: this.db.prepare(`
+        SELECT * FROM smart_open_shadow_positions
+        WHERE cohort_id = ? AND smart_event_id = ?
+      `),
+      updateSmartOpenShadowPosition: this.db.prepare(`
+        UPDATE smart_open_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_target_at = COALESCE(@entryTargetAt, entry_target_at),
+          entry_deadline_at = COALESCE(@entryDeadlineAt, entry_deadline_at),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct,
+            max_favorable_return_pct
+          ),
+          trailing_activated_at = COALESCE(@trailingActivatedAt, trailing_activated_at),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeSmartOpenShadowPositions: this.db.prepare(`
+        SELECT * FROM smart_open_shadow_positions
+        WHERE cohort_id = ? AND status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY smart_open_at, id
+      `),
       recentSmartWalletEvents: this.db.prepare(`
         SELECT * FROM smart_wallet_events
         WHERE timestamp_ms >= ?
@@ -2038,6 +2142,77 @@ class ResearchStore {
     return this.stmts.activeSmartPullbackShadowPositions.all(cohortId);
   }
 
+  createSmartOpenShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      cohortId: position.cohortId,
+      smartEventId: position.smartEventId,
+      smartWallet: position.smartWallet,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      smartOpenAt: position.smartOpenAt,
+      smartOpenPrice: position.smartOpenPrice,
+      smartOpenSol: position.smartOpenSol,
+      curvePct: finiteOrNull(position.curvePct),
+      ageMs: Number.isFinite(position.ageMs) ? Math.trunc(position.ageMs) : null,
+      preBuyWindowMs: Math.max(1, Math.trunc(Number(position.preBuyWindowMs) || 1)),
+      preBuyers: Math.max(0, Math.trunc(Number(position.preBuyers) || 0)),
+      preBuyTx: Math.max(0, Math.trunc(Number(position.preBuyTx) || 0)),
+      preBuyFlowSol: finiteOrNull(position.preBuyFlowSol) ?? 0,
+      preSellFlowSol: finiteOrNull(position.preSellFlowSol) ?? 0,
+      preNetFlowSol: finiteOrNull(position.preNetFlowSol) ?? 0,
+      entryTargetAt: position.entryTargetAt || null,
+      entryDeadlineAt: position.entryDeadlineAt || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertSmartOpenShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getSmartOpenShadowPosition.get(
+      row.cohortId,
+      row.smartEventId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateSmartOpenShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    this.stmts.updateSmartOpenShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryTargetAt: value('entryTargetAt'),
+      entryDeadlineAt: value('entryDeadlineAt'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      trailingActivatedAt: value('trailingActivatedAt'),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeSmartOpenShadowPositions(cohortId) {
+    return this.stmts.activeSmartOpenShadowPositions.all(cohortId);
+  }
+
   recentSmartWalletEvents(timestampMs) {
     return this.stmts.recentSmartWalletEvents.all(timestampMs);
   }
@@ -2303,6 +2478,126 @@ class ResearchStore {
     };
     const cohorts = cacheStats
       ? this._cachedDashboardStats(`smart-pullback-shadow:${threshold}`, 15_000, computeCohorts)
+      : computeCohorts();
+    return { cohorts, positions };
+  }
+
+  smartOpenShadowDashboard({ positionLimit = 200, bigWinnerPct = 50, cacheStats = false } = {}) {
+    const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
+    const threshold = Math.max(1, Number(bigWinnerPct) || 50);
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE
+          WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL THEN exit_at - entry_at
+          ELSE NULL
+        END AS hold_ms
+      FROM smart_open_shadow_positions
+      ORDER BY
+        CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const computeCohorts = () => {
+      const cohortIds = this.db.prepare(`
+        SELECT DISTINCT cohort_id FROM smart_open_shadow_positions ORDER BY cohort_id
+      `).all().map((row) => row.cohort_id);
+      return cohortIds.map((cohortId) => {
+        const counts = this.db.prepare(`
+          SELECT
+            COUNT(*) AS evaluated,
+            COUNT(DISTINCT mint) AS independent_mints,
+            COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rule_rejected,
+            COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+            COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+            COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+            COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+            COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+            COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+            AVG(entry_jump_pct) AS average_entry_jump_pct
+          FROM smart_open_shadow_positions WHERE cohort_id = ?
+        `).get(cohortId);
+        const resolved = this.db.prepare(`
+          SELECT net_return_pct, gross_return_pct, max_favorable_return_pct, entry_jump_pct
+          FROM smart_open_shadow_positions
+          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+            AND net_return_pct IS NOT NULL
+          ORDER BY net_return_pct
+        `).all(cohortId);
+        const returns = resolved.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+        const wins = returns.filter((value) => value > 0).sort((left, right) => right - left);
+        const losses = returns.filter((value) => value < 0);
+        const flat = returns.filter((value) => value === 0);
+        const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+        const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+        const bigOpportunities = resolved.filter((row) => (
+          Number(row.max_favorable_return_pct) >= threshold
+        ));
+        const bigWinners = resolved.filter((row) => Number(row.gross_return_pct) >= threshold);
+        const captures = bigOpportunities.map((row) => {
+          const maximum = Number(row.max_favorable_return_pct);
+          const realized = Number(row.gross_return_pct);
+          return maximum > 0 && Number.isFinite(realized) ? (realized / maximum) * 100 : null;
+        }).filter(Number.isFinite);
+        const median = returns.length
+          ? returns.length % 2 === 1
+            ? returns[(returns.length - 1) / 2]
+            : (returns[returns.length / 2 - 1] + returns[returns.length / 2]) / 2
+          : null;
+        const exTop5 = [...wins.slice(5), ...flat, ...losses];
+        const bucketDefinitions = [
+          ['at_or_below_2', '≤2%', -Infinity, 2],
+          ['between_2_and_5', '2–5%', 2, 5],
+          ['between_5_and_10', '5–10%', 5, 10],
+          ['above_10', '>10%', 10, Infinity],
+        ];
+        const entryJumpBuckets = bucketDefinitions.map(([id, label, lower, upper]) => {
+          const bucketRows = resolved.filter((row) => {
+            const jump = Number(row.entry_jump_pct);
+            return Number.isFinite(jump) && jump > lower && jump <= upper;
+          });
+          return {
+            id,
+            label,
+            resolved: bucketRows.length,
+            average_net_return_pct: bucketRows.length
+              ? bucketRows.reduce((sum, row) => sum + Number(row.net_return_pct), 0)
+                / bucketRows.length
+              : null,
+          };
+        });
+        return {
+          cohort_id: cohortId,
+          ...counts,
+          qualified_opens: Number(counts.evaluated || 0) - Number(counts.rule_rejected || 0),
+          resolved: returns.length,
+          average_net_return_pct: returns.length
+            ? returns.reduce((sum, value) => sum + value, 0) / returns.length
+            : null,
+          median_net_return_pct: median,
+          average_net_return_ex_top5_pct: exTop5.length
+            ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length
+            : null,
+          win_rate_pct: returns.length ? (wins.length / returns.length) * 100 : null,
+          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          max_winner_pct: wins[0] ?? null,
+          top_5_winner_contribution_pct: totalProfit > 0
+            ? (wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit) * 100
+            : null,
+          big_winner_threshold_pct: threshold,
+          big_winner_opportunities: bigOpportunities.length,
+          big_winners_realized: bigWinners.length,
+          big_winner_realization_rate_pct: bigOpportunities.length
+            ? (bigWinners.length / bigOpportunities.length) * 100
+            : null,
+          average_big_winner_capture_pct: captures.length
+            ? captures.reduce((sum, value) => sum + value, 0) / captures.length
+            : null,
+          entry_jump_buckets: entryJumpBuckets,
+        };
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats(`smart-open-shadow:${threshold}`, 15_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -2611,6 +2906,14 @@ class ResearchStore {
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit
       FROM smart_pullback_shadow_positions
     `).get();
+    const smartOpenShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected
+      FROM smart_open_shadow_positions
+    `).get();
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -2638,6 +2941,7 @@ class ResearchStore {
       primarySignalShadowPositions,
       flowFirstShadowPositions,
       smartPullbackShadowPositions,
+      smartOpenShadowPositions,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };
