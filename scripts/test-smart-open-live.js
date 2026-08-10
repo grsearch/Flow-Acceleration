@@ -1,10 +1,13 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const Database = require('better-sqlite3');
 const { PublicKey, TransactionInstruction } = require('@solana/web3.js');
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const { PUMP_PROGRAM_ID } = require('@pump-fun/pump-sdk');
-const FlowAccelerationEngine = require('../src/core/FlowAccelerationEngine');
 const LiveTradingManager = require('../src/core/LiveTradingManager');
 const {
   PumpTradeExecutor,
@@ -14,7 +17,7 @@ const {
   minimumTokensOut,
   replaceBuyV2WithExactQuoteIn,
 } = require('../src/core/PumpTradeExecutor');
-const { evaluateSmartOpen, REJECT } = require('../src/core/SmartOpenStrategy');
+const { evaluatePrimarySignal, REJECT } = require('../src/core/PrimarySignalStrategy');
 const { ResearchStore } = require('../src/data/ResearchStore');
 
 function makeStore() {
@@ -23,13 +26,84 @@ function makeStore() {
   }, { configuredTradingCostPct: 1.4 });
 }
 
+function testLegacyLiveSchemaMigration() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-live-migration-'));
+  const dbPath = path.join(tempDir, 'legacy.db');
+  const legacy = new Database(dbPath);
+  legacy.exec(`
+    CREATE TABLE live_positions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id INTEGER NOT NULL,
+      mint TEXT NOT NULL,
+      trigger_wallet TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      status TEXT NOT NULL,
+      position_sol REAL NOT NULL,
+      token_amount_raw TEXT,
+      entry_market TEXT,
+      entry_price REAL,
+      entry_signature TEXT,
+      entry_error TEXT,
+      highest_price REAL,
+      exit_market TEXT,
+      exit_price REAL,
+      exit_signature TEXT,
+      exit_reason TEXT,
+      exit_error TEXT,
+      opened_at INTEGER,
+      exit_requested_at INTEGER,
+      closed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE live_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      position_id INTEGER NOT NULL,
+      decision_id INTEGER NOT NULL,
+      mint TEXT NOT NULL,
+      side TEXT NOT NULL,
+      venue TEXT,
+      attempt INTEGER NOT NULL,
+      requested_sol REAL,
+      requested_token_raw TEXT,
+      status TEXT NOT NULL,
+      signature TEXT,
+      error TEXT,
+      execution_json TEXT,
+      submitted_at INTEGER,
+      confirmed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  legacy.close();
+
+  const migrated = new ResearchStore({
+    dbPath, archiveDir: tempDir, rawRetentionHours: 24, flushMs: 60_000, flushMax: 100,
+  }, { configuredTradingCostPct: 1.4 });
+  const positionColumns = new Map(
+    migrated.db.prepare('PRAGMA table_info(live_positions)').all()
+      .map((column) => [column.name, column]),
+  );
+  const orderColumns = new Map(
+    migrated.db.prepare('PRAGMA table_info(live_orders)').all()
+      .map((column) => [column.name, column]),
+  );
+  assert.strictEqual(positionColumns.get('decision_id').notnull, 0);
+  assert.strictEqual(positionColumns.get('trigger_wallet').notnull, 0);
+  assert.ok(positionColumns.has('primary_decision_id'));
+  assert.ok(positionColumns.has('signal_id'));
+  assert.ok(orderColumns.has('primary_decision_id'));
+  migrated.close();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+}
+
 function managerConfig(overrides = {}) {
   return {
     enabled: true,
     dryRun: false,
-    minSmartOpenSol: 1,
-    minPreBuyers: 2,
-    preBuyWindowMs: 2_000,
+    minNetFlowW3Sol: 10,
+    minUniqueBuyersW3: 7,
     maxSignalAgeMs: 1_500,
     positionSizeSol: 0.05,
     maxConcurrentPositions: 1,
@@ -46,14 +120,8 @@ function managerConfig(overrides = {}) {
     contextSlotRetryCount: 2,
     contextSlotRetryDelayMs: 25,
     commitment: 'confirmed',
-    exitStrategy: 'SMART_WALLET_SELL_60S',
-    stopLossPct: 12,
-    takeProfitPct: 20,
-    trailingActivationPct: 8,
-    trailingStopPct: 5,
-    minHoldMs: 500,
+    trailingStopPct: 7.5,
     maxHoldMs: 60_000,
-    exitOnTriggerWalletSell: true,
     exitRetryCount: 1,
     exitRetryDelayMs: 1,
     entryReconcileCount: 1,
@@ -63,26 +131,46 @@ function managerConfig(overrides = {}) {
   };
 }
 
-function smartTrade({ side = 'BUY', timestampMs, signature, tokenAmount = 100 }) {
-  return {
+function primarySignal(store, {
+  mint = 'primary-mint', timestampMs, price = 0.01, netFlowW3 = 10,
+  uniqueBuyersW3 = 7, signalVariant = 'primary_3w', isPrimary = true,
+}) {
+  return store.recordSignal({
     timestampMs,
-    receivedAtMs: timestampMs,
     slot: 1,
-    signature,
-    eventIndex: 0,
-    wallet: 'smart-wallet',
-    mint: 'smart-mint',
-    side,
-    market: 'PUMP_BONDING_CURVE',
-    solAmount: side === 'BUY' ? 1.2 : 1.1,
-    tokenAmount,
-    price: 0.01,
+    signature: `${mint}-${timestampMs}`,
+    mint,
+    symbol: mint,
     curvePct: 50,
     ageMs: 10_000,
-  };
+    price,
+    buyFlowW1: 1,
+    buyFlowW2: 5,
+    buyFlowW3: Math.max(10, netFlowW3),
+    sellFlowW1: 0,
+    sellFlowW2: 0,
+    sellFlowW3: 0,
+    netFlowW1: 1,
+    netFlowW2: 5,
+    netFlowW3,
+    deltaNetFlow12: 4,
+    deltaNetFlow23: 5,
+    uniqueBuyersW1: 2,
+    uniqueBuyersW2: 5,
+    uniqueBuyersW3,
+    buyTxW1: 2,
+    buyTxW2: 6,
+    buyTxW3: 15,
+    flowAccel1: 5,
+    flowAccel2: 2,
+    flowAccel: 2,
+    signalVariant,
+    isPrimary,
+  });
 }
 
 async function main() {
+  testLegacyLiveSchemaMigration();
   const exactInputData = exactQuoteInInstructionData(50_000_000n, 900_000n);
   assert.strictEqual(exactInputData.length, 24);
   assert.deepStrictEqual([...exactInputData.subarray(0, 8)], [194, 171, 28, 70, 104, 77, 91, 47]);
@@ -190,44 +278,31 @@ async function main() {
   }, 0n).state, 'EMPTY');
   assert.strictEqual(classifyBuyReconciliation(null, 0n).state, 'UNKNOWN');
 
-  const exact = evaluateSmartOpen({
-    positionPhase: 'OPEN', market: 'PUMP_BONDING_CURVE', solAmount: 1,
+  const exact = evaluatePrimarySignal({
+    isPrimary: true,
+    signalVariant: 'primary_3w',
+    netFlowW3: 10,
+    uniqueBuyersW3: 7,
+    price: 1,
     timestampMs: 10_000,
-  }, { uniqueBuyers: 2, receivedAtMs: 10_000 }, managerConfig(), 10_100);
+    createdAt: 10_000,
+  }, managerConfig(), 10_100);
   assert.strictEqual(exact.matched, true);
-  const rejected = evaluateSmartOpen({
-    positionPhase: 'ADD', market: 'PUMP_AMM', solAmount: 0.5, timestampMs: 1,
-  }, { uniqueBuyers: 1, receivedAtMs: 1 }, managerConfig(), 10_000);
-  assert.ok(rejected.rejectReasons.includes(REJECT.NOT_OPEN));
-  assert.ok(rejected.rejectReasons.includes(REJECT.NOT_BONDING_CURVE));
-  assert.ok(rejected.rejectReasons.includes(REJECT.SMART_BUY_TOO_SMALL));
-  assert.ok(rejected.rejectReasons.includes(REJECT.INSUFFICIENT_PREBUY_BUYERS));
-  assert.ok(rejected.rejectReasons.includes(REJECT.STALE_EVENT));
-
-  const engine = new FlowAccelerationEngine({
-    bufferMs: 60_000,
-    activityWindowMs: 5_000,
-    activityMinVolumeSol: 999,
-    activityMinTxCount: 999,
-    activityMinUniqueWallets: 999,
-    signalWindowMs: 2_000,
-    minNetFlowW3Sol: 999,
-    minNetFlowDeltaSol: 999,
-    minAccelerationRatio: 99,
-    ratioFloorSol: 0.05,
-    signalCooldownMs: 0,
-    candidateIdleMs: 15_000,
-  });
-  const prior = (wallet, timestampMs) => ({
-    market: 'PUMP_BONDING_CURVE', mint: 'smart-mint', wallet, side: 'BUY',
-    solAmount: 0.2, tokenAmount: 10, price: 0.01, timestampMs,
-  });
-  engine.handleTrade(prior('buyer-1', 9_000));
-  engine.handleTrade(prior('buyer-2', 9_500));
-  engine.handleTrade(prior('smart-wallet', 9_700));
-  const context = engine.recentBuyContext('smart-mint', 10_000, 2_000, 'smart-wallet');
-  assert.strictEqual(context.uniqueBuyers, 2, 'trigger wallet must be excluded from pre-buy Buyers');
-  assert.strictEqual(context.buyTx, 2);
+  const rejected = evaluatePrimarySignal({
+    isPrimary: false,
+    signalVariant: 'two_window',
+    netFlowW3: 9.9,
+    uniqueBuyersW3: 6,
+    price: 0,
+    timestampMs: 1,
+    createdAt: 1,
+  }, managerConfig(), 10_000);
+  assert.ok(rejected.rejectReasons.includes(REJECT.NOT_PRIMARY));
+  assert.ok(rejected.rejectReasons.includes(REJECT.WRONG_VARIANT));
+  assert.ok(rejected.rejectReasons.includes(REJECT.NETFLOW_W3_BELOW_MIN));
+  assert.ok(rejected.rejectReasons.includes(REJECT.BUYERS_W3_BELOW_MIN));
+  assert.ok(rejected.rejectReasons.includes(REJECT.INVALID_PRICE));
+  assert.ok(rejected.rejectReasons.includes(REJECT.STALE_SIGNAL));
 
   const store = makeStore();
   let now = 10_000;
@@ -258,41 +333,36 @@ async function main() {
     config: managerConfig(), store, executor, now: () => now,
   });
   manager.start();
-  const open = store.recordSmartWalletEvent(smartTrade({
-    timestampMs: now, signature: 'smart-open',
-  }));
-  manager.onSmartWalletEvent(open, { ...context, receivedAtMs: now });
+  const open = primarySignal(store, { timestampMs: now });
+  manager.onSignal(open);
   await manager.entryQueue;
   assert.strictEqual(calls.buy, 1);
   assert.strictEqual(calls.buyRequest.signalSlot, 1);
   assert.strictEqual(store.activeLivePositions().length, 1);
   assert.strictEqual(
-    store.db.prepare('SELECT action_status FROM smart_open_decisions').get().action_status,
+    store.db.prepare('SELECT action_status FROM primary_live_decisions').get().action_status,
     'OPEN',
   );
 
   now = 10_050;
   manager.observeTrade({
-    mint: 'smart-mint', market: 'PUMP_BONDING_CURVE', price: 0.001, timestampMs: now,
+    mint: 'primary-mint', market: 'PUMP_BONDING_CURVE', price: 0.012, timestampMs: now,
   });
   await Promise.allSettled([...manager.pending]);
-  assert.strictEqual(calls.sell, 0, 'price stop must be disabled by SMART_WALLET_SELL_60S');
+  assert.strictEqual(calls.sell, 0, 'a new high must not trigger an exit');
   assert.strictEqual(store.activeLivePositions().length, 1);
 
   now = 10_100;
-  const add = store.recordSmartWalletEvent(smartTrade({
-    timestampMs: now, signature: 'smart-add', tokenAmount: 10,
-  }));
-  assert.strictEqual(add.positionPhase, 'ADD');
-  manager.onSmartWalletEvent(add, { ...context, receivedAtMs: now });
-  assert.strictEqual(calls.buy, 1, 'ADD must never open another live position');
+  manager.observeTrade({
+    mint: 'primary-mint', market: 'PUMP_BONDING_CURVE', price: 0.0115, timestampMs: now,
+  });
+  await Promise.allSettled([...manager.pending]);
+  assert.strictEqual(calls.sell, 0, 'a drawdown below 7.5% must not trigger an exit');
 
   now = 10_200;
-  const close = store.recordSmartWalletEvent(smartTrade({
-    side: 'SELL', timestampMs: now, signature: 'smart-close', tokenAmount: 110,
-  }));
-  assert.strictEqual(close.positionPhase, 'CLOSE');
-  manager.onSmartWalletEvent(close, { ...context, receivedAtMs: now });
+  manager.observeTrade({
+    mint: 'primary-mint', market: 'PUMP_BONDING_CURVE', price: 0.011, timestampMs: now,
+  });
   await Promise.allSettled([...manager.pending]);
   assert.strictEqual(calls.sell, 1);
   assert.strictEqual(store.activeLivePositions().length, 0);
@@ -300,13 +370,16 @@ async function main() {
     store.db.prepare('SELECT status FROM live_positions').get().status,
     'CLOSED',
   );
+  const repeated = primarySignal(store, { timestampMs: 10_300 });
+  manager.onSignal(repeated);
+  await manager.entryQueue;
+  assert.strictEqual(calls.buy, 1, 'one Primary episode must create at most one live decision');
   assert.strictEqual(
-    store.db.prepare('SELECT COUNT(*) AS n FROM smart_open_decisions').get().n,
-    3,
-    'OPEN, ADD and CLOSE decisions must all be retained',
+    store.db.prepare('SELECT COUNT(*) AS n FROM primary_live_decisions').get().n,
+    1,
   );
   const dashboard = store.liveTradingDashboard();
-  assert.strictEqual(dashboard.stats.decisions, 3);
+  assert.strictEqual(dashboard.stats.decisions, 1);
   assert.strictEqual(dashboard.stats.matched, 1);
   assert.strictEqual(dashboard.stats.positions, 1);
   assert.strictEqual(dashboard.stats.closed_positions, 1);
@@ -316,18 +389,18 @@ async function main() {
   const dashboardBuy = dashboard.orders.find((order) => order.side === 'BUY');
   assert.strictEqual(dashboardBuy.execution.buyMode, 'EXACT_QUOTE_IN_V2_FIXED_SOL');
   assert.strictEqual(dashboardBuy.execution.timelineMs.submitted_ms, 12);
-  assert.strictEqual(dashboardBuy.execution.manager.eventToEntryStartMs, 0);
+  assert.strictEqual(dashboardBuy.execution.manager.triggerType, 'PRIMARY_SIGNAL');
+  assert.strictEqual(dashboardBuy.execution.manager.signalId, open.signalId);
+  assert.ok(Number.isFinite(dashboardBuy.execution.manager.eventToEntryStartMs));
   assert.ok(Array.isArray(dashboard.decisions[0].rejection_reasons));
   const health = manager.health();
-  assert.strictEqual(health.strategy.ruleVersion, 'smart-open-curve-v1');
-  assert.strictEqual(health.strategy.entry.minSmartOpenSol, 1);
+  assert.strictEqual(health.strategy.ruleVersion, 'primary-flow-w3-buyers-v1');
+  assert.strictEqual(health.strategy.entry.minNetFlowW3Sol, 10);
+  assert.strictEqual(health.strategy.entry.minUniqueBuyersW3, 7);
   assert.strictEqual(health.strategy.exit.maxHoldMs, 60_000);
-  assert.strictEqual(health.strategy.exit.policy, 'SMART_WALLET_SELL_60S');
-  assert.strictEqual(health.strategy.exit.exitOnTriggerWalletSell, true);
-  assert.strictEqual(health.strategy.exit.minHoldMs, 0);
-  assert.strictEqual(health.strategy.exit.stopLossPct, 0);
-  assert.strictEqual(health.strategy.exit.takeProfitPct, 0);
-  assert.strictEqual(health.strategy.exit.trailingStopPct, 0);
+  assert.strictEqual(health.strategy.exit.policy, 'PRIMARY_IMMEDIATE_TRAILING');
+  assert.strictEqual(health.strategy.exit.trailingActivationPct, 0);
+  assert.strictEqual(health.strategy.exit.trailingStopPct, 7.5);
   assert.strictEqual(health.strategy.risk.positionSizeSol, 0.05);
   assert.strictEqual(health.strategy.execution.buySlippagePct, 10);
   assert.strictEqual(health.strategy.execution.sellSlippagePct, 15);
@@ -341,6 +414,59 @@ async function main() {
 
   await manager.stop();
   store.close();
+
+  const latencyStore = makeStore();
+  let latencyNow = 15_000;
+  let resolveDelayedBuy;
+  let latencySellCalls = 0;
+  const delayedBuy = new Promise((resolve) => { resolveDelayedBuy = resolve; });
+  const latencyManager = new LiveTradingManager({
+    config: managerConfig(),
+    store: latencyStore,
+    now: () => latencyNow,
+    executor: {
+      async buy() { return delayedBuy; },
+      async sell() {
+        latencySellCalls += 1;
+        return {
+          signature: 'latency-sell-signature',
+          venue: 'PUMP_BONDING_CURVE',
+          tokenAmountRaw: '5000000',
+        };
+      },
+    },
+  });
+  latencyManager.start();
+  latencyManager.onSignal(primarySignal(latencyStore, {
+    mint: 'latency-mint', timestampMs: latencyNow,
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  latencyNow = 15_050;
+  latencyManager.observeTrade({
+    mint: 'latency-mint', market: 'PUMP_BONDING_CURVE', price: 0.012,
+    timestampMs: latencyNow,
+  });
+  latencyNow = 15_100;
+  latencyManager.observeTrade({
+    mint: 'latency-mint', market: 'PUMP_BONDING_CURVE', price: 0.011,
+    timestampMs: latencyNow,
+  });
+  resolveDelayedBuy({
+    signature: 'latency-buy-signature',
+    venue: 'PUMP_BONDING_CURVE',
+    tokenAmountRaw: '5000000',
+    expectedPrice: 0.01,
+  });
+  await latencyManager.entryQueue;
+  await Promise.allSettled([...latencyManager.pending]);
+  assert.strictEqual(latencySellCalls, 1,
+    'the immediate trailing exit must retain peaks observed during entry confirmation');
+  assert.strictEqual(
+    latencyStore.db.prepare('SELECT exit_reason FROM live_positions').get().exit_reason,
+    'TRAILING_IMMEDIATE',
+  );
+  await latencyManager.stop();
+  latencyStore.close();
 
   const failedStore = makeStore();
   let failedNow = 20_000;
@@ -367,11 +493,10 @@ async function main() {
     },
   });
   failedManager.start();
-  const failedOpen = failedStore.recordSmartWalletEvent(smartTrade({
-    timestampMs: failedNow,
-    signature: 'failed-smart-open',
-  }));
-  failedManager.onSmartWalletEvent(failedOpen, { ...context, receivedAtMs: failedNow });
+  const failedOpen = primarySignal(failedStore, {
+    mint: 'failed-primary-mint', timestampMs: failedNow,
+  });
+  failedManager.onSignal(failedOpen);
   await failedManager.entryQueue;
   const failedPosition = failedStore.db.prepare('SELECT * FROM live_positions').get();
   const failedOrder = failedStore.db.prepare('SELECT * FROM live_orders').get();
@@ -406,11 +531,10 @@ async function main() {
     },
   });
   unknownManager.start();
-  const unknownOpen = unknownStore.recordSmartWalletEvent(smartTrade({
-    timestampMs: unknownNow,
-    signature: 'unknown-smart-open',
-  }));
-  unknownManager.onSmartWalletEvent(unknownOpen, { ...context, receivedAtMs: unknownNow });
+  const unknownOpen = primarySignal(unknownStore, {
+    mint: 'unknown-primary-mint', timestampMs: unknownNow,
+  });
+  unknownManager.onSignal(unknownOpen);
   await unknownManager.entryQueue;
   assert.strictEqual(
     unknownStore.db.prepare('SELECT status FROM live_positions').get().status,
@@ -449,7 +573,7 @@ async function main() {
   await recoveryManager.stop();
   unknownStore.close();
 
-  console.log('test-smart-open-live: ok');
+  console.log('test-primary-signal-live: ok');
 }
 
 main().catch((error) => {

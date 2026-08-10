@@ -1,10 +1,10 @@
-# Pump.fun Flow Acceleration Research + Smart OPEN Executor
+# Pump.fun Flow Acceleration Research + Primary Signal Executor
 
-这是一个研究信号严格限定在 **Pump.fun Bonding Curve（毕业前）** 的全量采集项目，并带有默认关闭的 Smart Wallet 实盘执行模块。研究主线验证：
+这是一个研究信号严格限定在 **Pump.fun Bonding Curve（毕业前）** 的全量采集项目，并带有默认关闭的 Primary 信号实盘执行模块。研究主线验证：
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
 
-全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。实盘模块只使用明确的 Smart OPEN 规则，不使用 RSI、EMA、MACD、社交数据、Holder 变化、KOL 或 AI 评分；默认 `DISABLED`，不会读取私钥或提交交易。
+全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。实盘模块只使用明确的 Primary Flow 规则，不使用 Smart Wallet 触发、RSI、EMA、MACD、社交数据、Holder 变化、KOL 或 AI 评分；默认 `DISABLED`，不会读取私钥或提交交易。
 
 ## 数据链路
 
@@ -70,7 +70,8 @@ W3 = T-2s ~ T
 - `signal_returns`：1/2/3/5/8/10/15/20/30/60 秒 Raw Return、确定性成本后的 Net Return、每个 horizon 的观测 lag、`COMPLETE/RIGHT_CENSORED` 标签状态，以及 5/10/30 秒 MFE/MAE。某个 horizon 后首笔成交超过 `FLOW_LABEL_MAX_OBSERVATION_LAG_MS`，或 MFE/MAE 时间窗没有完整观测覆盖时，不会用旧价格或 0% 补值。
 - `smart_wallet_events`：两个研究钱包的成交、Curve、AGE、最近 Flow Signal 与时间差。
 - `smart_wallet_positions`：按实际 Token 数量维护的 Smart Wallet 仓位；买卖被区分为 `OPEN / ADD / REDUCE / CLOSE / SELL`。
-- `smart_open_decisions`：每一笔 Smart Wallet 事件的规则判定、买入前 2 秒上下文、拒绝原因和执行状态。未成交、被过滤和禁用模式也不会丢失。
+- `primary_live_decisions`：每个 Primary 信号批次的 W3 NetFlow、Buyers、规则结果、风控拒绝和执行状态。
+- `smart_open_decisions`：仅用于兼容旧版 Smart OPEN 历史数据；新策略不再写入。
 - `live_positions` / `live_orders`：模拟或实盘的仓位、每次买卖尝试、签名、失败原因与退出原因。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
@@ -192,24 +193,24 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 
 ## Primary 信号独立 Shadow 策略
 
-程序会把自有 `primary_3w` 信号送入完全独立的模拟执行路径。该路径固定为 `SHADOW`，没有交易执行器，也不会读取私钥、签名或发送链上交易，因此不会改变 Smart OPEN 实盘策略。
+程序会把自有 `primary_3w` 信号送入完全独立的模拟执行路径。该路径固定为 `SHADOW`，没有交易执行器，也不会读取私钥、签名或发送链上交易。
 
-默认规则为：信号所在批次第一笔、此前30秒没有 Smart Wallet 买入、W3 NetFlow≥10 SOL、W3 独立 Buyers≥7；信号后200ms开始寻找 Bonding Curve 模拟成交，2秒内没有成交或追价超过10%则不入场。入场后立即启用峰值价格回撤7.5%退出，30秒内≥0.1 SOL 的 Smart Wallet BUY作为确认；确认钱包后续 SELL 也会触发退出，未确认仓位30秒退出，所有仓位最长60秒。
+默认规则为：信号所在批次第一笔、W3 NetFlow≥10 SOL、W3 独立 Buyers≥7；信号后200ms开始寻找 Bonding Curve 模拟成交，2秒内没有成交或追价超过10%则不入场。入场后立即启用峰值价格回撤7.5%退出，所有仓位最长60秒。
 
-模拟仓位、净收益、Smart确认和退出原因保存在 `primary_signal_shadow_positions`。Dashboard 的“实盘交易”页面会把它与真实 Smart OPEN 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。默认模拟仓位为0.05 SOL并使用完整成本模型；相关参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量。
+模拟仓位、净收益和退出原因保存在 `primary_signal_shadow_positions`。Dashboard 的“实盘交易”页面会把它与真实 Primary 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。默认模拟仓位为0.05 SOL并使用完整成本模型；相关参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量。
 
-## Smart OPEN 模拟与实盘
+## Primary 信号模拟与实盘
 
 实时入场规则固定为：
 
 ```text
-Smart Wallet position_phase = OPEN
-AND market = PUMP_BONDING_CURVE
-AND Smart Wallet 本笔买入金额 >= 1 SOL
-AND 该笔买入发生前 2 秒独立 Buyers >= 2
+signal_variant = primary_3w
+AND is_primary = true
+AND W3 NetFlow >= 10 SOL
+AND W3 unique Buyers >= 7
 ```
 
-“买入前”上下文在把 Smart Wallet 当前交易放入滚动缓冲区之前计算，并排除触发钱包自身，避免当前买单自我满足 Buyers 条件。重启时会从 SQLite 恢复最近滚动交易。每一笔 Smart Wallet 事件都会写入 `smart_open_decisions`，所以完整数据、规则未命中样本和风控拒绝样本都可继续分析。
+每个 Primary 信号批次只允许一次实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件仍完整采集，但不会触发实盘开仓。
 
 执行模块有三种模式：
 
@@ -219,11 +220,11 @@ AND 该笔买入发生前 2 秒独立 Buyers >= 2
 
 实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制，旧的单一 `FLOW_LIVE_SLIPPAGE_PCT` 不再使用。
 
-当前实盘卖出策略固定为 `SMART_WALLET_SELL_60S`：触发开仓的 Smart Wallet 首次出现 SELL 时立即跟随退出；如果60秒内没有 SELL，则在满60秒时强制退出。该策略不启用止损、止盈、移动止损或 Flow 衰减退出，旧环境中的对应阈值会被忽略。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
+当前实盘卖出策略固定为 `PRIMARY_IMMEDIATE_TRAILING`：成交后立即以入场价作为首个峰值，持续更新最高观察价格；价格从峰值回撤7.5%时卖出，60秒仍未退出则强制卖出。对应配置为 `FLOW_LIVE_PRIMARY_TRAILING_STOP_PCT` 和 `FLOW_LIVE_PRIMARY_MAX_HOLD_MS`，旧版 Smart SELL、止损和止盈变量不再参与决策。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
 
 买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时先查询签名历史和交易钱包的Token余额，只有确认持有Token后才恢复仓位。仍无法确认时保留 `ENTRY_CONFIRMATION_UNKNOWN` 阻止同 Mint 再开仓，但不会盲目发送卖出重试。服务重启时会自动重新核对这类历史卡仓。
 
-先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`smart_open_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
+先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`primary_live_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
 
 ## 部署
 

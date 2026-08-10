@@ -82,7 +82,10 @@ function createRuntime(runtimeConfig = config) {
 
   engine.on('signal', (signal) => {
     const saved = persistSignal(signal, 'FLOW_ACCEL_SIGNAL');
-    if (saved) signalShadow.onSignal(saved);
+    if (saved) {
+      signalShadow.onSignal(saved);
+      trader.onSignal(saved);
+    }
   });
   engine.on('shadowSignal', (signal) => persistSignal(signal, 'FLOW_SHADOW_SIGNAL'));
 
@@ -131,25 +134,13 @@ function createRuntime(runtimeConfig = config) {
 
         const trade = store.enrichTrade(event);
         const isSmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
-        const preBuyContext = isSmartWalletTrade
-          ? engine.recentBuyContext(
-            trade.mint,
-            trade.timestampMs,
-            runtimeConfig.liveTrading.preBuyWindowMs,
-            trade.wallet,
-          )
-          : null;
         store.queueRawTrade(trade);
-        signalShadow.observeTrade(trade, { isSmartWallet: isSmartWalletTrade });
+        signalShadow.observeTrade(trade);
         engine.handleTrade(trade, store.getToken(trade.mint));
         labeler.onTrade(trade);
         trader.observeTrade(trade);
         if (isSmartWalletTrade) {
-          const smartEvent = store.recordSmartWalletEvent(trade);
-          trader.onSmartWalletEvent(smartEvent, {
-            ...preBuyContext,
-            receivedAtMs: trade.receivedAtMs,
-          });
+          store.recordSmartWalletEvent(trade);
         }
       } catch (error) {
         runtimeMetrics.parseErrors += 1;
@@ -166,6 +157,11 @@ function createRuntime(runtimeConfig = config) {
     await server.start();
     console.log(`Flow Acceleration dashboard: http://127.0.0.1:${runtimeConfig.server.port}`);
     console.log(`Trading mode: ${trader.mode}. Full research capture remains enabled.`);
+    console.log(
+      `Live entry: Primary W3 net>=${runtimeConfig.liveTrading.minNetFlowW3Sol}SOL, `
+      + `buyers>=${runtimeConfig.liveTrading.minUniqueBuyersW3}; `
+      + `trailing drawdown=${runtimeConfig.liveTrading.trailingStopPct}% from entry.`,
+    );
     console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
       + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `

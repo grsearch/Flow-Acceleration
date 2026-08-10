@@ -290,11 +290,45 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_smart_open_decisions_match_ts
         ON smart_open_decisions(rule_matched, timestamp_ms);
 
+      CREATE TABLE IF NOT EXISTS primary_live_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id INTEGER NOT NULL UNIQUE
+          REFERENCES flow_signals(signal_id) ON DELETE CASCADE,
+        signal_episode_id TEXT,
+        timestamp_ms INTEGER NOT NULL,
+        received_at_ms INTEGER,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        rule_version TEXT NOT NULL,
+        signal_variant TEXT NOT NULL,
+        netflow_w3 REAL NOT NULL,
+        unique_buyers_w3 INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        signal_age_ms INTEGER NOT NULL,
+        rule_matched INTEGER NOT NULL,
+        rejection_reasons_json TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        action_status TEXT NOT NULL,
+        action_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_primary_live_decisions_episode
+        ON primary_live_decisions(signal_episode_id)
+        WHERE signal_episode_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_primary_live_decisions_ts
+        ON primary_live_decisions(timestamp_ms);
+      CREATE INDEX IF NOT EXISTS idx_primary_live_decisions_match_ts
+        ON primary_live_decisions(rule_matched, timestamp_ms);
+
       CREATE TABLE IF NOT EXISTS live_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        decision_id INTEGER NOT NULL REFERENCES smart_open_decisions(id),
+        decision_id INTEGER REFERENCES smart_open_decisions(id),
+        primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
+        source_type TEXT NOT NULL DEFAULT 'PRIMARY_SIGNAL',
+        signal_id INTEGER REFERENCES flow_signals(signal_id),
         mint TEXT NOT NULL,
-        trigger_wallet TEXT NOT NULL,
+        trigger_wallet TEXT,
         mode TEXT NOT NULL,
         status TEXT NOT NULL,
         position_sol REAL NOT NULL,
@@ -324,7 +358,8 @@ class ResearchStore {
       CREATE TABLE IF NOT EXISTS live_orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         position_id INTEGER NOT NULL REFERENCES live_positions(id),
-        decision_id INTEGER NOT NULL REFERENCES smart_open_decisions(id),
+        decision_id INTEGER REFERENCES smart_open_decisions(id),
+        primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
         mint TEXT NOT NULL,
         side TEXT NOT NULL,
         venue TEXT,
@@ -389,6 +424,8 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_primary_shadow_mint
         ON primary_signal_shadow_positions(mint, signal_at DESC);
     `);
+
+    this._migrateLiveTradingSchema();
 
     const signalColumns = new Set(
       this.db.prepare('PRAGMA table_info(flow_signals)').all().map((column) => column.name),
@@ -668,6 +705,122 @@ class ResearchStore {
     `);
   }
 
+  _migrateLiveTradingSchema() {
+    const positionColumns = this.db.prepare('PRAGMA table_info(live_positions)').all();
+    const orderColumns = this.db.prepare('PRAGMA table_info(live_orders)').all();
+    const positionByName = new Map(positionColumns.map((column) => [column.name, column]));
+    const orderByName = new Map(orderColumns.map((column) => [column.name, column]));
+    const needsRebuild = !positionByName.has('primary_decision_id')
+      || !positionByName.has('source_type')
+      || !positionByName.has('signal_id')
+      || Number(positionByName.get('decision_id')?.notnull) === 1
+      || Number(positionByName.get('trigger_wallet')?.notnull) === 1
+      || !orderByName.has('primary_decision_id')
+      || Number(orderByName.get('decision_id')?.notnull) === 1;
+    if (!needsRebuild) return;
+
+    const executionExpression = orderByName.has('execution_json') ? 'execution_json' : 'NULL';
+    const foreignKeys = Number(this.db.pragma('foreign_keys', { simple: true })) === 1;
+    if (foreignKeys) this.db.pragma('foreign_keys = OFF');
+    try {
+      this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE live_orders RENAME TO live_orders_legacy_primary_migration;
+          ALTER TABLE live_positions RENAME TO live_positions_legacy_primary_migration;
+
+          CREATE TABLE live_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id INTEGER REFERENCES smart_open_decisions(id),
+            primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
+            source_type TEXT NOT NULL DEFAULT 'PRIMARY_SIGNAL',
+            signal_id INTEGER REFERENCES flow_signals(signal_id),
+            mint TEXT NOT NULL,
+            trigger_wallet TEXT,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            position_sol REAL NOT NULL,
+            token_amount_raw TEXT,
+            entry_market TEXT,
+            entry_price REAL,
+            entry_signature TEXT,
+            entry_error TEXT,
+            highest_price REAL,
+            exit_market TEXT,
+            exit_price REAL,
+            exit_signature TEXT,
+            exit_reason TEXT,
+            exit_error TEXT,
+            opened_at INTEGER,
+            exit_requested_at INTEGER,
+            closed_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          INSERT INTO live_positions (
+            id, decision_id, source_type, mint, trigger_wallet, mode, status,
+            position_sol, token_amount_raw, entry_market, entry_price, entry_signature,
+            entry_error, highest_price, exit_market, exit_price, exit_signature,
+            exit_reason, exit_error, opened_at, exit_requested_at, closed_at,
+            created_at, updated_at
+          ) SELECT
+            id, decision_id, 'SMART_OPEN', mint, trigger_wallet, mode, status,
+            position_sol, token_amount_raw, entry_market, entry_price, entry_signature,
+            entry_error, highest_price, exit_market, exit_price, exit_signature,
+            exit_reason, exit_error, opened_at, exit_requested_at, closed_at,
+            created_at, updated_at
+          FROM live_positions_legacy_primary_migration;
+
+          CREATE TABLE live_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            position_id INTEGER NOT NULL REFERENCES live_positions(id),
+            decision_id INTEGER REFERENCES smart_open_decisions(id),
+            primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
+            mint TEXT NOT NULL,
+            side TEXT NOT NULL,
+            venue TEXT,
+            attempt INTEGER NOT NULL,
+            requested_sol REAL,
+            requested_token_raw TEXT,
+            status TEXT NOT NULL,
+            signature TEXT,
+            error TEXT,
+            execution_json TEXT,
+            submitted_at INTEGER,
+            confirmed_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          INSERT INTO live_orders (
+            id, position_id, decision_id, mint, side, venue, attempt,
+            requested_sol, requested_token_raw, status, signature, error,
+            execution_json, submitted_at, confirmed_at, created_at, updated_at
+          ) SELECT
+            id, position_id, decision_id, mint, side, venue, attempt,
+            requested_sol, requested_token_raw, status, signature, error,
+            ${executionExpression}, submitted_at, confirmed_at, created_at, updated_at
+          FROM live_orders_legacy_primary_migration;
+
+          DROP TABLE live_orders_legacy_primary_migration;
+          DROP TABLE live_positions_legacy_primary_migration;
+          CREATE INDEX idx_live_positions_status
+            ON live_positions(status, updated_at);
+          CREATE UNIQUE INDEX idx_live_positions_one_active_mint
+            ON live_positions(mint)
+            WHERE status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED');
+          CREATE INDEX idx_live_orders_position ON live_orders(position_id, id);
+          CREATE INDEX idx_live_orders_created_id
+            ON live_orders(created_at DESC, id DESC);
+        `);
+      })();
+    } finally {
+      if (foreignKeys) this.db.pragma('foreign_keys = ON');
+    }
+    const violations = this.db.pragma('foreign_key_check');
+    if (violations.length > 0) {
+      throw new Error(`Live trading schema migration has ${violations.length} FK violation(s)`);
+    }
+  }
+
   _prepare() {
     this.stmts = {
       allTokens: this.db.prepare('SELECT * FROM flow_tokens'),
@@ -859,12 +1012,40 @@ class ResearchStore {
           updated_at = @updatedAt
         WHERE id = @id
       `),
+      insertPrimaryLiveDecision: this.db.prepare(`
+        INSERT OR IGNORE INTO primary_live_decisions (
+          signal_id, signal_episode_id, timestamp_ms, received_at_ms, mint, symbol,
+          rule_version, signal_variant, netflow_w3, unique_buyers_w3, signal_price,
+          signal_age_ms, rule_matched, rejection_reasons_json, mode,
+          action_status, action_reason, created_at, updated_at
+        ) VALUES (
+          @signalId, @signalEpisodeId, @timestampMs, @receivedAtMs, @mint, @symbol,
+          @ruleVersion, @signalVariant, @netFlowW3, @uniqueBuyersW3, @signalPrice,
+          @signalAgeMs, @ruleMatched, @rejectionReasonsJson, @mode,
+          @actionStatus, @actionReason, @createdAt, @updatedAt
+        )
+      `),
+      getPrimaryLiveDecisionBySignal: this.db.prepare(`
+        SELECT * FROM primary_live_decisions WHERE signal_id = ?
+      `),
+      getPrimaryLiveDecisionByEpisode: this.db.prepare(`
+        SELECT * FROM primary_live_decisions WHERE signal_episode_id = ?
+      `),
+      updatePrimaryLiveDecision: this.db.prepare(`
+        UPDATE primary_live_decisions SET
+          action_status = @actionStatus,
+          action_reason = @actionReason,
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
       insertLivePosition: this.db.prepare(`
         INSERT INTO live_positions (
-          decision_id, mint, trigger_wallet, mode, status, position_sol,
+          decision_id, primary_decision_id, source_type, signal_id,
+          mint, trigger_wallet, mode, status, position_sol,
           entry_market, entry_price, highest_price, created_at, updated_at
         ) VALUES (
-          @decisionId, @mint, @triggerWallet, @mode, @status, @positionSol,
+          @decisionId, @primaryDecisionId, @sourceType, @signalId,
+          @mint, @triggerWallet, @mode, @status, @positionSol,
           @entryMarket, @entryPrice, @highestPrice, @createdAt, @updatedAt
         )
       `),
@@ -903,11 +1084,11 @@ class ResearchStore {
       `),
       insertLiveOrder: this.db.prepare(`
         INSERT INTO live_orders (
-          position_id, decision_id, mint, side, venue, attempt,
+          position_id, decision_id, primary_decision_id, mint, side, venue, attempt,
           requested_sol, requested_token_raw, status, signature, error,
           execution_json, submitted_at, confirmed_at, created_at, updated_at
         ) VALUES (
-          @positionId, @decisionId, @mint, @side, @venue, @attempt,
+          @positionId, @decisionId, @primaryDecisionId, @mint, @side, @venue, @attempt,
           @requestedSol, @requestedTokenRaw, @status, @signature, @error,
           @executionJson, @submittedAt, @confirmedAt, @createdAt, @updatedAt
         )
@@ -1316,12 +1497,57 @@ class ResearchStore {
     });
   }
 
+  recordPrimaryLiveDecision(decision) {
+    const now = Date.now();
+    const row = {
+      signalId: decision.signalId,
+      signalEpisodeId: decision.signalEpisodeId || null,
+      timestampMs: decision.timestampMs,
+      receivedAtMs: decision.receivedAtMs || decision.timestampMs,
+      mint: decision.mint,
+      symbol: decision.symbol || null,
+      ruleVersion: decision.ruleVersion,
+      signalVariant: decision.signalVariant,
+      netFlowW3: decision.netFlowW3,
+      uniqueBuyersW3: decision.uniqueBuyersW3,
+      signalPrice: decision.signalPrice,
+      signalAgeMs: decision.signalAgeMs,
+      ruleMatched: Number(decision.ruleMatched === true),
+      rejectionReasonsJson: JSON.stringify(decision.rejectionReasons || []),
+      mode: decision.mode,
+      actionStatus: decision.actionStatus,
+      actionReason: decision.actionReason || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertPrimaryLiveDecision.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = row.signalEpisodeId
+      ? this.stmts.getPrimaryLiveDecisionByEpisode.get(row.signalEpisodeId)
+      : this.stmts.getPrimaryLiveDecisionBySignal.get(row.signalId);
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updatePrimaryLiveDecision(id, actionStatus, actionReason = null) {
+    this.stmts.updatePrimaryLiveDecision.run({
+      id,
+      actionStatus,
+      actionReason,
+      updatedAt: Date.now(),
+    });
+  }
+
   createLivePosition(position) {
     const now = Date.now();
     const row = {
-      decisionId: position.decisionId,
+      decisionId: position.decisionId || null,
+      primaryDecisionId: position.primaryDecisionId || null,
+      sourceType: position.sourceType || 'PRIMARY_SIGNAL',
+      signalId: position.signalId || null,
       mint: position.mint,
-      triggerWallet: position.triggerWallet,
+      triggerWallet: position.triggerWallet || null,
       mode: position.mode,
       status: position.status || 'OPENING',
       positionSol: position.positionSol,
@@ -1374,7 +1600,8 @@ class ResearchStore {
     const now = Date.now();
     const result = this.stmts.insertLiveOrder.run({
       positionId: order.positionId,
-      decisionId: order.decisionId,
+      decisionId: order.decisionId || null,
+      primaryDecisionId: order.primaryDecisionId || null,
       mint: order.mint,
       side: order.side,
       venue: order.venue || null,
@@ -1493,16 +1720,7 @@ class ResearchStore {
         CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
         updated_at DESC, id DESC
       LIMIT ?
-    `).all(limit).map((row) => {
-      let confirmingWallets = [];
-      try {
-        const parsed = JSON.parse(row.confirming_wallets_json || '[]');
-        if (Array.isArray(parsed)) confirmingWallets = parsed;
-      } catch (_) {
-        confirmingWallets = [];
-      }
-      return { ...row, confirming_wallets: confirmingWallets };
-    });
+    `).all(limit);
     const stats = this.db.prepare(`
       SELECT
         COUNT(*) AS evaluated,
@@ -1514,7 +1732,6 @@ class ResearchStore {
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
         COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
-        COALESCE(SUM(smart_confirmed_at IS NOT NULL), 0) AS smart_confirmed,
         AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
           AS average_net_return_pct,
         COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0) AS wins,
@@ -1525,14 +1742,10 @@ class ResearchStore {
       FROM primary_signal_shadow_positions
     `).get();
     const resolved = Number(stats.closed_positions || 0) + Number(stats.no_exit || 0);
-    const confirmedDenominator = resolved + Number(stats.active_positions || 0);
     return {
       stats: {
         ...stats,
         win_rate_pct: resolved > 0 ? (Number(stats.wins) / resolved) * 100 : null,
-        confirmation_rate_pct: confirmedDenominator > 0
-          ? (Number(stats.smart_confirmed) / confirmedDenominator) * 100
-          : null,
       },
       positions,
     };
@@ -1571,7 +1784,7 @@ class ResearchStore {
       return { ...row, execution };
     });
     const decisions = this.db.prepare(`
-      SELECT * FROM smart_open_decisions
+      SELECT * FROM primary_live_decisions
       ORDER BY timestamp_ms DESC, id DESC
       LIMIT ?
     `).all(safeLimit(decisionLimit)).map((row) => {
@@ -1591,7 +1804,7 @@ class ResearchStore {
         COALESCE(SUM(action_status = 'RULE_REJECTED'), 0) AS rule_rejected,
         COALESCE(SUM(action_status = 'MATCHED_DISABLED'), 0) AS matched_disabled,
         COALESCE(SUM(action_status = 'RISK_REJECTED'), 0) AS risk_rejected
-      FROM smart_open_decisions
+      FROM primary_live_decisions
     `).get();
     const positionStats = this.db.prepare(`
       SELECT
@@ -1793,13 +2006,13 @@ class ResearchStore {
     const smartSignalConfirmations = this.db.prepare(`
       SELECT COUNT(*) AS n FROM smart_signal_confirmations
     `).get().n;
-    const smartOpenDecisions = this.db.prepare(`
+    const primaryLiveDecisions = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COALESCE(SUM(rule_matched = 1), 0) AS matched,
         COALESCE(SUM(action_status = 'OPEN'), 0) AS opened,
         COALESCE(SUM(action_status = 'CLOSED'), 0) AS closed,
         COALESCE(SUM(action_status IN ('ENTRY_FAILED', 'EXIT_FAILED')), 0) AS failed
-      FROM smart_open_decisions
+      FROM primary_live_decisions
     `).get();
     const livePositions = this.db.prepare(`
       SELECT COUNT(*) AS total,
@@ -1836,7 +2049,7 @@ class ResearchStore {
       primarySignalRows,
       shadowSignalRows: signalRows - primarySignalRows,
       smartSignalConfirmations,
-      smartOpenDecisions,
+      primaryLiveDecisions,
       livePositions,
       primarySignalShadowPositions,
       labels: labelRows,

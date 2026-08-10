@@ -95,16 +95,17 @@ async function main() {
       `http://127.0.0.1:${port}/api/live-trading`,
     )).json();
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
-    assert.strictEqual(liveTrading.runtime.strategy.entry.phase, 'OPEN');
+    assert.strictEqual(liveTrading.runtime.strategy.entry.signalVariant, 'primary_3w');
     assert.strictEqual(liveTrading.runtime.strategy.entry.market, 'PUMP_BONDING_CURVE');
-    assert.strictEqual(liveTrading.runtime.strategy.entry.minSmartOpenSol, 1);
-    assert.strictEqual(liveTrading.runtime.strategy.entry.minPreBuyers, 2);
+    assert.strictEqual(liveTrading.runtime.strategy.entry.minNetFlowW3Sol, 10);
+    assert.strictEqual(liveTrading.runtime.strategy.entry.minUniqueBuyersW3, 7);
     assert.strictEqual(
       liveTrading.runtime.strategy.exit.policy,
-      'SMART_WALLET_SELL_60S',
+      'PRIMARY_IMMEDIATE_TRAILING',
     );
     assert.strictEqual(liveTrading.runtime.strategy.exit.maxHoldMs, 60_000);
-    assert.strictEqual(liveTrading.runtime.strategy.exit.stopLossPct, 0);
+    assert.strictEqual(liveTrading.runtime.strategy.exit.trailingActivationPct, 0);
+    assert.strictEqual(liveTrading.runtime.strategy.exit.trailingStopPct, 7.5);
     assert.strictEqual(liveTrading.runtime.strategy.execution.buySlippagePct, 10);
     assert.strictEqual(liveTrading.runtime.strategy.execution.sellSlippagePct, 15);
     assert.ok(Array.isArray(liveTrading.positions));
