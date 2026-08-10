@@ -173,9 +173,9 @@ class ResearchServer {
         runtime,
         monitoredWallets: this.config.smartWallets,
         ...this.store.liveTradingDashboard({
-          positionLimit: numeric(request.query.positionLimit, 100),
-          orderLimit: numeric(request.query.orderLimit, 100),
-          decisionLimit: numeric(request.query.decisionLimit, 100),
+          positionLimit: numeric(request.query.positionLimit, 30),
+          orderLimit: numeric(request.query.orderLimit, 30),
+          decisionLimit: numeric(request.query.decisionLimit, 30),
         }),
       });
     });
@@ -190,7 +190,8 @@ class ResearchServer {
           pendingEntries: 0,
         },
         ...this.store.primarySignalShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 200),
+          positionLimit: numeric(request.query.positionLimit, 30),
+          cacheStats: true,
         }),
       });
     });
@@ -205,8 +206,9 @@ class ResearchServer {
           cohorts: [],
         },
         ...this.store.flowFirstShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 200),
+          positionLimit: numeric(request.query.positionLimit, 30),
           bigWinnerPct: this.config.flowFirstShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
         }),
       });
     });
@@ -221,8 +223,9 @@ class ResearchServer {
           cohorts: [],
         },
         ...this.store.smartPullbackShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 200),
+          positionLimit: numeric(request.query.positionLimit, 30),
           bigWinnerPct: this.config.smartPullbackShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
         }),
       });
     });

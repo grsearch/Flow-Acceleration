@@ -71,6 +71,7 @@ class ResearchStore {
     for (const token of this.stmts.allTokens.all()) this.tokens.set(token.mint, token);
     this.rawBuffer = [];
     this.returnUpdateStatements = new Map();
+    this.dashboardStatsCache = new Map();
     this.metrics = {
       tradesQueued: 0,
       tradesWritten: 0,
@@ -89,6 +90,15 @@ class ResearchStore {
       }
     }, storageConfig.flushMs);
     if (this.flushTimer.unref) this.flushTimer.unref();
+  }
+
+  _cachedDashboardStats(key, ttlMs, compute) {
+    const now = Date.now();
+    const cached = this.dashboardStatsCache.get(key);
+    if (cached && now - cached.createdAt < ttlMs) return cached.value;
+    const value = compute();
+    this.dashboardStatsCache.set(key, { createdAt: now, value });
+    return value;
   }
 
   _initSchema() {
@@ -2032,7 +2042,7 @@ class ResearchStore {
     return this.stmts.recentSmartWalletEvents.all(timestampMs);
   }
 
-  primarySignalShadowDashboard({ positionLimit = 200 } = {}) {
+  primarySignalShadowDashboard({ positionLimit = 200, cacheStats = false } = {}) {
     const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
     const positions = this.db.prepare(`
       SELECT p.*, s.signal_variant,
@@ -2047,7 +2057,7 @@ class ResearchStore {
         p.updated_at DESC, p.id DESC
       LIMIT ?
     `).all(limit);
-    const stats = this.db.prepare(`
+    const computeStats = () => this.db.prepare(`
       SELECT
         COUNT(*) AS evaluated,
         COALESCE(SUM(rule_matched = 1), 0) AS matched,
@@ -2067,7 +2077,10 @@ class ResearchStore {
         END) AS average_hold_ms
       FROM primary_signal_shadow_positions
     `).get();
-    const profiles = this.db.prepare(`
+    const stats = cacheStats
+      ? this._cachedDashboardStats('primary-signal-shadow:stats', 15_000, computeStats)
+      : computeStats();
+    const computeProfiles = () => this.db.prepare(`
       SELECT
         s.signal_variant,
         COUNT(*) AS evaluated,
@@ -2090,6 +2103,9 @@ class ResearchStore {
           : null,
       };
     });
+    const profiles = cacheStats
+      ? this._cachedDashboardStats('primary-signal-shadow:profiles', 15_000, computeProfiles)
+      : computeProfiles();
     const resolved = Number(stats.closed_positions || 0) + Number(stats.no_exit || 0);
     return {
       stats: {
@@ -2101,7 +2117,7 @@ class ResearchStore {
     };
   }
 
-  flowFirstShadowDashboard({ positionLimit = 200, bigWinnerPct = 50 } = {}) {
+  flowFirstShadowDashboard({ positionLimit = 200, bigWinnerPct = 50, cacheStats = false } = {}) {
     const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
     const threshold = Math.max(1, Number(bigWinnerPct) || 50);
     const positions = this.db.prepare(`
@@ -2116,10 +2132,11 @@ class ResearchStore {
         updated_at DESC, id DESC
       LIMIT ?
     `).all(limit);
-    const cohortIds = this.db.prepare(`
-      SELECT DISTINCT cohort_id FROM flow_first_shadow_positions ORDER BY cohort_id
-    `).all().map((row) => row.cohort_id);
-    const cohorts = cohortIds.map((cohortId) => {
+    const computeCohorts = () => {
+      const cohortIds = this.db.prepare(`
+        SELECT DISTINCT cohort_id FROM flow_first_shadow_positions ORDER BY cohort_id
+      `).all().map((row) => row.cohort_id);
+      return cohortIds.map((cohortId) => {
       const counts = this.db.prepare(`
         SELECT
           COUNT(*) AS episodes,
@@ -2188,11 +2205,15 @@ class ResearchStore {
           ? captures.reduce((sum, value) => sum + value, 0) / captures.length
           : null,
       };
-    });
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats(`flow-first-shadow:${threshold}`, 15_000, computeCohorts)
+      : computeCohorts();
     return { cohorts, positions };
   }
 
-  smartPullbackShadowDashboard({ positionLimit = 200, bigWinnerPct = 50 } = {}) {
+  smartPullbackShadowDashboard({ positionLimit = 200, bigWinnerPct = 50, cacheStats = false } = {}) {
     const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
     const threshold = Math.max(1, Number(bigWinnerPct) || 50);
     const positions = this.db.prepare(`
@@ -2209,10 +2230,11 @@ class ResearchStore {
         updated_at DESC, id DESC
       LIMIT ?
     `).all(limit);
-    const cohortIds = this.db.prepare(`
-      SELECT DISTINCT cohort_id FROM smart_pullback_shadow_positions ORDER BY cohort_id
-    `).all().map((row) => row.cohort_id);
-    const cohorts = cohortIds.map((cohortId) => {
+    const computeCohorts = () => {
+      const cohortIds = this.db.prepare(`
+        SELECT DISTINCT cohort_id FROM smart_pullback_shadow_positions ORDER BY cohort_id
+      `).all().map((row) => row.cohort_id);
+      return cohortIds.map((cohortId) => {
       const counts = this.db.prepare(`
         SELECT
           COUNT(*) AS episodes,
@@ -2277,7 +2299,11 @@ class ResearchStore {
           ? captures.reduce((sum, value) => sum + value, 0) / captures.length
           : null,
       };
-    });
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats(`smart-pullback-shadow:${threshold}`, 15_000, computeCohorts)
+      : computeCohorts();
     return { cohorts, positions };
   }
 
