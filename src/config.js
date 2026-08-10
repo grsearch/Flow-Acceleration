@@ -271,6 +271,54 @@ const config = {
     }),
   },
 
+  // Direct Primary Flow research. Each 30-second signal episode is simulated once
+  // per exit cohort; all cohorts share the same 200ms-delayed market fill.
+  flowFirstShadow: {
+    enabled: booleanEnv('FLOW_FIRST_SHADOW_ENABLED', true),
+    signalVariant: 'primary_3w',
+    episodeGapMs: 30_000,
+    positionSizeSol: numberEnv('FLOW_FIRST_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
+    maxSignalAgeMs: integerEnv('FLOW_FIRST_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
+    entryDelayMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxHoldMs: integerEnv('FLOW_FIRST_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    bigWinnerPct: numberEnv('FLOW_FIRST_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'C5',
+        label: 'C5 固定持有5秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_FIRST_SHADOW_FIXED_HOLD_MS', 5_000, { min: 250 }),
+      },
+      {
+        id: 'C75',
+        label: 'C7.5 峰值回撤7.5%',
+        exitMode: 'TRAILING',
+        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C75_TRAILING_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'C125',
+        label: 'C12.5 峰值回撤12.5%',
+        exitMode: 'TRAILING',
+        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C125_TRAILING_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_FIRST_SHADOW_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   // Smart Wallet pullback A/B research. This path only records simulated
   // positions and never owns an executor or signing key.
   smartPullbackShadow: {

@@ -67,6 +67,27 @@ assert.strictEqual(config.signalShadow.trailingStopPct, 7.5);
 assert.strictEqual(config.signalShadow.positionSizeSol, 0.05);
 assert.ok(Math.abs(costBreakdown(config.signalShadow.costModel).deterministicCostPct - 3.22) < 1e-12);
 assert.deepStrictEqual(config.strategy.primaryThresholdProfiles, config.signalShadow.profiles);
+assert.strictEqual(config.flowFirstShadow.enabled, true);
+assert.strictEqual(config.flowFirstShadow.signalVariant, 'primary_3w');
+assert.strictEqual(config.flowFirstShadow.episodeGapMs, 30_000);
+assert.strictEqual(config.flowFirstShadow.positionSizeSol, 0.05);
+assert.deepStrictEqual(
+  config.flowFirstShadow.cohorts.map((cohort) => [
+    cohort.id,
+    cohort.exitMode,
+    cohort.fixedHoldMs ?? null,
+    cohort.trailingStopPct ?? null,
+  ]),
+  [
+    ['C5', 'FIXED_HOLD', 5_000, null],
+    ['C75', 'TRAILING', null, 7.5],
+    ['C125', 'TRAILING', null, 12.5],
+  ],
+);
+assert.ok(
+  Math.abs(costBreakdown(config.flowFirstShadow.costModel).deterministicCostPct - 3.22)
+    < 1e-12,
+);
 assert.strictEqual(config.smartPullbackShadow.enabled, true);
 assert.strictEqual(config.smartPullbackShadow.minSmartBuySol, 0.1);
 assert.strictEqual(config.smartPullbackShadow.confirmationWindowMs, 15_000);

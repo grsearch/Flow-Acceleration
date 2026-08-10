@@ -210,6 +210,18 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 
 模拟路径保存在 `smart_pullback_shadow_positions`，接口为 `GET /api/smart-pullback-shadow`。Dashboard 除平均收益、中位数、胜率和PF外，还统计最大赢家、Top5赢家对总盈利的贡献、MFE≥50%的大赢家机会、实际兑现的大赢家数量以及退出收益对MFE的兑现比例，用来验证“较低胜率 + 右尾大赢家”是否能覆盖全部亏损和成本。
 
+## Flow-First Shadow C
+
+`Flow-First Shadow C` 直接消费 Signal Monitor 对应的 `primary_3w` 主信号，不等待 Smart Wallet。它按数据库中的 `signal_episode_id` 去重：同一 Mint、同一30秒信号周期内即使 Rank 连续增长，也只建立一次模拟入场；原始信号行和 Future Label 仍全部保存，不会因去重而丢失。
+
+三个C组共享完全相同的信号、200ms执行延迟和延迟后的首个 Bonding Curve 模拟成交，唯一差异是退出方式：
+
+- C5：从实际模拟入场开始固定持有5秒，再等待200ms后的首个可退出成交。
+- C7.5：入场即激活移动止盈，峰值回撤7.5%退出，60秒兜底。
+- C12.5：入场即激活移动止盈，峰值回撤12.5%退出，60秒兜底。
+
+模拟仓位保存在 `flow_first_shadow_positions`，接口为 `GET /api/flow-first-shadow`。Dashboard 按独立 Episode/Mint 显示扣除完整0.05 SOL成本模型后的平均与中位净收益、胜率、PF、实际入场跳价、MFE、最大赢家、Top5盈利贡献、去掉Top5后的平均收益以及大赢家兑现率。该路径没有执行器、不读取私钥，也永不签名或发送链上交易。
+
 ## Primary 信号模拟与实盘
 
 实时入场规则固定为：
