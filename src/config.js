@@ -146,9 +146,8 @@ const config = {
     dryRun: booleanEnv('FLOW_LIVE_DRY_RUN', true),
     rpcUrl: process.env.FLOW_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
-    minSmartOpenSol: numberEnv('FLOW_LIVE_MIN_SMART_OPEN_SOL', 1, { min: 0 }),
-    minPreBuyers: integerEnv('FLOW_LIVE_MIN_PREBUY_BUYERS', 2, { min: 0 }),
-    preBuyWindowMs: integerEnv('FLOW_LIVE_PREBUY_WINDOW_MS', 2_000, { min: 100 }),
+    minNetFlowW3Sol: numberEnv('FLOW_LIVE_MIN_NETFLOW_W3_SOL', 10, { min: 0 }),
+    minUniqueBuyersW3: integerEnv('FLOW_LIVE_MIN_BUYERS_W3', 7, { min: 0 }),
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     positionSizeSol: numberEnv('FLOW_LIVE_POSITION_SOL', 0.05, { min: 0.000001 }),
     maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 1, { min: 1, max: 20 }),
@@ -186,14 +185,11 @@ const config = {
     commitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
       || process.env.FLOW_LIVE_COMMITMENT
       || 'confirmed',
-    exitStrategy: process.env.FLOW_LIVE_EXIT_STRATEGY || 'SMART_WALLET_SELL_60S',
-    stopLossPct: numberEnv('FLOW_LIVE_STOP_LOSS_PCT', 12, { min: 0 }),
-    takeProfitPct: numberEnv('FLOW_LIVE_TAKE_PROFIT_PCT', 20, { min: 0 }),
-    trailingActivationPct: numberEnv('FLOW_LIVE_TRAILING_ACTIVATION_PCT', 8, { min: 0 }),
-    trailingStopPct: numberEnv('FLOW_LIVE_TRAILING_STOP_PCT', 5, { min: 0 }),
-    minHoldMs: integerEnv('FLOW_LIVE_MIN_HOLD_MS', 500, { min: 0 }),
-    maxHoldMs: integerEnv('FLOW_LIVE_MAX_HOLD_MS', 60_000, { min: 1_000 }),
-    exitOnTriggerWalletSell: booleanEnv('FLOW_LIVE_EXIT_ON_SMART_SELL', true),
+    trailingStopPct: numberEnv('FLOW_LIVE_PRIMARY_TRAILING_STOP_PCT', 7.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    maxHoldMs: integerEnv('FLOW_LIVE_PRIMARY_MAX_HOLD_MS', 60_000, { min: 1_000 }),
     exitRetryCount: integerEnv('FLOW_LIVE_EXIT_RETRY_COUNT', 10, { min: 0, max: 60 }),
     exitRetryDelayMs: integerEnv('FLOW_LIVE_EXIT_RETRY_DELAY_MS', 1_000, { min: 100 }),
     entryReconcileCount: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_COUNT', 5, {
@@ -213,9 +209,7 @@ const config = {
     positionSizeSol: numberEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
     minNetFlowW3Sol: numberEnv('FLOW_SIGNAL_SHADOW_MIN_NETFLOW_W3_SOL', 10, { min: 0 }),
     minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_MIN_BUYERS_W3', 7, { min: 0 }),
-    priorSmartExclusionMs: integerEnv('FLOW_SIGNAL_SHADOW_PRIOR_SMART_MS', 30_000, { min: 0 }),
-    confirmWindowMs: integerEnv('FLOW_SIGNAL_SHADOW_CONFIRM_MS', 30_000, { min: 1_000 }),
-    confirmMinSol: numberEnv('FLOW_SIGNAL_SHADOW_CONFIRM_MIN_SOL', 0.1, { min: 0 }),
+    maxSignalAgeMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     entryDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
     exitDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
@@ -263,9 +257,6 @@ function validateConfig() {
   }
   if (config.strategy.signalWindowMs * 3 > config.strategy.bufferMs) {
     errors.push('FLOW_BUFFER_MS must cover all three signal windows');
-  }
-  if (!['SMART_WALLET_SELL_60S', 'DYNAMIC'].includes(config.liveTrading.exitStrategy)) {
-    errors.push('FLOW_LIVE_EXIT_STRATEGY must be SMART_WALLET_SELL_60S or DYNAMIC');
   }
   if (config.liveTrading.enabled && !config.liveTrading.dryRun) {
     if (!config.liveTrading.rpcUrl) errors.push('FLOW_RPC_URL is required for live trading');

@@ -16,9 +16,7 @@ function config(overrides = {}) {
     positionSizeSol: 0.05,
     minNetFlowW3Sol: 10,
     minUniqueBuyersW3: 7,
-    priorSmartExclusionMs: 30_000,
-    confirmWindowMs: 30_000,
-    confirmMinSol: 0.1,
+    maxSignalAgeMs: 1_500,
     entryDelayMs: 200,
     entryTimeoutMs: 2_000,
     exitDelayMs: 200,
@@ -112,46 +110,27 @@ function main() {
   assert.strictEqual(trailing.exit_reason, 'TRAILING_IMMEDIATE');
   assert.ok(Math.abs(trailing.net_return_pct - 5.78) < 1e-9);
 
-  const smartSignal = primarySignal(store, { mint: 'smart-follow-mint', timestampMs: 200_000 });
-  manager.onSignal(smartSignal);
-  manager.observeTrade(trade({ mint: 'smart-follow-mint', timestampMs: 200_200, price: 1 }));
-  manager.observeTrade(trade({
-    mint: 'smart-follow-mint', timestampMs: 200_500, price: 1.04,
-    wallet: 'confirming-wallet', solAmount: 0.2,
-  }), { isSmartWallet: true });
-  manager.observeTrade(trade({
-    mint: 'smart-follow-mint', timestampMs: 200_700, price: 1.05, side: 'SELL',
-    wallet: 'confirming-wallet', solAmount: 0.1,
-  }), { isSmartWallet: true });
-  manager.observeTrade(trade({ mint: 'smart-follow-mint', timestampMs: 200_900, price: 1.03 }));
+  const maxHoldSignal = primarySignal(store, { mint: 'max-hold-mint', timestampMs: 200_000 });
+  manager.onSignal(maxHoldSignal);
+  manager.observeTrade(trade({ mint: 'max-hold-mint', timestampMs: 200_200, price: 1 }));
+  now = 260_200;
+  manager.advanceTime(now);
+  manager.observeTrade(trade({ mint: 'max-hold-mint', timestampMs: 260_400, price: 1.05 }));
   dashboard = store.primarySignalShadowDashboard();
-  const smart = dashboard.positions.find((row) => row.mint === 'smart-follow-mint');
-  assert.strictEqual(smart.status, STATUS.CLOSED);
-  assert.strictEqual(smart.exit_reason, 'CONFIRMING_SMART_SELL');
-  assert.strictEqual(smart.smart_confirmed_at, 200_500);
-  assert.deepStrictEqual(smart.confirming_wallets, ['confirming-wallet']);
+  const maxHold = dashboard.positions.find((row) => row.mint === 'max-hold-mint');
+  assert.strictEqual(maxHold.status, STATUS.CLOSED);
+  assert.strictEqual(maxHold.exit_reason, 'MAX_HOLD_60S');
 
   manager.observeTrade(trade({
     mint: 'prior-smart-mint', timestampMs: 300_000, price: 1,
     wallet: 'early-smart', solAmount: 0.2,
   }), { isSmartWallet: true });
-  const rejectedSignal = primarySignal(store, { mint: 'prior-smart-mint', timestampMs: 300_000 });
-  manager.onSignal(rejectedSignal);
+  const independentSignal = primarySignal(store, { mint: 'prior-smart-mint', timestampMs: 300_000 });
+  manager.onSignal(independentSignal);
   dashboard = store.primarySignalShadowDashboard();
-  const rejected = dashboard.positions.find((row) => row.mint === 'prior-smart-mint');
-  assert.strictEqual(rejected.status, STATUS.RULE_REJECTED);
-  assert.match(rejected.rejection_reason, /PRIOR_SMART_BUY_30S/);
-
-  const timeoutSignal = primarySignal(store, { mint: 'timeout-mint', timestampMs: 400_000 });
-  manager.onSignal(timeoutSignal);
-  manager.observeTrade(trade({ mint: 'timeout-mint', timestampMs: 400_200, price: 1 }));
-  now = 430_000;
-  manager.advanceTime(now);
-  manager.observeTrade(trade({ mint: 'timeout-mint', timestampMs: 430_200, price: 0.95 }));
-  dashboard = store.primarySignalShadowDashboard();
-  const timeout = dashboard.positions.find((row) => row.mint === 'timeout-mint');
-  assert.strictEqual(timeout.status, STATUS.CLOSED);
-  assert.strictEqual(timeout.exit_reason, 'UNCONFIRMED_TIMEOUT');
+  const independent = dashboard.positions.find((row) => row.mint === 'prior-smart-mint');
+  assert.strictEqual(independent.status, STATUS.PENDING_ENTRY,
+    'Smart Wallet activity must not be a hidden Primary entry filter');
 
   const weakSignal = primarySignal(store, {
     mint: 'weak-mint', timestampMs: 500_000, netFlowW3: 9.9, uniqueBuyersW3: 6,
@@ -181,10 +160,11 @@ function main() {
 
   const health = manager.health();
   assert.strictEqual(health.mode, 'SHADOW');
+  assert.strictEqual(health.strategy.ruleVersion, 'primary-flow-w3-buyers-v1');
   assert.strictEqual(health.strategy.exit.trailingActivationPct, 0);
   assert.strictEqual(health.strategy.exit.trailingStopPct, 7.5);
   assert.strictEqual(health.strategy.risk.sendsTransactions, false);
-  assert.strictEqual(dashboard.stats.closed_positions, 3);
+  assert.strictEqual(dashboard.stats.closed_positions, 2);
 
   store.close();
   console.log('primary signal shadow tests passed');

@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluatePrimarySignal, RULE_VERSION } = require('./PrimarySignalStrategy');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -18,18 +19,7 @@ function finite(value, fallback = null) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function parseWallets(value) {
-  try {
-    const parsed = typeof value === 'string' ? JSON.parse(value || '[]') : value;
-    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
-  } catch (_) {
-    return [];
-  }
-}
-
 function restoredPosition(row) {
-  const confirmingWallets = parseWallets(row.confirming_wallets_json);
-  const confirmedAt = finite(row.smart_confirmed_at);
   return {
     id: row.id,
     signalId: row.signal_id,
@@ -45,8 +35,6 @@ function restoredPosition(row) {
     entryPrice: row.entry_price,
     entryMarket: row.entry_market,
     highestPrice: row.highest_price,
-    smartConfirmedAt: confirmedAt,
-    confirmingWallets: new Map(confirmingWallets.map((wallet) => [wallet, confirmedAt])),
     exitTriggerAt: row.exit_trigger_at,
     exitTargetAt: row.exit_target_at,
     exitDeadlineAt: row.exit_deadline_at,
@@ -61,7 +49,6 @@ class PrimarySignalShadowManager {
     this.now = now;
     this.pendingEntries = new Map();
     this.positions = new Map();
-    this.recentSmartBuys = new Map();
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.metrics = {
       evaluated: 0,
@@ -75,11 +62,6 @@ class PrimarySignalShadowManager {
 
   start() {
     const now = this.now();
-    for (const event of this.store.recentSmartWalletEvents(
-      now - this.config.priorSmartExclusionMs,
-    )) {
-      this._rememberSmartBuy(event);
-    }
     for (const row of this.store.activePrimarySignalShadowPositions()) {
       const position = restoredPosition(row);
       if (position.status === STATUS.PENDING_ENTRY) {
@@ -101,25 +83,20 @@ class PrimarySignalShadowManager {
       pendingEntries: this.pendingEntries.size,
       strategy: {
         name: 'Primary Signal Immediate Trailing Shadow',
+        ruleVersion: RULE_VERSION,
         entry: {
           signalVariant: 'primary_3w',
           minNetFlowW3Sol: this.config.minNetFlowW3Sol,
           minUniqueBuyersW3: this.config.minUniqueBuyersW3,
-          priorSmartExclusionMs: this.config.priorSmartExclusionMs,
+          maxSignalAgeMs: this.config.maxSignalAgeMs,
           entryDelayMs: this.config.entryDelayMs,
           entryTimeoutMs: this.config.entryTimeoutMs,
           maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
           market: 'PUMP_BONDING_CURVE',
         },
-        confirmation: {
-          minSmartBuySol: this.config.confirmMinSol,
-          windowMs: this.config.confirmWindowMs,
-        },
         exit: {
           trailingActivationPct: 0,
           trailingStopPct: this.config.trailingStopPct,
-          exitOnConfirmingWalletSell: true,
-          unconfirmedTimeoutMs: this.config.confirmWindowMs,
           maxHoldMs: this.config.maxHoldMs,
           exitDelayMs: this.config.exitDelayMs,
           exitTimeoutMs: this.config.exitTimeoutMs,
@@ -143,20 +120,8 @@ class PrimarySignalShadowManager {
     if (!(signalAt > 0) || !(signalPrice > 0) || !signal.mint || !signal.signalId) return null;
 
     this.metrics.evaluated += 1;
-    this._pruneSmartBuys(signal.mint, signalAt);
-    const reasons = [];
-    if (finite(signal.netFlowW3, -Infinity) < this.config.minNetFlowW3Sol) {
-      reasons.push('NETFLOW_W3_BELOW_MIN');
-    }
-    if (finite(signal.uniqueBuyersW3, -Infinity) < this.config.minUniqueBuyersW3) {
-      reasons.push('BUYERS_W3_BELOW_MIN');
-    }
-    if ((this.recentSmartBuys.get(signal.mint) || []).some((event) => (
-      event.timestampMs >= signalAt - this.config.priorSmartExclusionMs
-      && event.timestampMs <= signalAt
-    ))) {
-      reasons.push('PRIOR_SMART_BUY_30S');
-    }
+    const evaluated = evaluatePrimarySignal(signal, this.config, this.now());
+    const reasons = [...evaluated.rejectReasons];
     if (this.pendingEntries.has(signal.mint) || this.positions.has(signal.mint)) {
       reasons.push('MINT_ALREADY_ACTIVE');
     }
@@ -202,12 +167,11 @@ class PrimarySignalShadowManager {
     return saved;
   }
 
-  observeTrade(trade, { isSmartWallet = false } = {}) {
+  observeTrade(trade) {
     if (!this.config.enabled || !trade?.mint || !(finite(trade.price) > 0)
       || !(finite(trade.timestampMs) > 0)) return;
     const timestampMs = Number(trade.timestampMs);
     this.advanceTime(timestampMs);
-    if (isSmartWallet && trade.side === 'BUY') this._rememberSmartBuy(trade);
 
     let position = this.positions.get(trade.mint);
     if (position?.status === STATUS.EXIT_PENDING
@@ -255,27 +219,6 @@ class PrimarySignalShadowManager {
       return;
     }
 
-    if (isSmartWallet && trade.side === 'BUY'
-      && finite(trade.solAmount, 0) >= this.config.confirmMinSol
-      && timestampMs > position.entryAt
-      && timestampMs <= position.signalAt + this.config.confirmWindowMs) {
-      if (!position.confirmingWallets.has(trade.wallet)) {
-        position.confirmingWallets.set(trade.wallet, timestampMs);
-        position.smartConfirmedAt = position.smartConfirmedAt || timestampMs;
-        this.store.updatePrimarySignalShadowPosition(position.id, {
-          smartConfirmedAt: position.smartConfirmedAt,
-          confirmingWallets: [...position.confirmingWallets.keys()],
-        });
-      }
-    }
-
-    if (isSmartWallet && trade.side === 'SELL'
-      && position.confirmingWallets.has(trade.wallet)
-      && timestampMs > position.confirmingWallets.get(trade.wallet)) {
-      this._requestExit(position, 'CONFIRMING_SMART_SELL', timestampMs);
-      return;
-    }
-
     position.highestPrice = Math.max(position.highestPrice || position.entryPrice, trade.price);
     this.store.updatePrimarySignalShadowPosition(position.id, {
       highestPrice: position.highestPrice,
@@ -299,31 +242,10 @@ class PrimarySignalShadowManager {
         continue;
       }
       if (position.status !== STATUS.OPEN) continue;
-      if (!position.smartConfirmedAt
-        && now >= position.signalAt + this.config.confirmWindowMs) {
-        this._requestExit(position, 'UNCONFIRMED_TIMEOUT', position.signalAt + this.config.confirmWindowMs);
-      } else if (now >= position.entryAt + this.config.maxHoldMs) {
+      if (now >= position.entryAt + this.config.maxHoldMs) {
         this._requestExit(position, 'MAX_HOLD_60S', position.entryAt + this.config.maxHoldMs);
       }
     }
-  }
-
-  _rememberSmartBuy(event) {
-    if (event?.side !== 'BUY' || !event.mint || !(finite(event.timestampMs ?? event.timestamp_ms) > 0)) {
-      return;
-    }
-    const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
-    if (!this.recentSmartBuys.has(event.mint)) this.recentSmartBuys.set(event.mint, []);
-    this.recentSmartBuys.get(event.mint).push({ timestampMs, wallet: event.wallet });
-    this._pruneSmartBuys(event.mint, timestampMs);
-  }
-
-  _pruneSmartBuys(mint, now) {
-    const events = (this.recentSmartBuys.get(mint) || []).filter((event) => (
-      event.timestampMs >= now - this.config.priorSmartExclusionMs
-    ));
-    if (events.length) this.recentSmartBuys.set(mint, events);
-    else this.recentSmartBuys.delete(mint);
   }
 
   _eligibleExitTrade(position, trade) {
