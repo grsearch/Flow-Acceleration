@@ -45,6 +45,16 @@ async function main() {
   assert.ok(dashboard.includes('id="smart-open-metrics"'));
   assert.ok(dashboard.includes('id="smart-open-position-rows"'));
   assert.ok(dashboard.includes("json('/api/smart-open-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
+  assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
+  assert.ok(dashboard.includes('id="launch-quality-snapshot-rows"'));
+  assert.ok(dashboard.includes("json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60')"));
+  assert.ok(dashboard.includes('function renderMetricGroups('));
+  assert.ok(dashboard.includes("renderMetricGroups('#smart-open-metrics'"));
+  assert.ok(dashboard.includes("renderMetricGroups('#flow-first-metrics'"));
+  assert.ok(dashboard.includes("renderMetricGroups('#smart-pullback-metrics'"));
+  assert.ok(dashboard.includes("renderMetricGroups('#signal-shadow-metrics'"));
   assert.ok(dashboard.includes("let activeLiveStrategyId = 'execution';"));
   assert.ok(dashboard.includes('Current live strategy'));
   assert.ok(dashboard.includes("let activeTabId = 'overview';"));
@@ -114,6 +124,7 @@ async function main() {
       '/api/flow-first-shadow',
       '/api/smart-pullback-shadow',
       '/api/smart-open-shadow',
+      '/api/launch-quality-observer',
       '/api/health',
     ];
 
@@ -217,6 +228,18 @@ async function main() {
     );
     assert.ok(Array.isArray(smartOpen.cohorts));
     assert.ok(Array.isArray(smartOpen.positions));
+    const launchQuality = await (await fetch(
+      `http://127.0.0.1:${port}/api/launch-quality-observer`,
+    )).json();
+    assert.strictEqual(launchQuality.runtime.mode, 'OBSERVER_ONLY');
+    assert.strictEqual(launchQuality.runtime.sendsTransactions, false);
+    assert.strictEqual(launchQuality.runtime.opensSimulatedPositions, false);
+    assert.deepStrictEqual(
+      launchQuality.runtime.strategy.research.isolatedTables,
+      ['launch_quality_observations', 'launch_quality_snapshots'],
+    );
+    assert.ok(Array.isArray(launchQuality.observations));
+    assert.ok(Array.isArray(launchQuality.snapshots));
     const dynamicResponse = await fetch(
       `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&stopLossPct=3`
       + '&trailingStopPct=2&exitRetryCount=1&splitRatio=0.6'

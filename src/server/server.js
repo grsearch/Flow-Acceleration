@@ -25,6 +25,7 @@ class ResearchServer {
   constructor({
     config, store, engine, stream, labeler, trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
+    launchQualityObserver = null,
   }) {
     this.config = config;
     this.store = store;
@@ -36,6 +37,7 @@ class ResearchServer {
     this.flowFirstShadow = flowFirstShadow;
     this.smartPullbackShadow = smartPullbackShadow;
     this.smartOpenShadow = smartOpenShadow;
+    this.launchQualityObserver = launchQualityObserver;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -248,6 +250,22 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/launch-quality-observer', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.launchQualityObserver?.health() || {
+          enabled: false,
+          mode: 'OBSERVER_ONLY',
+          sendsTransactions: false,
+          opensSimulatedPositions: false,
+        },
+        ...this.store.launchQualityDashboard({
+          observationLimit: numeric(request.query.observationLimit, 30),
+          snapshotLimit: numeric(request.query.snapshotLimit, 60),
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -266,6 +284,7 @@ class ResearchServer {
         flowFirstShadow: this.flowFirstShadow?.health() || null,
         smartPullbackShadow: this.smartPullbackShadow?.health() || null,
         smartOpenShadow: this.smartOpenShadow?.health() || null,
+        launchQualityObserver: this.launchQualityObserver?.health() || null,
       });
     });
 

@@ -126,6 +126,14 @@ assert.ok(
   Math.abs(costBreakdown(config.smartOpenShadow.costModel).deterministicCostPct - 3.22)
     < 1e-12,
 );
+assert.strictEqual(config.launchQualityObserver.enabled, true);
+assert.deepStrictEqual(
+  config.launchQualityObserver.snapshotHorizonsMs,
+  [5_000, 10_000, 20_000, 30_000, 60_000],
+);
+assert.strictEqual(config.launchQualityObserver.pumpReferencePct, 25);
+assert.strictEqual(config.launchQualityObserver.pullbackReferencePct, 7.5);
+assert.strictEqual(config.launchQualityObserver.reboundReferencePct, 3);
 
 assert.deepStrictEqual(liveTradingGuard(true, true, false), {
   enabled: false,
