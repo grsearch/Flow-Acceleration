@@ -16,13 +16,20 @@ const engine = new FlowAccelerationEngine({
   ratioFloorSol: 0.05,
   signalCooldownMs: 10_000,
   candidateIdleMs: 15_000,
+  primaryThresholdProfiles: [
+    { id: 'aggressive', signalVariant: 'primary_early_3_3', minNetFlowW3Sol: 3, minUniqueBuyersW3: 3 },
+    { id: 'balanced', signalVariant: 'primary_early_5_4', minNetFlowW3Sol: 5, minUniqueBuyersW3: 4 },
+    { id: 'conservative', signalVariant: 'primary_early_7_5', minNetFlowW3Sol: 7, minUniqueBuyersW3: 5 },
+  ],
 });
 
 const mint = 'FlowMint1111111111111111111111111111111111';
 const signals = [];
 const shadowSignals = [];
+const primaryThresholdSignals = [];
 engine.on('signal', (signal) => signals.push(signal));
 engine.on('shadowSignal', (signal) => shadowSignals.push(signal));
+engine.on('primaryThresholdSignal', (signal) => primaryThresholdSignals.push(signal));
 
 const twoWindowOnly = {
   netFlowW1: 2,
@@ -84,6 +91,11 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual([signals[0].buyTxW1, signals[0].buyTxW2, signals[0].buyTxW3], [3, 8, 21]);
 assert.ok(Math.abs(signals[0].flowAccel - signals[0].flowAccel1) < 1e-8);
+assert.deepStrictEqual(
+  primaryThresholdSignals.map((signal) => signal.signalVariant),
+  ['primary_early_3_3'],
+);
+assert.ok(primaryThresholdSignals.every((signal) => signal.isPrimary === false));
 
 engine.handleTrade({
   market: 'PUMP_BONDING_CURVE', mint, wallet: 'wallet-extra', side: 'BUY', solAmount: 0.1,
@@ -91,10 +103,28 @@ engine.handleTrade({
 }, { mint, symbol: 'FLOW' });
 assert.strictEqual(signals.length, 1, 'a sustained condition must not emit duplicate signals');
 
+addMany({ count: 8, total: 1.6, side: 'BUY', start: 100_002, wallets: 8 });
+assert.deepStrictEqual(
+  primaryThresholdSignals.map((signal) => signal.signalVariant),
+  ['primary_early_3_3', 'primary_early_5_4'],
+  'the balanced threshold must trigger even while the original Primary signal remains active',
+);
+addMany({ count: 8, total: 2, side: 'BUY', start: 100_020, wallets: 8 });
+assert.deepStrictEqual(
+  primaryThresholdSignals.map((signal) => signal.signalVariant),
+  ['primary_early_3_3', 'primary_early_5_4', 'primary_early_7_5'],
+);
+engine.handleTrade({
+  market: 'PUMP_BONDING_CURVE', mint, wallet: 'wallet-more', side: 'BUY', solAmount: 1,
+  tokenAmount: 1, price: 1, timestampMs: 100_100, curvePct: 40, ageMs: 30_100,
+}, { mint, symbol: 'FLOW' });
+assert.strictEqual(primaryThresholdSignals.length, 3, 'each threshold may fire only once per episode');
+
 engine.handleComplete({ mint, completedAt: 101_000 });
 engine.handleCreate({ mint, symbol: 'FLOW', graduated_at: 101_000 });
 addMany({ count: 30, total: 30, side: 'BUY', start: 102_000, wallets: 30 });
 assert.strictEqual(signals.length, 1, 'graduated tokens must not emit new signals');
 assert.strictEqual(engine.stats().shadowSignalsCreated, 2);
+assert.strictEqual(engine.stats().primaryThresholdSignalsCreated, 3);
 
 console.log('test-flow-acceleration: ok');

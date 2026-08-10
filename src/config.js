@@ -3,6 +3,7 @@
 require('dotenv').config();
 
 const { costBreakdown, normalizeCostModel } = require('./core/CostModel');
+const { PRIMARY_THRESHOLD_VARIANTS } = require('./core/PrimaryThresholdProfiles');
 
 function numberEnv(name, fallback, { min = -Infinity, max = Infinity } = {}) {
   const raw = process.env[name];
@@ -76,6 +77,28 @@ const labelCostModel = normalizeCostModel({
   ),
 });
 
+const liveEntryThreshold = {
+  id: 'balanced',
+  signalVariant: PRIMARY_THRESHOLD_VARIANTS.BALANCED,
+  minNetFlowW3Sol: numberEnv('FLOW_LIVE_MIN_NETFLOW_W3_SOL', 5, { min: 0 }),
+  minUniqueBuyersW3: integerEnv('FLOW_LIVE_MIN_BUYERS_W3', 4, { min: 0 }),
+};
+const primaryThresholdProfiles = [
+  {
+    id: 'aggressive',
+    signalVariant: PRIMARY_THRESHOLD_VARIANTS.AGGRESSIVE,
+    minNetFlowW3Sol: numberEnv('FLOW_SIGNAL_SHADOW_AGGRESSIVE_MIN_NETFLOW_W3_SOL', 3, { min: 0 }),
+    minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_AGGRESSIVE_MIN_BUYERS_W3', 3, { min: 0 }),
+  },
+  liveEntryThreshold,
+  {
+    id: 'conservative',
+    signalVariant: PRIMARY_THRESHOLD_VARIANTS.CONSERVATIVE,
+    minNetFlowW3Sol: numberEnv('FLOW_SIGNAL_SHADOW_CONSERVATIVE_MIN_NETFLOW_W3_SOL', 7, { min: 0 }),
+    minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_CONSERVATIVE_MIN_BUYERS_W3', 5, { min: 0 }),
+  },
+];
+
 const config = {
   pump: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
@@ -116,6 +139,7 @@ const config = {
     ratioFloorSol: numberEnv('FLOW_RATIO_FLOOR_SOL', 0.05, { min: 0.000001 }),
     signalCooldownMs: integerEnv('FLOW_SIGNAL_COOLDOWN_MS', 0, { min: 0 }),
     candidateIdleMs: integerEnv('FLOW_CANDIDATE_IDLE_MS', 15_000, { min: 2_000 }),
+    primaryThresholdProfiles,
   },
 
   labels: {
@@ -146,8 +170,9 @@ const config = {
     dryRun: booleanEnv('FLOW_LIVE_DRY_RUN', true),
     rpcUrl: process.env.FLOW_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
-    minNetFlowW3Sol: numberEnv('FLOW_LIVE_MIN_NETFLOW_W3_SOL', 10, { min: 0 }),
-    minUniqueBuyersW3: integerEnv('FLOW_LIVE_MIN_BUYERS_W3', 7, { min: 0 }),
+    signalVariant: liveEntryThreshold.signalVariant,
+    minNetFlowW3Sol: liveEntryThreshold.minNetFlowW3Sol,
+    minUniqueBuyersW3: liveEntryThreshold.minUniqueBuyersW3,
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     positionSizeSol: numberEnv('FLOW_LIVE_POSITION_SOL', 0.05, { min: 0.000001 }),
     maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 1, { min: 1, max: 20 }),
@@ -206,9 +231,8 @@ const config = {
   // Research-only execution path. It never creates or signs a transaction.
   signalShadow: {
     enabled: booleanEnv('FLOW_SIGNAL_SHADOW_ENABLED', true),
+    profiles: primaryThresholdProfiles,
     positionSizeSol: numberEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
-    minNetFlowW3Sol: numberEnv('FLOW_SIGNAL_SHADOW_MIN_NETFLOW_W3_SOL', 10, { min: 0 }),
-    minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_MIN_BUYERS_W3', 7, { min: 0 }),
     maxSignalAgeMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     entryDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),

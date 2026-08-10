@@ -442,7 +442,9 @@ function runBacktest(db, options = {}) {
     ? costBreakdown({ ...costs, fixedCostSol: costs.fixedCostSol + retryCostSol })
     : costs;
 
-  const accelerationCondition = signalVariant === 'primary_3w' || signalVariant === '*'
+  const accelerationCondition = signalVariant === 'primary_3w'
+    || signalVariant.startsWith('primary_early_')
+    || signalVariant === '*'
     ? `(@minFlowAccel <= 0 OR (
       (s.flow_accel_1 IS NULL OR s.flow_accel_1 >= @minFlowAccel)
       AND (s.flow_accel_2 IS NULL OR s.flow_accel_2 >= @minFlowAccel)

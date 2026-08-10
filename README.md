@@ -191,26 +191,26 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 
 分析输出包括前 70% / 后 30% 时间外验证、按 Mint 等权收益、收益分位数、最大赢家贡献、去掉最大 1/3/5 笔后的平均收益，以及按 Mint 重采样的 Bootstrap 95% 置信区间。低于实时采集门槛的参数无法从已有数据库恢复；研究阶段应保持 `FLOW_MIN_NET_W3_SOL=1` 的宽口径采集，在回测参数中筛选 W3≥8/10，而不是提前丢弃低门槛信号。
 
-## Primary 信号独立 Shadow 策略
+## Primary Early 多组 Shadow 策略
 
-程序会把自有 `primary_3w` 信号送入完全独立的模拟执行路径。该路径固定为 `SHADOW`，没有交易执行器，也不会读取私钥、签名或发送链上交易。
+程序保留低门槛 `primary_3w` 研究信号，同时在同一个三窗口加速周期内记录三组独立的首次门槛穿越：`primary_early_3_3`、`primary_early_5_4`、`primary_early_7_5`。三条模拟路径固定为 `SHADOW`，没有交易执行器，也不会读取私钥、签名或发送链上交易。
 
-默认规则为：信号所在批次第一笔、W3 NetFlow≥10 SOL、W3 独立 Buyers≥7；信号后200ms开始寻找 Bonding Curve 模拟成交，2秒内没有成交或追价超过10%则不入场。入场后立即启用峰值价格回撤7.5%退出，所有仓位最长60秒。
+默认对照组分别为激进 `3 SOL / 3 Buyers`、均衡 `5 SOL / 4 Buyers` 和保守 `7 SOL / 5 Buyers`。每组在候选周期内只记录第一次穿越；信号后200ms开始寻找 Bonding Curve 模拟成交，2秒内没有成交或追价超过10%则不入场。入场后立即启用峰值价格回撤7.5%退出，所有仓位最长60秒。
 
-模拟仓位、净收益和退出原因保存在 `primary_signal_shadow_positions`。Dashboard 的“实盘交易”页面会把它与真实 Primary 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。默认模拟仓位为0.05 SOL并使用完整成本模型；相关参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量。
+模拟仓位、所属门槛版本、净收益和退出原因保存在 `primary_signal_shadow_positions` 及对应的 `flow_signals`。Dashboard 的“实盘交易”页面会按三组分别统计，并与真实 Primary 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。默认模拟仓位为0.05 SOL并使用完整成本模型；公共执行参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量，均衡组直接复用实盘 `FLOW_LIVE_MIN_*` 门槛。
 
 ## Primary 信号模拟与实盘
 
 实时入场规则固定为：
 
 ```text
-signal_variant = primary_3w
+signal_variant = primary_early_5_4
 AND is_primary = true
-AND W3 NetFlow >= 10 SOL
-AND W3 unique Buyers >= 7
+AND W3 NetFlow >= 5 SOL
+AND W3 unique Buyers >= 4
 ```
 
-每个 Primary 信号批次只允许一次实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件仍完整采集，但不会触发实盘开仓。
+研究引擎仍以 `FLOW_MIN_NET_W3_SOL=1` 保存宽口径 `primary_3w`。实盘门槛在同一候选周期内独立观察，因此即使早期研究信号已经发出，后续第一次达到 `5 SOL / 4 Buyers` 仍会触发；每个候选周期只允许一次均衡组实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件仍完整采集，但不会触发实盘开仓。
 
 执行模块有三种模式：
 
@@ -220,7 +220,7 @@ AND W3 unique Buyers >= 7
 
 实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制，旧的单一 `FLOW_LIVE_SLIPPAGE_PCT` 不再使用。
 
-当前实盘卖出策略固定为 `PRIMARY_IMMEDIATE_TRAILING`：成交后立即以入场价作为首个峰值，持续更新最高观察价格；价格从峰值回撤7.5%时卖出，60秒仍未退出则强制卖出。对应配置为 `FLOW_LIVE_PRIMARY_TRAILING_STOP_PCT` 和 `FLOW_LIVE_PRIMARY_MAX_HOLD_MS`，旧版 Smart SELL、止损和止盈变量不再参与决策。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
+当前实盘卖出策略固定为 `PRIMARY_IMMEDIATE_TRAILING`：链上买入确认后以实际入场价作为首个峰值，确认前观察到的价格不会计入持仓峰值；之后价格从峰值回撤7.5%时卖出，60秒仍未退出则强制卖出。对应配置为 `FLOW_LIVE_PRIMARY_TRAILING_STOP_PCT` 和 `FLOW_LIVE_PRIMARY_MAX_HOLD_MS`，旧版 Smart SELL、止损和止盈变量不再参与决策。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
 
 买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时先查询签名历史和交易钱包的Token余额，只有确认持有Token后才恢复仓位。仍无法确认时保留 `ENTRY_CONFIRMATION_UNKNOWN` 阻止同 Mint 再开仓，但不会盲目发送卖出重试。服务重启时会自动重新核对这类历史卡仓。
 

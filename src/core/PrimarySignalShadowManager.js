@@ -62,7 +62,7 @@ class PrimarySignalShadowManager {
 
   start() {
     const now = this.now();
-    for (const row of this.store.activePrimarySignalShadowPositions()) {
+    for (const row of this.store.activePrimarySignalShadowPositions(this.config.signalVariant)) {
       const position = restoredPosition(row);
       if (position.status === STATUS.PENDING_ENTRY) {
         this.pendingEntries.set(position.mint, position);
@@ -79,13 +79,14 @@ class PrimarySignalShadowManager {
     return {
       enabled: this.config.enabled,
       mode: 'SHADOW',
+      profileId: this.config.profileId,
       activePositions: this.positions.size,
       pendingEntries: this.pendingEntries.size,
       strategy: {
-        name: 'Primary Signal Immediate Trailing Shadow',
+        name: `Primary Early ${this.config.profileId} Immediate Trailing Shadow`,
         ruleVersion: RULE_VERSION,
         entry: {
-          signalVariant: 'primary_3w',
+          signalVariant: this.config.signalVariant,
           minNetFlowW3Sol: this.config.minNetFlowW3Sol,
           minUniqueBuyersW3: this.config.minUniqueBuyersW3,
           maxSignalAgeMs: this.config.maxSignalAgeMs,
@@ -112,7 +113,7 @@ class PrimarySignalShadowManager {
   }
 
   onSignal(signal) {
-    if (!this.config.enabled || !signal?.isPrimary || signal.signalVariant !== 'primary_3w') {
+    if (!this.config.enabled || signal?.signalVariant !== this.config.signalVariant) {
       return null;
     }
     const signalAt = finite(signal.timestampMs);

@@ -6,7 +6,7 @@ const PumpFlowStream = require('./core/PumpFlowStream');
 const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
 const SignalLabeler = require('./core/SignalLabeler');
 const LiveTradingManager = require('./core/LiveTradingManager');
-const { PrimarySignalShadowManager } = require('./core/PrimarySignalShadowManager');
+const { PrimarySignalShadowSuite } = require('./core/PrimarySignalShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -33,7 +33,7 @@ function createRuntime(runtimeConfig = config) {
     executor,
   });
   trader.start();
-  const signalShadow = new PrimarySignalShadowManager({
+  const signalShadow = new PrimarySignalShadowSuite({
     config: runtimeConfig.signalShadow,
     store,
   });
@@ -81,13 +81,15 @@ function createRuntime(runtimeConfig = config) {
   };
 
   engine.on('signal', (signal) => {
-    const saved = persistSignal(signal, 'FLOW_ACCEL_SIGNAL');
-    if (saved) {
-      signalShadow.onSignal(saved);
-      trader.onSignal(saved);
-    }
+    persistSignal(signal, 'FLOW_ACCEL_SIGNAL');
   });
   engine.on('shadowSignal', (signal) => persistSignal(signal, 'FLOW_SHADOW_SIGNAL'));
+  engine.on('primaryThresholdSignal', (signal) => {
+    const saved = persistSignal(signal, 'PRIMARY_THRESHOLD_SIGNAL');
+    if (!saved) return;
+    signalShadow.onSignal(saved);
+    if (saved.signalVariant === runtimeConfig.liveTrading.signalVariant) trader.onSignal(saved);
+  });
 
   stream.on('transaction', (transaction, context) => {
     let events;
@@ -161,6 +163,11 @@ function createRuntime(runtimeConfig = config) {
       `Live entry: Primary W3 net>=${runtimeConfig.liveTrading.minNetFlowW3Sol}SOL, `
       + `buyers>=${runtimeConfig.liveTrading.minUniqueBuyersW3}; `
       + `trailing drawdown=${runtimeConfig.liveTrading.trailingStopPct}% from entry.`,
+    );
+    console.log(
+      `Shadow entry cohorts: ${runtimeConfig.signalShadow.profiles.map((profile) => (
+        `${profile.id}=${profile.minNetFlowW3Sol}SOL/${profile.minUniqueBuyersW3}buyers`
+      )).join(', ')}.`,
     );
     console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `

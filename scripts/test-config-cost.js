@@ -34,8 +34,9 @@ assert.strictEqual(config.backtest.signalCooldownMs, 5_000);
 assert.strictEqual(config.backtest.singlePositionPerMint, true);
 assert.strictEqual(config.liveTrading.enabled, false);
 assert.strictEqual(config.liveTrading.dryRun, true);
-assert.strictEqual(config.liveTrading.minNetFlowW3Sol, 10);
-assert.strictEqual(config.liveTrading.minUniqueBuyersW3, 7);
+assert.strictEqual(config.liveTrading.signalVariant, 'primary_early_5_4');
+assert.strictEqual(config.liveTrading.minNetFlowW3Sol, 5);
+assert.strictEqual(config.liveTrading.minUniqueBuyersW3, 4);
 assert.strictEqual(config.liveTrading.trailingStopPct, 7.5);
 assert.strictEqual(config.liveTrading.maxHoldMs, 60_000);
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);
@@ -46,10 +47,22 @@ assert.strictEqual(config.liveTrading.confirmationCommitment, 'confirmed');
 assert.strictEqual(config.liveTrading.contextSlotRetryCount, 2);
 assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 25);
 assert.strictEqual(config.signalShadow.enabled, true);
-assert.strictEqual(config.signalShadow.minNetFlowW3Sol, 10);
-assert.strictEqual(config.signalShadow.minUniqueBuyersW3, 7);
+assert.deepStrictEqual(
+  config.signalShadow.profiles.map((profile) => [
+    profile.id,
+    profile.signalVariant,
+    profile.minNetFlowW3Sol,
+    profile.minUniqueBuyersW3,
+  ]),
+  [
+    ['aggressive', 'primary_early_3_3', 3, 3],
+    ['balanced', 'primary_early_5_4', 5, 4],
+    ['conservative', 'primary_early_7_5', 7, 5],
+  ],
+);
 assert.strictEqual(config.signalShadow.trailingStopPct, 7.5);
 assert.strictEqual(config.signalShadow.positionSizeSol, 0.05);
 assert.ok(Math.abs(costBreakdown(config.signalShadow.costModel).deterministicCostPct - 3.22) < 1e-12);
+assert.deepStrictEqual(config.strategy.primaryThresholdProfiles, config.signalShadow.profiles);
 
 console.log('test-config-cost: ok');

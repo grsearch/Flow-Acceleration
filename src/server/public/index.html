@@ -230,7 +230,7 @@
             <legend>2 · 买入信号条件</legend>
             <p class="strategy-help">这些字段只使用信号发生时已经可见的数据，适合做样本外验证，不包含未来 Smart Wallet 行为。</p>
             <div class="grid form-grid">
-              <label>信号版本<select name="signalVariant"><option value="primary_3w" selected>主信号 · 三窗口</option><option value="shadow_2w">影子 · 两窗口</option><option value="shadow_netflow_breakout">影子 · 净流入突破</option><option value="*">全部（诊断）</option></select></label>
+              <label>信号版本<select name="signalVariant"><option value="primary_3w" selected>研究主信号 · 三窗口</option><option value="primary_early_3_3">早期阈值 · 激进 3/3</option><option value="primary_early_5_4">早期阈值 · 均衡 5/4</option><option value="primary_early_7_5">早期阈值 · 保守 7/5</option><option value="shadow_2w">影子 · 两窗口</option><option value="shadow_netflow_breakout">影子 · 净流入突破</option><option value="*">全部（诊断）</option></select></label>
               <label>最小 AGE（秒）<input name="minAgeSec" type="number" min="0" step="1" placeholder="不限制"></label>
               <label>最小 Curve（%）<input name="minCurvePct" type="number" min="0" max="100" step="1" placeholder="不限制"></label>
               <label>W3 NetFlow 下限（SOL）<input name="minNetFlowW3" type="number" min="0" step="0.1" value="1"></label>
@@ -308,7 +308,7 @@
         </article>
         <article class="card">
           <p class="eyebrow">Current live strategy</p>
-          <div class="strategy-expression" id="live-strategy-expression">Primary + W3 NetFlow ≥10 SOL + Buyers ≥7 → 入场即激活、峰值回撤7.5%</div>
+          <div class="strategy-expression" id="live-strategy-expression">Primary Early + W3 NetFlow ≥5 SOL + Buyers ≥4 → 入场即激活、峰值回撤7.5%</div>
           <p class="mode-description">页面展示服务器当前实际加载的参数，不是回测表单中的临时设置。完整原始数据始终继续采集。</p>
           <div class="wallet-mini" id="live-monitored-wallets">等待策略配置…</div>
         </article>
@@ -322,10 +322,10 @@
           <h2>Primary 信号模拟策略</h2>
           <p>独立 Shadow 路径，永不签名或发送链上交易</p>
         </div>
-        <div class="strategy-expression" id="signal-shadow-expression">Primary + W3 NetFlow ≥10 SOL + Buyers ≥7 → 立即移动止盈7.5%</div>
+        <div class="strategy-expression" id="signal-shadow-expression">Primary Early Shadow：激进 3/3 · 均衡 5/4 · 保守 7/5</div>
         <div class="grid live-metric-grid" id="signal-shadow-metrics"></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>信号时间</th><th>状态</th><th>Mint</th><th>W3 NetFlow / Buyers</th><th>入场 / 最高 / 出场价</th><th>净收益</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+          <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint</th><th>W3 NetFlow / Buyers</th><th>入场 / 最高 / 出场价</th><th>净收益</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
           <tbody id="signal-shadow-position-rows"></tbody>
         </table></div>
       </article>
@@ -413,7 +413,7 @@
         ['今日 Raw Trades', data.rawTradesToday, '毕业前逐笔链上成交'],
         ['活跃 Token', data.activeTokens, '最近10分钟有成交'],
         ['Candidate', data.candidateCount, '已触发 Activity Wake-Up'],
-        ['Primary Signals', data.flowSignalsToday, `影子信号 ${number(data.shadowSignalsToday)}`],
+        ['Primary Signals', data.flowSignalsToday, `早期阈值 ${number(data.earlyThresholdSignalsToday)} · 影子信号 ${number(data.shadowSignalsToday)}`],
         ['Smart Wallet Trades', data.smartWalletTradesToday, '今日标注事件'],
       ];
       document.querySelector('#overview-metrics').innerHTML = items.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${number(value)}</strong><small>${note}</small></article>`).join('');
@@ -518,7 +518,7 @@
         ['紧急开关', runtime.killSwitchActive ? '<span class="negative">已触发</span>' : '<span class="positive">正常</span>'],
       ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
 
-      document.querySelector('#live-strategy-expression').textContent = `Primary + W3 NetFlow ≥${number(entry.minNetFlowW3Sol,1)} SOL + Buyers ≥${number(entry.minUniqueBuyersW3)} → 入场即激活、峰值回撤${number(exit.trailingStopPct,1)}%`;
+      document.querySelector('#live-strategy-expression').textContent = `Primary Early + W3 NetFlow ≥${number(entry.minNetFlowW3Sol,1)} SOL + Buyers ≥${number(entry.minUniqueBuyersW3)} → 入场即激活、峰值回撤${number(exit.trailingStopPct,1)}%`;
       const wallets = data.monitoredWallets || [];
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>实盘入口只使用 Primary 信号</b><br>Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究数据，不触发开仓。`;
 
@@ -592,7 +592,18 @@
       const exit = strategy.exit || {};
       const risk = strategy.risk || {};
       const stats = data.stats || {};
-      document.querySelector('#signal-shadow-expression').textContent = `Primary + W3 NetFlow ≥${number(entry.minNetFlowW3Sol,1)} SOL + Buyers ≥${number(entry.minUniqueBuyersW3)} → 入场即激活、峰值回撤${number(exit.trailingStopPct,1)}%`;
+      const profileLabels = {
+        primary_early_3_3: '激进 3/3',
+        primary_early_5_4: '均衡 5/4',
+        primary_early_7_5: '保守 7/5',
+      };
+      const runtimeProfiles = runtime.profiles || [];
+      const profileSummary = runtimeProfiles.map(profile => (
+        `${profileLabels[profile.strategy?.entry?.signalVariant] || profile.profileId}: `
+        + `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)} SOL / `
+        + `${number(profile.strategy?.entry?.minUniqueBuyersW3)} Buyers`
+      )).join(' · ');
+      document.querySelector('#signal-shadow-expression').textContent = `${profileSummary || '等待 Shadow 配置'} → 入场即激活、峰值回撤${number(exit.trailingStopPct,1)}%`;
       const metrics = [
         ['运行模式', runtime.enabled ? 'SHADOW' : '关闭', '不会发链上交易'],
         ['策略命中', number(stats.matched), `评估 ${number(stats.evaluated)}`],
@@ -601,26 +612,36 @@
         ['净胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
         ['平均净收益', pct(stats.average_net_return_pct), `成本 ${rate(risk.configuredCostPct)}`],
         ['平均持仓', age(stats.average_hold_ms), `60秒兜底 ${age(exit.maxHoldMs)}`],
+        ...(data.profiles || []).map(profile => [
+          profileLabels[profile.signal_variant] || profile.signal_variant,
+          pct(profile.average_net_return_pct),
+          `已完成 ${number(Number(profile.closed_positions || 0) + Number(profile.no_exit || 0))} · 胜率 ${rate(profile.win_rate_pct)}`,
+        ]),
       ];
       document.querySelector('#signal-shadow-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
 
       const rows = data.positions || [];
       document.querySelector('#signal-shadow-position-rows').innerHTML = rows.length ? rows.map(row => {
         const reason = row.exit_reason || row.rejection_reason || '—';
-        return `<tr><td>${dateTime(row.signal_at)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${number(row.netflow_w3,2)} SOL / ${number(row.unique_buyers_w3)}</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
-      }).join('') : '<tr><td colspan="8" class="empty">等待符合条件的 Primary 信号；完整原始数据仍在持续采集</td></tr>';
+        const profile = profileLabels[row.signal_variant] || row.signal_variant || '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td>${escapeHtml(profile)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${number(row.netflow_w3,2)} SOL / ${number(row.unique_buyers_w3)}</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">等待符合条件的 Primary Early 信号；完整原始数据仍在持续采集</td></tr>';
     }
 
     function renderHealth(data) {
       const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${region.active ? '当前' : '备用'}`).join('<br>') || '未连接';
       const trading = data.trading || { mode: 'DISABLED', activePositions: 0 };
       const signalShadow = data.signalShadow || { mode: 'SHADOW', enabled: false, activePositions: 0, pendingEntries: 0 };
+      const liveEntry = trading.strategy?.entry || {};
+      const shadowRules = (signalShadow.profiles || []).map(profile => (
+        `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)}/${number(profile.strategy?.entry?.minUniqueBuyersW3)}`
+      )).join(' · ') || '3/3 · 5/4 · 7/5';
       const cards = [
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
-        ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Primary Signals', number(data.engine.signalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Primary Signals', number(data.database.primarySignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
-        ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', 'OPEN + Curve + ≥1 SOL + 前置 Buyers≥2'], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
-        ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则', 'W3 Flow≥10 + Buyers≥7'], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
+        ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', `Primary Early ${number(liveEntry.minNetFlowW3Sol,1)} SOL / ${number(liveEntry.minUniqueBuyersW3)} Buyers`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
+        ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');

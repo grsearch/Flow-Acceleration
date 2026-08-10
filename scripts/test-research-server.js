@@ -95,10 +95,10 @@ async function main() {
       `http://127.0.0.1:${port}/api/live-trading`,
     )).json();
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
-    assert.strictEqual(liveTrading.runtime.strategy.entry.signalVariant, 'primary_3w');
+    assert.strictEqual(liveTrading.runtime.strategy.entry.signalVariant, 'primary_early_5_4');
     assert.strictEqual(liveTrading.runtime.strategy.entry.market, 'PUMP_BONDING_CURVE');
-    assert.strictEqual(liveTrading.runtime.strategy.entry.minNetFlowW3Sol, 10);
-    assert.strictEqual(liveTrading.runtime.strategy.entry.minUniqueBuyersW3, 7);
+    assert.strictEqual(liveTrading.runtime.strategy.entry.minNetFlowW3Sol, 5);
+    assert.strictEqual(liveTrading.runtime.strategy.entry.minUniqueBuyersW3, 4);
     assert.strictEqual(
       liveTrading.runtime.strategy.exit.policy,
       'PRIMARY_IMMEDIATE_TRAILING',
@@ -116,11 +116,20 @@ async function main() {
       `http://127.0.0.1:${port}/api/primary-signal-shadow`,
     )).json();
     assert.strictEqual(signalShadow.runtime.mode, 'SHADOW');
-    assert.strictEqual(signalShadow.runtime.strategy.entry.minNetFlowW3Sol, 10);
-    assert.strictEqual(signalShadow.runtime.strategy.entry.minUniqueBuyersW3, 7);
+    assert.strictEqual(signalShadow.runtime.strategy.entry.minNetFlowW3Sol, 5);
+    assert.strictEqual(signalShadow.runtime.strategy.entry.minUniqueBuyersW3, 4);
     assert.strictEqual(signalShadow.runtime.strategy.exit.trailingActivationPct, 0);
     assert.strictEqual(signalShadow.runtime.strategy.exit.trailingStopPct, 7.5);
     assert.strictEqual(signalShadow.runtime.strategy.risk.sendsTransactions, false);
+    assert.deepStrictEqual(
+      signalShadow.runtime.profiles.map((profile) => [
+        profile.profileId,
+        profile.strategy.entry.minNetFlowW3Sol,
+        profile.strategy.entry.minUniqueBuyersW3,
+      ]),
+      [['aggressive', 3, 3], ['balanced', 5, 4], ['conservative', 7, 5]],
+    );
+    assert.ok(Array.isArray(signalShadow.profiles));
     assert.ok(Array.isArray(signalShadow.positions));
     const dynamicResponse = await fetch(
       `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&stopLossPct=3`
