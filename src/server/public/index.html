@@ -286,7 +286,7 @@
         </form>
       </article>
       <div class="notice" id="backtest-warning" hidden></div>
-      <div class="grid result-grid" id="backtest-results"></div>
+      <div class="grid result-grid" id="backtest-results"><div class="card empty">点击“运行回测”后计算结果；页面加载时不再自动执行回测。</div></div>
     </section>
 
     <section class="panel" role="tabpanel" id="wallets" hidden>
@@ -420,9 +420,14 @@
     async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
 
     const tabs = [...document.querySelectorAll('[role="tab"]')];
+    let activeTabId = 'overview';
+    let refreshInFlight = false;
+    let refreshQueued = false;
     function selectTab(id) {
+      activeTabId = id;
       tabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.getAttribute('aria-controls') === id)));
       document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== id; });
+      void refresh(true);
     }
     tabs.forEach((tab, index) => {
       tab.addEventListener('click', () => selectTab(tab.getAttribute('aria-controls')));
@@ -764,22 +769,51 @@
       catch (error) { target.innerHTML = `<div class="card empty error">回测失败：${escapeHtml(error.message)}</div>`; }
     });
 
-    async function refresh() {
-      await Promise.allSettled([
-        json('/api/overview').then(renderOverview),
-        json('/api/signals?limit=200').then(renderSignals),
-        json('/api/smart-wallets').then(renderWallets),
-        json('/api/signal-repetition').then(renderSignalQuality),
-        json('/api/live-trading?positionLimit=100&orderLimit=100&decisionLimit=100').then(renderLiveTrading),
-        json('/api/primary-signal-shadow?positionLimit=200').then(renderPrimarySignalShadow),
-        json('/api/flow-first-shadow?positionLimit=200').then(renderFlowFirstShadow),
-        json('/api/smart-pullback-shadow?positionLimit=200').then(renderSmartPullbackShadow),
-        json('/api/health').then(renderHealth),
-      ]);
+    async function refresh(force = false) {
+      if (document.hidden && !force) return;
+      if (refreshInFlight) {
+        if (force) refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      const requestsByTab = {
+        overview: () => [
+          json('/api/overview').then(renderOverview),
+        ],
+        signals: () => [
+          json('/api/signals?limit=50').then(renderSignals),
+        ],
+        backtest: () => [],
+        wallets: () => [
+          json('/api/smart-wallets').then(renderWallets),
+          json('/api/signal-repetition').then(renderSignalQuality),
+        ],
+        'live-trading': () => [
+          json('/api/live-trading?positionLimit=30&orderLimit=30&decisionLimit=30').then(renderLiveTrading),
+          json('/api/primary-signal-shadow?positionLimit=30').then(renderPrimarySignalShadow),
+          json('/api/flow-first-shadow?positionLimit=30').then(renderFlowFirstShadow),
+          json('/api/smart-pullback-shadow?positionLimit=30').then(renderSmartPullbackShadow),
+        ],
+        health: () => [
+          json('/api/health').then(renderHealth),
+        ],
+      };
+      try {
+        const createRequests = requestsByTab[activeTabId] || (() => []);
+        await Promise.allSettled(createRequests());
+      } finally {
+        refreshInFlight = false;
+        if (refreshQueued) {
+          refreshQueued = false;
+          void refresh();
+        }
+      }
     }
-    document.querySelector('#backtest-form').requestSubmit();
-    refresh();
-    setInterval(refresh, 5000);
+    void refresh();
+    setInterval(() => void refresh(), 5000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) void refresh(true);
+    });
   </script>
 </body>
 </html>

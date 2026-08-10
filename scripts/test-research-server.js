@@ -41,6 +41,13 @@ async function main() {
   assert.ok(dashboard.includes('id="smart-pullback-metrics"'));
   assert.ok(dashboard.includes('id="smart-pullback-position-rows"'));
   assert.ok(dashboard.includes('Current live strategy'));
+  assert.ok(dashboard.includes("let activeTabId = 'overview';"));
+  assert.ok(dashboard.includes('refreshInFlight'));
+  assert.ok(dashboard.includes('if (document.hidden && !force) return;'));
+  assert.ok(dashboard.includes("json('/api/signals?limit=50')"));
+  assert.ok(dashboard.includes('positionLimit=30&orderLimit=30&decisionLimit=30'));
+  assert.ok(dashboard.includes("document.addEventListener('visibilitychange'"));
+  assert.ok(!dashboard.includes("document.querySelector('#backtest-form').requestSubmit();"));
 
   const runtimeConfig = {
     ...config,
@@ -55,6 +62,14 @@ async function main() {
     },
   };
   const runtime = createRuntime(runtimeConfig);
+  let dashboardCacheComputations = 0;
+  const cachedDashboardValue = () => {
+    dashboardCacheComputations += 1;
+    return dashboardCacheComputations;
+  };
+  assert.strictEqual(runtime.store._cachedDashboardStats('test:dashboard', 15_000, cachedDashboardValue), 1);
+  assert.strictEqual(runtime.store._cachedDashboardStats('test:dashboard', 15_000, cachedDashboardValue), 1);
+  assert.strictEqual(dashboardCacheComputations, 1);
   const entryLookupPlan = runtime.store.db.prepare(`
     EXPLAIN QUERY PLAN
     SELECT timestamp_ms, price, market
