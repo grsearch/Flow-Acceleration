@@ -377,7 +377,7 @@
     };
     function recordTone(status) {
       if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED'].includes(status)) return 'good';
-      if (['OPENING','EXITING','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','PRICE_JUMP','NO_ENTRY'].includes(status)) return 'warn';
+      if (['OPENING','EXITING','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','PRICE_JUMP','NO_ENTRY'].includes(status)) return 'warn';
       if (String(status || '').includes('FAILED') || ['RISK_REJECTED','NO_EXIT'].includes(status)) return 'bad';
       return 'neutral';
     }
@@ -551,7 +551,7 @@
         ]],
         ['仓位与风控', [
           ['单笔仓位', `${number(risk.positionSizeSol,4)} SOL`], ['最大并发', `${number(risk.maxConcurrentPositions)} 仓`],
-          ['每日开仓上限', `${number(risk.maxDailySpendSol,4)} SOL`], ['钱包最低保留', `${number(risk.minWalletReserveSol,4)} SOL`],
+          ['每日开仓额度', '不设上限'], ['钱包最低保留', `${number(risk.minWalletReserveSol,4)} SOL`],
           ['同 Mint 冷却', age(risk.mintCooldownMs)], ['当前活动仓位', number(runtime.activePositions)],
           ['紧急开关', runtime.killSwitchActive ? '已禁止开仓' : '正常'], ['当前模式', mode],
         ]],
@@ -560,6 +560,7 @@
           ['优先费', `${number(execution.priorityFeeMicroLamports)} μLamports`], ['读取 → 确认', commitmentPath],
           ['Slot 同步重试', `${number(execution.contextSlotRetryCount)} × ${number(execution.contextSlotRetryDelayMs)} ms`],
           ['买入状态核对', `${number(execution.entryReconcileCount)} × ${number(execution.entryReconcileDelayMs)} ms`], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
+          ['卖出数量', '链上当前余额 100%'], ['卖后余额核对', '残余自动重试'],
         ]],
       ];
       document.querySelector('#live-strategy-cards').innerHTML = cards.map(([title,rows]) => `<article class="card strategy-card"><h3>${title}</h3><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${escapeHtml(value)}</b></div>`).join('')}</div></article>`).join('');

@@ -8,6 +8,7 @@ const Database = require('better-sqlite3');
 const { PublicKey, TransactionInstruction } = require('@solana/web3.js');
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const { PUMP_PROGRAM_ID } = require('@pump-fun/pump-sdk');
+const BN = require('bn.js');
 const LiveTradingManager = require('../src/core/LiveTradingManager');
 const {
   PumpTradeExecutor,
@@ -108,7 +109,6 @@ function managerConfig(overrides = {}) {
     maxSignalAgeMs: 1_500,
     positionSizeSol: 0.05,
     maxConcurrentPositions: 1,
-    maxDailySpendSol: 1,
     minWalletReserveSol: 0.05,
     mintCooldownMs: 600_000,
     maxEntryPriceJumpPct: 10,
@@ -258,6 +258,56 @@ async function main() {
     (error) => error.code === 'RPC_CONTEXT_BEHIND' && error.contextRetries === 0,
   );
 
+  const sellExecutor = Object.create(PumpTradeExecutor.prototype);
+  const sellMint = PublicKey.unique();
+  const sellCurve = {
+    complete: false,
+    tokenTotalSupply: new BN('1000000000000000'),
+    virtualTokenReserves: new BN('1000000000000'),
+    virtualQuoteReserves: new BN('100000000000'),
+    creator: PublicKey.unique(),
+    isMayhemMode: false,
+  };
+  let sellBalanceReads = 0;
+  let instructionSellRaw = null;
+  sellExecutor.config = { sellSlippagePct: 15 };
+  sellExecutor.confirmationCommitment = 'confirmed';
+  sellExecutor.signer = { publicKey: PublicKey.unique() };
+  sellExecutor._tokenProgram = async () => TOKEN_PROGRAM_ID;
+  sellExecutor._tokenBalanceRaw = async (mint, tokenProgram, commitment) => {
+    assert.ok(mint.equals(sellMint));
+    assert.ok(tokenProgram.equals(TOKEN_PROGRAM_ID));
+    sellBalanceReads += 1;
+    if (sellBalanceReads === 1) return 1_005_000n;
+    assert.strictEqual(commitment, 'confirmed');
+    return 0n;
+  };
+  sellExecutor._protocolState = async () => ({
+    global: { feeBasisPoints: new BN(0), creatorFeeBasisPoints: new BN(0) },
+    feeConfig: null,
+  });
+  sellExecutor.onlinePump = {
+    async fetchSellState() {
+      return { bondingCurve: sellCurve, bondingCurveAccountInfo: {} };
+    },
+  };
+  sellExecutor.pump = {
+    async sellV2Instructions({ amount }) {
+      instructionSellRaw = amount.toString();
+      return [];
+    },
+  };
+  sellExecutor._send = async () => 'sell-all-signature';
+  const sellAll = await sellExecutor.sell({
+    mint: sellMint.toBase58(),
+    tokenAmountRaw: '1000000',
+  });
+  assert.strictEqual(instructionSellRaw, '1005000',
+    'sell must use the complete live wallet balance, not the stale entry amount');
+  assert.strictEqual(sellAll.tokenAmountRaw, '1005000');
+  assert.strictEqual(sellAll.remainingTokenAmountRaw, '0');
+  assert.strictEqual(sellAll.balanceVerified, true);
+
   const confirmedFailure = confirmedTransactionFailure(
     'failed-chain-signature',
     { InstructionError: [3, { Custom: 6002 }] },
@@ -307,7 +357,7 @@ async function main() {
 
   const store = makeStore();
   let now = 10_000;
-  const calls = { buy: 0, buyRequest: null, sell: 0 };
+  const calls = { buy: 0, buyRequest: null, sell: 0, sellRequests: [] };
   const executor = {
     async buy(request) {
       calls.buy += 1;
@@ -322,11 +372,18 @@ async function main() {
         },
       };
     },
-    async sell() {
+    async sell(request) {
       calls.sell += 1;
+      calls.sellRequests.push(request);
+      if (calls.sell === 1) {
+        return {
+          signature: 'live-sell-partial-signature', venue: 'PUMP_BONDING_CURVE',
+          tokenAmountRaw: '5000000', remainingTokenAmountRaw: '1000', balanceVerified: true,
+        };
+      }
       return {
         signature: 'live-sell-signature', venue: 'PUMP_BONDING_CURVE',
-        tokenAmountRaw: '5000000',
+        tokenAmountRaw: '1000', remainingTokenAmountRaw: '0', balanceVerified: true,
       };
     },
   };
@@ -365,7 +422,11 @@ async function main() {
     mint: 'primary-mint', market: 'PUMP_BONDING_CURVE', price: 0.011, timestampMs: now,
   });
   await Promise.allSettled([...manager.pending]);
-  assert.strictEqual(calls.sell, 1);
+  assert.strictEqual(calls.sell, 2, 'a confirmed residual balance must be sold by the retry');
+  assert.deepStrictEqual(calls.sellRequests, [
+    { mint: 'primary-mint' },
+    { mint: 'primary-mint' },
+  ]);
   assert.strictEqual(store.activeLivePositions().length, 0);
   assert.strictEqual(
     store.db.prepare('SELECT status FROM live_positions').get().status,
@@ -384,9 +445,18 @@ async function main() {
   assert.strictEqual(dashboard.stats.matched, 1);
   assert.strictEqual(dashboard.stats.positions, 1);
   assert.strictEqual(dashboard.stats.closed_positions, 1);
-  assert.strictEqual(dashboard.stats.confirmed_orders, 2);
+  assert.strictEqual(dashboard.stats.confirmed_orders, 3);
   assert.strictEqual(dashboard.positions[0].status, 'CLOSED');
-  assert.strictEqual(dashboard.orders.length, 2);
+  assert.strictEqual(dashboard.orders.length, 3);
+  const dashboardSells = dashboard.orders.filter((order) => order.side === 'SELL');
+  assert.deepStrictEqual(
+    dashboardSells.map((order) => order.status).sort(),
+    ['CONFIRMED', 'CONFIRMED_PARTIAL'],
+  );
+  assert.deepStrictEqual(
+    dashboardSells.map((order) => order.requested_token_raw).sort(),
+    ['1000', '5000000'],
+  );
   const dashboardBuy = dashboard.orders.find((order) => order.side === 'BUY');
   assert.strictEqual(dashboardBuy.execution.buyMode, 'EXACT_QUOTE_IN_V2_FIXED_SOL');
   assert.strictEqual(dashboardBuy.execution.timelineMs.submitted_ms, 12);
@@ -404,6 +474,7 @@ async function main() {
   assert.strictEqual(health.strategy.exit.trailingActivationPct, 0);
   assert.strictEqual(health.strategy.exit.trailingStopPct, 7.5);
   assert.strictEqual(health.strategy.risk.positionSizeSol, 0.05);
+  assert.strictEqual(health.strategy.risk.maxDailySpendSol, undefined);
   assert.strictEqual(health.strategy.execution.buySlippagePct, 10);
   assert.strictEqual(health.strategy.execution.sellSlippagePct, 15);
   assert.strictEqual(health.strategy.execution.buyMode, 'EXACT_QUOTE_IN_V2_FIXED_SOL');
