@@ -35,6 +35,9 @@ async function main() {
   assert.ok(!dashboard.includes('每日开仓上限'));
   assert.ok(dashboard.includes('id="signal-shadow-position-rows"'));
   assert.ok(dashboard.includes('id="signal-shadow-metrics"'));
+  assert.ok(dashboard.includes('id="flow-first-metrics"'));
+  assert.ok(dashboard.includes('id="flow-first-position-rows"'));
+  assert.ok(dashboard.includes('Flow-First Shadow C'));
   assert.ok(dashboard.includes('id="smart-pullback-metrics"'));
   assert.ok(dashboard.includes('id="smart-pullback-position-rows"'));
   assert.ok(dashboard.includes('Current live strategy'));
@@ -87,6 +90,7 @@ async function main() {
       '/api/signal-repetition',
       '/api/live-trading',
       '/api/primary-signal-shadow',
+      '/api/flow-first-shadow',
       '/api/smart-pullback-shadow',
       '/api/health',
     ];
@@ -137,6 +141,26 @@ async function main() {
     );
     assert.ok(Array.isArray(signalShadow.profiles));
     assert.ok(Array.isArray(signalShadow.positions));
+    const flowFirst = await (await fetch(
+      `http://127.0.0.1:${port}/api/flow-first-shadow`,
+    )).json();
+    assert.strictEqual(flowFirst.runtime.mode, 'SHADOW_C');
+    assert.strictEqual(flowFirst.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      flowFirst.runtime.cohorts.map((cohort) => [
+        cohort.cohortId,
+        cohort.strategy.exit.policy,
+        cohort.strategy.exit.fixedHoldMs,
+        cohort.strategy.exit.trailingStopPct,
+      ]),
+      [
+        ['C5', 'FIXED_HOLD', 5_000, null],
+        ['C75', 'IMMEDIATE_TRAILING', null, 7.5],
+        ['C125', 'IMMEDIATE_TRAILING', null, 12.5],
+      ],
+    );
+    assert.ok(Array.isArray(flowFirst.cohorts));
+    assert.ok(Array.isArray(flowFirst.positions));
     const smartPullback = await (await fetch(
       `http://127.0.0.1:${port}/api/smart-pullback-shadow`,
     )).json();

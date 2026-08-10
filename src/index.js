@@ -7,6 +7,7 @@ const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
 const SignalLabeler = require('./core/SignalLabeler');
 const LiveTradingManager = require('./core/LiveTradingManager');
 const { PrimarySignalShadowSuite } = require('./core/PrimarySignalShadowSuite');
+const { FlowFirstShadowSuite } = require('./core/FlowFirstShadowSuite');
 const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
@@ -39,6 +40,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   signalShadow.start();
+  const flowFirstShadow = new FlowFirstShadowSuite({
+    config: runtimeConfig.flowFirstShadow,
+    store,
+  });
+  flowFirstShadow.start();
   const smartPullbackShadow = new SmartPullbackShadowSuite({
     config: runtimeConfig.smartPullbackShadow,
     store,
@@ -52,6 +58,7 @@ function createRuntime(runtimeConfig = config) {
     labeler,
     trader,
     signalShadow,
+    flowFirstShadow,
     smartPullbackShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
@@ -88,7 +95,8 @@ function createRuntime(runtimeConfig = config) {
   };
 
   engine.on('signal', (signal) => {
-    persistSignal(signal, 'FLOW_ACCEL_SIGNAL');
+    const saved = persistSignal(signal, 'FLOW_ACCEL_SIGNAL');
+    if (saved) flowFirstShadow.onSignal(saved);
   });
   engine.on('shadowSignal', (signal) => persistSignal(signal, 'FLOW_SHADOW_SIGNAL'));
   engine.on('primaryThresholdSignal', (signal) => {
@@ -146,6 +154,7 @@ function createRuntime(runtimeConfig = config) {
         store.queueRawTrade(trade);
         signalShadow.observeTrade(trade);
         engine.handleTrade(trade, store.getToken(trade.mint));
+        flowFirstShadow.observeTrade(trade);
         labeler.onTrade(trade);
         trader.observeTrade(trade);
         if (isSmartWalletTrade) {
@@ -184,6 +193,13 @@ function createRuntime(runtimeConfig = config) {
       )).join(', ')}.`,
     );
     console.log(
+      `Flow-First Shadow C: ${runtimeConfig.flowFirstShadow.cohorts.map((cohort) => (
+        cohort.exitMode === 'FIXED_HOLD'
+          ? `${cohort.id}=hold${cohort.fixedHoldMs}ms`
+          : `${cohort.id}=trailing${cohort.trailingStopPct}%`
+      )).join(', ')}; one entry per Primary episode; sends transactions=false.`,
+    );
+    console.log(
       `Smart pullback Shadow A/B: ${runtimeConfig.smartPullbackShadow.cohorts.map((cohort) => (
         `${cohort.id}=trailing${cohort.trailingStopPct}%`
       )).join(', ')}; sends transactions=false.`,
@@ -204,6 +220,7 @@ function createRuntime(runtimeConfig = config) {
       engine.cleanup(now);
       labeler.advanceTime(now);
       signalShadow.advanceTime(now);
+      flowFirstShadow.advanceTime(now);
       smartPullbackShadow.advanceTime(now);
       const graduatedPending = labeler.pendingMints().filter((mint) => store.getToken(mint)?.graduated_at);
       stream.setAmmMints(graduatedPending);
@@ -233,6 +250,7 @@ function createRuntime(runtimeConfig = config) {
     await stream.stop();
     await trader.stop();
     signalShadow.stop();
+    flowFirstShadow.stop();
     smartPullbackShadow.stop();
     await server.stop();
     store.close();
@@ -247,13 +265,14 @@ function createRuntime(runtimeConfig = config) {
       database: store.health(),
       trading: trader.health(),
       signalShadow: signalShadow.health(),
+      flowFirstShadow: flowFirstShadow.health(),
       smartPullbackShadow: smartPullbackShadow.health(),
     };
   }
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
-    smartPullbackShadow,
+    flowFirstShadow, smartPullbackShadow,
   };
 }
 

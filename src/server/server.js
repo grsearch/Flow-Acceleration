@@ -24,7 +24,7 @@ function boolean(value, fallback = false) {
 class ResearchServer {
   constructor({
     config, store, engine, stream, labeler, trader = null, signalShadow = null,
-    smartPullbackShadow = null,
+    flowFirstShadow = null, smartPullbackShadow = null,
   }) {
     this.config = config;
     this.store = store;
@@ -33,6 +33,7 @@ class ResearchServer {
     this.labeler = labeler;
     this.trader = trader;
     this.signalShadow = signalShadow;
+    this.flowFirstShadow = flowFirstShadow;
     this.smartPullbackShadow = smartPullbackShadow;
     this.app = express();
     this.httpServer = null;
@@ -194,6 +195,22 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/flow-first-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.flowFirstShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_C',
+          sendsTransactions: false,
+          cohorts: [],
+        },
+        ...this.store.flowFirstShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 200),
+          bigWinnerPct: this.config.flowFirstShadow?.bigWinnerPct ?? 50,
+        }),
+      });
+    });
+
     this.app.get('/api/smart-pullback-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -225,6 +242,7 @@ class ResearchServer {
         database: this.store.health(),
         trading: this.trader?.health() || null,
         signalShadow: this.signalShadow?.health() || null,
+        flowFirstShadow: this.flowFirstShadow?.health() || null,
         smartPullbackShadow: this.smartPullbackShadow?.health() || null,
       });
     });
