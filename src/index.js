@@ -7,6 +7,7 @@ const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
 const SignalLabeler = require('./core/SignalLabeler');
 const LiveTradingManager = require('./core/LiveTradingManager');
 const { PrimarySignalShadowSuite } = require('./core/PrimarySignalShadowSuite');
+const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -38,6 +39,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   signalShadow.start();
+  const smartPullbackShadow = new SmartPullbackShadowSuite({
+    config: runtimeConfig.smartPullbackShadow,
+    store,
+  });
+  smartPullbackShadow.start();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
@@ -46,6 +52,7 @@ function createRuntime(runtimeConfig = config) {
     labeler,
     trader,
     signalShadow,
+    smartPullbackShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
@@ -142,8 +149,12 @@ function createRuntime(runtimeConfig = config) {
         labeler.onTrade(trade);
         trader.observeTrade(trade);
         if (isSmartWalletTrade) {
-          store.recordSmartWalletEvent(trade);
+          const smartEvent = store.recordSmartWalletEvent(trade);
+          if (smartEvent?.inserted && trade.side === 'BUY') {
+            smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id });
+          }
         }
+        smartPullbackShadow.observeTrade(trade);
       } catch (error) {
         runtimeMetrics.parseErrors += 1;
         console.error(`[Runtime] ${event.type} failed:`, error.message);
@@ -159,6 +170,9 @@ function createRuntime(runtimeConfig = config) {
     await server.start();
     console.log(`Flow Acceleration dashboard: http://127.0.0.1:${runtimeConfig.server.port}`);
     console.log(`Trading mode: ${trader.mode}. Full research capture remains enabled.`);
+    if (runtimeConfig.liveTrading.safetyLock) {
+      console.log('Live trading safety lock: ON. Signing and chain submission are disabled.');
+    }
     console.log(
       `Live entry: Primary W3 net>=${runtimeConfig.liveTrading.minNetFlowW3Sol}SOL, `
       + `buyers>=${runtimeConfig.liveTrading.minUniqueBuyersW3}; `
@@ -168,6 +182,11 @@ function createRuntime(runtimeConfig = config) {
       `Shadow entry cohorts: ${runtimeConfig.signalShadow.profiles.map((profile) => (
         `${profile.id}=${profile.minNetFlowW3Sol}SOL/${profile.minUniqueBuyersW3}buyers`
       )).join(', ')}.`,
+    );
+    console.log(
+      `Smart pullback Shadow A/B: ${runtimeConfig.smartPullbackShadow.cohorts.map((cohort) => (
+        `${cohort.id}=trailing${cohort.trailingStopPct}%`
+      )).join(', ')}; sends transactions=false.`,
     );
     console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
@@ -185,6 +204,7 @@ function createRuntime(runtimeConfig = config) {
       engine.cleanup(now);
       labeler.advanceTime(now);
       signalShadow.advanceTime(now);
+      smartPullbackShadow.advanceTime(now);
       const graduatedPending = labeler.pendingMints().filter((mint) => store.getToken(mint)?.graduated_at);
       stream.setAmmMints(graduatedPending);
     }, 1_000);
@@ -213,6 +233,7 @@ function createRuntime(runtimeConfig = config) {
     await stream.stop();
     await trader.stop();
     signalShadow.stop();
+    smartPullbackShadow.stop();
     await server.stop();
     store.close();
   }
@@ -226,11 +247,13 @@ function createRuntime(runtimeConfig = config) {
       database: store.health(),
       trading: trader.health(),
       signalShadow: signalShadow.health(),
+      smartPullbackShadow: smartPullbackShadow.health(),
     };
   }
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
+    smartPullbackShadow,
   };
 }
 

@@ -22,7 +22,10 @@ function boolean(value, fallback = false) {
 }
 
 class ResearchServer {
-  constructor({ config, store, engine, stream, labeler, trader = null, signalShadow = null }) {
+  constructor({
+    config, store, engine, stream, labeler, trader = null, signalShadow = null,
+    smartPullbackShadow = null,
+  }) {
     this.config = config;
     this.store = store;
     this.engine = engine;
@@ -30,6 +33,7 @@ class ResearchServer {
     this.labeler = labeler;
     this.trader = trader;
     this.signalShadow = signalShadow;
+    this.smartPullbackShadow = smartPullbackShadow;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -190,6 +194,22 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/smart-pullback-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.smartPullbackShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_AB',
+          sendsTransactions: false,
+          cohorts: [],
+        },
+        ...this.store.smartPullbackShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 200),
+          bigWinnerPct: this.config.smartPullbackShadow?.bigWinnerPct ?? 50,
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -205,6 +225,7 @@ class ResearchServer {
         database: this.store.health(),
         trading: this.trader?.health() || null,
         signalShadow: this.signalShadow?.health() || null,
+        smartPullbackShadow: this.smartPullbackShadow?.health() || null,
       });
     });
 

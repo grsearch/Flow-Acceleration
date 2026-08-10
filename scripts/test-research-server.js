@@ -35,6 +35,8 @@ async function main() {
   assert.ok(!dashboard.includes('每日开仓上限'));
   assert.ok(dashboard.includes('id="signal-shadow-position-rows"'));
   assert.ok(dashboard.includes('id="signal-shadow-metrics"'));
+  assert.ok(dashboard.includes('id="smart-pullback-metrics"'));
+  assert.ok(dashboard.includes('id="smart-pullback-position-rows"'));
   assert.ok(dashboard.includes('Current live strategy'));
 
   const runtimeConfig = {
@@ -85,6 +87,7 @@ async function main() {
       '/api/signal-repetition',
       '/api/live-trading',
       '/api/primary-signal-shadow',
+      '/api/smart-pullback-shadow',
       '/api/health',
     ];
 
@@ -97,6 +100,7 @@ async function main() {
       `http://127.0.0.1:${port}/api/live-trading`,
     )).json();
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
+    assert.strictEqual(liveTrading.runtime.safetyLock, true);
     assert.strictEqual(liveTrading.runtime.strategy.entry.signalVariant, 'primary_early_5_4');
     assert.strictEqual(liveTrading.runtime.strategy.entry.market, 'PUMP_BONDING_CURVE');
     assert.strictEqual(liveTrading.runtime.strategy.entry.minNetFlowW3Sol, 5);
@@ -133,6 +137,20 @@ async function main() {
     );
     assert.ok(Array.isArray(signalShadow.profiles));
     assert.ok(Array.isArray(signalShadow.positions));
+    const smartPullback = await (await fetch(
+      `http://127.0.0.1:${port}/api/smart-pullback-shadow`,
+    )).json();
+    assert.strictEqual(smartPullback.runtime.mode, 'SHADOW_AB');
+    assert.strictEqual(smartPullback.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      smartPullback.runtime.cohorts.map((cohort) => [
+        cohort.cohortId,
+        cohort.strategy.exit.trailingStopPct,
+      ]),
+      [['A', 7.5], ['B', 12.5]],
+    );
+    assert.ok(Array.isArray(smartPullback.cohorts));
+    assert.ok(Array.isArray(smartPullback.positions));
     const dynamicResponse = await fetch(
       `http://127.0.0.1:${port}/api/backtest?takeProfitPct=5&stopLossPct=3`
       + '&trailingStopPct=2&exitRetryCount=1&splitRatio=0.6'

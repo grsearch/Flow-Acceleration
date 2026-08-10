@@ -32,6 +32,15 @@ function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function liveTradingGuard(requestedEnabled, safetyLock, dryRun) {
+  return {
+    enabled: Boolean(requestedEnabled) && !Boolean(safetyLock),
+    requestedEnabled: Boolean(requestedEnabled),
+    safetyLock: Boolean(safetyLock),
+    dryRun: Boolean(safetyLock) || Boolean(dryRun),
+  };
+}
+
 function normalizeEndpoint(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -98,6 +107,15 @@ const primaryThresholdProfiles = [
     minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_CONSERVATIVE_MIN_BUYERS_W3', 5, { min: 0 }),
   },
 ];
+const liveTradingRequested = booleanEnv('FLOW_LIVE_TRADING_ENABLED', false);
+// Safety lock defaults to ON so an existing server .env with live trading enabled
+// cannot resume signing after this research-only A/B release is deployed.
+const liveTradingSafetyLock = booleanEnv('FLOW_LIVE_TRADING_SAFETY_LOCK', true);
+const guardedLiveTrading = liveTradingGuard(
+  liveTradingRequested,
+  liveTradingSafetyLock,
+  booleanEnv('FLOW_LIVE_DRY_RUN', true),
+);
 
 const config = {
   pump: {
@@ -166,8 +184,7 @@ const config = {
   ]),
 
   liveTrading: {
-    enabled: booleanEnv('FLOW_LIVE_TRADING_ENABLED', false),
-    dryRun: booleanEnv('FLOW_LIVE_DRY_RUN', true),
+    ...guardedLiveTrading,
     rpcUrl: process.env.FLOW_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
     signalVariant: liveEntryThreshold.signalVariant,
@@ -254,6 +271,67 @@ const config = {
     }),
   },
 
+  // Smart Wallet pullback A/B research. This path only records simulated
+  // positions and never owns an executor or signing key.
+  smartPullbackShadow: {
+    enabled: booleanEnv('FLOW_SMART_PULLBACK_SHADOW_ENABLED', true),
+    minSmartBuySol: numberEnv('FLOW_SMART_PULLBACK_MIN_BUY_SOL', 0.1, { min: 0.000001 }),
+    episodeGapMs: integerEnv('FLOW_SMART_PULLBACK_EPISODE_GAP_MS', 30_000, { min: 1_000 }),
+    confirmationWindowMs: integerEnv(
+      'FLOW_SMART_PULLBACK_CONFIRMATION_WINDOW_MS',
+      15_000,
+      { min: 1_000 },
+    ),
+    pullbackPct: numberEnv('FLOW_SMART_PULLBACK_DRAWDOWN_PCT', 2.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    reboundPct: numberEnv('FLOW_SMART_PULLBACK_REBOUND_PCT', 7.5, {
+      min: 0.1,
+      max: 500,
+    }),
+    minReboundBuyers: integerEnv('FLOW_SMART_PULLBACK_MIN_REBOUND_BUYERS', 1, { min: 1 }),
+    maxEntryVsSmartBuyPct: numberEnv('FLOW_SMART_PULLBACK_MAX_ENTRY_VS_SMART_PCT', 2, {
+      min: 0,
+      max: 100,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_PULLBACK_MAX_CONFIRM_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    positionSizeSol: numberEnv('FLOW_SMART_PULLBACK_POSITION_SOL', 0.05, { min: 0.000001 }),
+    entryDelayMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxHoldMs: integerEnv('FLOW_SMART_PULLBACK_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    bigWinnerPct: numberEnv('FLOW_SMART_PULLBACK_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'A',
+        label: 'A · Trailing 7.5%',
+        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_A_TRAILING_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'B',
+        label: 'B · Trailing 12.5%',
+        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_B_TRAILING_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_SMART_PULLBACK_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),
@@ -296,6 +374,7 @@ function validateConfig() {
 module.exports = {
   config,
   normalizeEndpoint,
+  liveTradingGuard,
   validateConfig,
   streamTokenFor,
 };

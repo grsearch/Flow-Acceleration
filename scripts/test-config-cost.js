@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { config, normalizeEndpoint } = require('../src/config');
+const { config, normalizeEndpoint, liveTradingGuard } = require('../src/config');
 const { costBreakdown, expectedNetReturnPct } = require('../src/core/CostModel');
 
 assert.strictEqual(
@@ -33,6 +33,8 @@ assert.strictEqual(config.backtest.exitExecutionDelayMs, 200);
 assert.strictEqual(config.backtest.signalCooldownMs, 5_000);
 assert.strictEqual(config.backtest.singlePositionPerMint, true);
 assert.strictEqual(config.liveTrading.enabled, false);
+assert.strictEqual(config.liveTrading.requestedEnabled, false);
+assert.strictEqual(config.liveTrading.safetyLock, true);
 assert.strictEqual(config.liveTrading.dryRun, true);
 assert.strictEqual(config.liveTrading.signalVariant, 'primary_early_5_4');
 assert.strictEqual(config.liveTrading.minNetFlowW3Sol, 5);
@@ -65,5 +67,32 @@ assert.strictEqual(config.signalShadow.trailingStopPct, 7.5);
 assert.strictEqual(config.signalShadow.positionSizeSol, 0.05);
 assert.ok(Math.abs(costBreakdown(config.signalShadow.costModel).deterministicCostPct - 3.22) < 1e-12);
 assert.deepStrictEqual(config.strategy.primaryThresholdProfiles, config.signalShadow.profiles);
+assert.strictEqual(config.smartPullbackShadow.enabled, true);
+assert.strictEqual(config.smartPullbackShadow.minSmartBuySol, 0.1);
+assert.strictEqual(config.smartPullbackShadow.confirmationWindowMs, 15_000);
+assert.strictEqual(config.smartPullbackShadow.pullbackPct, 2.5);
+assert.strictEqual(config.smartPullbackShadow.reboundPct, 7.5);
+assert.strictEqual(config.smartPullbackShadow.maxEntryVsSmartBuyPct, 2);
+assert.deepStrictEqual(
+  config.smartPullbackShadow.cohorts.map((cohort) => [cohort.id, cohort.trailingStopPct]),
+  [['A', 7.5], ['B', 12.5]],
+);
+assert.ok(
+  Math.abs(costBreakdown(config.smartPullbackShadow.costModel).deterministicCostPct - 3.22)
+    < 1e-12,
+);
+
+assert.deepStrictEqual(liveTradingGuard(true, true, false), {
+  enabled: false,
+  requestedEnabled: true,
+  safetyLock: true,
+  dryRun: true,
+});
+assert.deepStrictEqual(liveTradingGuard(true, false, false), {
+  enabled: true,
+  requestedEnabled: true,
+  safetyLock: false,
+  dryRun: false,
+});
 
 console.log('test-config-cost: ok');
