@@ -142,6 +142,8 @@ class LiveTradingManager {
     return {
       mode: this.mode,
       enabled: this.config.enabled,
+      requestedEnabled: this.config.requestedEnabled,
+      safetyLock: this.config.safetyLock,
       dryRun: this.config.dryRun,
       rule: entry,
       strategy: {

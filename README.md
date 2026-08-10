@@ -199,6 +199,17 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 
 模拟仓位、所属门槛版本、净收益和退出原因保存在 `primary_signal_shadow_positions` 及对应的 `flow_signals`。Dashboard 的“实盘交易”页面会按三组分别统计，并与真实 Primary 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。默认模拟仓位为0.05 SOL并使用完整成本模型；公共执行参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量，均衡组直接复用实盘 `FLOW_LIVE_MIN_*` 门槛。
 
+## Smart Wallet 回踩 Shadow A/B
+
+当前 Smart Wallet 研究路径只运行模拟A/B，不读取私钥、不创建交易执行器，也永不签名或发送链上交易。≥0.1 SOL 的 Bonding Curve Smart BUY 按同 Mint 30秒聚合为一个 Episode；触发后最多观察15秒：价格需从触发后的局部峰值回撤至少2.5%，再从低点反弹至少7.5%，反弹阶段至少出现1个独立买家，且200ms执行延迟后的模拟入场价不得高于 Smart BUY 价格2%。
+
+两组共享完全相同的 Episode、确认时点与模拟入场，唯一差异是退出阈值：
+
+- A组：入场即激活，峰值回撤7.5%退出，60秒兜底。
+- B组：入场即激活，峰值回撤12.5%退出，60秒兜底。
+
+模拟路径保存在 `smart_pullback_shadow_positions`，接口为 `GET /api/smart-pullback-shadow`。Dashboard 除平均收益、中位数、胜率和PF外，还统计最大赢家、Top5赢家对总盈利的贡献、MFE≥50%的大赢家机会、实际兑现的大赢家数量以及退出收益对MFE的兑现比例，用来验证“较低胜率 + 右尾大赢家”是否能覆盖全部亏损和成本。
+
 ## Primary 信号模拟与实盘
 
 实时入场规则固定为：
@@ -210,13 +221,15 @@ AND W3 NetFlow >= 5 SOL
 AND W3 unique Buyers >= 4
 ```
 
-研究引擎仍以 `FLOW_MIN_NET_W3_SOL=1` 保存宽口径 `primary_3w`。实盘门槛在同一候选周期内独立观察，因此即使早期研究信号已经发出，后续第一次达到 `5 SOL / 4 Buyers` 仍会触发；每个候选周期只允许一次均衡组实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件仍完整采集，但不会触发实盘开仓。
+研究引擎仍以 `FLOW_MIN_NET_W3_SOL=1` 保存宽口径 `primary_3w`。实盘门槛在同一候选周期内独立观察，因此即使早期研究信号已经发出，后续第一次达到 `5 SOL / 4 Buyers` 仍会触发；每个候选周期只允许一次均衡组实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件继续完整采集，并且只触发上述Shadow A/B，不触发真实开仓。
 
 执行模块有三种模式：
 
-- `DISABLED`：默认模式，只保存规则判定。
-- `DRY_RUN`：设置 `FLOW_LIVE_TRADING_ENABLED=true`、保留 `FLOW_LIVE_DRY_RUN=true`，模拟仓位和动态退出，不签名。
-- `LIVE`：还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写 `FLOW_LIVE_POSITION_SOL`。
+- `DISABLED`：当前强制模式，只保存规则判定。
+- `DRY_RUN`：只有先显式解除 `FLOW_LIVE_TRADING_SAFETY_LOCK`，再设置 `FLOW_LIVE_TRADING_ENABLED=true` 并保留 `FLOW_LIVE_DRY_RUN=true` 才能启用。
+- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写 `FLOW_LIVE_POSITION_SOL`。
+
+本次A/B研究发布中，`FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
 实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制，旧的单一 `FLOW_LIVE_SLIPPAGE_PCT` 不再使用。
 

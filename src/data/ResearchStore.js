@@ -423,6 +423,53 @@ class ResearchStore {
         ON primary_signal_shadow_positions(status, updated_at);
       CREATE INDEX IF NOT EXISTS idx_primary_shadow_mint
         ON primary_signal_shadow_positions(mint, signal_at DESC);
+
+      CREATE TABLE IF NOT EXISTS smart_pullback_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        smart_event_id INTEGER REFERENCES smart_wallet_events(id) ON DELETE SET NULL,
+        smart_wallet TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        smart_buy_at INTEGER NOT NULL,
+        smart_buy_price REAL NOT NULL,
+        smart_buy_sol REAL NOT NULL,
+        confirmation_deadline_at INTEGER NOT NULL,
+        peak_before_pullback REAL,
+        pullback_armed_at INTEGER,
+        pullback_low_price REAL,
+        rebound_buyers_json TEXT NOT NULL DEFAULT '[]',
+        confirmation_at INTEGER,
+        confirmation_price REAL,
+        entry_target_at INTEGER,
+        entry_deadline_at INTEGER,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        highest_price REAL,
+        max_favorable_return_pct REAL,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_smart_pullback_shadow_status
+        ON smart_pullback_shadow_positions(cohort_id, status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_smart_pullback_shadow_mint
+        ON smart_pullback_shadow_positions(mint, smart_buy_at DESC);
     `);
 
     this._migrateLiveTradingSchema();
@@ -1153,6 +1200,64 @@ class ResearchStore {
           AND s.signal_variant = ?
         ORDER BY p.signal_at, p.id
       `),
+      insertSmartPullbackShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO smart_pullback_shadow_positions (
+          cohort_id, episode_id, smart_event_id, smart_wallet, mint, symbol,
+          status, rejection_reason, position_sol, configured_cost_pct,
+          smart_buy_at, smart_buy_price, smart_buy_sol, confirmation_deadline_at,
+          peak_before_pullback, created_at, updated_at
+        ) VALUES (
+          @cohortId, @episodeId, @smartEventId, @smartWallet, @mint, @symbol,
+          @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @smartBuyAt, @smartBuyPrice, @smartBuySol, @confirmationDeadlineAt,
+          @peakBeforePullback, @createdAt, @updatedAt
+        )
+      `),
+      getSmartPullbackShadowPosition: this.db.prepare(`
+        SELECT * FROM smart_pullback_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      updateSmartPullbackShadowPosition: this.db.prepare(`
+        UPDATE smart_pullback_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          peak_before_pullback = COALESCE(@peakBeforePullback, peak_before_pullback),
+          pullback_armed_at = COALESCE(@pullbackArmedAt, pullback_armed_at),
+          pullback_low_price = COALESCE(@pullbackLowPrice, pullback_low_price),
+          rebound_buyers_json = COALESCE(@reboundBuyersJson, rebound_buyers_json),
+          confirmation_at = COALESCE(@confirmationAt, confirmation_at),
+          confirmation_price = COALESCE(@confirmationPrice, confirmation_price),
+          entry_target_at = COALESCE(@entryTargetAt, entry_target_at),
+          entry_deadline_at = COALESCE(@entryDeadlineAt, entry_deadline_at),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct,
+            max_favorable_return_pct
+          ),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeSmartPullbackShadowPositions: this.db.prepare(`
+        SELECT * FROM smart_pullback_shadow_positions
+        WHERE cohort_id = ?
+          AND status IN (
+            'WAITING_PULLBACK', 'WAITING_REBOUND', 'PENDING_ENTRY',
+            'OPEN', 'EXIT_PENDING'
+          )
+        ORDER BY smart_buy_at, id
+      `),
       recentSmartWalletEvents: this.db.prepare(`
         SELECT * FROM smart_wallet_events
         WHERE timestamp_ms >= ?
@@ -1697,6 +1802,76 @@ class ResearchStore {
     return this.stmts.activePrimarySignalShadowPositions.all(signalVariant);
   }
 
+  createSmartPullbackShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      cohortId: position.cohortId,
+      episodeId: position.episodeId,
+      smartEventId: position.smartEventId || null,
+      smartWallet: position.smartWallet,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      smartBuyAt: position.smartBuyAt,
+      smartBuyPrice: position.smartBuyPrice,
+      smartBuySol: position.smartBuySol,
+      confirmationDeadlineAt: position.confirmationDeadlineAt,
+      peakBeforePullback: finiteOrNull(position.peakBeforePullback),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertSmartPullbackShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getSmartPullbackShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateSmartPullbackShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    this.stmts.updateSmartPullbackShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      peakBeforePullback: finiteOrNull(value('peakBeforePullback')),
+      pullbackArmedAt: value('pullbackArmedAt'),
+      pullbackLowPrice: finiteOrNull(value('pullbackLowPrice')),
+      reboundBuyersJson: value('reboundBuyers')
+        ? JSON.stringify(value('reboundBuyers'))
+        : value('reboundBuyersJson'),
+      confirmationAt: value('confirmationAt'),
+      confirmationPrice: finiteOrNull(value('confirmationPrice')),
+      entryTargetAt: value('entryTargetAt'),
+      entryDeadlineAt: value('entryDeadlineAt'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeSmartPullbackShadowPositions(cohortId) {
+    return this.stmts.activeSmartPullbackShadowPositions.all(cohortId);
+  }
+
   recentSmartWalletEvents(timestampMs) {
     return this.stmts.recentSmartWalletEvents.all(timestampMs);
   }
@@ -1768,6 +1943,95 @@ class ResearchStore {
       profiles,
       positions,
     };
+  }
+
+  smartPullbackShadowDashboard({ positionLimit = 200, bigWinnerPct = 50 } = {}) {
+    const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
+    const threshold = Math.max(1, Number(bigWinnerPct) || 50);
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE
+          WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL THEN exit_at - entry_at
+          ELSE NULL
+        END AS hold_ms
+      FROM smart_pullback_shadow_positions
+      ORDER BY
+        CASE WHEN status IN (
+          'WAITING_PULLBACK', 'WAITING_REBOUND', 'PENDING_ENTRY', 'OPEN', 'EXIT_PENDING'
+        ) THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const cohortIds = this.db.prepare(`
+      SELECT DISTINCT cohort_id FROM smart_pullback_shadow_positions ORDER BY cohort_id
+    `).all().map((row) => row.cohort_id);
+    const cohorts = cohortIds.map((cohortId) => {
+      const counts = this.db.prepare(`
+        SELECT
+          COUNT(*) AS episodes,
+          COALESCE(SUM(status = 'NO_CONFIRMATION'), 0) AS no_confirmation,
+          COALESCE(SUM(status IN ('PRICE_JUMP', 'PRICE_CAP')), 0) AS price_rejected,
+          COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+          COALESCE(SUM(status IN (
+            'WAITING_PULLBACK', 'WAITING_REBOUND', 'PENDING_ENTRY'
+          )), 0) AS pending_entries,
+          COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+          COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit
+        FROM smart_pullback_shadow_positions WHERE cohort_id = ?
+      `).get(cohortId);
+      const resolved = this.db.prepare(`
+        SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+        FROM smart_pullback_shadow_positions
+        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          AND net_return_pct IS NOT NULL
+        ORDER BY net_return_pct
+      `).all(cohortId);
+      const returns = resolved.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+      const wins = returns.filter((value) => value > 0).sort((left, right) => right - left);
+      const losses = returns.filter((value) => value < 0);
+      const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+      const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+      const bigOpportunities = resolved.filter((row) => (
+        Number(row.max_favorable_return_pct) >= threshold
+      ));
+      const bigWinners = resolved.filter((row) => Number(row.gross_return_pct) >= threshold);
+      const captures = bigOpportunities.map((row) => {
+        const maximum = Number(row.max_favorable_return_pct);
+        const realized = Number(row.gross_return_pct);
+        return maximum > 0 && Number.isFinite(realized) ? (realized / maximum) * 100 : null;
+      }).filter(Number.isFinite);
+      const median = returns.length
+        ? returns.length % 2 === 1
+          ? returns[(returns.length - 1) / 2]
+          : (returns[returns.length / 2 - 1] + returns[returns.length / 2]) / 2
+        : null;
+      return {
+        cohort_id: cohortId,
+        ...counts,
+        resolved: returns.length,
+        average_net_return_pct: returns.length
+          ? returns.reduce((sum, value) => sum + value, 0) / returns.length
+          : null,
+        median_net_return_pct: median,
+        win_rate_pct: returns.length ? (wins.length / returns.length) * 100 : null,
+        profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+        max_winner_pct: wins[0] ?? null,
+        top_5_winner_contribution_pct: totalProfit > 0
+          ? (wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit) * 100
+          : null,
+        big_winner_threshold_pct: threshold,
+        big_winner_opportunities: bigOpportunities.length,
+        big_winners_realized: bigWinners.length,
+        big_winner_realization_rate_pct: bigOpportunities.length
+          ? (bigWinners.length / bigOpportunities.length) * 100
+          : null,
+        average_big_winner_capture_pct: captures.length
+          ? captures.reduce((sum, value) => sum + value, 0) / captures.length
+          : null,
+      };
+    });
+    return { cohorts, positions };
   }
 
   liveTradingDashboard({ positionLimit = 100, orderLimit = 100, decisionLimit = 100 } = {}) {
@@ -2058,6 +2322,15 @@ class ResearchStore {
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit
       FROM primary_signal_shadow_positions
     `).get();
+    const smartPullbackShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status IN (
+          'WAITING_PULLBACK', 'WAITING_REBOUND', 'PENDING_ENTRY', 'OPEN', 'EXIT_PENDING'
+        )), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit
+      FROM smart_pullback_shadow_positions
+    `).get();
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -2083,6 +2356,7 @@ class ResearchStore {
       primaryLiveDecisions,
       livePositions,
       primarySignalShadowPositions,
+      smartPullbackShadowPositions,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };

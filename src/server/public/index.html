@@ -319,6 +319,19 @@
 
       <article class="card record-section">
         <div class="section-title">
+          <h2>Smart Wallet 回踩 Shadow A/B</h2>
+          <p>相同入场，A=峰值回撤7.5%，B=峰值回撤12.5%；永不签名或发送交易</p>
+        </div>
+        <div class="strategy-expression" id="smart-pullback-expression">Smart BUY ≥0.1 SOL → 回踩2.5% → 反弹7.5% → 入场≤Smart价+2%</div>
+        <div class="grid live-metric-grid" id="smart-pullback-metrics"></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Smart买入</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>Smart价 / 回踩低点</th><th>入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+          <tbody id="smart-pullback-position-rows"></tbody>
+        </table></div>
+      </article>
+
+      <article class="card record-section">
+        <div class="section-title">
           <h2>Primary 信号模拟策略</h2>
           <p>独立 Shadow 路径，永不签名或发送链上交易</p>
         </div>
@@ -509,6 +522,9 @@
       badge.textContent = mode;
       document.querySelector('#live-mode-title').textContent = modeCopy[0];
       document.querySelector('#live-mode-description').textContent = modeCopy[1];
+      if (runtime.safetyLock) {
+        document.querySelector('#live-mode-description').textContent = '实盘安全锁已开启：即使旧 .env 仍配置 ENABLED=true，也不会签名或发送链上交易。';
+      }
       document.querySelector('#live-runtime-strip').innerHTML = [
         ['本次运行评估', number(runtime.evaluated)],
         ['命中', number(runtime.matched)],
@@ -586,6 +602,34 @@
       }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；Primary 信号到达后会自动记录</td></tr>';
     }
 
+    function renderSmartPullbackShadow(data) {
+      const runtime = data.runtime || {};
+      const runtimeCohorts = runtime.cohorts || [];
+      const entry = runtimeCohorts[0]?.strategy?.entry || {};
+      const research = runtimeCohorts[0]?.strategy?.research || {};
+      document.querySelector('#smart-pullback-expression').textContent = `Smart BUY ≥${number(entry.smartBuyMinSol,2)} SOL → ${number(entry.confirmationWindowMs / 1000)}秒内峰值回踩${number(entry.pullbackPct,1)}% → 低点反弹${number(entry.reboundPct,1)}% / Buyers≥${number(entry.minReboundBuyers)} → 入场≤Smart价+${number(entry.maxEntryVsSmartBuyPct,1)}%`;
+      const labels = Object.fromEntries(runtimeCohorts.map(cohort => [cohort.cohortId, cohort.cohortLabel]));
+      const metrics = [
+        ['运行模式', runtime.enabled ? 'SHADOW A/B' : '关闭', '链上交易永不发送'],
+        ['候选 / 待入场', `${number(runtime.candidates)} / ${number(runtime.pendingEntries)}`, `活动 ${number(runtime.activePositions)}`],
+        ['本次 Episode', number(runtime.episodes), `确认 ${number(runtime.confirmed)} · 开仓 ${number(runtime.opened)}`],
+        ...(data.cohorts || []).flatMap(cohort => [
+          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 净收益`, pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
+          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 胜率`, rate(cohort.win_rate_pct), `完成 ${number(cohort.resolved)} · 最大赢家 ${pct(cohort.max_winner_pct)}`],
+          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 大赢家`, `${number(cohort.big_winners_realized)} / ${number(cohort.big_winner_opportunities)}`, `阈值 ${rate(cohort.big_winner_threshold_pct)} · 捕获率 ${rate(cohort.big_winner_realization_rate_pct)}`],
+          [`${labels[cohort.cohort_id] || cohort.cohort_id} · 右尾贡献`, rate(cohort.top_5_winner_contribution_pct), `Top5盈利贡献 · 平均兑现MFE ${rate(cohort.average_big_winner_capture_pct)}`],
+        ]),
+      ];
+      document.querySelector('#smart-pullback-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+
+      const rows = data.positions || [];
+      document.querySelector('#smart-pullback-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const wallet = row.smart_wallet ? `${escapeHtml(row.smart_wallet.slice(0,6))}…${escapeHtml(row.smart_wallet.slice(-4))}` : '—';
+        return `<tr><td>${dateTime(row.smart_buy_at)}</td><td>${escapeHtml(labels[row.cohort_id] || row.cohort_id)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${wallet}</span></td><td>${number(row.smart_buy_price,10)} / ${number(row.pullback_low_price,10)}</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)}</span></td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">等待 Smart Wallet BUY 后的回踩确认；完整原始数据仍在持续采集</td></tr>';
+    }
+
     function renderPrimarySignalShadow(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -633,6 +677,7 @@
       const regions = data.stream.regions.map(region => `${escapeHtml(region.label)} · ${escapeHtml(region.state || 'waiting')} · ${region.active ? '当前' : '备用'}`).join('<br>') || '未连接';
       const trading = data.trading || { mode: 'DISABLED', activePositions: 0 };
       const signalShadow = data.signalShadow || { mode: 'SHADOW', enabled: false, activePositions: 0, pendingEntries: 0 };
+      const smartPullback = data.smartPullbackShadow || { mode: 'SHADOW_AB', enabled: false, activePositions: 0, pendingEntries: 0, candidates: 0 };
       const liveEntry = trading.strategy?.entry || {};
       const shadowRules = (signalShadow.profiles || []).map(profile => (
         `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)}/${number(profile.strategy?.entry?.minUniqueBuyersW3)}`
@@ -643,6 +688,7 @@
         ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', `Primary Early ${number(liveEntry.minNetFlowW3Sol,1)} SOL / ${number(liveEntry.minUniqueBuyersW3)} Buyers`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
+        ['Smart Pullback A/B', [['模式', smartPullback.enabled ? 'SHADOW A/B' : '关闭'], ['候选', number(smartPullback.candidates)], ['待入场', number(smartPullback.pendingEntries)], ['活动仓位', number(smartPullback.activePositions)], ['本次Episode', number(smartPullback.episodes)], ['确认', number(smartPullback.confirmed)], ['A / B', '7.5% / 12.5%'], ['链上交易', '永不发送']]],
         ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
@@ -675,6 +721,7 @@
         json('/api/signal-repetition').then(renderSignalQuality),
         json('/api/live-trading?positionLimit=100&orderLimit=100&decisionLimit=100').then(renderLiveTrading),
         json('/api/primary-signal-shadow?positionLimit=200').then(renderPrimarySignalShadow),
+        json('/api/smart-pullback-shadow?positionLimit=200').then(renderSmartPullbackShadow),
         json('/api/health').then(renderHealth),
       ]);
     }
