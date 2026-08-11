@@ -333,7 +333,7 @@
               <b>Smart OPEN · D</b><small>新建独立 Shadow，不混入旧数据</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback">
-              <b>Launch 回踩 · F</b><small>首次回踩质量过滤，固定3秒/8秒</small>
+              <b>Launch 回踩 · F / FT</b><small>保留固定3/8秒，新增四组移动止盈</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migrated-rebound">
               <b>生命周期超跌反弹 · G</b><small>毕业前 Curve / 毕业后 PumpSwap 分层</small>
@@ -417,10 +417,10 @@
           <div class="strategy-pane" data-live-strategy-pane="launch-pullback" hidden>
             <article class="card record-section">
               <div class="section-title">
-                <h2>Launch First Pullback Shadow F1 / F2 / F3</h2>
+                <h2>Launch First Pullback Shadow F1 / F2 / F3 + FT-A / B / C / D</h2>
                 <p>来自 Observer E 的首次回踩参考点；独立表、只做模拟，永不签名或发送交易</p>
               </div>
-              <div class="strategy-expression" id="launch-pullback-expression">+25%首波 → 回踩7.5% → 反弹3% → 质量过滤 → 固定持有3秒 / 8秒</div>
+              <div class="strategy-expression" id="launch-pullback-expression">+25%首波 → 回踩7.5% → 反弹3% → 质量过滤 → 固定持有与移动止盈独立对照</div>
               <div class="strategy-metric-groups" id="launch-pullback-metrics"></div>
               <div class="strategy-metric-groups" id="launch-pullback-time-sessions"></div>
               <div class="table-wrap"><table>
@@ -843,14 +843,21 @@
       ]));
       const entryRules = [...new Map(runtimeCohorts.map(cohort => {
         const entry = cohort.strategy?.entry || {};
-        const profile = String(cohort.cohortId || '').split('_')[0];
+        const profile = entry.profileId || String(cohort.cohortId || '').split('_')[0];
         return [profile, `${profile}: NetFlow≥${number(entry.minNetFlowSol,1)} SOL / Creator≤${rate(entry.maxCreatorSharePct)}`];
       })).values()].join(' · ');
-      const holdRules = [...new Set(runtimeCohorts.map(cohort => (
-        age(cohort.strategy?.exit?.fixedHoldMs)
-      )))].join(' / ');
+      const holdRules = [...new Set(runtimeCohorts.map(cohort => {
+        const exit = cohort.strategy?.exit || {};
+        if (exit.policy === 'TRAILING_STOP') {
+          const activation = number(exit.activationPct,1) > 0
+            ? `+${number(exit.activationPct,1)}%激活`
+            : '入场激活';
+          return `${activation}/回撤${rate(exit.drawdownPct)}/${age(exit.maxHoldMs)}兜底`;
+        }
+        return `固定${age(exit.fixedHoldMs)}`;
+      }))].join(' · ');
       const research = runtimeCohorts[0]?.strategy?.research || {};
-      document.querySelector('#launch-pullback-expression').textContent = `首波+25% → 回踩7.5% → 低点反弹3% → ${entryRules || '等待过滤配置'} → 200ms后模拟入场 → 固定${holdRules || '3s / 8s'}退出`;
+      document.querySelector('#launch-pullback-expression').textContent = `首波+25% → 回踩7.5% → 低点反弹3% → ${entryRules || '等待过滤配置'} → 200ms后模拟入场 → ${holdRules || '等待退出配置'}`;
       const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW F' : '关闭', `独立表 ${research.isolatedTable || 'launch_pullback_shadow_positions'}`],
         ['参考点', number(runtime.referencesSeen), `最宽组合格 ${number(runtime.qualifiedReferences)} · 去重 ${number(runtime.deduplicated)}`],
@@ -860,9 +867,12 @@
         const cohort = (data.cohorts || []).find(item => item.cohort_id === runtimeCohort.cohortId) || {};
         const entry = runtimeCohort.strategy?.entry || {};
         const exit = runtimeCohort.strategy?.exit || {};
+        const exitNote = exit.policy === 'TRAILING_STOP'
+          ? `${number(exit.activationPct,1) > 0 ? `+${number(exit.activationPct,1)}%激活` : '入场激活'} · 峰值回撤${rate(exit.drawdownPct)} · 最短${age(exit.minHoldMs)} · ${age(exit.maxHoldMs)}兜底 · ${exit.hardStopPct == null ? '无硬止损' : `止损${rate(exit.hardStopPct)}`}`
+          : `固定${age(exit.fixedHoldMs)}`;
         return {
           label: labels[runtimeCohort.cohortId] || runtimeCohort.cohortId,
-          note: `NetFlow≥${number(entry.minNetFlowSol,1)} SOL · Creator≤${rate(entry.maxCreatorSharePct)} · 固定${age(exit.fixedHoldMs)}`,
+          note: `${entry.profileId || 'F'} · NetFlow≥${number(entry.minNetFlowSol,1)} SOL · Creator≤${rate(entry.maxCreatorSharePct)} · ${exitNote}`,
           metrics: [
             ['净收益', pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
             ['胜率 / 去Top5', `${rate(cohort.win_rate_pct)} / ${pct(cohort.average_net_return_ex_top5_pct)}`, `完成 ${number(cohort.resolved)} · 合格 ${number(cohort.qualified_references)} · 跳价拒绝 ${number(cohort.price_jump)}`],
@@ -878,7 +888,7 @@
       document.querySelector('#launch-pullback-position-rows').innerHTML = rows.length ? rows.map(row => {
         const reason = row.exit_reason || row.rejection_reason || '—';
         return `<tr><td>${dateTime(row.reference_at)}</td><td>${escapeHtml(labels[row.cohort_id] || row.cohort_id)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">回踩 ${pct(row.max_pullback_pct)}</span></td><td>${number(row.net_flow_sol,2)} SOL / ${rate(row.creator_share_pct)}</td><td>${number(row.buyers)} / ${rate(row.retention_pct)}<br><span class="table-note">近窗 ${number(row.recent_buyers)} · Top3 ${rate(row.top3_share_pct)}</span></td><td>${number(row.reference_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)}</span></td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
-      }).join('') : '<tr><td colspan="10" class="empty">等待新的首次回踩参考点；F1/F2/F3 与3秒/8秒退出均写入独立表，不影响旧策略历史</td></tr>';
+      }).join('') : '<tr><td colspan="10" class="empty">等待新的首次回踩参考点；原F1/F2/F3固定持仓与新FT-A/B/C/D移动止盈使用独立cohort，不会混合历史</td></tr>';
     }
 
     function renderMigratedDropReboundShadow(data) {
