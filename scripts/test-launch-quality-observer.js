@@ -38,6 +38,7 @@ function trade({ timestampMs, price, side = 'BUY', wallet = 'wallet-a', solAmoun
 function main() {
   const store = makeStore();
   let now = 100_000;
+  const references = [];
   const observer = new LaunchQualityObserver({
     config: {
       enabled: true,
@@ -52,6 +53,7 @@ function main() {
     },
     store,
     now: () => now,
+    onReference: (reference) => references.push(reference),
   });
   observer.onCreate({
     mint: 'launch-quality-mint',
@@ -102,6 +104,23 @@ function main() {
     [5_000, 10_000, 20_000, 30_000, 60_000],
   );
   assert.strictEqual(observer.health().activeLaunches, 0);
+  assert.strictEqual(references.length, 1, 'live reference must be emitted exactly once');
+  assert.strictEqual(references[0].mint, 'launch-quality-mint');
+  assert.ok(references[0].features.netFlowSol > 0);
+
+  const completed = store.getLaunchQualityObservation('launch-quality-mint');
+  now = 195_000;
+  observer.observeTrade(trade({ timestampMs: now, price: 1.01 }), { replay: true });
+  const afterReplay = store.getLaunchQualityObservation('launch-quality-mint');
+  assert.strictEqual(afterReplay.label_status, 'COMPLETE');
+  assert.strictEqual(afterReplay.rebound_at, completed.rebound_at);
+  assert.strictEqual(references.length, 1, 'startup replay must not emit a trading reference');
+  const immutable = store.updateLaunchQualityObservation('launch-quality-mint', {
+    status: 'NO_REFERENCE_PULLBACK',
+    labelStatus: 'NO_REFERENCE',
+  });
+  assert.strictEqual(immutable.changes, 0, 'terminal labels must be immutable');
+  assert.strictEqual(store.getLaunchQualityObservation('launch-quality-mint').label_status, 'COMPLETE');
   assert.strictEqual(observer.health().sendsTransactions, false);
   assert.strictEqual(observer.health().opensSimulatedPositions, false);
   assert.strictEqual(

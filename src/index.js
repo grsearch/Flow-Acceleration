@@ -10,6 +10,7 @@ const { PrimarySignalShadowSuite } = require('./core/PrimarySignalShadowSuite');
 const { FlowFirstShadowSuite } = require('./core/FlowFirstShadowSuite');
 const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
 const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
+const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
@@ -57,9 +58,15 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   smartOpenShadow.start();
+  const launchPullbackShadow = new LaunchPullbackShadowSuite({
+    config: runtimeConfig.launchPullbackShadow,
+    store,
+  });
+  launchPullbackShadow.start();
   const launchQualityObserver = new LaunchQualityObserver({
     config: runtimeConfig.launchQualityObserver,
     store,
+    onReference: (reference) => launchPullbackShadow.onReference(reference),
   });
   launchQualityObserver.start();
   const server = new ResearchServer({
@@ -73,6 +80,7 @@ function createRuntime(runtimeConfig = config) {
     flowFirstShadow,
     smartPullbackShadow,
     smartOpenShadow,
+    launchPullbackShadow,
     launchQualityObserver,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
@@ -176,6 +184,7 @@ function createRuntime(runtimeConfig = config) {
           : null;
         store.queueRawTrade(trade);
         launchQualityObserver.observeTrade(trade);
+        launchPullbackShadow.observeTrade(trade);
         signalShadow.observeTrade(trade);
         engine.handleTrade(trade, store.getToken(trade.mint));
         flowFirstShadow.observeTrade(trade);
@@ -247,6 +256,12 @@ function createRuntime(runtimeConfig = config) {
       + 'observer-only, sends transactions=false.',
     );
     console.log(
+      `Launch Pullback Shadow F: ${runtimeConfig.launchPullbackShadow.profiles.map((profile) => (
+        `${profile.id}=net>=${profile.minNetFlowSol}SOL/creator<=${profile.maxCreatorSharePct}%`
+      )).join(', ')}; holds=${runtimeConfig.launchPullbackShadow.holds
+        .map((hold) => `${hold.fixedHoldMs}ms`).join(',')}; isolated table; sends transactions=false.`,
+    );
+    console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
       + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `
       + `wallets>=${runtimeConfig.strategy.activityMinUniqueWallets}`,
@@ -265,6 +280,7 @@ function createRuntime(runtimeConfig = config) {
       flowFirstShadow.advanceTime(now);
       smartPullbackShadow.advanceTime(now);
       smartOpenShadow.advanceTime(now);
+      launchPullbackShadow.advanceTime(now);
       launchQualityObserver.advanceTime(now);
       const graduatedPending = labeler.pendingMints().filter((mint) => store.getToken(mint)?.graduated_at);
       stream.setAmmMints(graduatedPending);
@@ -297,6 +313,7 @@ function createRuntime(runtimeConfig = config) {
     flowFirstShadow.stop();
     smartPullbackShadow.stop();
     smartOpenShadow.stop();
+    launchPullbackShadow.stop();
     launchQualityObserver.stop();
     await server.stop();
     store.close();
@@ -314,13 +331,15 @@ function createRuntime(runtimeConfig = config) {
       flowFirstShadow: flowFirstShadow.health(),
       smartPullbackShadow: smartPullbackShadow.health(),
       smartOpenShadow: smartOpenShadow.health(),
+      launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
     };
   }
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
-    flowFirstShadow, smartPullbackShadow, smartOpenShadow, launchQualityObserver,
+    flowFirstShadow, smartPullbackShadow, smartOpenShadow, launchPullbackShadow,
+    launchQualityObserver,
   };
 }
 

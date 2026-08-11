@@ -25,7 +25,7 @@ class ResearchServer {
   constructor({
     config, store, engine, stream, labeler, trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
-    launchQualityObserver = null,
+    launchPullbackShadow = null, launchQualityObserver = null,
   }) {
     this.config = config;
     this.store = store;
@@ -37,6 +37,7 @@ class ResearchServer {
     this.flowFirstShadow = flowFirstShadow;
     this.smartPullbackShadow = smartPullbackShadow;
     this.smartOpenShadow = smartOpenShadow;
+    this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.app = express();
     this.httpServer = null;
@@ -266,6 +267,23 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/launch-pullback-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.launchPullbackShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_F',
+          sendsTransactions: false,
+          cohorts: [],
+        },
+        ...this.store.launchPullbackShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.launchPullbackShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -284,6 +302,7 @@ class ResearchServer {
         flowFirstShadow: this.flowFirstShadow?.health() || null,
         smartPullbackShadow: this.smartPullbackShadow?.health() || null,
         smartOpenShadow: this.smartOpenShadow?.health() || null,
+        launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
       });
     });

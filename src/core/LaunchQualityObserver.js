@@ -67,10 +67,11 @@ function newState(token) {
 }
 
 class LaunchQualityObserver {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onReference = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onReference = typeof onReference === 'function' ? onReference : null;
     this.states = new Map();
     this.metrics = {
       launchesObserved: 0,
@@ -117,6 +118,10 @@ class LaunchQualityObserver {
 
     let state = this.states.get(trade.mint);
     if (!state) {
+      // Startup replay may continue past a state that was already finalized and
+      // removed. Never recreate it from a later trade: doing so used to replace
+      // a valid reference label with NO_REFERENCE after every restart.
+      if (replay) return;
       const token = normalizedToken(this.store.getToken(trade.mint) || {});
       if (!token.mint || !token.createdAt) return;
       const latestDeadline = token.createdAt + this.config.maxLaunchAgeMs
@@ -126,7 +131,7 @@ class LaunchQualityObserver {
     }
     if (!state || timestampMs < state.createdAt - 5_000) return;
 
-    this._applyTrade(state, trade, timestampMs, price);
+    this._applyTrade(state, trade, timestampMs, price, replay);
     this._captureDueSnapshots(state, timestampMs);
     this._captureDueReturns(state, trade, timestampMs, price);
     this._finishIfDue(state, timestampMs);
@@ -176,6 +181,10 @@ class LaunchQualityObserver {
     if (!token?.mint || !(token.createdAt > 0)) return null;
     const existing = this.states.get(token.mint);
     if (existing) return existing;
+    const stored = this.store.getLaunchQualityObservation(token.mint);
+    if (stored && ['COMPLETE', 'RIGHT_CENSORED', 'NO_REFERENCE'].includes(stored.label_status)) {
+      return null;
+    }
     const state = newState(token);
     this.states.set(token.mint, state);
     this.store.createLaunchQualityObservation(token);
@@ -186,7 +195,7 @@ class LaunchQualityObserver {
     return state;
   }
 
-  _applyTrade(state, trade, timestampMs, price) {
+  _applyTrade(state, trade, timestampMs, price, replay = false) {
     if (!state.firstTradeAt) {
       state.firstTradeAt = timestampMs;
       state.baselinePrice = price;
@@ -259,7 +268,7 @@ class LaunchQualityObserver {
       ((state.peakPrice / state.baselinePrice) - 1) * 100,
     );
     this._recordPumpMilestones(state, timestampMs, price);
-    this._observeReferencePullback(state, timestampMs, price);
+    this._observeReferencePullback(state, timestampMs, price, replay);
     this._updateOutcomeExcursions(state, timestampMs, price);
   }
 
@@ -274,7 +283,7 @@ class LaunchQualityObserver {
     if (Object.keys(patch).length) this.store.updateLaunchQualityObservation(state.mint, patch);
   }
 
-  _observeReferencePullback(state, timestampMs, price) {
+  _observeReferencePullback(state, timestampMs, price, replay = false) {
     if (!state.pumpAt[25] || state.reboundAt) return;
     state.referencePeakAt ??= state.peakAt;
     state.referencePeakPrice ??= state.peakPrice;
@@ -318,6 +327,27 @@ class LaunchQualityObserver {
       referenceFeatures: state.referenceFeatures,
       labelStatus: 'PENDING',
     });
+    if (!replay && this.onReference) {
+      try {
+        this.onReference({
+          mint: state.mint,
+          symbol: state.symbol,
+          creator: state.creator,
+          createdAt: state.createdAt,
+          referenceAt: timestampMs,
+          referencePrice: price,
+          pump25At: state.pumpAt[25],
+          referencePeakAt: state.referencePeakAt,
+          referencePeakPrice: state.referencePeakPrice,
+          firstPullbackAt: state.firstPullbackAt,
+          pullbackLowPrice: state.pullbackLowPrice,
+          maxPullbackPct: state.maxPullbackPct,
+          features: { ...state.referenceFeatures },
+        });
+      } catch (error) {
+        this.metrics.lastError = error?.message || String(error);
+      }
+    }
   }
 
   _features(state, observedAt, horizonMs = null) {
