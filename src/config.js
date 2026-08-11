@@ -540,11 +540,19 @@ const config = {
     }),
   },
 
-  // Migrated-token oversold rebound research. The broad PumpSwap subscription
-  // preserves every trade for later grid search; profiles below are orthogonal
-  // online cohorts and never create or sign a transaction.
+  // Lifecycle oversold-rebound research. Pre-migration curve trades and the
+  // post-migration PumpSwap subscription use separate cohorts; profiles below
+  // are orthogonal online experiments and never create or sign a transaction.
   migratedDropReboundShadow: {
     enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
+    lifecycleStages: [
+      { id: 'PRE_MIGRATION', label: '毕业前', market: 'PUMP_BONDING_CURVE' },
+      { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
+    ],
+    stateRetentionMs: integerEnv('FLOW_REBOUND_DETECTOR_STATE_RETENTION_MS', 60_000, {
+      min: 5_000,
+      max: 10 * 60_000,
+    }),
     trackingAgeMs: integerEnv('FLOW_MIGRATED_REBOUND_TRACKING_MS', 5 * 60_000, {
       min: 30_000,
       max: 30 * 60_000,

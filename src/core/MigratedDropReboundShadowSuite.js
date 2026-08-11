@@ -27,6 +27,7 @@ function rowPosition(row) {
   return {
     id: row.id,
     cohortId: value('cohort_id', 'cohortId'),
+    lifecycleStage: value('lifecycle_stage', 'lifecycleStage') || 'POST_MIGRATION',
     entryProfileId: value('entry_profile_id', 'entryProfileId'),
     exitProfileId: value('exit_profile_id', 'exitProfileId'),
     episodeId: value('episode_id', 'episodeId'),
@@ -72,7 +73,20 @@ class MigratedDropReboundShadowSuite {
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((profile) => [profile.id, profile]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
-    this.detectors = new Map([...this.entryProfiles].map(([id]) => [id, new Map()]));
+    this.lifecycleStages = config.lifecycleStages || [
+      { id: 'PRE_MIGRATION', label: '毕业前', market: 'PUMP_BONDING_CURVE' },
+      { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
+    ];
+    this.detectors = new Map();
+    for (const stage of this.lifecycleStages) {
+      for (const profile of this.entryProfiles.values()) {
+        this.detectors.set(`${stage.id}:${profile.id}`, {
+          stage: stage.id,
+          profileId: profile.id,
+          states: new Map(),
+        });
+      }
+    }
     this.tracked = new Map();
     this.pendingEntries = new Map();
     this.positions = new Map();
@@ -122,7 +136,11 @@ class MigratedDropReboundShadowSuite {
         profile.windowMs + profile.reboundTimeoutMs
       )),
     );
-    for (const trade of this.store.recentAmmTrades(now - replayHorizonMs)) {
+    const replayTrades = [
+      ...this.store.recentCurveTrades(now - replayHorizonMs),
+      ...this.store.recentAmmTrades(now - replayHorizonMs),
+    ].sort((left, right) => left.timestampMs - right.timestampMs);
+    for (const trade of replayTrades) {
       this.observeTrade(trade, { replay: true });
     }
     this.advanceTime(now);
@@ -150,7 +168,7 @@ class MigratedDropReboundShadowSuite {
       if (now - token.graduatedAt <= this.config.trackingAgeMs) continue;
       if (this._hasActiveMint(mint)) continue;
       this.tracked.delete(mint);
-      for (const states of this.detectors.values()) states.delete(mint);
+      for (const detector of this.detectors.values()) detector.states.delete(mint);
     }
     return [...this.tracked.keys()];
   }
@@ -158,31 +176,45 @@ class MigratedDropReboundShadowSuite {
   observeTrade(trade, { replay = false } = {}) {
     const price = shadowPrice(trade);
     const timestampMs = finite(trade?.timestampMs);
-    if (!this.config.enabled || trade?.market !== 'PUMP_AMM' || !trade?.mint
+    if (!this.config.enabled || !['PUMP_BONDING_CURVE', 'PUMP_AMM'].includes(trade?.market)
+      || !trade?.mint
       || !(price > 0) || !(timestampMs > 0)) return;
     const token = this.store.getToken(trade.mint);
     const graduatedAt = finite(token?.graduated_at ?? this.tracked.get(trade.mint)?.graduatedAt);
-    if (!(graduatedAt > 0) || timestampMs < graduatedAt) return;
-    if (!this.tracked.has(trade.mint)) this.onGraduated(token);
-    if (timestampMs - graduatedAt > this.config.trackingAgeMs && !this._hasActiveMint(trade.mint)) {
-      return;
-    }
-
     this._observeRowsForMint(trade, price);
+    const lifecycleStage = trade.market === 'PUMP_BONDING_CURVE'
+      && (!(graduatedAt > 0) || timestampMs < graduatedAt)
+      ? 'PRE_MIGRATION'
+      : trade.market === 'PUMP_AMM' && graduatedAt > 0 && timestampMs >= graduatedAt
+        ? 'POST_MIGRATION'
+        : null;
+    if (!lifecycleStage) return;
+    if (lifecycleStage === 'POST_MIGRATION') {
+      if (!this.tracked.has(trade.mint)) this.onGraduated(token);
+      if (timestampMs - graduatedAt > this.config.trackingAgeMs
+        && !this._hasActiveMint(trade.mint)) return;
+    }
+    const anchorAt = lifecycleStage === 'POST_MIGRATION'
+      ? graduatedAt
+      : finite(token?.created_at, timestampMs);
     for (const profile of this.entryProfiles.values()) {
-      this._observeDetector(profile, trade, price, graduatedAt, replay);
+      this._observeDetector(profile, lifecycleStage, trade, price, anchorAt, replay);
     }
   }
 
   advanceTime(now = this.now()) {
     if (!this.config.enabled) return;
-    for (const [profileId, states] of this.detectors) {
-      for (const state of states.values()) {
+    for (const detector of this.detectors.values()) {
+      const profile = this.entryProfiles.get(detector.profileId);
+      for (const [mint, state] of detector.states) {
         if (state.candidate && now > state.candidate.expiresAt) {
           state.candidate = null;
           this.metrics.reboundTimeouts += 1;
         }
-        this._prune(state, now, this.entryProfiles.get(profileId).windowMs);
+        this._prune(state, now, profile.windowMs);
+        if (!state.candidate && now - state.lastTimestampMs > this.config.stateRetentionMs) {
+          detector.states.delete(mint);
+        }
       }
     }
     for (const pending of [...this.pendingEntries.values()]) {
@@ -209,12 +241,19 @@ class MigratedDropReboundShadowSuite {
       mode: 'SHADOW_G',
       sendsTransactions: false,
       trackedMints: this.tracked.size,
+      detectorStates: Object.fromEntries(this.lifecycleStages.map((stage) => [
+        stage.id,
+        [...this.detectors.values()]
+          .filter((detector) => detector.stage === stage.id)
+          .reduce((total, detector) => total + detector.states.size, 0),
+      ])),
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
       entryProfiles: [...this.entryProfiles.values()],
       exitProfiles: [...this.exitProfiles.values()],
+      lifecycleStages: this.lifecycleStages,
       strategy: {
-        scope: 'POST_MIGRATION_PUMP_AMM_ONLY',
+        scope: 'PRE_MIGRATION_BONDING_CURVE_AND_POST_MIGRATION_PUMP_AMM',
         trackingAgeMs: this.config.trackingAgeMs,
         entryDelayMs: this.config.entryDelayMs,
         entryTimeoutMs: this.config.entryTimeoutMs,
@@ -223,7 +262,7 @@ class MigratedDropReboundShadowSuite {
           simulatedPositionSol: this.config.positionSizeSol,
           configuredCostPct: this.costs.deterministicCostPct,
           isolatedTable: 'migrated_drop_rebound_shadow_positions',
-          rawData: 'all subscribed PUMP_AMM trades are retained for offline grid search',
+          rawData: 'all pre-migration curve trades and the subscribed post-migration PUMP_AMM trades are retained for offline grid search',
           sendsTransactions: false,
         },
       },
@@ -231,8 +270,8 @@ class MigratedDropReboundShadowSuite {
     };
   }
 
-  _state(profileId, mint) {
-    const states = this.detectors.get(profileId);
+  _state(lifecycleStage, profileId, mint) {
+    const states = this.detectors.get(`${lifecycleStage}:${profileId}`).states;
     let state = states.get(mint);
     if (!state) {
       state = { prices: [], lastTimestampMs: 0, dropReady: true, candidate: null };
@@ -246,9 +285,9 @@ class MigratedDropReboundShadowSuite {
     while (state.prices.length && state.prices[0].timestampMs < cutoff) state.prices.shift();
   }
 
-  _observeDetector(profile, trade, price, graduatedAt, replay) {
+  _observeDetector(profile, lifecycleStage, trade, price, anchorAt, replay) {
     const timestampMs = trade.timestampMs;
-    const state = this._state(profile.id, trade.mint);
+    const state = this._state(lifecycleStage, profile.id, trade.mint);
     if (state.lastTimestampMs && timestampMs < state.lastTimestampMs) return;
     state.lastTimestampMs = timestampMs;
     state.prices.push({
@@ -292,9 +331,10 @@ class MigratedDropReboundShadowSuite {
             } else {
               this._emitSignal({
                 profile,
+                lifecycleStage,
                 trade,
                 price,
-                graduatedAt,
+                anchorAt,
                 candidate,
                 dropPct,
                 reboundPct,
@@ -320,13 +360,24 @@ class MigratedDropReboundShadowSuite {
     }
   }
 
-  _emitSignal({ profile, trade, price, graduatedAt, candidate, dropPct, reboundPct }) {
-    const episodeId = `${trade.mint}:${profile.id}:${candidate.startedAt}:${trade.timestampMs}`;
+  _emitSignal({
+    profile,
+    lifecycleStage,
+    trade,
+    price,
+    anchorAt,
+    candidate,
+    dropPct,
+    reboundPct,
+  }) {
+    const stageCode = lifecycleStage === 'PRE_MIGRATION' ? 'PRE' : 'POST';
+    const episodeId = `${trade.mint}:${stageCode}:${profile.id}:${candidate.startedAt}:${trade.timestampMs}`;
     this.metrics.signals += 1;
     for (const exitProfile of this.exitProfiles.values()) {
-      const cohortId = `${profile.id}_${exitProfile.id}`;
+      const cohortId = `${stageCode}_${profile.id}_${exitProfile.id}`;
       const saved = this.store.createMigratedDropReboundShadowPosition({
         cohortId,
+        lifecycleStage,
         entryProfileId: profile.id,
         exitProfileId: exitProfile.id,
         episodeId,
@@ -335,8 +386,8 @@ class MigratedDropReboundShadowSuite {
         status: STATUS.PENDING_ENTRY,
         positionSol: this.config.positionSizeSol,
         configuredCostPct: this.costs.deterministicCostPct,
-        migratedAt: graduatedAt,
-        migrationAgeMs: Math.max(0, trade.timestampMs - graduatedAt),
+        migratedAt: anchorAt,
+        migrationAgeMs: Math.max(0, trade.timestampMs - anchorAt),
         windowMs: profile.windowMs,
         dropMinPct: profile.dropMinPct,
         dropMaxPct: profile.dropMaxPct,
@@ -380,6 +431,7 @@ class MigratedDropReboundShadowSuite {
       const position = this.pendingEntries.get(id) || this.positions.get(id);
       if (!position) continue;
       if (position.status === STATUS.PENDING_ENTRY) {
+        if (!this._eligibleEntryTrade(position, trade)) continue;
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
         const jumpPct = ((price / position.reboundPrice) - 1) * 100;
@@ -422,11 +474,13 @@ class MigratedDropReboundShadowSuite {
         continue;
       }
       if (position.status === STATUS.EXIT_PENDING) {
+        if (!this._eligibleExitTrade(position, trade, price)) continue;
         if (trade.timestampMs >= position.exitTargetAt
           && trade.timestampMs <= position.exitDeadlineAt) this._close(position, trade, price);
         continue;
       }
-      if (position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt) continue;
+      if (position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt
+        || !this._eligibleExitTrade(position, trade, price)) continue;
       this._updateExtrema(position, trade.timestampMs, price);
       this._evaluateExit(position, trade.timestampMs, price);
       if (position.status === STATUS.EXIT_PENDING) {
@@ -462,6 +516,27 @@ class MigratedDropReboundShadowSuite {
       patch.maxAdverseReturnPct = position.maxAdverseReturnPct;
     }
     this.store.updateMigratedDropReboundShadowPosition(position.id, patch);
+  }
+
+  _eligibleEntryTrade(position, trade) {
+    if (position.lifecycleStage === 'POST_MIGRATION') return trade.market === 'PUMP_AMM';
+    if (trade.market !== 'PUMP_BONDING_CURVE') return false;
+    const graduatedAt = finite(this.store.getToken(position.mint)?.graduated_at);
+    return !(graduatedAt > 0) || trade.timestampMs < graduatedAt;
+  }
+
+  _eligibleExitTrade(position, trade, price) {
+    if (position.lifecycleStage === 'POST_MIGRATION') {
+      return trade.market === 'PUMP_AMM';
+    }
+    const graduatedAt = finite(this.store.getToken(position.mint)?.graduated_at);
+    if (trade.market === 'PUMP_BONDING_CURVE') {
+      return !(graduatedAt > 0) || trade.timestampMs < graduatedAt;
+    }
+    if (trade.market !== 'PUMP_AMM') return false;
+    if (!(graduatedAt > 0) || trade.timestampMs < graduatedAt) return false;
+    const ratio = price / position.entryPrice;
+    return ratio >= 0.05 && ratio <= 20;
   }
 
   _evaluateExit(position, timestampMs, price) {
