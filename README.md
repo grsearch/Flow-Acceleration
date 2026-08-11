@@ -106,6 +106,8 @@ Dashboard 默认地址：<http://127.0.0.1:3001>
 5. **Live Trading**：左侧选择实盘或任一 Shadow 策略，右侧只加载该策略的参数、统计和交易记录，避免一次刷新全部长表。
 6. **System Health**：数据流、解析量、Buffer、标签、数据库写入和错误。
 
+Live Trading 中的 **Bonding Curve 动量 · H** 是完全独立的毕业前订单流实验：H0 生命周期基线、H1 买单速度、H2 新买家分散、H3 卖压衰减，分别配合固定3秒、订单流反转和大赢家移动止盈三种退出。它只写入 `bonding_curve_momentum_shadow_positions` 与 `bonding_curve_momentum_shadow_snapshots`，不会签名或发送交易，也不会修改旧 Shadow 的历史数据。
+
 ## 回测
 
 Dashboard 可直接运行常用组合。命令行支持更细的成本拆分：

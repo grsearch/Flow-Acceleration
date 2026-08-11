@@ -540,6 +540,153 @@ const config = {
     }),
   },
 
+  // Independent pre-migration Bonding Curve momentum research. It evaluates
+  // causal order-flow edges and simulated exits only; no execution path exists.
+  bondingCurveMomentumShadow: {
+    enabled: booleanEnv('FLOW_BONDING_MOMENTUM_SHADOW_ENABLED', true),
+    positionSizeSol: numberEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL', 0.05, {
+      min: 0.000001,
+    }),
+    stateWindowMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_WINDOW_MS', 5_000, {
+      min: 5_000,
+      max: 30_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_RETENTION_MS', 60_000, {
+      min: 5_000,
+      max: 10 * 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_BONDING_MOMENTUM_EPISODE_COOLDOWN_MS', 5_000, {
+      min: 0,
+      max: 10 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_BONDING_MOMENTUM_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    snapshotHorizonsMs: millisecondListEnv(
+      'FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS',
+      [1, 2, 3, 5, 8, 10, 20, 30],
+    ),
+    maxSnapshotLagMs: integerEnv('FLOW_BONDING_MOMENTUM_MAX_SNAPSHOT_LAG_MS', 2_000, {
+      min: 0,
+      max: 30_000,
+    }),
+    flowExitNetFlowSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_NET_SOL', 0),
+    flowExitMaxBuyTxAccel: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_BUY_TX_ACCEL', 0),
+    flowExitMinSellSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_MIN_SELL_SOL', 0.5, {
+      min: 0,
+    }),
+    bigWinnerPct: numberEnv('FLOW_BONDING_MOMENTUM_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'H0',
+        label: 'H0 · Lifecycle订单流基线',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+      },
+      {
+        id: 'H1',
+        label: 'H1 · 买单速度加速',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+        minBuyTxAccel1s: 6,
+        maxTop1SharePct: 50,
+      },
+      {
+        id: 'H2',
+        label: 'H2 · 新买家资金分散',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minNewBuyers1s: 4,
+        minBuyTx1s: 5,
+        maxTop1SharePct: 30,
+      },
+      {
+        id: 'H3',
+        label: 'H3 · 卖压衰减转换',
+        minAgeMs: 10_000,
+        maxAgeMs: 180_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 3,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+        minPriorSellSol1s: 0.5,
+        maxSellDecayRatio: 0.25,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X3',
+        label: 'X3 · 固定持有3秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FIXED_HOLD_MS', 3_000, {
+          min: 250,
+        }),
+        maxHoldMs: 3_000,
+      },
+      {
+        id: 'XF',
+        label: 'XF · 订单流反转 / 10秒兜底',
+        exitMode: 'FLOW_REVERSAL',
+        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MIN_HOLD_MS', 500, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MAX_HOLD_MS', 10_000, {
+          min: 1_000,
+        }),
+      },
+      {
+        id: 'XT',
+        label: 'XT · +10%激活 / 回撤7.5% / 30秒兜底',
+        exitMode: 'WINNER_TRAIL',
+        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MIN_HOLD_MS', 500, { min: 0 }),
+        trailingActivationPct: numberEnv(
+          'FLOW_BONDING_MOMENTUM_TRAIL_ACTIVATION_PCT',
+          10,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_BONDING_MOMENTUM_TRAIL_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MAX_HOLD_MS', 30_000, {
+          min: 1_000,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   // Lifecycle oversold-rebound research. Pre-migration curve trades and the
   // post-migration PumpSwap subscription use separate cohorts; profiles below
   // are orthogonal online experiments and never create or sign a transaction.
@@ -798,6 +945,9 @@ function validateConfig() {
   }
   if (config.launchQualityObserver.snapshotHorizonsMs.length === 0) {
     errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must contain at least one value');
+  }
+  if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
+    errors.push('FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS must contain at least one value');
   }
   if (config.liveTrading.enabled && !config.liveTrading.dryRun) {
     if (!config.liveTrading.rpcUrl) errors.push('FLOW_RPC_URL is required for live trading');

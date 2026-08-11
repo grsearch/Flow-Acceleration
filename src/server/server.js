@@ -27,6 +27,7 @@ class ResearchServer {
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
+    bondingCurveMomentumShadow = null,
   }) {
     this.config = config;
     this.store = store;
@@ -41,6 +42,7 @@ class ResearchServer {
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
+    this.bondingCurveMomentumShadow = bondingCurveMomentumShadow;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -304,6 +306,25 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/bonding-curve-momentum-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.bondingCurveMomentumShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_H',
+          sendsTransactions: false,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        ...this.store.bondingCurveMomentumShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          snapshotLimit: numeric(request.query.snapshotLimit, 40),
+          bigWinnerPct: this.config.bondingCurveMomentumShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -325,6 +346,7 @@ class ResearchServer {
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
+        bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,
       });
     });
 
