@@ -61,6 +61,14 @@ function run() {
     exitDelayMs: 200,
     exitTimeoutMs: 5_000,
     maxEntryPriceJumpPct: 15,
+    ammPriceContinuity: {
+      minRatio: 0.2,
+      maxRatio: 5,
+      resetAfterMs: 15_000,
+      confirmationTrades: 2,
+      confirmationWindowMs: 2_000,
+      confirmationTolerancePct: 20,
+    },
     entryProfiles: [{
       id: 'G0',
       label: 'baseline',
@@ -162,6 +170,10 @@ function run() {
   assert.strictEqual(suite.health().pendingEntries, 2);
   suite.observeTrade(trade(postMint, base + 5_950, 0.83));
   assert.strictEqual(suite.health().opened, 2);
+  suite.observeTrade(trade(postMint, base + 6_000, 0.0001));
+  rows = store.migratedDropReboundShadowDashboard({ positionLimit: 20 }).positions;
+  assert(rows.filter((row) => row.lifecycle_stage === 'POST_MIGRATION')
+    .every((row) => row.last_price === 0.83 && row.lowest_price === 0.83));
   suite.observeTrade(trade(postMint, base + 7_000, 1));
   suite.observeTrade(trade(postMint, base + 7_250, 0.99));
   suite.observeTrade(trade(postMint, base + 9_200, 0.9));
@@ -193,10 +205,37 @@ function run() {
   assert.strictEqual(suite.health().signals, signalsBeforeStrayCurve);
   assert(suite.health().dropExceededMax >= 1);
 
+  // A single malformed PumpSwap quote is ignored and cannot manufacture a signal.
+  const guardedMint = 'GuardedAmmPrice111111111111111111111111111';
+  recordCreate(store, guardedMint, base);
+  store.recordComplete({
+    mint: guardedMint,
+    completedAt: base + 13_000,
+    timestampMs: base + 13_000,
+  });
+  suite.onGraduated(store.getToken(guardedMint));
+  suite.observeTrade(trade(guardedMint, base + 13_100, 1));
+  const signalsBeforeOutlier = suite.health().signals;
+  suite.observeTrade(trade(guardedMint, base + 13_200, 0.0001));
+  suite.observeTrade(trade(guardedMint, base + 13_300, 0.99));
+  assert.strictEqual(suite.health().signals, signalsBeforeOutlier);
+  assert.strictEqual(suite.health().ammPriceOutliersIgnored, 2);
+
+  // Two corroborating quotes may confirm a genuine new regime after the first is quarantined.
+  suite.observeTrade(trade(guardedMint, base + 13_400, 0.1));
+  suite.observeTrade(trade(guardedMint, base + 13_500, 0.101));
+  assert.strictEqual(suite.health().ammPriceOutliersIgnored, 3);
+  assert.strictEqual(suite.health().ammPriceRegimesConfirmed, 1);
+
   const dashboard = store.migratedDropReboundShadowDashboard({ positionLimit: 20 });
   assert.strictEqual(dashboard.cohorts.length, 4);
   assert.strictEqual(dashboard.entryProfiles.length, 2);
   assert(dashboard.entryProfiles.every((profile) => profile.signals === 1));
+  const timeSessions = store.shadowTimeSessionDashboard('migrated-rebound');
+  assert.strictEqual(
+    timeSessions.sessions.reduce((sum, session) => sum + session.resolved, 0),
+    4,
+  );
   const health = store.health().migratedDropReboundShadowPositions;
   assert.strictEqual(health.signals, 2);
   assert.strictEqual(health.pre_migration_signals, 1);
