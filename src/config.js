@@ -540,6 +540,185 @@ const config = {
     }),
   },
 
+  // Migrated-token oversold rebound research. The broad PumpSwap subscription
+  // preserves every trade for later grid search; profiles below are orthogonal
+  // online cohorts and never create or sign a transaction.
+  migratedDropReboundShadow: {
+    enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
+    trackingAgeMs: integerEnv('FLOW_MIGRATED_REBOUND_TRACKING_MS', 5 * 60_000, {
+      min: 30_000,
+      max: 30 * 60_000,
+    }),
+    positionSizeSol: numberEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL', 0.05, {
+      min: 0.000001,
+    }),
+    entryDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATED_REBOUND_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0,
+      max: 100,
+    }),
+    bigWinnerPct: numberEnv('FLOW_MIGRATED_REBOUND_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'G0',
+        label: '基准 1秒 / 跌15–35% / 反弹2–5% / 1秒确认',
+        windowMs: 1_000,
+        dropMinPct: 15,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GW05',
+        label: '窗口0.5秒',
+        windowMs: 500,
+        dropMinPct: 15,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GW20',
+        label: '窗口2秒',
+        windowMs: 2_000,
+        dropMinPct: 15,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GD15_25',
+        label: '浅跌15–25%',
+        windowMs: 1_000,
+        dropMinPct: 15,
+        dropMaxPct: 25,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GD25_35',
+        label: '深跌25–35%',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GR3',
+        label: '反弹3–5%',
+        windowMs: 1_000,
+        dropMinPct: 15,
+        dropMaxPct: 35,
+        reboundMinPct: 3,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GT05',
+        label: '0.5秒内反弹',
+        windowMs: 1_000,
+        dropMinPct: 15,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 500,
+      },
+      {
+        id: 'GT20',
+        label: '2秒内反弹',
+        windowMs: 1_000,
+        dropMinPct: 15,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 2_000,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X3',
+        label: '固定持有3秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_3S_MS', 3_000, { min: 250 }),
+      },
+      {
+        id: 'X8',
+        label: '固定持有8秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_8S_MS', 8_000, { min: 250 }),
+      },
+      {
+        id: 'XLEG',
+        label: '旧版 +8%激活 / 回撤3% / 15秒兜底',
+        exitMode: 'LEGACY',
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT',
+          8,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, {
+          min: 0.1,
+          max: 100,
+        }),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+          max: 1_000,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS',
+          5_000,
+          { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      },
+      {
+        id: 'XTAIL',
+        label: '大赢家尾部 +20%激活 / 回撤10% / 60秒兜底',
+        exitMode: 'TAIL',
+        hardStopPct: numberEnv('FLOW_MIGRATED_REBOUND_TAIL_HARD_STOP_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_TAIL_ACTIVATION_PCT',
+          20,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_MIGRATED_REBOUND_TAIL_STOP_PCT', 10, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_TAIL_MAX_HOLD_MS', 60_000, {
+          min: 1_000,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   // Observer-only Launch Quality research. Reference percentages label market
   // structure for later analysis; they never become an entry or execution rule.
   launchQualityObserver: {

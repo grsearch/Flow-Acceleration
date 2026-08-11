@@ -50,6 +50,11 @@ async function main() {
   assert.ok(dashboard.includes('id="launch-pullback-metrics"'));
   assert.ok(dashboard.includes('id="launch-pullback-position-rows"'));
   assert.ok(dashboard.includes("json('/api/launch-pullback-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="migrated-rebound"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="migrated-rebound"'));
+  assert.ok(dashboard.includes('id="migrated-rebound-cohort-rows"'));
+  assert.ok(dashboard.includes('id="migrated-rebound-position-rows"'));
+  assert.ok(dashboard.includes("json('/api/migrated-drop-rebound-shadow?positionLimit=30')"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -131,6 +136,7 @@ async function main() {
       '/api/smart-pullback-shadow',
       '/api/smart-open-shadow',
       '/api/launch-pullback-shadow',
+      '/api/migrated-drop-rebound-shadow',
       '/api/launch-quality-observer',
       '/api/health',
     ];
@@ -259,6 +265,32 @@ async function main() {
     );
     assert.ok(Array.isArray(launchPullback.cohorts));
     assert.ok(Array.isArray(launchPullback.positions));
+    const migratedRebound = await (await fetch(
+      `http://127.0.0.1:${port}/api/migrated-drop-rebound-shadow`,
+    )).json();
+    assert.strictEqual(migratedRebound.runtime.mode, 'SHADOW_G');
+    assert.strictEqual(migratedRebound.runtime.sendsTransactions, false);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 8);
+    assert.strictEqual(migratedRebound.runtime.exitProfiles.length, 4);
+    assert.strictEqual(
+      migratedRebound.runtime.strategy.research.isolatedTable,
+      'migrated_drop_rebound_shadow_positions',
+    );
+    assert.deepStrictEqual(
+      migratedRebound.runtime.entryProfiles.find((profile) => profile.id === 'G0'),
+      {
+        id: 'G0',
+        label: '基准 1秒 / 跌15–35% / 反弹2–5% / 1秒确认',
+        windowMs: 1_000,
+        dropMinPct: 15,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+    );
+    assert.ok(Array.isArray(migratedRebound.cohorts));
+    assert.ok(Array.isArray(migratedRebound.positions));
     const launchQuality = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-quality-observer`,
     )).json();
