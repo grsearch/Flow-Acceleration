@@ -665,6 +665,7 @@ class ResearchStore {
       CREATE TABLE IF NOT EXISTS migrated_drop_rebound_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cohort_id TEXT NOT NULL,
+        lifecycle_stage TEXT NOT NULL DEFAULT 'POST_MIGRATION',
         entry_profile_id TEXT NOT NULL,
         exit_profile_id TEXT NOT NULL,
         episode_id TEXT NOT NULL,
@@ -821,6 +822,23 @@ class ResearchStore {
     `);
 
     this._migrateLiveTradingSchema();
+
+    const reboundColumns = new Set(
+      this.db.prepare('PRAGMA table_info(migrated_drop_rebound_shadow_positions)')
+        .all().map((column) => column.name),
+    );
+    if (!reboundColumns.has('lifecycle_stage')) {
+      this.db.exec(`
+        ALTER TABLE migrated_drop_rebound_shadow_positions
+        ADD COLUMN lifecycle_stage TEXT NOT NULL DEFAULT 'POST_MIGRATION'
+      `);
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_migrated_drop_rebound_lifecycle_profiles
+      ON migrated_drop_rebound_shadow_positions(
+        lifecycle_stage, entry_profile_id, exit_profile_id, rebound_at DESC
+      )
+    `);
 
     const signalColumns = new Set(
       this.db.prepare('PRAGMA table_info(flow_signals)').all().map((column) => column.name),
@@ -1773,7 +1791,7 @@ class ResearchStore {
       `),
       insertMigratedDropReboundShadowPosition: this.db.prepare(`
         INSERT OR IGNORE INTO migrated_drop_rebound_shadow_positions (
-          cohort_id, entry_profile_id, exit_profile_id, episode_id,
+          cohort_id, lifecycle_stage, entry_profile_id, exit_profile_id, episode_id,
           mint, symbol, status, rejection_reason, position_sol, configured_cost_pct,
           migrated_at, migration_age_ms, window_ms, drop_min_pct, drop_max_pct,
           rebound_min_pct, rebound_max_pct, rebound_timeout_ms,
@@ -1784,7 +1802,7 @@ class ResearchStore {
           hard_stop_pct, fast_take_profit_pct, fast_take_profit_window_ms,
           loss_check_at_ms, max_hold_ms, created_at, updated_at
         ) VALUES (
-          @cohortId, @entryProfileId, @exitProfileId, @episodeId,
+          @cohortId, @lifecycleStage, @entryProfileId, @exitProfileId, @episodeId,
           @mint, @symbol, @status, @rejectionReason, @positionSol, @configuredCostPct,
           @migratedAt, @migrationAgeMs, @windowMs, @dropMinPct, @dropMaxPct,
           @reboundMinPct, @reboundMaxPct, @reboundTimeoutMs,
@@ -2699,6 +2717,7 @@ class ResearchStore {
     const nullableInteger = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
     const row = {
       cohortId: position.cohortId,
+      lifecycleStage: position.lifecycleStage || 'POST_MIGRATION',
       entryProfileId: position.entryProfileId,
       exitProfileId: position.exitProfileId,
       episodeId: position.episodeId,
@@ -2992,7 +3011,7 @@ class ResearchStore {
     `).all(limit);
     const computeCohorts = () => {
       const cohortRows = this.db.prepare(`
-        SELECT cohort_id, entry_profile_id, exit_profile_id,
+        SELECT cohort_id, lifecycle_stage, entry_profile_id, exit_profile_id,
           MIN(window_ms) AS window_ms,
           MIN(drop_min_pct) AS drop_min_pct,
           MIN(drop_max_pct) AS drop_max_pct,
@@ -3021,8 +3040,8 @@ class ResearchStore {
           AVG(max_favorable_return_pct) AS average_mfe_pct,
           AVG(max_adverse_return_pct) AS average_mae_pct
         FROM migrated_drop_rebound_shadow_positions
-        GROUP BY cohort_id, entry_profile_id, exit_profile_id
-        ORDER BY entry_profile_id, exit_profile_id
+        GROUP BY cohort_id, lifecycle_stage, entry_profile_id, exit_profile_id
+        ORDER BY lifecycle_stage, entry_profile_id, exit_profile_id
       `).all();
       return cohortRows.map((cohort) => {
         const resolved = this.db.prepare(`
@@ -3081,15 +3100,15 @@ class ResearchStore {
       ? this._cachedDashboardStats(`migrated-drop-rebound:${threshold}`, 15_000, computeCohorts)
       : computeCohorts();
     const entryProfiles = this.db.prepare(`
-      SELECT entry_profile_id,
+      SELECT lifecycle_stage, entry_profile_id,
         COUNT(DISTINCT episode_id) AS signals,
         COUNT(DISTINCT mint) AS independent_mints,
         AVG(drop_pct) AS average_drop_pct,
         AVG(rebound_pct) AS average_rebound_pct,
         AVG(rebound_elapsed_ms) AS average_rebound_elapsed_ms
       FROM migrated_drop_rebound_shadow_positions
-      GROUP BY entry_profile_id
-      ORDER BY entry_profile_id
+      GROUP BY lifecycle_stage, entry_profile_id
+      ORDER BY lifecycle_stage, entry_profile_id
     `).all();
     return { cohorts, entryProfiles, positions };
   }
@@ -3852,6 +3871,10 @@ class ResearchStore {
       SELECT COUNT(*) AS total,
         COUNT(DISTINCT episode_id) AS signals,
         COUNT(DISTINCT mint) AS mints,
+        COUNT(DISTINCT CASE WHEN lifecycle_stage = 'PRE_MIGRATION' THEN episode_id END)
+          AS pre_migration_signals,
+        COUNT(DISTINCT CASE WHEN lifecycle_stage = 'POST_MIGRATION' THEN episode_id END)
+          AS post_migration_signals,
         COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
         COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,

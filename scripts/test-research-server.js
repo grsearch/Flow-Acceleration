@@ -54,6 +54,9 @@ async function main() {
   assert.ok(dashboard.includes('data-live-strategy-pane="migrated-rebound"'));
   assert.ok(dashboard.includes('id="migrated-rebound-cohort-rows"'));
   assert.ok(dashboard.includes('id="migrated-rebound-position-rows"'));
+  assert.ok(dashboard.includes('生命周期超跌反弹 · G'));
+  assert.ok(dashboard.includes('毕业前 Curve / 毕业后 PumpSwap 分层'));
+  assert.ok(dashboard.includes('两生命周期 × 八组入场 × 四组退出，共64个独立组合'));
   assert.ok(dashboard.includes("json('/api/migrated-drop-rebound-shadow?positionLimit=30')"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
@@ -270,8 +273,19 @@ async function main() {
     )).json();
     assert.strictEqual(migratedRebound.runtime.mode, 'SHADOW_G');
     assert.strictEqual(migratedRebound.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      migratedRebound.runtime.lifecycleStages,
+      [
+        { id: 'PRE_MIGRATION', label: '毕业前', market: 'PUMP_BONDING_CURVE' },
+        { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
+      ],
+    );
     assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 8);
     assert.strictEqual(migratedRebound.runtime.exitProfiles.length, 4);
+    assert.strictEqual(
+      migratedRebound.runtime.strategy.scope,
+      'PRE_MIGRATION_BONDING_CURVE_AND_POST_MIGRATION_PUMP_AMM',
+    );
     assert.strictEqual(
       migratedRebound.runtime.strategy.research.isolatedTable,
       'migrated_drop_rebound_shadow_positions',

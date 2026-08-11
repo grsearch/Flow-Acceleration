@@ -283,9 +283,10 @@ function createRuntime(runtimeConfig = config) {
         .map((hold) => `${hold.fixedHoldMs}ms`).join(',')}; isolated table; sends transactions=false.`,
     );
     console.log(
-      `Migrated Drop/Rebound Shadow G: ${runtimeConfig.migratedDropReboundShadow.entryProfiles.length} `
-      + `entry profiles x ${runtimeConfig.migratedDropReboundShadow.exitProfiles.length} exits; `
-      + `PumpSwap tracking=${runtimeConfig.migratedDropReboundShadow.trackingAgeMs / 1_000}s; `
+      `Lifecycle Drop/Rebound Shadow G: ${runtimeConfig.migratedDropReboundShadow.lifecycleStages.length} `
+      + `stages x ${runtimeConfig.migratedDropReboundShadow.entryProfiles.length} entry profiles `
+      + `x ${runtimeConfig.migratedDropReboundShadow.exitProfiles.length} exits; `
+      + `post-migration PumpSwap tracking=${runtimeConfig.migratedDropReboundShadow.trackingAgeMs / 1_000}s; `
       + 'isolated table; sends transactions=false.',
     );
     console.log(
