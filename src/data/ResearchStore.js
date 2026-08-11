@@ -176,6 +176,11 @@ class ResearchStore {
         table: 'bonding_curve_momentum_shadow_positions',
         anchor: 'signal_at',
       },
+      'graduation-hold': {
+        label: '毕业概率持仓 · I',
+        table: 'graduation_hold_shadow_positions',
+        anchor: 'signal_at',
+      },
     };
     const strategy = strategies[strategyId];
     if (!strategy) throw new Error(`Unknown Shadow time-session strategy: ${strategyId}`);
@@ -901,6 +906,66 @@ class ResearchStore {
         ON bonding_curve_momentum_shadow_positions(mint, signal_at DESC);
       CREATE INDEX IF NOT EXISTS idx_bonding_momentum_profiles
         ON bonding_curve_momentum_shadow_positions(entry_profile_id, exit_profile_id, signal_at);
+
+      CREATE TABLE IF NOT EXISTS graduation_hold_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        signal_id INTEGER NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        signal_curve_pct REAL,
+        signal_netflow_w3 REAL,
+        signal_buyers_w3 INTEGER,
+        entry_target_at INTEGER,
+        entry_deadline_at INTEGER,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        exit_mode TEXT NOT NULL,
+        current_checkpoint_pct REAL,
+        next_checkpoint_pct REAL,
+        checkpoint_deadline_at INTEGER,
+        gates_passed INTEGER NOT NULL DEFAULT 0,
+        last_gate_at INTEGER,
+        last_gate_pass INTEGER,
+        last_features_json TEXT,
+        checkpoint_history_json TEXT NOT NULL DEFAULT '[]',
+        graduation_ready INTEGER NOT NULL DEFAULT 0,
+        graduated_at INTEGER,
+        exit_target_market TEXT,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_graduation_hold_status
+        ON graduation_hold_shadow_positions(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_graduation_hold_mint
+        ON graduation_hold_shadow_positions(mint, signal_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_graduation_hold_cohort
+        ON graduation_hold_shadow_positions(cohort_id, signal_at DESC);
 
       CREATE TABLE IF NOT EXISTS bonding_curve_momentum_shadow_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2122,6 +2187,72 @@ class ResearchStore {
         WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY signal_at, id
       `),
+      insertGraduationHoldShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO graduation_hold_shadow_positions (
+          cohort_id, episode_id, signal_id, mint, symbol, status, rejection_reason,
+          position_sol, configured_cost_pct, signal_at, signal_price,
+          signal_curve_pct, signal_netflow_w3, signal_buyers_w3,
+          entry_target_at, entry_deadline_at, exit_mode,
+          created_at, updated_at
+        ) VALUES (
+          @cohortId, @episodeId, @signalId, @mint, @symbol, @status, @rejectionReason,
+          @positionSol, @configuredCostPct, @signalAt, @signalPrice,
+          @signalCurvePct, @signalNetFlowW3, @signalBuyersW3,
+          @entryTargetAt, @entryDeadlineAt, @exitMode,
+          @createdAt, @updatedAt
+        )
+      `),
+      getGraduationHoldShadowPosition: this.db.prepare(`
+        SELECT * FROM graduation_hold_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      getGraduationHoldShadowPositionById: this.db.prepare(`
+        SELECT * FROM graduation_hold_shadow_positions WHERE id = ?
+      `),
+      updateGraduationHoldShadowPosition: this.db.prepare(`
+        UPDATE graduation_hold_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          lowest_price = COALESCE(@lowestPrice, lowest_price),
+          last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          max_favorable_return_pct = COALESCE(@maxFavorableReturnPct, max_favorable_return_pct),
+          max_adverse_return_pct = COALESCE(@maxAdverseReturnPct, max_adverse_return_pct),
+          current_checkpoint_pct = COALESCE(@currentCheckpointPct, current_checkpoint_pct),
+          next_checkpoint_pct = CASE WHEN @clearNextCheckpoint = 1
+            THEN NULL ELSE COALESCE(@nextCheckpointPct, next_checkpoint_pct) END,
+          checkpoint_deadline_at = CASE WHEN @clearCheckpointDeadline = 1
+            THEN NULL ELSE COALESCE(@checkpointDeadlineAt, checkpoint_deadline_at) END,
+          gates_passed = COALESCE(@gatesPassed, gates_passed),
+          last_gate_at = COALESCE(@lastGateAt, last_gate_at),
+          last_gate_pass = COALESCE(@lastGatePass, last_gate_pass),
+          last_features_json = COALESCE(@lastFeaturesJson, last_features_json),
+          checkpoint_history_json = COALESCE(@checkpointHistoryJson, checkpoint_history_json),
+          graduation_ready = COALESCE(@graduationReady, graduation_ready),
+          graduated_at = COALESCE(@graduatedAt, graduated_at),
+          exit_target_market = COALESCE(@exitTargetMarket, exit_target_market),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeGraduationHoldShadowPositions: this.db.prepare(`
+        SELECT * FROM graduation_hold_shadow_positions
+        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY signal_at, id
+      `),
       insertBondingCurveMomentumShadowSnapshot: this.db.prepare(`
         INSERT OR IGNORE INTO bonding_curve_momentum_shadow_snapshots (
           episode_id, entry_profile_id, mint, horizon_ms, status,
@@ -3189,6 +3320,102 @@ class ResearchStore {
     return this.stmts.activeBondingCurveMomentumShadowPositions.all();
   }
 
+  createGraduationHoldShadowPosition(position) {
+    const now = Date.now();
+    const nullableInteger = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
+    const row = {
+      cohortId: position.cohortId,
+      episodeId: position.episodeId,
+      signalId: Math.trunc(position.signalId),
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      signalAt: Math.trunc(position.signalAt),
+      signalPrice: position.signalPrice,
+      signalCurvePct: finiteOrNull(position.signalCurvePct),
+      signalNetFlowW3: finiteOrNull(position.signalNetFlowW3),
+      signalBuyersW3: nullableInteger(position.signalBuyersW3),
+      entryTargetAt: nullableInteger(position.entryTargetAt),
+      entryDeadlineAt: nullableInteger(position.entryDeadlineAt),
+      exitMode: position.exitMode,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertGraduationHoldShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getGraduationHoldShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateGraduationHoldShadowPosition(id, patch = {}) {
+    const owns = (key) => Object.prototype.hasOwnProperty.call(patch, key);
+    const value = (key) => (owns(key) ? patch[key] : null);
+    let checkpointHistoryJson = null;
+    if (patch.appendCheckpointHistory) {
+      const current = this.stmts.getGraduationHoldShadowPositionById.get(id);
+      let history = [];
+      try {
+        history = JSON.parse(current?.checkpoint_history_json || '[]');
+        if (!Array.isArray(history)) history = [];
+      } catch (_) {
+        history = [];
+      }
+      history.push(patch.appendCheckpointHistory);
+      checkpointHistoryJson = JSON.stringify(history.slice(-20));
+    }
+    return this.stmts.updateGraduationHoldShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      lowestPrice: finiteOrNull(value('lowestPrice')),
+      lastObservedAt: value('lastObservedAt'),
+      lastPrice: finiteOrNull(value('lastPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
+      currentCheckpointPct: finiteOrNull(value('currentCheckpointPct')),
+      nextCheckpointPct: finiteOrNull(value('nextCheckpointPct')),
+      clearNextCheckpoint: owns('nextCheckpointPct') && patch.nextCheckpointPct == null ? 1 : 0,
+      checkpointDeadlineAt: value('checkpointDeadlineAt'),
+      clearCheckpointDeadline: owns('checkpointDeadlineAt')
+        && patch.checkpointDeadlineAt == null ? 1 : 0,
+      gatesPassed: value('gatesPassed'),
+      lastGateAt: value('lastGateAt'),
+      lastGatePass: value('lastGatePass'),
+      lastFeaturesJson: value('lastFeaturesJson'),
+      checkpointHistoryJson,
+      graduationReady: value('graduationReady'),
+      graduatedAt: value('graduatedAt'),
+      exitTargetMarket: value('exitTargetMarket'),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeGraduationHoldShadowPositions() {
+    return this.stmts.activeGraduationHoldShadowPositions.all();
+  }
+
   recentBondingCurveMomentumEpisodes(sinceMs) {
     return this.stmts.recentBondingCurveMomentumEpisodes.all(sinceMs);
   }
@@ -3658,6 +3885,89 @@ class ResearchStore {
       ORDER BY entry_profile_id, horizon_ms
     `).all();
     return { cohorts, positions, snapshots, snapshotStats };
+  }
+
+  graduationHoldShadowDashboard({ positionLimit = 30, bigWinnerPct = 50 } = {}) {
+    const limit = Math.min(200, Math.max(1, Math.trunc(Number(positionLimit) || 30)));
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+          THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM graduation_hold_shadow_positions
+      ORDER BY CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        THEN 0 ELSE 1 END, updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit).map((row) => {
+      let lastFeatures = null;
+      let checkpointHistory = [];
+      try { lastFeatures = row.last_features_json ? JSON.parse(row.last_features_json) : null; }
+      catch (_) { lastFeatures = { parseError: true }; }
+      try { checkpointHistory = JSON.parse(row.checkpoint_history_json || '[]'); }
+      catch (_) { checkpointHistory = []; }
+      return { ...row, last_features: lastFeatures, checkpoint_history: checkpointHistory };
+    });
+    const groups = this.db.prepare(`
+      SELECT cohort_id, exit_mode,
+        COUNT(*) AS attempts,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS independent_mints,
+        COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+        COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+        COALESCE(SUM(graduation_ready = 1), 0) AS graduation_ready,
+        COALESCE(SUM(graduated_at IS NOT NULL), 0) AS graduated,
+        AVG(gates_passed) AS average_gates_passed,
+        AVG(entry_jump_pct) AS average_entry_jump_pct,
+        AVG(max_favorable_return_pct) AS average_mfe_pct,
+        AVG(max_adverse_return_pct) AS average_mae_pct
+      FROM graduation_hold_shadow_positions
+      GROUP BY cohort_id, exit_mode
+      ORDER BY cohort_id
+    `).all();
+    const threshold = Math.max(1, Number(bigWinnerPct) || 50);
+    const cohorts = groups.map((group) => {
+      const resolved = this.db.prepare(`
+        SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+        FROM graduation_hold_shadow_positions
+        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          AND net_return_pct IS NOT NULL
+        ORDER BY net_return_pct
+      `).all(group.cohort_id);
+      const returns = resolved.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+      const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
+      const losses = returns.filter((value) => value < 0);
+      const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+      const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+      const exTop5 = [...wins.slice(5), ...returns.filter((value) => value <= 0)];
+      const sorted = [...returns].sort((a, b) => a - b);
+      const middle = Math.floor(sorted.length / 2);
+      const median = sorted.length
+        ? sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+        : null;
+      const opportunities = resolved.filter((row) => Number(row.max_favorable_return_pct) >= threshold);
+      const realized = resolved.filter((row) => Number(row.gross_return_pct) >= threshold);
+      return {
+        ...group,
+        resolved: returns.length,
+        average_net_return_pct: returns.length
+          ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+        median_net_return_pct: median,
+        win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+        profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+        average_net_return_ex_top5_pct: exTop5.length
+          ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length : null,
+        top_5_winner_contribution_pct: totalProfit > 0
+          ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100 : null,
+        big_winner_threshold_pct: threshold,
+        big_winner_opportunities: opportunities.length,
+        big_winners_realized: realized.length,
+        big_winner_realization_rate_pct: opportunities.length
+          ? realized.length / opportunities.length * 100 : null,
+      };
+    });
+    return { cohorts, positions };
   }
 
   launchQualityDashboard({ observationLimit = 30, snapshotLimit = 60 } = {}) {
@@ -4444,6 +4754,17 @@ class ResearchStore {
         COALESCE(SUM(status = 'NO_TRADE'), 0) AS no_trade
       FROM bonding_curve_momentum_shadow_snapshots
     `).get();
+    const graduationHoldShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected,
+        COALESCE(SUM(graduation_ready = 1), 0) AS graduation_ready
+      FROM graduation_hold_shadow_positions
+    `).get();
     const launchQualityObservations = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
@@ -4485,6 +4806,7 @@ class ResearchStore {
       migratedDropReboundShadowPositions,
       bondingCurveMomentumShadowPositions,
       bondingCurveMomentumShadowSnapshots,
+      graduationHoldShadowPositions,
       launchQualityObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
