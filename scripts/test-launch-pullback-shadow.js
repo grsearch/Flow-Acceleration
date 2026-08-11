@@ -14,7 +14,7 @@ function makeStore() {
   }, { configuredTradingCostPct: 0 });
 }
 
-function makeConfig() {
+function makeConfig({ withTrailing = false } = {}) {
   return {
     enabled: true,
     positionSizeSol: 0.05,
@@ -33,6 +33,28 @@ function makeConfig() {
       { id: '3S', label: '3s', fixedHoldMs: 3_000 },
       { id: '8S', label: '8s', fixedHoldMs: 8_000 },
     ],
+    trailingCohorts: withTrailing ? [
+      {
+        id: 'FT_A', label: 'FT-A', profileId: 'F2', trailingActivationPct: 0,
+        trailingDrawdownPct: 20, minHoldMs: 3_000, maxHoldMs: 120_000,
+        hardStopPct: null,
+      },
+      {
+        id: 'FT_B', label: 'FT-B', profileId: 'F1', trailingActivationPct: 10,
+        trailingDrawdownPct: 20, minHoldMs: 3_000, maxHoldMs: 120_000,
+        hardStopPct: 30,
+      },
+      {
+        id: 'FT_C', label: 'FT-C', profileId: 'F2', trailingActivationPct: 30,
+        trailingDrawdownPct: 20, minHoldMs: 0, maxHoldMs: 120_000,
+        hardStopPct: 30,
+      },
+      {
+        id: 'FT_D', label: 'FT-D', profileId: 'F1', trailingActivationPct: 30,
+        trailingDrawdownPct: 15, minHoldMs: 3_000, maxHoldMs: 120_000,
+        hardStopPct: 30,
+      },
+    ] : [],
     costModel: {
       platformFeePct: 1.4,
       buySlippagePct: 0.3,
@@ -45,6 +67,73 @@ function makeConfig() {
       positionSizeSol: 0.05,
     },
   };
+}
+
+function testTrailingCohorts() {
+  const store = makeStore();
+  let now = 1_000_000;
+  const suite = new LaunchPullbackShadowSuite({
+    config: makeConfig({ withTrailing: true }),
+    store,
+    now: () => now,
+  });
+  suite.start();
+  suite.onReference(reference('trail', now));
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint = 'trail'").get().n,
+    10,
+    'six historical cohorts and four new trailing cohorts must coexist',
+  );
+
+  suite.observeTrade(trade('trail', now + 200, 1));
+  suite.observeTrade(trade('trail', now + 1_000, 1.5));
+  suite.observeTrade(trade('trail', now + 2_500, 1.1));
+  assert.strictEqual(
+    store.db.prepare("SELECT status FROM launch_pullback_shadow_positions WHERE cohort_id = 'FT_C' AND mint = 'trail'").get().status,
+    'EXIT_PENDING',
+    'FT-C should trail immediately once its +30% activation was reached',
+  );
+  assert.strictEqual(
+    store.db.prepare("SELECT status FROM launch_pullback_shadow_positions WHERE cohort_id = 'FT_A' AND mint = 'trail'").get().status,
+    'OPEN',
+    'FT-A must respect its three-second minimum hold',
+  );
+  suite.observeTrade(trade('trail', now + 2_700, 1.08));
+  suite.observeTrade(trade('trail', now + 3_200, 1.1));
+  suite.observeTrade(trade('trail', now + 3_400, 1.08));
+  const exits = store.db.prepare(`
+    SELECT cohort_id, status, exit_reason FROM launch_pullback_shadow_positions
+    WHERE mint = 'trail' AND cohort_id LIKE 'FT_%' ORDER BY cohort_id
+  `).all();
+  assert.deepStrictEqual(exits.map((row) => row.status), ['CLOSED', 'CLOSED', 'CLOSED', 'CLOSED']);
+  assert.ok(exits.every((row) => row.exit_reason.startsWith('TRAILING_DRAWDOWN_')));
+
+  now = 2_000_000;
+  suite.onReference(reference('hard-stop', now));
+  suite.observeTrade(trade('hard-stop', now + 200, 1));
+  suite.observeTrade(trade('hard-stop', now + 500, 0.69));
+  suite.observeTrade(trade('hard-stop', now + 700, 0.68));
+  const hardStops = store.db.prepare(`
+    SELECT cohort_id, status, exit_reason FROM launch_pullback_shadow_positions
+    WHERE mint = 'hard-stop' AND cohort_id LIKE 'FT_%' ORDER BY cohort_id
+  `).all();
+  assert.strictEqual(hardStops.find((row) => row.cohort_id === 'FT_A').status, 'OPEN');
+  assert.ok(hardStops.filter((row) => row.cohort_id !== 'FT_A').every((row) => (
+    row.status === 'CLOSED' && row.exit_reason === 'HARD_STOP_30PCT'
+  )));
+
+  now = 3_000_000;
+  suite.onReference(reference('max-hold', now));
+  suite.observeTrade(trade('max-hold', now + 200, 1));
+  suite.advanceTime(now + 120_200);
+  suite.observeTrade(trade('max-hold', now + 120_400, 1.1));
+  const maxHold = store.db.prepare(`
+    SELECT status, exit_reason FROM launch_pullback_shadow_positions
+    WHERE mint = 'max-hold' AND cohort_id = 'FT_A'
+  `).get();
+  assert.deepStrictEqual(maxHold, { status: 'CLOSED', exit_reason: 'MAX_HOLD_120S' });
+  assert.strictEqual(suite.health().sendsTransactions, false);
+  store.close();
 }
 
 function reference(mint, at, netFlowSol = 20, creatorSharePct = 4) {
@@ -166,3 +255,4 @@ function main() {
 }
 
 main();
+testTrailingCohorts();

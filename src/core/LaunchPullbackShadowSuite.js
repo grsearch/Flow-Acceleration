@@ -15,14 +15,42 @@ class LaunchPullbackShadowSuite {
             ...profile,
             cohortId,
             cohortLabel: `${profile.label} · ${hold.label}`,
+            profileId: profile.id,
+            exitPolicy: 'FIXED_HOLD',
             fixedHoldMs: hold.fixedHoldMs,
             profiles: undefined,
             holds: undefined,
+            trailingCohorts: undefined,
           },
           store,
           now,
         }));
       }
+    }
+
+    const profiles = new Map((config.profiles || []).map((profile) => [profile.id, profile]));
+    for (const cohort of config.trailingCohorts || []) {
+      const profile = profiles.get(cohort.profileId);
+      if (!profile) throw new Error(`Unknown Launch Pullback profile: ${cohort.profileId}`);
+      if (this.managers.has(cohort.id)) {
+        throw new Error(`Duplicate Launch Pullback cohort: ${cohort.id}`);
+      }
+      this.managers.set(cohort.id, new LaunchPullbackShadowManager({
+        config: {
+          ...config,
+          ...profile,
+          ...cohort,
+          cohortId: cohort.id,
+          cohortLabel: cohort.label,
+          profileId: profile.id,
+          exitPolicy: 'TRAILING_STOP',
+          profiles: undefined,
+          holds: undefined,
+          trailingCohorts: undefined,
+        },
+        store,
+        now,
+      }));
     }
   }
 

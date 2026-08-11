@@ -532,6 +532,87 @@ const config = {
         }),
       },
     ],
+    // These cohorts retain the exact F1/F2 entry filters above and only vary exits.
+    // Their IDs are intentionally independent from the historical fixed-hold cohorts.
+    trailingCohorts: [
+      {
+        id: 'FT_A',
+        label: 'FT-A · F2立即激活/回撤20%/无硬止损',
+        profileId: 'F2',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_ACTIVATION_PCT', 0, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: null,
+      },
+      {
+        id: 'FT_B',
+        label: 'FT-B · F1盈利10%激活/回撤20%/止损30%',
+        profileId: 'F1',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_ACTIVATION_PCT', 10, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FT_C',
+        label: 'FT-C · F2盈利30%激活/回撤20%/止损30%',
+        profileId: 'F2',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FT_D',
+        label: 'FT-D对照 · F1盈利30%激活/回撤15%/止损30%',
+        profileId: 'F1',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_DRAWDOWN_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+    ],
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL', 0.05, {

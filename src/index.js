@@ -291,7 +291,9 @@ function createRuntime(runtimeConfig = config) {
       `Launch Pullback Shadow F: ${runtimeConfig.launchPullbackShadow.profiles.map((profile) => (
         `${profile.id}=net>=${profile.minNetFlowSol}SOL/creator<=${profile.maxCreatorSharePct}%`
       )).join(', ')}; holds=${runtimeConfig.launchPullbackShadow.holds
-        .map((hold) => `${hold.fixedHoldMs}ms`).join(',')}; isolated table; sends transactions=false.`,
+        .map((hold) => `${hold.fixedHoldMs}ms`).join(',')}; trailing=${runtimeConfig
+        .launchPullbackShadow.trailingCohorts?.map((cohort) => cohort.id).join(',') || 'none'}; `
+      + 'isolated cohorts; sends transactions=false.',
     );
     console.log(
       `Lifecycle Drop/Rebound Shadow G: ${runtimeConfig.migratedDropReboundShadow.lifecycleStages.length} `

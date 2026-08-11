@@ -90,6 +90,7 @@ class LaunchPullbackShadowManager {
       strategy: {
         name: `Launch Pullback ${this.config.cohortId}`,
         entry: {
+          profileId: this.config.profileId,
           reference: 'PUMP_25_PULLBACK_7.5_REBOUND_3',
           minNetFlowSol: this.config.minNetFlowSol,
           maxCreatorSharePct: this.config.maxCreatorSharePct,
@@ -98,12 +99,23 @@ class LaunchPullbackShadowManager {
           maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
           market: 'PUMP_BONDING_CURVE',
         },
-        exit: {
-          policy: 'FIXED_HOLD',
-          fixedHoldMs: this.config.fixedHoldMs,
-          exitDelayMs: this.config.exitDelayMs,
-          exitTimeoutMs: this.config.exitTimeoutMs,
-        },
+        exit: this.config.exitPolicy === 'TRAILING_STOP'
+          ? {
+            policy: 'TRAILING_STOP',
+            activationPct: this.config.trailingActivationPct,
+            drawdownPct: this.config.trailingDrawdownPct,
+            minHoldMs: this.config.minHoldMs,
+            maxHoldMs: this.config.maxHoldMs,
+            hardStopPct: this.config.hardStopPct,
+            exitDelayMs: this.config.exitDelayMs,
+            exitTimeoutMs: this.config.exitTimeoutMs,
+          }
+          : {
+            policy: 'FIXED_HOLD',
+            fixedHoldMs: this.config.fixedHoldMs,
+            exitDelayMs: this.config.exitDelayMs,
+            exitTimeoutMs: this.config.exitTimeoutMs,
+          },
         research: {
           bigWinnerPct: this.config.bigWinnerPct,
           simulatedPositionSol: this.config.positionSizeSol,
@@ -240,6 +252,7 @@ class LaunchPullbackShadowManager {
     position = position || this.positions.get(trade.mint);
     if (position?.status === STATUS.OPEN && this._eligibleExitTrade(position, trade, price)) {
       this._updatePeak(position, price);
+      this._evaluateTrailingExit(position, price, timestampMs);
     }
   }
 
@@ -256,8 +269,16 @@ class LaunchPullbackShadowManager {
         continue;
       }
       if (position.status !== STATUS.OPEN) continue;
-      const triggerAt = position.entryAt + this.config.fixedHoldMs;
-      if (now >= triggerAt) this._requestExit(position, triggerAt);
+      const holdMs = this.config.exitPolicy === 'TRAILING_STOP'
+        ? this.config.maxHoldMs
+        : this.config.fixedHoldMs;
+      const triggerAt = position.entryAt + holdMs;
+      if (now >= triggerAt) {
+        const reason = this.config.exitPolicy === 'TRAILING_STOP'
+          ? `MAX_HOLD_${holdMs / 1_000}S`
+          : `FIXED_HOLD_${holdMs / 1_000}S`;
+        this._requestExit(position, triggerAt, reason);
+      }
     }
   }
 
@@ -282,10 +303,35 @@ class LaunchPullbackShadowManager {
     });
   }
 
-  _requestExit(position, triggerAt) {
+  _evaluateTrailingExit(position, price, timestampMs) {
+    if (this.config.exitPolicy !== 'TRAILING_STOP' || position.status !== STATUS.OPEN) return;
+    const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    if (this.config.hardStopPct != null && grossReturnPct <= -this.config.hardStopPct) {
+      this._requestExit(
+        position,
+        timestampMs,
+        `HARD_STOP_${this.config.hardStopPct}PCT`,
+      );
+      return;
+    }
+
+    const peakReturnPct = ((position.highestPrice / position.entryPrice) - 1) * 100;
+    const armed = peakReturnPct >= this.config.trailingActivationPct;
+    const oldEnough = timestampMs - position.entryAt >= this.config.minHoldMs;
+    const drawdownPct = (1 - price / position.highestPrice) * 100;
+    if (armed && oldEnough && drawdownPct >= this.config.trailingDrawdownPct) {
+      this._requestExit(
+        position,
+        timestampMs,
+        `TRAILING_DRAWDOWN_${this.config.trailingDrawdownPct}PCT`,
+      );
+    }
+  }
+
+  _requestExit(position, triggerAt, reason) {
     if (position.status !== STATUS.OPEN) return;
     position.status = STATUS.EXIT_PENDING;
-    position.exitReason = `FIXED_HOLD_${this.config.fixedHoldMs / 1_000}S`;
+    position.exitReason = reason;
     position.exitTriggerAt = triggerAt;
     position.exitTargetAt = triggerAt + this.config.exitDelayMs;
     position.exitDeadlineAt = position.exitTargetAt + this.config.exitTimeoutMs;
