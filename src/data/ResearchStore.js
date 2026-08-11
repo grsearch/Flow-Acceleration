@@ -735,6 +735,108 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_migrated_drop_rebound_profiles
         ON migrated_drop_rebound_shadow_positions(entry_profile_id, exit_profile_id, rebound_at);
 
+      CREATE TABLE IF NOT EXISTS bonding_curve_momentum_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        entry_profile_id TEXT NOT NULL,
+        exit_profile_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        age_ms INTEGER,
+        curve_pct REAL,
+        virtual_sol_reserves REAL,
+        net_flow_1s REAL NOT NULL,
+        prior_net_flow_1s REAL NOT NULL,
+        flow_accel_1s REAL NOT NULL,
+        buy_sol_1s REAL NOT NULL,
+        sell_sol_1s REAL NOT NULL,
+        prior_sell_sol_1s REAL NOT NULL,
+        sell_decay_ratio REAL NOT NULL,
+        buyers_1s INTEGER NOT NULL,
+        new_buyers_1s INTEGER NOT NULL,
+        buy_tx_1s INTEGER NOT NULL,
+        prior_buy_tx_1s INTEGER NOT NULL,
+        buy_tx_accel_1s INTEGER NOT NULL,
+        top1_share_pct REAL,
+        features_json TEXT NOT NULL,
+        entry_target_at INTEGER NOT NULL,
+        entry_deadline_at INTEGER NOT NULL,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        trailing_activated_at INTEGER,
+        exit_mode TEXT NOT NULL,
+        fixed_hold_ms INTEGER,
+        min_hold_ms INTEGER,
+        max_hold_ms INTEGER NOT NULL,
+        trailing_activation_pct REAL,
+        trailing_stop_pct REAL,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bonding_momentum_status
+        ON bonding_curve_momentum_shadow_positions(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_bonding_momentum_mint
+        ON bonding_curve_momentum_shadow_positions(mint, signal_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_bonding_momentum_profiles
+        ON bonding_curve_momentum_shadow_positions(entry_profile_id, exit_profile_id, signal_at);
+
+      CREATE TABLE IF NOT EXISTS bonding_curve_momentum_shadow_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        episode_id TEXT NOT NULL,
+        entry_profile_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        horizon_ms INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        target_at INTEGER NOT NULL,
+        observed_at INTEGER,
+        observation_lag_ms INTEGER,
+        market TEXT,
+        price REAL,
+        gross_return_pct REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        net_flow_1s REAL,
+        flow_accel_1s REAL,
+        buyers_1s INTEGER,
+        new_buyers_1s INTEGER,
+        buy_tx_accel_1s INTEGER,
+        sell_decay_ratio REAL,
+        curve_pct REAL,
+        virtual_sol_reserves REAL,
+        features_json TEXT,
+        created_at INTEGER NOT NULL,
+        UNIQUE(episode_id, horizon_ms)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bonding_momentum_snapshots_horizon
+        ON bonding_curve_momentum_shadow_snapshots(horizon_ms, observed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_bonding_momentum_snapshots_mint
+        ON bonding_curve_momentum_shadow_snapshots(mint, target_at DESC);
+
       CREATE TABLE IF NOT EXISTS launch_quality_observations (
         mint TEXT PRIMARY KEY,
         symbol TEXT,
@@ -1856,6 +1958,102 @@ class ResearchStore {
         WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY rebound_at, id
       `),
+      insertBondingCurveMomentumShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO bonding_curve_momentum_shadow_positions (
+          cohort_id, entry_profile_id, exit_profile_id, episode_id,
+          mint, symbol, status, rejection_reason, position_sol, configured_cost_pct,
+          signal_at, signal_price, age_ms, curve_pct, virtual_sol_reserves,
+          net_flow_1s, prior_net_flow_1s, flow_accel_1s,
+          buy_sol_1s, sell_sol_1s, prior_sell_sol_1s, sell_decay_ratio,
+          buyers_1s, new_buyers_1s, buy_tx_1s, prior_buy_tx_1s,
+          buy_tx_accel_1s, top1_share_pct, features_json,
+          entry_target_at, entry_deadline_at, exit_mode, fixed_hold_ms,
+          min_hold_ms, max_hold_ms, trailing_activation_pct, trailing_stop_pct,
+          created_at, updated_at
+        ) VALUES (
+          @cohortId, @entryProfileId, @exitProfileId, @episodeId,
+          @mint, @symbol, @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @signalAt, @signalPrice, @ageMs, @curvePct, @virtualSolReserves,
+          @netFlow1s, @priorNetFlow1s, @flowAccel1s,
+          @buySol1s, @sellSol1s, @priorSellSol1s, @sellDecayRatio,
+          @buyers1s, @newBuyers1s, @buyTx1s, @priorBuyTx1s,
+          @buyTxAccel1s, @top1SharePct, @featuresJson,
+          @entryTargetAt, @entryDeadlineAt, @exitMode, @fixedHoldMs,
+          @minHoldMs, @maxHoldMs, @trailingActivationPct, @trailingStopPct,
+          @createdAt, @updatedAt
+        )
+      `),
+      getBondingCurveMomentumShadowPosition: this.db.prepare(`
+        SELECT * FROM bonding_curve_momentum_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      updateBondingCurveMomentumShadowPosition: this.db.prepare(`
+        UPDATE bonding_curve_momentum_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          lowest_price = COALESCE(@lowestPrice, lowest_price),
+          last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct,
+            max_favorable_return_pct
+          ),
+          max_adverse_return_pct = COALESCE(
+            @maxAdverseReturnPct,
+            max_adverse_return_pct
+          ),
+          trailing_activated_at = COALESCE(@trailingActivatedAt, trailing_activated_at),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeBondingCurveMomentumShadowPositions: this.db.prepare(`
+        SELECT * FROM bonding_curve_momentum_shadow_positions
+        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY signal_at, id
+      `),
+      insertBondingCurveMomentumShadowSnapshot: this.db.prepare(`
+        INSERT OR IGNORE INTO bonding_curve_momentum_shadow_snapshots (
+          episode_id, entry_profile_id, mint, horizon_ms, status,
+          target_at, observed_at, observation_lag_ms, market, price,
+          gross_return_pct, max_favorable_return_pct, max_adverse_return_pct,
+          net_flow_1s, flow_accel_1s, buyers_1s, new_buyers_1s,
+          buy_tx_accel_1s, sell_decay_ratio, curve_pct, virtual_sol_reserves,
+          features_json, created_at
+        ) VALUES (
+          @episodeId, @entryProfileId, @mint, @horizonMs, @status,
+          @targetAt, @observedAt, @observationLagMs, @market, @price,
+          @grossReturnPct, @maxFavorableReturnPct, @maxAdverseReturnPct,
+          @netFlow1s, @flowAccel1s, @buyers1s, @newBuyers1s,
+          @buyTxAccel1s, @sellDecayRatio, @curvePct, @virtualSolReserves,
+          @featuresJson, @createdAt
+        )
+      `),
+      recentBondingCurveMomentumEpisodes: this.db.prepare(`
+        SELECT entry_profile_id, episode_id, mint, symbol, signal_at, signal_price
+        FROM bonding_curve_momentum_shadow_positions
+        WHERE signal_at >= ?
+        GROUP BY episode_id
+        ORDER BY signal_at, episode_id
+      `),
+      bondingCurveMomentumSnapshotHorizons: this.db.prepare(`
+        SELECT horizon_ms FROM bonding_curve_momentum_shadow_snapshots
+        WHERE episode_id = ?
+        ORDER BY horizon_ms
+      `),
       insertLaunchQualityObservation: this.db.prepare(`
         INSERT OR IGNORE INTO launch_quality_observations (
           mint, symbol, creator, created_at, status, label_status,
@@ -2804,6 +3002,139 @@ class ResearchStore {
     return this.stmts.activeMigratedDropReboundShadowPositions.all();
   }
 
+  createBondingCurveMomentumShadowPosition(position) {
+    const now = Date.now();
+    const features = position.features || {};
+    const nullableInteger = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
+    const row = {
+      cohortId: position.cohortId,
+      entryProfileId: position.entryProfileId,
+      exitProfileId: position.exitProfileId,
+      episodeId: position.episodeId,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      signalAt: Math.trunc(position.signalAt),
+      signalPrice: position.signalPrice,
+      ageMs: nullableInteger(features.ageMs),
+      curvePct: finiteOrNull(features.curvePct),
+      virtualSolReserves: finiteOrNull(features.virtualSolReserves),
+      netFlow1s: finiteOrNull(features.netFlow1s) ?? 0,
+      priorNetFlow1s: finiteOrNull(features.priorNetFlow1s) ?? 0,
+      flowAccel1s: finiteOrNull(features.flowAccel1s) ?? 0,
+      buySol1s: finiteOrNull(features.buySol1s) ?? 0,
+      sellSol1s: finiteOrNull(features.sellSol1s) ?? 0,
+      priorSellSol1s: finiteOrNull(features.priorSellSol1s) ?? 0,
+      sellDecayRatio: finiteOrNull(features.sellDecayRatio) ?? 0,
+      buyers1s: Math.max(0, Math.trunc(features.buyers1s || 0)),
+      newBuyers1s: Math.max(0, Math.trunc(features.newBuyers1s || 0)),
+      buyTx1s: Math.max(0, Math.trunc(features.buyTx1s || 0)),
+      priorBuyTx1s: Math.max(0, Math.trunc(features.priorBuyTx1s || 0)),
+      buyTxAccel1s: Math.trunc(features.buyTxAccel1s || 0),
+      top1SharePct: finiteOrNull(features.top1SharePct),
+      featuresJson: JSON.stringify(features),
+      entryTargetAt: Math.trunc(position.entryTargetAt),
+      entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
+      exitMode: position.exitMode,
+      fixedHoldMs: nullableInteger(position.fixedHoldMs),
+      minHoldMs: nullableInteger(position.minHoldMs),
+      maxHoldMs: Math.trunc(position.maxHoldMs ?? position.fixedHoldMs),
+      trailingActivationPct: finiteOrNull(position.trailingActivationPct),
+      trailingStopPct: finiteOrNull(position.trailingStopPct),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertBondingCurveMomentumShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getBondingCurveMomentumShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateBondingCurveMomentumShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    return this.stmts.updateBondingCurveMomentumShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      lowestPrice: finiteOrNull(value('lowestPrice')),
+      lastObservedAt: value('lastObservedAt'),
+      lastPrice: finiteOrNull(value('lastPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
+      trailingActivatedAt: value('trailingActivatedAt'),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeBondingCurveMomentumShadowPositions() {
+    return this.stmts.activeBondingCurveMomentumShadowPositions.all();
+  }
+
+  recentBondingCurveMomentumEpisodes(sinceMs) {
+    return this.stmts.recentBondingCurveMomentumEpisodes.all(sinceMs);
+  }
+
+  bondingCurveMomentumSnapshotHorizons(episodeId) {
+    return this.stmts.bondingCurveMomentumSnapshotHorizons
+      .all(episodeId).map((row) => row.horizon_ms);
+  }
+
+  recordBondingCurveMomentumShadowSnapshot(snapshot) {
+    const features = snapshot.features || {};
+    const row = {
+      episodeId: snapshot.episodeId,
+      entryProfileId: snapshot.entryProfileId,
+      mint: snapshot.mint,
+      horizonMs: Math.trunc(snapshot.horizonMs),
+      status: snapshot.status,
+      targetAt: Math.trunc(snapshot.targetAt),
+      observedAt: Number.isFinite(snapshot.observedAt) ? Math.trunc(snapshot.observedAt) : null,
+      observationLagMs: Number.isFinite(snapshot.observationLagMs)
+        ? Math.max(0, Math.trunc(snapshot.observationLagMs)) : null,
+      market: snapshot.market || null,
+      price: finiteOrNull(snapshot.price),
+      grossReturnPct: finiteOrNull(snapshot.grossReturnPct),
+      maxFavorableReturnPct: finiteOrNull(snapshot.maxFavorableReturnPct),
+      maxAdverseReturnPct: finiteOrNull(snapshot.maxAdverseReturnPct),
+      netFlow1s: finiteOrNull(features.netFlow1s),
+      flowAccel1s: finiteOrNull(features.flowAccel1s),
+      buyers1s: Number.isFinite(features.buyers1s) ? Math.trunc(features.buyers1s) : null,
+      newBuyers1s: Number.isFinite(features.newBuyers1s)
+        ? Math.trunc(features.newBuyers1s) : null,
+      buyTxAccel1s: Number.isFinite(features.buyTxAccel1s)
+        ? Math.trunc(features.buyTxAccel1s) : null,
+      sellDecayRatio: finiteOrNull(features.sellDecayRatio),
+      curvePct: finiteOrNull(features.curvePct),
+      virtualSolReserves: finiteOrNull(features.virtualSolReserves),
+      featuresJson: snapshot.features ? JSON.stringify(features) : null,
+      createdAt: Date.now(),
+    };
+    const result = this.stmts.insertBondingCurveMomentumShadowSnapshot.run(row);
+    return { ...row, inserted: result.changes > 0 };
+  }
+
   createLaunchQualityObservation(token) {
     const now = Date.now();
     const createdAt = Number(token.createdAt ?? token.created_at);
@@ -3111,6 +3442,125 @@ class ResearchStore {
       ORDER BY lifecycle_stage, entry_profile_id
     `).all();
     return { cohorts, entryProfiles, positions };
+  }
+
+  bondingCurveMomentumShadowDashboard({
+    positionLimit = 30,
+    snapshotLimit = 40,
+    bigWinnerPct = 50,
+    cacheStats = false,
+  } = {}) {
+    const safeLimit = (value, fallback) => Math.min(
+      200,
+      Math.max(1, Math.trunc(Number(value) || fallback)),
+    );
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE
+          WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL THEN exit_at - entry_at
+          ELSE NULL
+        END AS hold_ms
+      FROM bonding_curve_momentum_shadow_positions
+      ORDER BY
+        CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(safeLimit(positionLimit, 30));
+
+    const threshold = Math.max(1, Number(bigWinnerPct) || 50);
+    const computeCohorts = () => {
+      const groups = this.db.prepare(`
+        SELECT cohort_id, entry_profile_id, exit_profile_id,
+          COUNT(*) AS attempts,
+          COUNT(DISTINCT episode_id) AS signals,
+          COUNT(DISTINCT mint) AS independent_mints,
+          COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+          COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+          COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active,
+          COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+          AVG(entry_jump_pct) AS average_entry_jump_pct,
+          AVG(max_favorable_return_pct) AS average_mfe_pct,
+          AVG(max_adverse_return_pct) AS average_mae_pct
+        FROM bonding_curve_momentum_shadow_positions
+        GROUP BY cohort_id, entry_profile_id, exit_profile_id
+        ORDER BY entry_profile_id, exit_profile_id
+      `).all();
+      return groups.map((group) => {
+        const resolved = this.db.prepare(`
+          SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+          FROM bonding_curve_momentum_shadow_positions
+          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+            AND net_return_pct IS NOT NULL
+          ORDER BY net_return_pct
+        `).all(group.cohort_id);
+        const returns = resolved.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+        const wins = returns.filter((value) => value > 0).sort((left, right) => right - left);
+        const losses = returns.filter((value) => value < 0);
+        const flat = returns.filter((value) => value === 0);
+        const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+        const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+        const middle = Math.floor(returns.length / 2);
+        const median = returns.length
+          ? returns.length % 2 ? returns[middle] : (returns[middle - 1] + returns[middle]) / 2
+          : null;
+        const exTop5 = [...wins.slice(5), ...flat, ...losses];
+        const opportunities = resolved.filter((row) => (
+          Number(row.max_favorable_return_pct) >= threshold
+        ));
+        const realized = resolved.filter((row) => Number(row.gross_return_pct) >= threshold);
+        const captures = opportunities.map((row) => {
+          const maximum = Number(row.max_favorable_return_pct);
+          const outcome = Number(row.gross_return_pct);
+          return maximum > 0 && Number.isFinite(outcome) ? outcome / maximum * 100 : null;
+        }).filter(Number.isFinite);
+        return {
+          ...group,
+          resolved: returns.length,
+          average_net_return_pct: returns.length
+            ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+          median_net_return_pct: median,
+          average_net_return_ex_top5_pct: exTop5.length
+            ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length : null,
+          win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          max_winner_pct: wins[0] ?? null,
+          top_5_winner_contribution_pct: totalProfit > 0
+            ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100
+            : null,
+          big_winner_threshold_pct: threshold,
+          big_winner_opportunities: opportunities.length,
+          big_winners_realized: realized.length,
+          big_winner_realization_rate_pct: opportunities.length
+            ? realized.length / opportunities.length * 100 : null,
+          average_big_winner_capture_pct: captures.length
+            ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
+        };
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats(`bonding-momentum:${threshold}`, 15_000, computeCohorts)
+      : computeCohorts();
+    const snapshots = this.db.prepare(`
+      SELECT * FROM bonding_curve_momentum_shadow_snapshots
+      ORDER BY COALESCE(observed_at, target_at) DESC, id DESC
+      LIMIT ?
+    `).all(safeLimit(snapshotLimit, 40));
+    const snapshotStats = this.db.prepare(`
+      SELECT entry_profile_id, horizon_ms,
+        COUNT(*) AS samples,
+        COALESCE(SUM(status = 'OBSERVED'), 0) AS observed,
+        COALESCE(SUM(status = 'NO_TRADE'), 0) AS no_trade,
+        AVG(CASE WHEN status = 'OBSERVED' THEN gross_return_pct END)
+          AS average_gross_return_pct,
+        AVG(CASE WHEN status = 'OBSERVED' THEN max_favorable_return_pct END)
+          AS average_mfe_pct,
+        AVG(CASE WHEN status = 'OBSERVED' THEN max_adverse_return_pct END)
+          AS average_mae_pct
+      FROM bonding_curve_momentum_shadow_snapshots
+      GROUP BY entry_profile_id, horizon_ms
+      ORDER BY entry_profile_id, horizon_ms
+    `).all();
+    return { cohorts, positions, snapshots, snapshotStats };
   }
 
   launchQualityDashboard({ observationLimit = 30, snapshotLimit = 60 } = {}) {
@@ -3881,6 +4331,22 @@ class ResearchStore {
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
       FROM migrated_drop_rebound_shadow_positions
     `).get();
+    const bondingCurveMomentumShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
+      FROM bonding_curve_momentum_shadow_positions
+    `).get();
+    const bondingCurveMomentumShadowSnapshots = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status = 'OBSERVED'), 0) AS observed,
+        COALESCE(SUM(status = 'NO_TRADE'), 0) AS no_trade
+      FROM bonding_curve_momentum_shadow_snapshots
+    `).get();
     const launchQualityObservations = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
@@ -3920,6 +4386,8 @@ class ResearchStore {
       smartOpenShadowPositions,
       launchPullbackShadowPositions,
       migratedDropReboundShadowPositions,
+      bondingCurveMomentumShadowPositions,
+      bondingCurveMomentumShadowSnapshots,
       launchQualityObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),

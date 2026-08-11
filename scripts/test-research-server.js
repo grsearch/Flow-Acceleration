@@ -58,6 +58,13 @@ async function main() {
   assert.ok(dashboard.includes('毕业前 Curve / 毕业后 PumpSwap 分层'));
   assert.ok(dashboard.includes('两生命周期 × 八组入场 × 四组退出，共64个独立组合'));
   assert.ok(dashboard.includes("json('/api/migrated-drop-rebound-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="bonding-momentum"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="bonding-momentum"'));
+  assert.ok(dashboard.includes('id="bonding-momentum-cohort-rows"'));
+  assert.ok(dashboard.includes('id="bonding-momentum-position-rows"'));
+  assert.ok(dashboard.includes('id="bonding-momentum-snapshot-rows"'));
+  assert.ok(dashboard.includes('Bonding Curve 动量 · H'));
+  assert.ok(dashboard.includes("json('/api/bonding-curve-momentum-shadow?positionLimit=30&snapshotLimit=40')"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -140,6 +147,7 @@ async function main() {
       '/api/smart-open-shadow',
       '/api/launch-pullback-shadow',
       '/api/migrated-drop-rebound-shadow',
+      '/api/bonding-curve-momentum-shadow',
       '/api/launch-quality-observer',
       '/api/health',
     ];
@@ -305,6 +313,28 @@ async function main() {
     );
     assert.ok(Array.isArray(migratedRebound.cohorts));
     assert.ok(Array.isArray(migratedRebound.positions));
+    const bondingMomentum = await (await fetch(
+      `http://127.0.0.1:${port}/api/bonding-curve-momentum-shadow`,
+    )).json();
+    assert.strictEqual(bondingMomentum.runtime.mode, 'SHADOW_H');
+    assert.strictEqual(bondingMomentum.runtime.sendsTransactions, false);
+    assert.strictEqual(bondingMomentum.runtime.entryProfiles.length, 4);
+    assert.strictEqual(bondingMomentum.runtime.exitProfiles.length, 3);
+    assert.strictEqual(
+      bondingMomentum.runtime.strategy.scope,
+      'PRE_MIGRATION_PUMP_BONDING_CURVE',
+    );
+    assert.strictEqual(
+      bondingMomentum.runtime.strategy.research.isolatedPositionTable,
+      'bonding_curve_momentum_shadow_positions',
+    );
+    assert.strictEqual(
+      bondingMomentum.runtime.strategy.research.isolatedSnapshotTable,
+      'bonding_curve_momentum_shadow_snapshots',
+    );
+    assert.ok(Array.isArray(bondingMomentum.cohorts));
+    assert.ok(Array.isArray(bondingMomentum.positions));
+    assert.ok(Array.isArray(bondingMomentum.snapshots));
     const launchQuality = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-quality-observer`,
     )).json();

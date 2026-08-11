@@ -13,6 +13,9 @@ const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
+const {
+  BondingCurveMomentumShadowSuite,
+} = require('./core/BondingCurveMomentumShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -75,6 +78,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   migratedDropReboundShadow.start();
+  const bondingCurveMomentumShadow = new BondingCurveMomentumShadowSuite({
+    config: runtimeConfig.bondingCurveMomentumShadow,
+    store,
+  });
+  bondingCurveMomentumShadow.start();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
@@ -89,6 +97,7 @@ function createRuntime(runtimeConfig = config) {
     launchPullbackShadow,
     launchQualityObserver,
     migratedDropReboundShadow,
+    bondingCurveMomentumShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
@@ -102,6 +111,7 @@ function createRuntime(runtimeConfig = config) {
     stream.setAmmMints([...new Set([
       ...graduatedPending,
       ...migratedDropReboundShadow.trackedMints(now),
+      ...bondingCurveMomentumShadow.trackedMints(),
     ])]);
   };
 
@@ -204,6 +214,7 @@ function createRuntime(runtimeConfig = config) {
           : null;
         store.queueRawTrade(trade);
         migratedDropReboundShadow.observeTrade(trade);
+        bondingCurveMomentumShadow.observeTrade(trade);
         launchQualityObserver.observeTrade(trade);
         launchPullbackShadow.observeTrade(trade);
         signalShadow.observeTrade(trade);
@@ -290,6 +301,13 @@ function createRuntime(runtimeConfig = config) {
       + 'isolated table; sends transactions=false.',
     );
     console.log(
+      `Bonding Curve Momentum Shadow H: ${runtimeConfig.bondingCurveMomentumShadow.entryProfiles.length} `
+      + `entry profiles x ${runtimeConfig.bondingCurveMomentumShadow.exitProfiles.length} exits; `
+      + `snapshots=${runtimeConfig.bondingCurveMomentumShadow.snapshotHorizonsMs
+        .map((value) => `${value / 1_000}s`).join(',')}; `
+      + 'pre-migration only, isolated tables, sends transactions=false.',
+    );
+    console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
       + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `
       + `wallets>=${runtimeConfig.strategy.activityMinUniqueWallets}`,
@@ -311,6 +329,7 @@ function createRuntime(runtimeConfig = config) {
       launchPullbackShadow.advanceTime(now);
       launchQualityObserver.advanceTime(now);
       migratedDropReboundShadow.advanceTime(now);
+      bondingCurveMomentumShadow.advanceTime(now);
       refreshAmmSubscriptions(now);
     }, 1_000);
 
@@ -345,6 +364,7 @@ function createRuntime(runtimeConfig = config) {
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     migratedDropReboundShadow.stop();
+    bondingCurveMomentumShadow.stop();
     await server.stop();
     store.close();
   }
@@ -364,6 +384,7 @@ function createRuntime(runtimeConfig = config) {
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
+      bondingCurveMomentumShadow: bondingCurveMomentumShadow.health(),
     };
   }
 
@@ -371,6 +392,7 @@ function createRuntime(runtimeConfig = config) {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, launchPullbackShadow,
     launchQualityObserver, migratedDropReboundShadow,
+    bondingCurveMomentumShadow,
   };
 }
 
