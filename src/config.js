@@ -719,6 +719,33 @@ const config = {
       min: 0,
       max: 100,
     }),
+    ammPriceContinuity: {
+      minRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MIN_RATIO', 0.2, {
+        min: 0.0001,
+        max: 1,
+      }),
+      maxRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MAX_RATIO', 5, {
+        min: 1,
+      }),
+      resetAfterMs: integerEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_RESET_MS', 15_000, {
+        min: 1_000,
+      }),
+      confirmationTrades: integerEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TRADES',
+        2,
+        { min: 2, max: 10 },
+      ),
+      confirmationWindowMs: integerEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_WINDOW_MS',
+        2_000,
+        { min: 100, max: 30_000 },
+      ),
+      confirmationTolerancePct: numberEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TOLERANCE_PCT',
+        20,
+        { min: 0.1, max: 100 },
+      ),
+    },
     bigWinnerPct: numberEnv('FLOW_MIGRATED_REBOUND_BIG_WINNER_PCT', 50, { min: 1 }),
     entryProfiles: [
       {

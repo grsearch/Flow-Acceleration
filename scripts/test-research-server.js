@@ -71,6 +71,10 @@ async function main() {
   assert.ok(dashboard.includes('id="launch-quality-snapshot-rows"'));
   assert.ok(dashboard.includes("json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60')"));
   assert.ok(dashboard.includes('function renderMetricGroups('));
+  assert.ok(dashboard.includes('function renderTimeSessions('));
+  assert.ok(dashboard.includes('北京时间分时观察'));
+  assert.ok(dashboard.includes('id="migrated-rebound-time-sessions"'));
+  assert.ok(dashboard.includes('id="bonding-momentum-time-sessions"'));
   assert.ok(dashboard.includes("renderMetricGroups('#smart-open-metrics'"));
   assert.ok(dashboard.includes("renderMetricGroups('#launch-pullback-metrics'"));
   assert.ok(dashboard.includes("renderMetricGroups('#flow-first-metrics'"));
@@ -107,6 +111,23 @@ async function main() {
   assert.strictEqual(runtime.store._cachedDashboardStats('test:dashboard', 15_000, cachedDashboardValue), 1);
   assert.strictEqual(runtime.store._cachedDashboardStats('test:dashboard', 15_000, cachedDashboardValue), 1);
   assert.strictEqual(dashboardCacheComputations, 1);
+  for (const strategyId of [
+    'primary-shadow',
+    'flow-first',
+    'smart-pullback',
+    'smart-open',
+    'launch-pullback',
+    'migrated-rebound',
+    'bonding-momentum',
+  ]) {
+    const timeSessions = runtime.store.shadowTimeSessionDashboard(strategyId);
+    assert.strictEqual(timeSessions.timezone, 'Asia/Shanghai');
+    assert.strictEqual(timeSessions.observationOnly, true);
+    assert.deepStrictEqual(
+      timeSessions.sessions.map((session) => session.id),
+      ['00-04', '04-08', '08-18', '18-24'],
+    );
+  }
   const entryLookupPlan = runtime.store.db.prepare(`
     EXPLAIN QUERY PLAN
     SELECT timestamp_ms, price, market

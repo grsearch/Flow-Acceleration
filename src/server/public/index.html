@@ -406,6 +406,7 @@
               </div>
               <div class="strategy-expression" id="smart-open-expression">OPEN + Bonding Curve + Smart金额≥1 SOL + 买入前2秒 Buyers≥2</div>
               <div class="strategy-metric-groups" id="smart-open-metrics"></div>
+              <div class="strategy-metric-groups" id="smart-open-time-sessions"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>Smart OPEN</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>OPEN金额 / 前置买家</th><th>OPEN价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="smart-open-position-rows"></tbody>
@@ -421,6 +422,7 @@
               </div>
               <div class="strategy-expression" id="launch-pullback-expression">+25%首波 → 回踩7.5% → 反弹3% → 质量过滤 → 固定持有3秒 / 8秒</div>
               <div class="strategy-metric-groups" id="launch-pullback-metrics"></div>
+              <div class="strategy-metric-groups" id="launch-pullback-time-sessions"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>参考时间</th><th>组别</th><th>状态</th><th>Mint</th><th>NetFlow / Creator</th><th>Buyers / Retention</th><th>参考价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="launch-pullback-position-rows"></tbody>
@@ -436,6 +438,7 @@
               </div>
               <div class="strategy-expression" id="migrated-rebound-expression">1秒跌15%–35% → 低点反弹2%–5% → 200ms后模拟入场</div>
               <div class="strategy-metric-groups" id="migrated-rebound-metrics"></div>
+              <div class="strategy-metric-groups" id="migrated-rebound-time-sessions"></div>
               <div class="section-title"><h2>生命周期 × 参数组合表现</h2><p>毕业前32组 + 毕业后32组；两类市场不混算，样本少时不据此选最优阈值</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>生命周期 / 入场 / 退出</th><th>窗口 / 跌幅 / 反弹 / 时限</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位净收益</th><th>PF / 去Top5</th><th>MFE / MAE</th><th>大赢家兑现</th></tr></thead>
@@ -457,6 +460,7 @@
               </div>
               <div class="strategy-expression" id="bonding-momentum-expression">等待 Bonding Curve Momentum 配置…</div>
               <div class="strategy-metric-groups" id="bonding-momentum-metrics"></div>
+              <div class="strategy-metric-groups" id="bonding-momentum-time-sessions"></div>
               <div class="section-title"><h2>参数组合表现</h2><p>每种退出独立建仓，不用同一仓位事后选择最优结果</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位净收益</th><th>PF / 去Top5</th><th>入场跳价</th><th>MFE / MAE</th><th>大赢家兑现</th></tr></thead>
@@ -504,6 +508,7 @@
               <div class="section-title"><h2>Flow-First Shadow C</h2><p>旧实验保持不变；同 Mint / 30秒 Episode 只模拟一次</p></div>
               <div class="strategy-expression" id="flow-first-expression">等待 Flow-First 配置…</div>
               <div class="strategy-metric-groups" id="flow-first-metrics"></div>
+              <div class="strategy-metric-groups" id="flow-first-time-sessions"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint / Rank</th><th>W3 NetFlow / Buyers</th><th>信号价 / 入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="flow-first-position-rows"></tbody>
@@ -516,6 +521,7 @@
               <div class="section-title"><h2>Smart Wallet 回踩 Shadow A/B</h2><p>旧实验保持不变，历史样本继续写入原表</p></div>
               <div class="strategy-expression" id="smart-pullback-expression">等待 Smart 回踩配置…</div>
               <div class="strategy-metric-groups" id="smart-pullback-metrics"></div>
+              <div class="strategy-metric-groups" id="smart-pullback-time-sessions"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>Smart买入</th><th>组别</th><th>状态</th><th>Mint / 钱包</th><th>Smart价 / 回踩低点</th><th>入场 / 最高 / 出场</th><th>净收益 / MFE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="smart-pullback-position-rows"></tbody>
@@ -528,6 +534,7 @@
               <div class="section-title"><h2>Primary 信号模拟策略</h2><p>旧 Shadow 路径保持不变</p></div>
               <div class="strategy-expression" id="signal-shadow-expression">等待 Primary Early 配置…</div>
               <div class="strategy-metric-groups" id="signal-shadow-metrics"></div>
+              <div class="strategy-metric-groups" id="signal-shadow-time-sessions"></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>组别</th><th>状态</th><th>Mint</th><th>W3 NetFlow / Buyers</th><th>入场 / 最高 / 出场价</th><th>净收益</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="signal-shadow-position-rows"></tbody>
@@ -588,6 +595,26 @@
           <div class="grid live-metric-grid">${metricCards(group.metrics)}</div>
         </section>
       `).join('');
+    }
+    function renderTimeSessions(selector, data) {
+      const target = document.querySelector(selector);
+      if (!target) return;
+      const sessions = data?.sessions || [];
+      target.innerHTML = `
+        <section class="strategy-metric-group">
+          <div class="strategy-metric-label">
+            <b>北京时间分时观察</b>
+            <span>只做统计标签，不参与入场；每个参数组合仓位分别计数</span>
+          </div>
+          <div class="grid live-metric-grid">${sessions.map(session => `
+            <article class="metric">
+              <span>${escapeHtml(session.label)} · ${escapeHtml(session.note)}</span>
+              <strong class="${tone(session.average_net_return_pct)}">${escapeHtml(pct(session.average_net_return_pct))}</strong>
+              <small>完成 ${number(session.resolved)} · Mint ${number(session.independent_mints)} · 胜率 ${rate(session.win_rate_pct)} · PF ${number(session.profit_factor,2)}</small>
+            </article>
+          `).join('')}</div>
+        </section>
+      `;
     }
     async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
 
@@ -845,6 +872,7 @@
         };
       });
       renderMetricGroups('#launch-pullback-metrics', summaryMetrics, cohortGroups);
+      renderTimeSessions('#launch-pullback-time-sessions', data.timeSessions);
 
       const rows = data.positions || [];
       document.querySelector('#launch-pullback-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -874,7 +902,9 @@
         ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
         ['参数矩阵', `${number(lifecycleStages.length || 2)} × ${number(entryProfiles.length)} × ${number(exitProfiles.length)}`, '两生命周期 × 八组入场 × 四组退出，共64个独立组合'],
         ['模拟成本', pct(research.configuredCostPct), `仓位 ${number(research.simulatedPositionSol,4)} SOL · 链上交易永不发送`],
+        ['AMM异常价隔离', number(runtime.ammPriceOutliersIgnored), `新价格区间确认 ${number(runtime.ammPriceRegimesConfirmed)} · 原始成交仍保留`],
       ], []);
+      renderTimeSessions('#migrated-rebound-time-sessions', data.timeSessions);
 
       const cohorts = data.cohorts || [];
       document.querySelector('#migrated-rebound-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => {
@@ -933,6 +963,7 @@
           ],
         };
       }));
+      renderTimeSessions('#bonding-momentum-time-sessions', data.timeSessions);
 
       document.querySelector('#bonding-momentum-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
         `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}<br><span class="table-note">尝试 ${number(row.attempts)} · 活动 ${number(row.active)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.average_net_return_ex_top5_pct)}</td><td>${pct(row.average_entry_jump_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td><td>${number(row.big_winners_realized)} / ${number(row.big_winner_opportunities)}<br><span class="table-note">兑现 ${rate(row.big_winner_realization_rate_pct)} · 捕获 ${rate(row.average_big_winner_capture_pct)}</span></td></tr>`
@@ -1036,6 +1067,7 @@
         };
       });
       renderMetricGroups('#flow-first-metrics', summaryMetrics, cohortGroups);
+      renderTimeSessions('#flow-first-time-sessions', data.timeSessions);
 
       const rows = data.positions || [];
       document.querySelector('#flow-first-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -1087,6 +1119,7 @@
         };
       }).filter(Boolean);
       renderMetricGroups('#smart-open-metrics', summaryMetrics, cohortGroups);
+      renderTimeSessions('#smart-open-time-sessions', data.timeSessions);
 
       const rows = data.positions || [];
       document.querySelector('#smart-open-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -1118,6 +1151,7 @@
         ],
       }));
       renderMetricGroups('#smart-pullback-metrics', summaryMetrics, cohortGroups);
+      renderTimeSessions('#smart-pullback-time-sessions', data.timeSessions);
 
       const rows = data.positions || [];
       document.querySelector('#smart-pullback-position-rows').innerHTML = rows.length ? rows.map(row => {
@@ -1169,6 +1203,7 @@
         };
       });
       renderMetricGroups('#signal-shadow-metrics', summaryMetrics, profileGroups);
+      renderTimeSessions('#signal-shadow-time-sessions', data.timeSessions);
 
       const rows = data.positions || [];
       document.querySelector('#signal-shadow-position-rows').innerHTML = rows.length ? rows.map(row => {

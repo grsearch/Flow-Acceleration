@@ -197,6 +197,7 @@ class ResearchServer {
           activePositions: 0,
           pendingEntries: 0,
         },
+        timeSessions: this.store.shadowTimeSessionDashboard('primary-shadow'),
         ...this.store.primarySignalShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 30),
           cacheStats: true,
@@ -213,6 +214,7 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
+        timeSessions: this.store.shadowTimeSessionDashboard('flow-first'),
         ...this.store.flowFirstShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 30),
           bigWinnerPct: this.config.flowFirstShadow?.bigWinnerPct ?? 50,
@@ -230,6 +232,7 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
+        timeSessions: this.store.shadowTimeSessionDashboard('smart-pullback'),
         ...this.store.smartPullbackShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 30),
           bigWinnerPct: this.config.smartPullbackShadow?.bigWinnerPct ?? 50,
@@ -247,6 +250,7 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
+        timeSessions: this.store.shadowTimeSessionDashboard('smart-open'),
         ...this.store.smartOpenShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 30),
           bigWinnerPct: this.config.smartOpenShadow?.bigWinnerPct ?? 50,
@@ -280,6 +284,7 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
+        timeSessions: this.store.shadowTimeSessionDashboard('launch-pullback'),
         ...this.store.launchPullbackShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 30),
           bigWinnerPct: this.config.launchPullbackShadow?.bigWinnerPct ?? 50,
@@ -298,6 +303,7 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
+        timeSessions: this.store.shadowTimeSessionDashboard('migrated-rebound'),
         ...this.store.migratedDropReboundShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 30),
           bigWinnerPct: this.config.migratedDropReboundShadow?.bigWinnerPct ?? 50,
@@ -316,6 +322,7 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
+        timeSessions: this.store.shadowTimeSessionDashboard('bonding-momentum'),
         ...this.store.bondingCurveMomentumShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 30),
           snapshotLimit: numeric(request.query.snapshotLimit, 40),

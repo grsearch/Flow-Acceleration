@@ -91,6 +91,7 @@ class MigratedDropReboundShadowSuite {
     this.pendingEntries = new Map();
     this.positions = new Map();
     this.rowsByMint = new Map();
+    this.ammPriceStates = new Map();
     this.metrics = {
       candidates: 0,
       signals: 0,
@@ -103,6 +104,8 @@ class MigratedDropReboundShadowSuite {
       opened: 0,
       closed: 0,
       noExit: 0,
+      ammPriceOutliersIgnored: 0,
+      ammPriceRegimesConfirmed: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -169,6 +172,7 @@ class MigratedDropReboundShadowSuite {
       if (this._hasActiveMint(mint)) continue;
       this.tracked.delete(mint);
       for (const detector of this.detectors.values()) detector.states.delete(mint);
+      this.ammPriceStates.delete(mint);
     }
     return [...this.tracked.keys()];
   }
@@ -179,6 +183,7 @@ class MigratedDropReboundShadowSuite {
     if (!this.config.enabled || !['PUMP_BONDING_CURVE', 'PUMP_AMM'].includes(trade?.market)
       || !trade?.mint
       || !(price > 0) || !(timestampMs > 0)) return;
+    if (!this._acceptAmmPrice(trade, price)) return;
     const token = this.store.getToken(trade.mint);
     const graduatedAt = finite(token?.graduated_at ?? this.tracked.get(trade.mint)?.graduatedAt);
     this._observeRowsForMint(trade, price);
@@ -258,6 +263,11 @@ class MigratedDropReboundShadowSuite {
         entryDelayMs: this.config.entryDelayMs,
         entryTimeoutMs: this.config.entryTimeoutMs,
         maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
+        ammPriceContinuity: {
+          enabled: true,
+          ...(this.config.ammPriceContinuity || {}),
+          behavior: 'outliers remain in raw trades but cannot update Shadow G',
+        },
         research: {
           simulatedPositionSol: this.config.positionSizeSol,
           configuredCostPct: this.costs.deterministicCostPct,
@@ -278,6 +288,66 @@ class MigratedDropReboundShadowSuite {
       states.set(mint, state);
     }
     return state;
+  }
+
+  _acceptAmmPrice(trade, price) {
+    if (trade.market !== 'PUMP_AMM') return true;
+    const settings = {
+      minRatio: 0.2,
+      maxRatio: 5,
+      resetAfterMs: 15_000,
+      confirmationTrades: 2,
+      confirmationWindowMs: 2_000,
+      confirmationTolerancePct: 20,
+      ...(this.config.ammPriceContinuity || {}),
+    };
+    const timestampMs = Number(trade.timestampMs);
+    const state = this.ammPriceStates.get(trade.mint);
+    if (!state || timestampMs - state.acceptedAt > settings.resetAfterMs) {
+      this.ammPriceStates.set(trade.mint, {
+        acceptedPrice: price,
+        acceptedAt: timestampMs,
+        candidate: null,
+      });
+      return true;
+    }
+    if (timestampMs < state.acceptedAt) return false;
+
+    const ratio = price / state.acceptedPrice;
+    if (ratio >= settings.minRatio && ratio <= settings.maxRatio) {
+      state.acceptedPrice = price;
+      state.acceptedAt = timestampMs;
+      state.candidate = null;
+      return true;
+    }
+
+    const candidate = state.candidate;
+    const candidateRatio = candidate ? price / candidate.price : null;
+    const withinCandidateRange = candidateRatio > 0
+      && Math.abs(candidateRatio - 1) * 100 <= settings.confirmationTolerancePct;
+    if (candidate
+      && timestampMs - candidate.startedAt <= settings.confirmationWindowMs
+      && withinCandidateRange) {
+      candidate.count += 1;
+      candidate.price = price;
+      candidate.lastAt = timestampMs;
+      if (candidate.count >= settings.confirmationTrades) {
+        state.acceptedPrice = price;
+        state.acceptedAt = timestampMs;
+        state.candidate = null;
+        this.metrics.ammPriceRegimesConfirmed += 1;
+        return true;
+      }
+    } else {
+      state.candidate = {
+        price,
+        count: 1,
+        startedAt: timestampMs,
+        lastAt: timestampMs,
+      };
+    }
+    this.metrics.ammPriceOutliersIgnored += 1;
+    return false;
   }
 
   _prune(state, timestampMs, windowMs) {

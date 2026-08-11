@@ -139,6 +139,103 @@ class ResearchStore {
     return value;
   }
 
+  shadowTimeSessionDashboard(strategyId) {
+    const strategies = {
+      'primary-shadow': {
+        label: 'Primary Early',
+        table: 'primary_signal_shadow_positions',
+        anchor: 'signal_at',
+      },
+      'flow-first': {
+        label: 'Flow-First · C',
+        table: 'flow_first_shadow_positions',
+        anchor: 'signal_at',
+      },
+      'smart-pullback': {
+        label: 'Smart 回踩 · A/B',
+        table: 'smart_pullback_shadow_positions',
+        anchor: 'smart_buy_at',
+      },
+      'smart-open': {
+        label: 'Smart OPEN · D',
+        table: 'smart_open_shadow_positions',
+        anchor: 'smart_open_at',
+      },
+      'launch-pullback': {
+        label: 'Launch 回踩 · F',
+        table: 'launch_pullback_shadow_positions',
+        anchor: 'reference_at',
+      },
+      'migrated-rebound': {
+        label: '生命周期超跌反弹 · G',
+        table: 'migrated_drop_rebound_shadow_positions',
+        anchor: 'rebound_at',
+      },
+      'bonding-momentum': {
+        label: 'Bonding Curve 动量 · H',
+        table: 'bonding_curve_momentum_shadow_positions',
+        anchor: 'signal_at',
+      },
+    };
+    const strategy = strategies[strategyId];
+    if (!strategy) throw new Error(`Unknown Shadow time-session strategy: ${strategyId}`);
+    const definitions = [
+      { id: '00-04', label: '00:00–04:00', note: '深夜' },
+      { id: '04-08', label: '04:00–08:00', note: '凌晨' },
+      { id: '08-18', label: '08:00–18:00', note: '白天' },
+      { id: '18-24', label: '18:00–24:00', note: '晚间' },
+    ];
+    const hour = `CAST(strftime('%H', ${strategy.anchor} / 1000.0,
+      'unixepoch', '+8 hours') AS INTEGER)`;
+    const session = `CASE
+      WHEN ${hour} < 4 THEN '00-04'
+      WHEN ${hour} < 8 THEN '04-08'
+      WHEN ${hour} < 18 THEN '08-18'
+      ELSE '18-24'
+    END`;
+    const compute = () => {
+      const rows = this.db.prepare(`
+        SELECT ${session} AS session_id,
+          COUNT(*) AS resolved,
+          COUNT(DISTINCT mint) AS independent_mints,
+          COALESCE(SUM(net_return_pct > 0), 0) AS wins,
+          AVG(net_return_pct) AS average_net_return_pct,
+          COALESCE(SUM(CASE WHEN net_return_pct > 0 THEN net_return_pct ELSE 0 END), 0)
+            AS total_profit_pct,
+          ABS(COALESCE(SUM(CASE WHEN net_return_pct < 0 THEN net_return_pct ELSE 0 END), 0))
+            AS total_loss_pct
+        FROM ${strategy.table}
+        WHERE status IN ('CLOSED', 'NO_EXIT') AND net_return_pct IS NOT NULL
+        GROUP BY session_id
+      `).all();
+      const byId = new Map(rows.map((row) => [row.session_id, row]));
+      return definitions.map((definition) => {
+        const row = byId.get(definition.id) || {};
+        const resolved = Number(row.resolved) || 0;
+        const wins = Number(row.wins) || 0;
+        const profit = Number(row.total_profit_pct) || 0;
+        const loss = Number(row.total_loss_pct) || 0;
+        return {
+          ...definition,
+          resolved,
+          independent_mints: Number(row.independent_mints) || 0,
+          wins,
+          win_rate_pct: resolved ? wins / resolved * 100 : null,
+          average_net_return_pct: resolved ? Number(row.average_net_return_pct) : null,
+          profit_factor: loss > 0 ? profit / loss : (profit > 0 ? null : 0),
+        };
+      });
+    };
+    return {
+      strategyId,
+      strategyLabel: strategy.label,
+      timezone: 'Asia/Shanghai',
+      observationOnly: true,
+      countingUnit: 'resolved cohort positions',
+      sessions: this._cachedDashboardStats(`shadow-time-sessions:${strategyId}`, 15_000, compute),
+    };
+  }
+
   _initSchema() {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS flow_tokens (
