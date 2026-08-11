@@ -612,6 +612,56 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_smart_open_shadow_mint
         ON smart_open_shadow_positions(mint, smart_open_at DESC);
 
+      CREATE TABLE IF NOT EXISTS launch_pullback_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        reference_at INTEGER NOT NULL,
+        reference_price REAL NOT NULL,
+        pump_25_at INTEGER,
+        reference_peak_at INTEGER,
+        reference_peak_price REAL,
+        first_pullback_at INTEGER,
+        pullback_low_price REAL,
+        max_pullback_pct REAL,
+        net_flow_sol REAL,
+        creator_share_pct REAL,
+        buyers INTEGER,
+        recent_buyers INTEGER,
+        retention_pct REAL,
+        top1_share_pct REAL,
+        top3_share_pct REAL,
+        entry_target_at INTEGER,
+        entry_deadline_at INTEGER,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        highest_price REAL,
+        max_favorable_return_pct REAL,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, mint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_launch_pullback_shadow_status
+        ON launch_pullback_shadow_positions(cohort_id, status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_launch_pullback_shadow_mint
+        ON launch_pullback_shadow_positions(mint, reference_at DESC);
+
       CREATE TABLE IF NOT EXISTS launch_quality_observations (
         mint TEXT PRIMARY KEY,
         symbol TEXT,
@@ -1586,6 +1636,59 @@ class ResearchStore {
         WHERE cohort_id = ? AND status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY smart_open_at, id
       `),
+      insertLaunchPullbackShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO launch_pullback_shadow_positions (
+          cohort_id, mint, symbol, status, rejection_reason,
+          position_sol, configured_cost_pct, reference_at, reference_price,
+          pump_25_at, reference_peak_at, reference_peak_price,
+          first_pullback_at, pullback_low_price, max_pullback_pct,
+          net_flow_sol, creator_share_pct, buyers, recent_buyers,
+          retention_pct, top1_share_pct, top3_share_pct,
+          entry_target_at, entry_deadline_at, created_at, updated_at
+        ) VALUES (
+          @cohortId, @mint, @symbol, @status, @rejectionReason,
+          @positionSol, @configuredCostPct, @referenceAt, @referencePrice,
+          @pump25At, @referencePeakAt, @referencePeakPrice,
+          @firstPullbackAt, @pullbackLowPrice, @maxPullbackPct,
+          @netFlowSol, @creatorSharePct, @buyers, @recentBuyers,
+          @retentionPct, @top1SharePct, @top3SharePct,
+          @entryTargetAt, @entryDeadlineAt, @createdAt, @updatedAt
+        )
+      `),
+      getLaunchPullbackShadowPosition: this.db.prepare(`
+        SELECT * FROM launch_pullback_shadow_positions
+        WHERE cohort_id = ? AND mint = ?
+      `),
+      updateLaunchPullbackShadowPosition: this.db.prepare(`
+        UPDATE launch_pullback_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct,
+            max_favorable_return_pct
+          ),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeLaunchPullbackShadowPositions: this.db.prepare(`
+        SELECT * FROM launch_pullback_shadow_positions
+        WHERE cohort_id = ? AND status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY reference_at, id
+      `),
       insertLaunchQualityObservation: this.db.prepare(`
         INSERT OR IGNORE INTO launch_quality_observations (
           mint, symbol, creator, created_at, status, label_status,
@@ -1594,6 +1697,9 @@ class ResearchStore {
           @mint, @symbol, @creator, @createdAt, 'OBSERVING', 'WAITING_REFERENCE',
           @recordCreatedAt, @updatedAt
         )
+      `),
+      getLaunchQualityObservation: this.db.prepare(`
+        SELECT * FROM launch_quality_observations WHERE mint = ?
       `),
       insertLaunchQualitySnapshot: this.db.prepare(`
         INSERT OR IGNORE INTO launch_quality_snapshots (
@@ -2367,6 +2473,74 @@ class ResearchStore {
     return this.stmts.activeSmartOpenShadowPositions.all(cohortId);
   }
 
+  createLaunchPullbackShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      cohortId: position.cohortId,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      referenceAt: position.referenceAt,
+      referencePrice: position.referencePrice,
+      pump25At: position.pump25At || null,
+      referencePeakAt: position.referencePeakAt || null,
+      referencePeakPrice: finiteOrNull(position.referencePeakPrice),
+      firstPullbackAt: position.firstPullbackAt || null,
+      pullbackLowPrice: finiteOrNull(position.pullbackLowPrice),
+      maxPullbackPct: finiteOrNull(position.maxPullbackPct),
+      netFlowSol: finiteOrNull(position.netFlowSol),
+      creatorSharePct: finiteOrNull(position.creatorSharePct),
+      buyers: Number.isFinite(position.buyers) ? Math.trunc(position.buyers) : null,
+      recentBuyers: Number.isFinite(position.recentBuyers)
+        ? Math.trunc(position.recentBuyers) : null,
+      retentionPct: finiteOrNull(position.retentionPct),
+      top1SharePct: finiteOrNull(position.top1SharePct),
+      top3SharePct: finiteOrNull(position.top3SharePct),
+      entryTargetAt: position.entryTargetAt || null,
+      entryDeadlineAt: position.entryDeadlineAt || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertLaunchPullbackShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getLaunchPullbackShadowPosition.get(row.cohortId, row.mint);
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateLaunchPullbackShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    return this.stmts.updateLaunchPullbackShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeLaunchPullbackShadowPositions(cohortId) {
+    return this.stmts.activeLaunchPullbackShadowPositions.all(cohortId);
+  }
+
   createLaunchQualityObservation(token) {
     const now = Date.now();
     const createdAt = Number(token.createdAt ?? token.created_at);
@@ -2381,6 +2555,10 @@ class ResearchStore {
     };
     const result = this.stmts.insertLaunchQualityObservation.run(row);
     return { ...row, inserted: result.changes > 0 };
+  }
+
+  getLaunchQualityObservation(mint) {
+    return mint ? this.stmts.getLaunchQualityObservation.get(mint) || null : null;
   }
 
   updateLaunchQualityObservation(mint, patch = {}) {
@@ -2405,6 +2583,7 @@ class ResearchStore {
           ${keys.map((key) => `${LAUNCH_QUALITY_COLUMNS[key]} = @${key}`).join(', ')},
           updated_at = @updatedAt
         WHERE mint = @mint
+          AND label_status NOT IN ('COMPLETE', 'RIGHT_CENSORED', 'NO_REFERENCE')
       `);
       this.launchQualityUpdateStatements.set(cacheKey, statement);
     }
@@ -2413,7 +2592,7 @@ class ResearchStore {
       const value = normalized[key];
       values[key] = typeof value === 'number' ? finiteOrNull(value) : value;
     }
-    statement.run(values);
+    return statement.run(values);
   }
 
   recordLaunchQualitySnapshot(snapshot) {
@@ -2452,6 +2631,100 @@ class ResearchStore {
     };
     const result = this.stmts.insertLaunchQualitySnapshot.run(row);
     return { ...row, inserted: result.changes > 0 };
+  }
+
+  launchPullbackShadowDashboard({ positionLimit = 200, bigWinnerPct = 50, cacheStats = false } = {}) {
+    const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
+    const threshold = Math.max(1, Number(bigWinnerPct) || 50);
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE
+          WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL THEN exit_at - entry_at
+          ELSE NULL
+        END AS hold_ms
+      FROM launch_pullback_shadow_positions
+      ORDER BY
+        CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const computeCohorts = () => {
+      const cohortIds = this.db.prepare(`
+        SELECT DISTINCT cohort_id FROM launch_pullback_shadow_positions ORDER BY cohort_id
+      `).all().map((row) => row.cohort_id);
+      return cohortIds.map((cohortId) => {
+        const counts = this.db.prepare(`
+          SELECT
+            COUNT(*) AS evaluated,
+            COUNT(DISTINCT mint) AS independent_mints,
+            COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rule_rejected,
+            COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+            COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+            COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+            COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+            COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+            COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+            AVG(entry_jump_pct) AS average_entry_jump_pct
+          FROM launch_pullback_shadow_positions WHERE cohort_id = ?
+        `).get(cohortId);
+        const resolved = this.db.prepare(`
+          SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+          FROM launch_pullback_shadow_positions
+          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+            AND net_return_pct IS NOT NULL
+          ORDER BY net_return_pct
+        `).all(cohortId);
+        const returns = resolved.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+        const wins = returns.filter((value) => value > 0).sort((left, right) => right - left);
+        const losses = returns.filter((value) => value < 0);
+        const flat = returns.filter((value) => value === 0);
+        const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+        const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+        const median = returns.length
+          ? returns.length % 2 === 1
+            ? returns[(returns.length - 1) / 2]
+            : (returns[returns.length / 2 - 1] + returns[returns.length / 2]) / 2
+          : null;
+        const exTop5 = [...wins.slice(5), ...flat, ...losses];
+        const bigOpportunities = resolved.filter((row) => (
+          Number(row.max_favorable_return_pct) >= threshold
+        ));
+        const bigWinners = resolved.filter((row) => Number(row.gross_return_pct) >= threshold);
+        const captures = bigOpportunities.map((row) => {
+          const maximum = Number(row.max_favorable_return_pct);
+          const realized = Number(row.gross_return_pct);
+          return maximum > 0 && Number.isFinite(realized) ? realized / maximum * 100 : null;
+        }).filter(Number.isFinite);
+        return {
+          cohort_id: cohortId,
+          ...counts,
+          qualified_references: Number(counts.evaluated || 0) - Number(counts.rule_rejected || 0),
+          resolved: returns.length,
+          average_net_return_pct: returns.length
+            ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+          median_net_return_pct: median,
+          average_net_return_ex_top5_pct: exTop5.length
+            ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length : null,
+          win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          max_winner_pct: wins[0] ?? null,
+          top_5_winner_contribution_pct: totalProfit > 0
+            ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100
+            : null,
+          big_winner_threshold_pct: threshold,
+          big_winner_opportunities: bigOpportunities.length,
+          big_winners_realized: bigWinners.length,
+          big_winner_realization_rate_pct: bigOpportunities.length
+            ? bigWinners.length / bigOpportunities.length * 100 : null,
+          average_big_winner_capture_pct: captures.length
+            ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
+        };
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats(`launch-pullback-shadow:${threshold}`, 15_000, computeCohorts)
+      : computeCohorts();
+    return { cohorts, positions };
   }
 
   launchQualityDashboard({ observationLimit = 30, snapshotLimit = 60 } = {}) {
@@ -3200,6 +3473,14 @@ class ResearchStore {
         COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected
       FROM smart_open_shadow_positions
     `).get();
+    const launchPullbackShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected
+      FROM launch_pullback_shadow_positions
+    `).get();
     const launchQualityObservations = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
@@ -3237,6 +3518,7 @@ class ResearchStore {
       flowFirstShadowPositions,
       smartPullbackShadowPositions,
       smartOpenShadowPositions,
+      launchPullbackShadowPositions,
       launchQualityObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),

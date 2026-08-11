@@ -74,6 +74,8 @@ W3 = T-2s ~ T
 - `smart_open_decisions`：仅用于兼容旧版 Smart OPEN 历史数据；新策略不再写入。
 - `live_positions` / `live_orders`：模拟或实盘的仓位、每次买卖尝试、签名、失败原因与退出原因。
 - `smart_open_shadow_positions`：独立的真实 Smart Wallet OPEN Shadow D0/D1/D2 样本；不与旧回踩或 Primary Shadow 混表。
+- `launch_quality_observations` / `launch_quality_snapshots`：Launch 前60秒结构、首次回踩参考点和未来收益标签。
+- `launch_pullback_shadow_positions`：独立的 Launch 首次回踩 Shadow F1/F2/F3 仓位；不与 Observer E 或任何旧 Shadow 混表。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
 SQLite 使用 WAL 和批量写入。默认保留 168 小时热数据；超过 `FLOW_RAW_RETENTION_HOURS` 的 Raw Trade 会先压缩为 `data/archive/*.ndjson.gz`，成功写入归档后才从热库删除；Signals 与 Future Labels 不删除。
@@ -222,6 +224,18 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 - D2：硬止损12.5%；跟随触发 OPEN 的同一 Smart Wallet 首次 `REDUCE / CLOSE`；180秒兜底。
 
 所有样本只写入 `smart_open_shadow_positions`，接口为 `GET /api/smart-open-shadow`。该路径没有执行器、不读取私钥，永不签名或发送交易。Dashboard 额外按实际入场跳价分层，显示大赢家机会、兑现率和MFE捕获，便于判断问题来自 Smart OPEN 本身、跟随延迟还是退出过早。
+
+## Launch First Pullback Shadow F
+
+Observer E 继续完整记录所有 Launch。新 F 路径只在实时检测到“首波上涨25% → 从峰值回踩7.5% → 从低点反弹3%”的第一个参考点时建立独立模拟样本；服务启动时的历史回放不会补发交易参考点。完成、右截尾或无参考的 Observer 标签为终态，重启回放不能再覆盖它们。
+
+F 路径同时测试三个质量过滤档位，每档分别固定持有3秒和8秒，共六个互不混合的 cohort：
+
+- F1：参考点 NetFlow ≥15 SOL，Creator 买入占比 ≤5%。
+- F2：参考点 NetFlow ≥20 SOL，Creator 买入占比 ≤10%。
+- F3 对照：参考点 NetFlow ≥20 SOL，Creator 买入占比 ≤20%。
+
+模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。收益扣除0.05 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
 
 ## Flow-First Shadow C
 

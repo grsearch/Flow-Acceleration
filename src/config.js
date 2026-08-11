@@ -461,6 +461,85 @@ const config = {
     }),
   },
 
+  // Independent first-pullback execution research. References are emitted by
+  // LaunchQualityObserver, but every simulated position lives in its own table.
+  launchPullbackShadow: {
+    enabled: booleanEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENABLED', true),
+    positionSizeSol: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL', 0.05, {
+      min: 0.000001,
+    }),
+    entryDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv(
+      'FLOW_LAUNCH_PULLBACK_SHADOW_MAX_ENTRY_JUMP_PCT',
+      10,
+      { min: 0, max: 100 },
+    ),
+    bigWinnerPct: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_BIG_WINNER_PCT', 50, {
+      min: 1,
+    }),
+    profiles: [
+      {
+        id: 'F1',
+        label: 'F1 · NetFlow≥15 / Creator≤5%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F1_MIN_NET_FLOW_SOL', 15, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F1_MAX_CREATOR_SHARE_PCT',
+          5,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'F2',
+        label: 'F2 · NetFlow≥20 / Creator≤10%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'F3',
+        label: 'F3 对照 · NetFlow≥20 / Creator≤20%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F3_MIN_NET_FLOW_SOL', 20, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F3_MAX_CREATOR_SHARE_PCT',
+          20,
+          { min: 0, max: 100 },
+        ),
+      },
+    ],
+    holds: [
+      {
+        id: '3S',
+        label: '固定持有3秒',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_3S_MS', 3_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: '8S',
+        label: '固定持有8秒',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   // Observer-only Launch Quality research. Reference percentages label market
   // structure for later analysis; they never become an entry or execution rule.
   launchQualityObserver: {

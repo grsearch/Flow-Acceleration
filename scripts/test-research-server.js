@@ -45,6 +45,11 @@ async function main() {
   assert.ok(dashboard.includes('id="smart-open-metrics"'));
   assert.ok(dashboard.includes('id="smart-open-position-rows"'));
   assert.ok(dashboard.includes("json('/api/smart-open-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="launch-pullback"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="launch-pullback"'));
+  assert.ok(dashboard.includes('id="launch-pullback-metrics"'));
+  assert.ok(dashboard.includes('id="launch-pullback-position-rows"'));
+  assert.ok(dashboard.includes("json('/api/launch-pullback-shadow?positionLimit=30')"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -52,6 +57,7 @@ async function main() {
   assert.ok(dashboard.includes("json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60')"));
   assert.ok(dashboard.includes('function renderMetricGroups('));
   assert.ok(dashboard.includes("renderMetricGroups('#smart-open-metrics'"));
+  assert.ok(dashboard.includes("renderMetricGroups('#launch-pullback-metrics'"));
   assert.ok(dashboard.includes("renderMetricGroups('#flow-first-metrics'"));
   assert.ok(dashboard.includes("renderMetricGroups('#smart-pullback-metrics'"));
   assert.ok(dashboard.includes("renderMetricGroups('#signal-shadow-metrics'"));
@@ -124,6 +130,7 @@ async function main() {
       '/api/flow-first-shadow',
       '/api/smart-pullback-shadow',
       '/api/smart-open-shadow',
+      '/api/launch-pullback-shadow',
       '/api/launch-quality-observer',
       '/api/health',
     ];
@@ -228,6 +235,30 @@ async function main() {
     );
     assert.ok(Array.isArray(smartOpen.cohorts));
     assert.ok(Array.isArray(smartOpen.positions));
+    const launchPullback = await (await fetch(
+      `http://127.0.0.1:${port}/api/launch-pullback-shadow`,
+    )).json();
+    assert.strictEqual(launchPullback.runtime.mode, 'SHADOW_F');
+    assert.strictEqual(launchPullback.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      launchPullback.runtime.cohorts.map((cohort) => [
+        cohort.cohortId,
+        cohort.strategy.entry.minNetFlowSol,
+        cohort.strategy.entry.maxCreatorSharePct,
+        cohort.strategy.exit.fixedHoldMs,
+        cohort.strategy.research.isolatedTable,
+      ]),
+      [
+        ['F1_3S', 15, 5, 3_000, 'launch_pullback_shadow_positions'],
+        ['F1_8S', 15, 5, 8_000, 'launch_pullback_shadow_positions'],
+        ['F2_3S', 20, 10, 3_000, 'launch_pullback_shadow_positions'],
+        ['F2_8S', 20, 10, 8_000, 'launch_pullback_shadow_positions'],
+        ['F3_3S', 20, 20, 3_000, 'launch_pullback_shadow_positions'],
+        ['F3_8S', 20, 20, 8_000, 'launch_pullback_shadow_positions'],
+      ],
+    );
+    assert.ok(Array.isArray(launchPullback.cohorts));
+    assert.ok(Array.isArray(launchPullback.positions));
     const launchQuality = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-quality-observer`,
     )).json();

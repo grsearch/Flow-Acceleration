@@ -126,6 +126,25 @@ assert.ok(
   Math.abs(costBreakdown(config.smartOpenShadow.costModel).deterministicCostPct - 3.22)
     < 1e-12,
 );
+assert.strictEqual(config.launchPullbackShadow.enabled, true);
+assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 0.05);
+assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
+assert.deepStrictEqual(
+  config.launchPullbackShadow.profiles.map((profile) => [
+    profile.id,
+    profile.minNetFlowSol,
+    profile.maxCreatorSharePct,
+  ]),
+  [['F1', 15, 5], ['F2', 20, 10], ['F3', 20, 20]],
+);
+assert.deepStrictEqual(
+  config.launchPullbackShadow.holds.map((hold) => [hold.id, hold.fixedHoldMs]),
+  [['3S', 3_000], ['8S', 8_000]],
+);
+assert.ok(
+  Math.abs(costBreakdown(config.launchPullbackShadow.costModel).deterministicCostPct - 3.22)
+    < 1e-12,
+);
 assert.strictEqual(config.launchQualityObserver.enabled, true);
 assert.deepStrictEqual(
   config.launchQualityObserver.snapshotHorizonsMs,
