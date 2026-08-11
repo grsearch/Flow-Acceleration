@@ -341,6 +341,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="bonding-momentum">
               <b>Bonding Curve 动量 · H</b><small>订单流领先、四组入场 × 三组退出</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="graduation-hold">
+              <b>毕业概率持仓 · I</b><small>早期Primary入场，I0/I1/I2持仓对照</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-quality">
               <b>Launch Quality · E</b><small>只观察选币、存活与首次回踩</small>
             </button>
@@ -477,6 +480,28 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>目标时间</th><th>组别 / Mint</th><th>窗口</th><th>状态 / 延迟</th><th>收益 / MFE / MAE</th><th>Net / 加速</th><th>Buyers / 新买家 / 买单加速</th><th>Sell衰减 / Curve</th></tr></thead>
                 <tbody id="bonding-momentum-snapshot-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="graduation-hold" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Graduation Probability Hold Shadow I0 / I1 / I2</h2>
+                <p>只从早期 Primary Flow 模拟入场；禁止高Curve追买，三个退出组独立记录</p>
+              </div>
+              <div class="strategy-expression" id="graduation-hold-expression">等待 Graduation Hold 配置…</div>
+              <div class="strategy-metric-groups" id="graduation-hold-metrics"></div>
+              <div class="strategy-metric-groups" id="graduation-hold-time-sessions"></div>
+              <div class="section-title"><h2>三组表现</h2><p>I0为移动止盈对照；I1毕业前退出；I2严格门槛后穿越毕业</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>组别</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位净收益</th><th>PF / 去Top5</th><th>检查点 / 毕业</th><th>MFE / MAE</th><th>大赢家</th></tr></thead>
+                <tbody id="graduation-hold-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>显示最近一次概率检查点、5秒订单流及退出去向</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>组别 / 状态</th><th>Mint</th><th>信号Curve / 入场</th><th>当前 / 下一检查点</th><th>Net5 / Buyers / Sell5</th><th>入场 / 最高 / 最低 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+                <tbody id="graduation-hold-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -991,6 +1016,40 @@
       )).join('') : '<tr><td colspan="8" class="empty">等待信号后1/2/3/5/8/10/20/30秒因果快照</td></tr>';
     }
 
+    function renderGraduationHoldShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const entry = strategy.entry || {};
+      const research = strategy.research || {};
+      const cohortLabels = Object.fromEntries((runtime.cohorts || []).map(row => [row.id, row.label]));
+      const checkpointText = (strategy.checkpoints || []).map(rule => (
+        `${number(rule.thresholdPct)}%: Net5≥${number(rule.minNetFlow5Sol,1)} / Buyers≥${number(rule.minBuyers5)}${rule.maxSellSol5 == null ? '' : ` / Sell≤${number(rule.maxSellSol5,1)}`}`
+      )).join(' · ');
+      document.querySelector('#graduation-hold-expression').textContent = `早期 ${entry.signalVariant || 'primary_3w'} 且 Curve≤${number(entry.maxSignalCurvePct)}% → ${number(entry.entryDelayMs)}ms后模拟入场 → ${checkpointText || '70/80/85/90/95/97%因果检查点'} → I1在97%前退出 / I2严格门槛后毕业+${age(strategy.ammExitDelayMs || 5000)} PumpSwap退出`;
+      renderMetricGroups('#graduation-hold-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW I' : '关闭', `独立表 ${research.isolatedTable || 'graduation_hold_shadow_positions'}`],
+        ['早期信号 / 合格', `${number(runtime.signalsSeen)} / ${number(runtime.eligibleSignals)}`, `高Curve及陈旧信号拒绝 ${number(runtime.rejected)}`],
+        ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
+        ['检查点通过 / 失败', `${number(runtime.gatesPassed)} / ${number(runtime.gatesFailed)}`, `评估 ${number(runtime.gatesEvaluated)} · 毕业就绪 ${number(runtime.graduationReady)}`],
+        ['执行保护', `跳价>${rate(entry.maxEntryPriceJumpPct)}`, `跳价拦截 ${number(runtime.priceJump)} · 无入场 ${number(runtime.noEntry)}`],
+        ['模拟成本', pct(research.configuredCostPct), `仓位 ${number(research.simulatedPositionSol,4)} SOL · 永不发送链上交易`],
+      ], []);
+      renderTimeSessions('#graduation-hold-time-sessions', data.timeSessions);
+
+      const cohorts = data.cohorts || [];
+      document.querySelector('#graduation-hold-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(cohortLabels[row.cohort_id] || row.cohort_id)}</b><br><span class="table-note">${escapeHtml(row.exit_mode || '')}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}<br><span class="table-note">尝试 ${number(row.attempts)} · 拒绝 ${number(row.rejected)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">活动 ${number(row.active)} · 无入场 ${number(row.no_entry)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.average_net_return_ex_top5_pct)}</td><td>${number(row.average_gates_passed,1)} / ${number(row.graduation_ready)}<br><span class="table-note">已毕业 ${number(row.graduated)}</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td><td>${number(row.big_winners_realized)} / ${number(row.big_winner_opportunities)}<br><span class="table-note">兑现 ${rate(row.big_winner_realization_rate_pct)} · Top5贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待 Curve≤70% 的早期 Primary Flow Episode</td></tr>';
+
+      const rows = data.positions || [];
+      document.querySelector('#graduation-hold-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const features = row.last_features || {};
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const prices = `${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.lowest_price,10)} / ${number(row.exit_price,10)}`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(cohortLabels[row.cohort_id] || row.cohort_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${pct(row.signal_curve_pct)} / ${pct(row.entry_jump_pct)}<br><span class="table-note">W3 ${number(row.signal_netflow_w3,2)} SOL / ${number(row.signal_buyers_w3)} Buyers</span></td><td>${pct(row.current_checkpoint_pct)} → ${pct(row.next_checkpoint_pct)}<br><span class="table-note">通过 ${number(row.gates_passed)} · 毕业就绪 ${row.graduation_ready ? '是' : '否'}</span></td><td>${number(features.netFlow5,2)} / ${number(features.buyers5)} / ${number(features.sellSol5,2)}<br><span class="table-note">ΔCurve5 ${pct(features.curveDelta5)} · 累计TX ${number(features.cumulativeCurveTrades)}</span></td><td>${prices}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+      }).join('') : '<tr><td colspan="10" class="empty">暂无 Shadow I 模拟仓位；高Curve信号只记录拒绝，绝不追买</td></tr>';
+    }
+
     function renderLaunchQualityObserver(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -1234,6 +1293,7 @@
       const launchQuality = data.launchQualityObserver || { mode: 'OBSERVER_ONLY', enabled: false, activeLaunches: 0, launchesObserved: 0, snapshotsWritten: 0, referencePullbacks: 0 };
       const migratedRebound = data.migratedDropReboundShadow || { mode: 'SHADOW_G', enabled: false, trackedMints: 0, activePositions: 0, pendingEntries: 0, candidates: 0, signals: 0 };
       const bondingMomentum = data.bondingCurveMomentumShadow || { mode: 'SHADOW_H', enabled: false, activePositions: 0, pendingEntries: 0, signals: 0, snapshotsWritten: 0 };
+      const graduationHold = data.graduationHoldShadow || { mode: 'SHADOW_I', enabled: false, activePositions: 0, pendingEntries: 0, signalsSeen: 0, gatesPassed: 0 };
       const liveEntry = trading.strategy?.entry || {};
       const shadowRules = (signalShadow.profiles || []).map(profile => (
         `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)}/${number(profile.strategy?.entry?.minUniqueBuyersW3)}`
@@ -1241,7 +1301,7 @@
       const cards = [
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['规则', `Primary Early ${number(liveEntry.minNetFlowW3Sol,1)} SOL / ${number(liveEntry.minUniqueBuyersW3)} Buyers`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Flow-First C', [['模式', flowFirst.enabled ? 'SHADOW C' : '关闭'], ['Primary信号', number(flowFirst.signalsSeen)], ['独立Episode', number(flowFirst.episodes)], ['重复行去重', number(flowFirst.deduplicated)], ['待入场', number(flowFirst.pendingEntries)], ['活动模拟仓位', number(flowFirst.activePositions)], ['C组退出', '5秒 / 7.5% / 12.5%'], ['链上交易', '永不发送']]],
@@ -1250,6 +1310,7 @@
         ['Launch Pullback F', [['模式', launchPullback.enabled ? 'SHADOW F' : '关闭'], ['参考点', number(launchPullback.referencesSeen)], ['最宽组合格', number(launchPullback.qualifiedReferences)], ['待入场', number(launchPullback.pendingEntries)], ['活动仓位', number(launchPullback.activePositions)], ['开仓 / 已关', `${number(launchPullback.opened)} / ${number(launchPullback.closed)}`], ['F组退出', '固定3秒 / 8秒'], ['链上交易', '永不发送']]],
         ['Lifecycle Rebound G', [['模式', migratedRebound.enabled ? 'SHADOW G' : '关闭'], ['毕业后订阅Mint', number(migratedRebound.trackedMints)], ['毕业前 / 后状态', `${number(migratedRebound.detectorStates?.PRE_MIGRATION)} / ${number(migratedRebound.detectorStates?.POST_MIGRATION)}`], ['候选 / 信号', `${number(migratedRebound.candidates)} / ${number(migratedRebound.signals)}`], ['待入场', number(migratedRebound.pendingEntries)], ['活动仓位', number(migratedRebound.activePositions)], ['原始成交', '毕业前完整 / 毕业后前5分钟'], ['链上交易', '永不发送']]],
         ['Bonding Momentum H', [['模式', bondingMomentum.enabled ? 'SHADOW H' : '关闭'], ['订单流信号', number(bondingMomentum.signals)], ['待入场', number(bondingMomentum.pendingEntries)], ['活动仓位', number(bondingMomentum.activePositions)], ['因果快照', number(bondingMomentum.snapshotsWritten)], ['无成交快照', number(bondingMomentum.snapshotsMissed)], ['组合', '四组入场 × 三组退出'], ['链上交易', '永不发送']]],
+        ['Graduation Hold I', [['模式', graduationHold.enabled ? 'SHADOW I' : '关闭'], ['早期Primary', number(graduationHold.signalsSeen)], ['合格入场信号', number(graduationHold.eligibleSignals)], ['待入场', number(graduationHold.pendingEntries)], ['活动仓位', number(graduationHold.activePositions)], ['检查点通过 / 失败', `${number(graduationHold.gatesPassed)} / ${number(graduationHold.gatesFailed)}`], ['毕业就绪', number(graduationHold.graduationReady)], ['链上交易', '永不发送']]],
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['参考回踩', number(launchQuality.referencePullbacks)], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
         ['Scope Guard', [['新信号 / 入场', 'Bonding Curve only'], ['出场', 'Bonding Curve / PumpSwap'], ['毕业后新信号', 'Blocked'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
@@ -1297,6 +1358,9 @@
         ],
         'bonding-momentum': () => [
           json('/api/bonding-curve-momentum-shadow?positionLimit=30&snapshotLimit=40').then(renderBondingCurveMomentumShadow),
+        ],
+        'graduation-hold': () => [
+          json('/api/graduation-hold-shadow?positionLimit=30').then(renderGraduationHoldShadow),
         ],
         'launch-quality': () => [
           json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60').then(renderLaunchQualityObserver),

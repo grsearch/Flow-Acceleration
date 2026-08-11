@@ -28,6 +28,7 @@ class ResearchServer {
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
     bondingCurveMomentumShadow = null,
+    graduationHoldShadow = null,
   }) {
     this.config = config;
     this.store = store;
@@ -43,6 +44,7 @@ class ResearchServer {
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
     this.bondingCurveMomentumShadow = bondingCurveMomentumShadow;
+    this.graduationHoldShadow = graduationHoldShadow;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -332,6 +334,23 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/graduation-hold-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.graduationHoldShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_I',
+          sendsTransactions: false,
+          cohorts: [],
+        },
+        timeSessions: this.store.shadowTimeSessionDashboard('graduation-hold'),
+        ...this.store.graduationHoldShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.graduationHoldShadow?.bigWinnerPct ?? 50,
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -354,6 +373,7 @@ class ResearchServer {
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
         bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,
+        graduationHoldShadow: this.graduationHoldShadow?.health() || null,
       });
     });
 

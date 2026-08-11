@@ -65,6 +65,13 @@ async function main() {
   assert.ok(dashboard.includes('id="bonding-momentum-snapshot-rows"'));
   assert.ok(dashboard.includes('Bonding Curve 动量 · H'));
   assert.ok(dashboard.includes("json('/api/bonding-curve-momentum-shadow?positionLimit=30&snapshotLimit=40')"));
+  assert.ok(dashboard.includes('data-live-strategy="graduation-hold"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="graduation-hold"'));
+  assert.ok(dashboard.includes('id="graduation-hold-cohort-rows"'));
+  assert.ok(dashboard.includes('id="graduation-hold-position-rows"'));
+  assert.ok(dashboard.includes('id="graduation-hold-time-sessions"'));
+  assert.ok(dashboard.includes('毕业概率持仓 · I'));
+  assert.ok(dashboard.includes("json('/api/graduation-hold-shadow?positionLimit=30')"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -119,6 +126,7 @@ async function main() {
     'launch-pullback',
     'migrated-rebound',
     'bonding-momentum',
+    'graduation-hold',
   ]) {
     const timeSessions = runtime.store.shadowTimeSessionDashboard(strategyId);
     assert.strictEqual(timeSessions.timezone, 'Asia/Shanghai');
@@ -169,6 +177,7 @@ async function main() {
       '/api/launch-pullback-shadow',
       '/api/migrated-drop-rebound-shadow',
       '/api/bonding-curve-momentum-shadow',
+      '/api/graduation-hold-shadow',
       '/api/launch-quality-observer',
       '/api/health',
     ];
@@ -366,6 +375,26 @@ async function main() {
     assert.ok(Array.isArray(bondingMomentum.cohorts));
     assert.ok(Array.isArray(bondingMomentum.positions));
     assert.ok(Array.isArray(bondingMomentum.snapshots));
+    const graduationHold = await (await fetch(
+      `http://127.0.0.1:${port}/api/graduation-hold-shadow`,
+    )).json();
+    assert.strictEqual(graduationHold.runtime.mode, 'SHADOW_I');
+    assert.strictEqual(graduationHold.runtime.sendsTransactions, false);
+    assert.strictEqual(graduationHold.runtime.strategy.entry.maxSignalCurvePct, 70);
+    assert.strictEqual(
+      graduationHold.runtime.strategy.research.isolatedTable,
+      'graduation_hold_shadow_positions',
+    );
+    assert.deepStrictEqual(
+      graduationHold.runtime.cohorts.map((cohort) => [cohort.id, cohort.exitMode]),
+      [
+        ['I0', 'CONTROL_TRAILING'],
+        ['I1', 'PRE_GRAD_CHECKPOINTS'],
+        ['I2', 'THROUGH_GRADUATION'],
+      ],
+    );
+    assert.ok(Array.isArray(graduationHold.cohorts));
+    assert.ok(Array.isArray(graduationHold.positions));
     const launchQuality = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-quality-observer`,
     )).json();

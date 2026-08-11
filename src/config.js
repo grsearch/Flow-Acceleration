@@ -768,6 +768,142 @@ const config = {
     }),
   },
 
+  // Graduation probability is used only as a hold/exit overlay on an earlier
+  // Primary Flow entry. It never opens a fresh position above the configured
+  // Curve ceiling and never owns a signer or transaction executor.
+  graduationHoldShadow: {
+    enabled: booleanEnv('FLOW_GRADUATION_HOLD_SHADOW_ENABLED', true),
+    signalVariant: 'primary_3w',
+    positionSizeSol: numberEnv('FLOW_GRADUATION_HOLD_POSITION_SOL', 0.05, {
+      min: 0.000001,
+    }),
+    maxSignalLatencyMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_SIGNAL_LATENCY_MS', 1_500, {
+      min: 100,
+    }),
+    maxSignalCurvePct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_CURVE_PCT', 70, {
+      min: 0,
+      max: 100,
+    }),
+    maxTokenAgeMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_TOKEN_AGE_MS', 10 * 60_000, {
+      min: 1_000,
+      max: 60 * 60_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_GRADUATION_HOLD_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 5_000,
+      max: 60 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    hardStopPct: numberEnv('FLOW_GRADUATION_HOLD_HARD_STOP_PCT', 30, {
+      min: 0.1,
+      max: 100,
+    }),
+    controlTrailingStopPct: numberEnv('FLOW_GRADUATION_HOLD_I0_TRAILING_STOP_PCT', 7.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    controlMaxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_I0_MAX_HOLD_MS', 60_000, {
+      min: 1_000,
+    }),
+    maxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_HOLD_MS', 120_000, {
+      min: 1_000,
+    }),
+    firstCheckpointTimeoutMs: integerEnv(
+      'FLOW_GRADUATION_HOLD_FIRST_CHECKPOINT_TIMEOUT_MS',
+      20_000,
+      { min: 1_000 },
+    ),
+    stepTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_STEP_TIMEOUT_MS', 3_000, {
+      min: 250,
+    }),
+    graduationTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_GRADUATION_TIMEOUT_MS', 15_000, {
+      min: 1_000,
+    }),
+    ammExitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_I2_AMM_EXIT_DELAY_MS', 5_000, {
+      min: 0,
+    }),
+    bridgeMinBuyers5: integerEnv('FLOW_GRADUATION_HOLD_I2_MIN_BUYERS_5S', 12, {
+      min: 1,
+    }),
+    bridgeMaxCumulativeTrades: integerEnv(
+      'FLOW_GRADUATION_HOLD_I2_MAX_CUMULATIVE_TRADES',
+      20,
+      { min: 1 },
+    ),
+    checkpoints: [70, 80, 85, 90, 95, 97],
+    checkpointRules: [
+      {
+        thresholdPct: 70,
+        minNetFlow5Sol: 0,
+        minBuyers5: 3,
+        maxSellSol5: 1,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 80,
+        minNetFlow5Sol: 0,
+        minBuyers5: 1,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 85,
+        minNetFlow5Sol: 0,
+        minBuyers5: 1,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 90,
+        minNetFlow5Sol: 0,
+        minBuyers5: 4,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 95,
+        minNetFlow5Sol: 0,
+        minBuyers5: 4,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+    ],
+    cohorts: [
+      {
+        id: 'I0',
+        label: 'I0 · Early Entry移动止盈对照',
+        exitMode: 'CONTROL_TRAILING',
+      },
+      {
+        id: 'I1',
+        label: 'I1 · 概率检查点 / 97%毕业前退出',
+        exitMode: 'PRE_GRAD_CHECKPOINTS',
+      },
+      {
+        id: 'I2',
+        label: 'I2 · 严格概率检查点 / 穿越毕业',
+        exitMode: 'THROUGH_GRADUATION',
+      },
+    ],
+    bigWinnerPct: numberEnv('FLOW_GRADUATION_HOLD_BIG_WINNER_PCT', 50, { min: 1 }),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_GRADUATION_HOLD_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   // Lifecycle oversold-rebound research. Pre-migration curve trades and the
   // post-migration PumpSwap subscription use separate cohorts; profiles below
   // are orthogonal online experiments and never create or sign a transaction.
