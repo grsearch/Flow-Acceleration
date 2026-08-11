@@ -65,7 +65,7 @@ W3 = T-2s ~ T
 
 默认数据库为 `data/flow-research.db`，核心表为：
 
-- `raw_trades`：毕业前逐笔成交，以及仅用于完成标签的毕业后 PumpSwap 成交。
+- `raw_trades`：毕业前逐笔成交、标签所需 PumpSwap 成交，以及 Shadow G 对每个新毕业 Mint 前5分钟的完整 PumpSwap 成交；后者用于离线穷举超跌/反弹阈值。
 - `flow_signals`：三个窗口的买卖流、净流入、独立买家、买单数、绝对增量和 ratio。
 - `signal_returns`：1/2/3/5/8/10/15/20/30/60 秒 Raw Return、确定性成本后的 Net Return、每个 horizon 的观测 lag、`COMPLETE/RIGHT_CENSORED` 标签状态，以及 5/10/30 秒 MFE/MAE。某个 horizon 后首笔成交超过 `FLOW_LABEL_MAX_OBSERVATION_LAG_MS`，或 MFE/MAE 时间窗没有完整观测覆盖时，不会用旧价格或 0% 补值。
 - `smart_wallet_events`：两个研究钱包的成交、Curve、AGE、最近 Flow Signal 与时间差。
@@ -76,6 +76,7 @@ W3 = T-2s ~ T
 - `smart_open_shadow_positions`：独立的真实 Smart Wallet OPEN Shadow D0/D1/D2 样本；不与旧回踩或 Primary Shadow 混表。
 - `launch_quality_observations` / `launch_quality_snapshots`：Launch 前60秒结构、首次回踩参考点和未来收益标签。
 - `launch_pullback_shadow_positions`：独立的 Launch 首次回踩 Shadow F1/F2/F3 仓位；不与 Observer E 或任何旧 Shadow 混表。
+- `migrated_drop_rebound_shadow_positions`：独立的毕业后超跌反弹 Shadow G 参数组、模拟入场、MFE/MAE和退出结果。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
 SQLite 使用 WAL 和批量写入。默认保留 168 小时热数据；超过 `FLOW_RAW_RETENTION_HOURS` 的 Raw Trade 会先压缩为 `data/archive/*.ndjson.gz`，成功写入归档后才从热库删除；Signals 与 Future Labels 不删除。
@@ -236,6 +237,14 @@ F 路径同时测试三个质量过滤档位，每档分别固定持有3秒和8�
 - F3 对照：参考点 NetFlow ≥20 SOL，Creator 买入占比 ≤20%。
 
 模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。收益扣除0.05 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
+
+## Migrated Drop/Rebound Shadow G
+
+Shadow G 只处理已经毕业迁移后的 `PUMP_AMM` 成交，不读取毕业前 Bonding Curve 价格，也不影响 A–F 的规则和历史表。新毕业 Mint 默认持续订阅5分钟，逐笔成交先进入 `raw_trades`，因此样本积累后可以离线重新穷举窗口、跌幅、反弹幅度和确认时限，不受在线参数组限制。
+
+基准入场为“1秒滚动高点下跌15%–35%，随后从运行低点反弹2%–5%，且反弹在候选开始后1秒内出现”。同一跌势只触发一次，必须先恢复到未达到15%跌幅才会重新武装。在线同时跑八个正交组：0.5/1/2秒窗口、15%–25%与25%–35%跌幅分层、2%与3%反弹下限、0.5/1/2秒反弹时限；每组只改变一个核心变量，避免日后无法归因。
+
+每个入场组同时模拟四种退出：固定3秒、固定8秒、旧版“+8%激活/峰值回撤3%/快速+18%/6秒亏损检查/15秒兜底”，以及保留大赢家的“硬止损20%/+20%激活/峰值回撤10%/60秒兜底”。模拟入场和退出均使用200ms执行延迟与真实后续 PumpSwap 成交，收益扣除0.05 SOL仓位的确定性成本；MFE、MAE和实际入场跳价一并保存。接口为 `GET /api/migrated-drop-rebound-shadow`。该策略没有执行器、不读取私钥，永不签名或发送交易。
 
 ## Flow-First Shadow C
 

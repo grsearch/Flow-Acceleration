@@ -12,6 +12,7 @@ const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
 const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
+const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -69,6 +70,11 @@ function createRuntime(runtimeConfig = config) {
     onReference: (reference) => launchPullbackShadow.onReference(reference),
   });
   launchQualityObserver.start();
+  const migratedDropReboundShadow = new MigratedDropReboundShadowSuite({
+    config: runtimeConfig.migratedDropReboundShadow,
+    store,
+  });
+  migratedDropReboundShadow.start();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
@@ -82,12 +88,22 @@ function createRuntime(runtimeConfig = config) {
     smartOpenShadow,
     launchPullbackShadow,
     launchQualityObserver,
+    migratedDropReboundShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
   let maintenanceTimer = null;
   let archiveTimer = null;
   let stopping = false;
+
+  const refreshAmmSubscriptions = (now = Date.now()) => {
+    const graduatedPending = labeler.pendingMints()
+      .filter((mint) => store.getToken(mint)?.graduated_at);
+    stream.setAmmMints([...new Set([
+      ...graduatedPending,
+      ...migratedDropReboundShadow.trackedMints(now),
+    ])]);
+  };
 
   engine.on('candidate', (candidate) => {
     console.log(
@@ -148,13 +164,17 @@ function createRuntime(runtimeConfig = config) {
           continue;
         }
         if (event.type === 'complete') {
-          store.recordComplete(event);
+          const token = store.recordComplete(event);
           engine.handleComplete(event);
+          migratedDropReboundShadow.onGraduated(token || event);
+          refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
         }
         if (event.type === 'migration') {
-          store.recordMigration(event);
+          const token = store.recordMigration(event);
           engine.handleComplete({ ...event, completedAt: event.migratedAt });
+          migratedDropReboundShadow.onGraduated(token || event);
+          refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
         }
         if (event.type !== 'trade' && event.type !== 'ammTrade') {
@@ -183,6 +203,7 @@ function createRuntime(runtimeConfig = config) {
           )
           : null;
         store.queueRawTrade(trade);
+        migratedDropReboundShadow.observeTrade(trade);
         launchQualityObserver.observeTrade(trade);
         launchPullbackShadow.observeTrade(trade);
         signalShadow.observeTrade(trade);
@@ -262,6 +283,12 @@ function createRuntime(runtimeConfig = config) {
         .map((hold) => `${hold.fixedHoldMs}ms`).join(',')}; isolated table; sends transactions=false.`,
     );
     console.log(
+      `Migrated Drop/Rebound Shadow G: ${runtimeConfig.migratedDropReboundShadow.entryProfiles.length} `
+      + `entry profiles x ${runtimeConfig.migratedDropReboundShadow.exitProfiles.length} exits; `
+      + `PumpSwap tracking=${runtimeConfig.migratedDropReboundShadow.trackingAgeMs / 1_000}s; `
+      + 'isolated table; sends transactions=false.',
+    );
+    console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
       + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `
       + `wallets>=${runtimeConfig.strategy.activityMinUniqueWallets}`,
@@ -282,8 +309,8 @@ function createRuntime(runtimeConfig = config) {
       smartOpenShadow.advanceTime(now);
       launchPullbackShadow.advanceTime(now);
       launchQualityObserver.advanceTime(now);
-      const graduatedPending = labeler.pendingMints().filter((mint) => store.getToken(mint)?.graduated_at);
-      stream.setAmmMints(graduatedPending);
+      migratedDropReboundShadow.advanceTime(now);
+      refreshAmmSubscriptions(now);
     }, 1_000);
 
     archiveTimer = setInterval(() => {
@@ -296,6 +323,7 @@ function createRuntime(runtimeConfig = config) {
     }, 60 * 60_000);
     if (archiveTimer.unref) archiveTimer.unref();
 
+    refreshAmmSubscriptions();
     await stream.start();
   }
 
@@ -315,6 +343,7 @@ function createRuntime(runtimeConfig = config) {
     smartOpenShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
+    migratedDropReboundShadow.stop();
     await server.stop();
     store.close();
   }
@@ -333,13 +362,14 @@ function createRuntime(runtimeConfig = config) {
       smartOpenShadow: smartOpenShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
+      migratedDropReboundShadow: migratedDropReboundShadow.health(),
     };
   }
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, launchPullbackShadow,
-    launchQualityObserver,
+    launchQualityObserver, migratedDropReboundShadow,
   };
 }
 

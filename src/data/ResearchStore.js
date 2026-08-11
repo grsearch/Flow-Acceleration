@@ -662,6 +662,78 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_launch_pullback_shadow_mint
         ON launch_pullback_shadow_positions(mint, reference_at DESC);
 
+      CREATE TABLE IF NOT EXISTS migrated_drop_rebound_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        entry_profile_id TEXT NOT NULL,
+        exit_profile_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        migrated_at INTEGER NOT NULL,
+        migration_age_ms INTEGER NOT NULL,
+        window_ms INTEGER NOT NULL,
+        drop_min_pct REAL NOT NULL,
+        drop_max_pct REAL NOT NULL,
+        rebound_min_pct REAL NOT NULL,
+        rebound_max_pct REAL NOT NULL,
+        rebound_timeout_ms INTEGER NOT NULL,
+        peak_at INTEGER NOT NULL,
+        peak_price REAL NOT NULL,
+        low_at INTEGER NOT NULL,
+        low_price REAL NOT NULL,
+        drop_pct REAL NOT NULL,
+        rebound_at INTEGER NOT NULL,
+        rebound_price REAL NOT NULL,
+        rebound_pct REAL NOT NULL,
+        rebound_elapsed_ms INTEGER NOT NULL,
+        rebound_from_low_ms INTEGER NOT NULL,
+        entry_target_at INTEGER NOT NULL,
+        entry_deadline_at INTEGER NOT NULL,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        trailing_activated_at INTEGER,
+        exit_mode TEXT NOT NULL,
+        fixed_hold_ms INTEGER,
+        trailing_activation_pct REAL,
+        trailing_stop_pct REAL,
+        hard_stop_pct REAL,
+        fast_take_profit_pct REAL,
+        fast_take_profit_window_ms INTEGER,
+        loss_check_at_ms INTEGER,
+        max_hold_ms INTEGER,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_migrated_drop_rebound_status
+        ON migrated_drop_rebound_shadow_positions(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_migrated_drop_rebound_mint
+        ON migrated_drop_rebound_shadow_positions(mint, rebound_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_migrated_drop_rebound_profiles
+        ON migrated_drop_rebound_shadow_positions(entry_profile_id, exit_profile_id, rebound_at);
+
       CREATE TABLE IF NOT EXISTS launch_quality_observations (
         mint TEXT PRIMARY KEY,
         symbol TEXT,
@@ -1281,6 +1353,16 @@ class ResearchStore {
         WHERE market = 'PUMP_BONDING_CURVE' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
       `),
+      recentAmmTrades: this.db.prepare(`
+        SELECT timestamp_ms AS timestampMs, received_at_ms AS receivedAtMs,
+          slot, signature, event_index AS eventIndex,
+          market, mint, wallet, side, sol_amount AS solAmount,
+          token_amount AS tokenAmount, price, reserve_price AS reservePrice,
+          curve_pct AS curvePct
+        FROM raw_trades
+        WHERE market = 'PUMP_AMM' AND timestamp_ms >= ?
+        ORDER BY timestamp_ms, id
+      `),
       smartWalletPosition: this.db.prepare(`
         SELECT token_balance
         FROM smart_wallet_positions
@@ -1689,6 +1771,73 @@ class ResearchStore {
         WHERE cohort_id = ? AND status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY reference_at, id
       `),
+      insertMigratedDropReboundShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO migrated_drop_rebound_shadow_positions (
+          cohort_id, entry_profile_id, exit_profile_id, episode_id,
+          mint, symbol, status, rejection_reason, position_sol, configured_cost_pct,
+          migrated_at, migration_age_ms, window_ms, drop_min_pct, drop_max_pct,
+          rebound_min_pct, rebound_max_pct, rebound_timeout_ms,
+          peak_at, peak_price, low_at, low_price, drop_pct,
+          rebound_at, rebound_price, rebound_pct, rebound_elapsed_ms,
+          rebound_from_low_ms, entry_target_at, entry_deadline_at,
+          exit_mode, fixed_hold_ms, trailing_activation_pct, trailing_stop_pct,
+          hard_stop_pct, fast_take_profit_pct, fast_take_profit_window_ms,
+          loss_check_at_ms, max_hold_ms, created_at, updated_at
+        ) VALUES (
+          @cohortId, @entryProfileId, @exitProfileId, @episodeId,
+          @mint, @symbol, @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @migratedAt, @migrationAgeMs, @windowMs, @dropMinPct, @dropMaxPct,
+          @reboundMinPct, @reboundMaxPct, @reboundTimeoutMs,
+          @peakAt, @peakPrice, @lowAt, @lowPrice, @dropPct,
+          @reboundAt, @reboundPrice, @reboundPct, @reboundElapsedMs,
+          @reboundFromLowMs, @entryTargetAt, @entryDeadlineAt,
+          @exitMode, @fixedHoldMs, @trailingActivationPct, @trailingStopPct,
+          @hardStopPct, @fastTakeProfitPct, @fastTakeProfitWindowMs,
+          @lossCheckAtMs, @maxHoldMs, @createdAt, @updatedAt
+        )
+      `),
+      getMigratedDropReboundShadowPosition: this.db.prepare(`
+        SELECT * FROM migrated_drop_rebound_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      updateMigratedDropReboundShadowPosition: this.db.prepare(`
+        UPDATE migrated_drop_rebound_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          lowest_price = COALESCE(@lowestPrice, lowest_price),
+          last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct,
+            max_favorable_return_pct
+          ),
+          max_adverse_return_pct = COALESCE(
+            @maxAdverseReturnPct,
+            max_adverse_return_pct
+          ),
+          trailing_activated_at = COALESCE(@trailingActivatedAt, trailing_activated_at),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeMigratedDropReboundShadowPositions: this.db.prepare(`
+        SELECT * FROM migrated_drop_rebound_shadow_positions
+        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY rebound_at, id
+      `),
       insertLaunchQualityObservation: this.db.prepare(`
         INSERT OR IGNORE INTO launch_quality_observations (
           mint, symbol, creator, created_at, status, label_status,
@@ -1992,6 +2141,10 @@ class ResearchStore {
 
   recentCurveTrades(sinceMs) {
     return this.stmts.recentCurveTrades.all(sinceMs);
+  }
+
+  recentAmmTrades(sinceMs) {
+    return this.stmts.recentAmmTrades.all(sinceMs);
   }
 
   recordSmartWalletEvent(trade) {
@@ -2541,6 +2694,97 @@ class ResearchStore {
     return this.stmts.activeLaunchPullbackShadowPositions.all(cohortId);
   }
 
+  createMigratedDropReboundShadowPosition(position) {
+    const now = Date.now();
+    const nullableInteger = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
+    const row = {
+      cohortId: position.cohortId,
+      entryProfileId: position.entryProfileId,
+      exitProfileId: position.exitProfileId,
+      episodeId: position.episodeId,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      migratedAt: Math.trunc(position.migratedAt),
+      migrationAgeMs: Math.max(0, Math.trunc(position.migrationAgeMs)),
+      windowMs: Math.trunc(position.windowMs),
+      dropMinPct: position.dropMinPct,
+      dropMaxPct: position.dropMaxPct,
+      reboundMinPct: position.reboundMinPct,
+      reboundMaxPct: position.reboundMaxPct,
+      reboundTimeoutMs: Math.trunc(position.reboundTimeoutMs),
+      peakAt: Math.trunc(position.peakAt),
+      peakPrice: position.peakPrice,
+      lowAt: Math.trunc(position.lowAt),
+      lowPrice: position.lowPrice,
+      dropPct: position.dropPct,
+      reboundAt: Math.trunc(position.reboundAt),
+      reboundPrice: position.reboundPrice,
+      reboundPct: position.reboundPct,
+      reboundElapsedMs: Math.max(0, Math.trunc(position.reboundElapsedMs)),
+      reboundFromLowMs: Math.max(0, Math.trunc(position.reboundFromLowMs)),
+      entryTargetAt: Math.trunc(position.entryTargetAt),
+      entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
+      exitMode: position.exitMode,
+      fixedHoldMs: nullableInteger(position.fixedHoldMs),
+      trailingActivationPct: finiteOrNull(position.trailingActivationPct),
+      trailingStopPct: finiteOrNull(position.trailingStopPct),
+      hardStopPct: finiteOrNull(position.hardStopPct),
+      fastTakeProfitPct: finiteOrNull(position.fastTakeProfitPct),
+      fastTakeProfitWindowMs: nullableInteger(position.fastTakeProfitWindowMs),
+      lossCheckAtMs: nullableInteger(position.lossCheckAtMs),
+      maxHoldMs: nullableInteger(position.maxHoldMs),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertMigratedDropReboundShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getMigratedDropReboundShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateMigratedDropReboundShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    return this.stmts.updateMigratedDropReboundShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      lowestPrice: finiteOrNull(value('lowestPrice')),
+      lastObservedAt: value('lastObservedAt'),
+      lastPrice: finiteOrNull(value('lastPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
+      trailingActivatedAt: value('trailingActivatedAt'),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeMigratedDropReboundShadowPositions() {
+    return this.stmts.activeMigratedDropReboundShadowPositions.all();
+  }
+
   createLaunchQualityObservation(token) {
     const now = Date.now();
     const createdAt = Number(token.createdAt ?? token.created_at);
@@ -2725,6 +2969,129 @@ class ResearchStore {
       ? this._cachedDashboardStats(`launch-pullback-shadow:${threshold}`, 15_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
+  }
+
+  migratedDropReboundShadowDashboard({
+    positionLimit = 200,
+    bigWinnerPct = 50,
+    cacheStats = false,
+  } = {}) {
+    const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
+    const threshold = Math.max(1, Number(bigWinnerPct) || 50);
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE
+          WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL THEN exit_at - entry_at
+          ELSE NULL
+        END AS hold_ms
+      FROM migrated_drop_rebound_shadow_positions
+      ORDER BY
+        CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const computeCohorts = () => {
+      const cohortRows = this.db.prepare(`
+        SELECT cohort_id, entry_profile_id, exit_profile_id,
+          MIN(window_ms) AS window_ms,
+          MIN(drop_min_pct) AS drop_min_pct,
+          MIN(drop_max_pct) AS drop_max_pct,
+          MIN(rebound_min_pct) AS rebound_min_pct,
+          MIN(rebound_max_pct) AS rebound_max_pct,
+          MIN(rebound_timeout_ms) AS rebound_timeout_ms,
+          MIN(exit_mode) AS exit_mode,
+          MIN(fixed_hold_ms) AS fixed_hold_ms,
+          MIN(trailing_activation_pct) AS trailing_activation_pct,
+          MIN(trailing_stop_pct) AS trailing_stop_pct,
+          MIN(hard_stop_pct) AS hard_stop_pct,
+          MIN(max_hold_ms) AS max_hold_ms,
+          COUNT(*) AS signals,
+          COUNT(DISTINCT mint) AS independent_mints,
+          COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+          COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+          COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+          COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+          COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          AVG(entry_jump_pct) AS average_entry_jump_pct,
+          AVG(migration_age_ms) AS average_migration_age_ms,
+          AVG(drop_pct) AS average_drop_pct,
+          AVG(rebound_pct) AS average_rebound_pct,
+          AVG(rebound_elapsed_ms) AS average_rebound_elapsed_ms,
+          AVG(max_favorable_return_pct) AS average_mfe_pct,
+          AVG(max_adverse_return_pct) AS average_mae_pct
+        FROM migrated_drop_rebound_shadow_positions
+        GROUP BY cohort_id, entry_profile_id, exit_profile_id
+        ORDER BY entry_profile_id, exit_profile_id
+      `).all();
+      return cohortRows.map((cohort) => {
+        const resolved = this.db.prepare(`
+          SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+          FROM migrated_drop_rebound_shadow_positions
+          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+            AND net_return_pct IS NOT NULL
+          ORDER BY net_return_pct
+        `).all(cohort.cohort_id);
+        const returns = resolved.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+        const wins = returns.filter((value) => value > 0).sort((left, right) => right - left);
+        const losses = returns.filter((value) => value < 0);
+        const flat = returns.filter((value) => value === 0);
+        const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+        const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+        const median = returns.length
+          ? returns.length % 2 === 1
+            ? returns[(returns.length - 1) / 2]
+            : (returns[returns.length / 2 - 1] + returns[returns.length / 2]) / 2
+          : null;
+        const exTop5 = [...wins.slice(5), ...flat, ...losses];
+        const opportunities = resolved.filter((row) => (
+          Number(row.max_favorable_return_pct) >= threshold
+        ));
+        const realized = resolved.filter((row) => Number(row.gross_return_pct) >= threshold);
+        const captures = opportunities.map((row) => {
+          const maximum = Number(row.max_favorable_return_pct);
+          const outcome = Number(row.gross_return_pct);
+          return maximum > 0 && Number.isFinite(outcome) ? outcome / maximum * 100 : null;
+        }).filter(Number.isFinite);
+        return {
+          ...cohort,
+          resolved: returns.length,
+          average_net_return_pct: returns.length
+            ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+          median_net_return_pct: median,
+          average_net_return_ex_top5_pct: exTop5.length
+            ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length : null,
+          win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          max_winner_pct: wins[0] ?? null,
+          top_5_winner_contribution_pct: totalProfit > 0
+            ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100
+            : null,
+          big_winner_threshold_pct: threshold,
+          big_winner_opportunities: opportunities.length,
+          big_winners_realized: realized.length,
+          big_winner_realization_rate_pct: opportunities.length
+            ? realized.length / opportunities.length * 100 : null,
+          average_big_winner_capture_pct: captures.length
+            ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
+        };
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats(`migrated-drop-rebound:${threshold}`, 15_000, computeCohorts)
+      : computeCohorts();
+    const entryProfiles = this.db.prepare(`
+      SELECT entry_profile_id,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS independent_mints,
+        AVG(drop_pct) AS average_drop_pct,
+        AVG(rebound_pct) AS average_rebound_pct,
+        AVG(rebound_elapsed_ms) AS average_rebound_elapsed_ms
+      FROM migrated_drop_rebound_shadow_positions
+      GROUP BY entry_profile_id
+      ORDER BY entry_profile_id
+    `).all();
+    return { cohorts, entryProfiles, positions };
   }
 
   launchQualityDashboard({ observationLimit = 30, snapshotLimit = 60 } = {}) {
@@ -3481,6 +3848,16 @@ class ResearchStore {
         COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected
       FROM launch_pullback_shadow_positions
     `).get();
+    const migratedDropReboundShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
+      FROM migrated_drop_rebound_shadow_positions
+    `).get();
     const launchQualityObservations = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
@@ -3519,6 +3896,7 @@ class ResearchStore {
       smartPullbackShadowPositions,
       smartOpenShadowPositions,
       launchPullbackShadowPositions,
+      migratedDropReboundShadowPositions,
       launchQualityObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
