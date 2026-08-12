@@ -79,6 +79,7 @@ W3 = T-2s ~ T
 - `launch_pullback_shadow_positions`：独立的 Launch 首次回踩 Shadow F1/F2/F3 仓位；不与 Observer E 或任何旧 Shadow 混表。
 - `migrated_drop_rebound_shadow_positions`：独立的生命周期超跌反弹 Shadow G 参数组；用 `lifecycle_stage` 严格区分毕业前与毕业后模拟入场、MFE/MAE和退出结果。
 - `graduation_hold_shadow_positions`：独立的毕业概率持仓 Shadow I0/I1/I2；共享早期 Primary 模拟入场，但分别保存移动止盈对照、97%毕业前退出和严格门槛穿越毕业结果。
+- `range_scalper_shadow_positions`：独立的 PumpSwap 区间波段 Shadow J；保存区间质量、重复 Episode、三组回踩入场与四组退出结果。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
 SQLite 使用 WAL 和批量写入。默认保留 168 小时热数据；超过 `FLOW_RAW_RETENTION_HOURS` 的 Raw Trade 会先压缩为 `data/archive/*.ndjson.gz`，成功写入归档后才从热库删除；Signals 与 Future Labels 不删除。
@@ -252,6 +253,12 @@ F 路径保留三个质量过滤档位，每档分别固定持有3秒和8秒，�
 FT-A/B/C/D使用全新的 `cohort_id`，Dashboard 会分别统计，不会把新结果并入原F1/F2/F3固定持仓历史。这些组仍是右尾依赖型研究实验，仅用于前向Shadow验证。
 
 模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。收益扣除0.05 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
+
+## PumpSwap Range Scalper Shadow J
+
+Shadow J 对每个新毕业 Mint 先订阅 PumpSwap 成交120秒，用滚动60秒成交构建因果区间状态：成交笔数、SOL成交量、独立钱包、买卖占比、振幅、价格路径效率、均值穿越次数、最大钱包集中度和短期趋势。只有高成交量、低趋势、持续来回穿越均值的市场才延长订阅，最长20分钟；区间连续失效30秒且没有活动仓位时自动退订，避免无边界增加 Helius 消耗。
+
+每个合格区间并行测试三组入场：`JA` 为偏离中轴1σ后反弹2%，`JB` 为偏离1.5σ且最近1秒净流入转正，`JC` 为下轨反弹并要求新买家与卖压衰减。每次价格回到中轴后重新武装，因此同一 Mint 可产生多个独立 Episode。每个入场同时模拟中轴退出、固定+6%、上轨退出和中轴资金流反转四组卖法，统一使用200ms执行延迟、8%硬止损与20–30秒兜底，并扣除0.05 SOL仓位的确定性成本。该策略只有 Shadow 路径、独立表与 Dashboard 页面，永不签名或发送链上交易。
 
 ## Lifecycle Drop/Rebound Shadow G
 

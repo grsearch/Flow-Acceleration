@@ -166,6 +166,22 @@ assert.deepStrictEqual(
 assert.strictEqual(config.launchQualityObserver.pumpReferencePct, 25);
 assert.strictEqual(config.launchQualityObserver.pullbackReferencePct, 7.5);
 assert.strictEqual(config.launchQualityObserver.reboundReferencePct, 3);
+assert.strictEqual(config.rangeScalperShadow.enabled, true);
+assert.strictEqual(config.rangeScalperShadow.initialObservationMs, 120_000);
+assert.strictEqual(config.rangeScalperShadow.maxTrackingMs, 1_200_000);
+assert.strictEqual(config.rangeScalperShadow.windowMs, 60_000);
+assert.deepStrictEqual(
+  config.rangeScalperShadow.entryProfiles.map((profile) => profile.id),
+  ['JA', 'JB', 'JC'],
+);
+assert.deepStrictEqual(
+  config.rangeScalperShadow.exitProfiles.map((profile) => profile.id),
+  ['XM', 'X6', 'XB', 'XF'],
+);
+assert.ok(
+  Math.abs(costBreakdown(config.rangeScalperShadow.costModel).deterministicCostPct - 3.22)
+    < 1e-12,
+);
 
 assert.deepStrictEqual(liveTradingGuard(true, true, false), {
   enabled: false,

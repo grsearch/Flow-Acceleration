@@ -27,6 +27,7 @@ class ResearchServer {
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
+    rangeScalperShadow = null,
     bondingCurveMomentumShadow = null,
     graduationHoldShadow = null,
   }) {
@@ -43,6 +44,7 @@ class ResearchServer {
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
+    this.rangeScalperShadow = rangeScalperShadow;
     this.bondingCurveMomentumShadow = bondingCurveMomentumShadow;
     this.graduationHoldShadow = graduationHoldShadow;
     this.app = express();
@@ -337,6 +339,24 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/range-scalper-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.rangeScalperShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_J',
+          sendsTransactions: false,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        timeSessions: this.store.shadowTimeSessionDashboard('range-scalper'),
+        ...this.store.rangeScalperShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/graduation-hold-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -375,6 +395,7 @@ class ResearchServer {
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
+        rangeScalperShadow: this.rangeScalperShadow?.health() || null,
         bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,
         graduationHoldShadow: this.graduationHoldShadow?.health() || null,
       });
