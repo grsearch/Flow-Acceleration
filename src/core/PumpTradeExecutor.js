@@ -151,13 +151,59 @@ function confirmedTransactionFailure(signature, transactionError) {
   return error;
 }
 
-function classifyBuyReconciliation(status, tokenBalanceRaw) {
+function tokenDeltaFromTransaction(transactionResponse, mintValue, ownerValue) {
+  const meta = transactionResponse?.meta;
+  if (!meta || meta.err) return null;
+  const mint = String(mintValue || '');
+  const owner = String(ownerValue || '');
+  const balances = new Map();
+  const collect = (rows, field) => {
+    for (const row of rows || []) {
+      if (String(row?.mint || '') !== mint) continue;
+      const accountIndex = Number(row.accountIndex);
+      if (!Number.isInteger(accountIndex)) continue;
+      const current = balances.get(accountIndex) || {
+        pre: 0n, post: 0n, owner: null, matched: false,
+      };
+      const raw = row?.uiTokenAmount?.amount;
+      try {
+        current[field] = BigInt(raw || 0);
+      } catch (_) {
+        continue;
+      }
+      current.owner = row.owner || current.owner;
+      current.matched = true;
+      balances.set(accountIndex, current);
+    }
+  };
+  collect(meta.preTokenBalances, 'pre');
+  collect(meta.postTokenBalances, 'post');
+  let delta = 0n;
+  let matchedOwner = false;
+  for (const row of balances.values()) {
+    if (!row.matched || !row.owner || String(row.owner) !== owner) continue;
+    matchedOwner = true;
+    if (row.post > row.pre) delta += row.post - row.pre;
+  }
+  return matchedOwner ? delta : 0n;
+}
+
+function classifyBuyReconciliation(status, tokenBalanceRaw, {
+  transactionTokenDeltaRaw = null,
+  transactionObserved = false,
+  balanceObserved = true,
+} = {}) {
   const tokenBalance = BigInt(tokenBalanceRaw || 0);
-  if (tokenBalance > 0n) {
+  const transactionDelta = transactionTokenDeltaRaw == null
+    ? 0n
+    : BigInt(transactionTokenDeltaRaw || 0);
+  const recoveredAmount = tokenBalance > 0n ? tokenBalance : transactionDelta;
+  if (recoveredAmount > 0n) {
     return {
       state: 'CONFIRMED',
-      tokenAmountRaw: tokenBalance.toString(),
+      tokenAmountRaw: recoveredAmount.toString(),
       confirmationStatus: status?.confirmationStatus || null,
+      recoveredFrom: tokenBalance > 0n ? 'WALLET_BALANCE' : 'TRANSACTION_META',
     };
   }
   if (status?.err) {
@@ -170,10 +216,14 @@ function classifyBuyReconciliation(status, tokenBalanceRaw) {
   }
   if (status && ['confirmed', 'finalized'].includes(status.confirmationStatus)) {
     return {
-      state: 'EMPTY',
+      // A confirmed signature can become visible before the Token/Token-2022
+      // account index. Zero is therefore not proof that the buy was empty.
+      state: 'UNKNOWN',
       tokenAmountRaw: '0',
       confirmationStatus: status.confirmationStatus,
-      error: 'Buy transaction confirmed but the trading wallet has no token balance',
+      transactionObserved,
+      balanceObserved,
+      error: 'Buy transaction confirmed; token receipt is still awaiting RPC reconciliation',
     };
   }
   return {
@@ -246,6 +296,10 @@ class PumpTradeExecutor {
   }
 
   async _tokenBalanceRaw(mint, tokenProgram, commitment = this.readCommitment) {
+    return (await this._tokenBalanceSnapshot(mint, tokenProgram, commitment)).amount;
+  }
+
+  async _tokenBalanceSnapshot(mint, tokenProgram, commitment = this.readCommitment) {
     const ata = getAssociatedTokenAddressSync(
       mint,
       this.signer.publicKey,
@@ -254,10 +308,17 @@ class PumpTradeExecutor {
     );
     try {
       const balance = await this.connection.getTokenAccountBalance(ata, commitment);
-      return BigInt(balance.value.amount);
+      return { amount: BigInt(balance.value.amount), observed: true, ata: ata.toBase58() };
     } catch (error) {
       const message = String(error?.message || error);
-      if (/could not find account|Invalid param|not found/i.test(message)) return 0n;
+      if (/could not find account|Invalid param|not found/i.test(message)) {
+        return {
+          amount: 0n,
+          observed: false,
+          ata: ata.toBase58(),
+          error: message.slice(0, 1_000),
+        };
+      }
       throw error;
     }
   }
@@ -397,14 +458,29 @@ class PumpTradeExecutor {
   async reconcileBuy({ mint: mintValue, signature = null }) {
     const mint = new PublicKey(mintValue);
     const tokenProgram = await this._tokenProgram(mint);
-    const [statusResponse, tokenBalance] = await Promise.all([
+    const [statusResponse, tokenBalance, transactionResponse] = await Promise.all([
       signature
         ? this.connection.getSignatureStatuses([signature], { searchTransactionHistory: true })
         : Promise.resolve({ value: [null] }),
-      this._tokenBalanceRaw(mint, tokenProgram, this.confirmationCommitment),
+      this._tokenBalanceSnapshot(mint, tokenProgram, this.confirmationCommitment),
+      signature && typeof this.connection.getTransaction === 'function'
+        ? this.connection.getTransaction(signature, {
+          commitment: this.confirmationCommitment,
+          maxSupportedTransactionVersion: 0,
+        }).catch(() => null)
+        : Promise.resolve(null),
     ]);
     const status = statusResponse?.value?.[0] || null;
-    return classifyBuyReconciliation(status, tokenBalance);
+    const transactionDelta = tokenDeltaFromTransaction(
+      transactionResponse,
+      mint.toBase58(),
+      this.signer.publicKey.toBase58(),
+    );
+    return classifyBuyReconciliation(status, tokenBalance.amount, {
+      transactionTokenDeltaRaw: transactionDelta,
+      transactionObserved: transactionResponse != null,
+      balanceObserved: tokenBalance.observed,
+    });
   }
 
   async buy({
@@ -690,9 +766,30 @@ class PumpTradeExecutor {
       );
       const acquired = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
       if (acquired <= 0n) {
+        const reconciled = await this.reconcileBuy({
+          mint: mint.toBase58(),
+          signature,
+        });
+        if (reconciled.state === 'CONFIRMED' && BigInt(reconciled.tokenAmountRaw) > 0n) {
+          const recovered = BigInt(reconciled.tokenAmountRaw);
+          const acquiredTokens = Number(recovered) / (10 ** decimals);
+          const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
+          mark('balance_reconciled_ms');
+          mark('total_ms');
+          return {
+            signature,
+            venue: 'PUMP_AMM',
+            tokenAmountRaw: recovered.toString(),
+            quotedTokenAmountRaw: quoted.base.toString(),
+            minimumTokenAmountRaw: minBaseOut.toString(),
+            expectedPrice: filledPrice,
+            quotedPrice: expectedPrice,
+            execution: { ...execution, receiptRecoveredFrom: reconciled.recoveredFrom },
+          };
+        }
         const error = errorWithCode(
-          'PumpSwap buy confirmed but no token balance was received',
-          'CONFIRMED_EMPTY',
+          'PumpSwap buy confirmed; token receipt is awaiting RPC reconciliation',
+          'CONFIRMATION_PENDING',
         );
         error.signature = signature;
         throw error;
@@ -720,7 +817,7 @@ class PumpTradeExecutor {
 
   async _confirmedSellResult({ mint, tokenProgram, signature, venue, soldRaw }) {
     try {
-      const remaining = await this._tokenBalanceRaw(
+      const remaining = await this._tokenBalanceSnapshot(
         mint,
         tokenProgram,
         this.confirmationCommitment,
@@ -729,8 +826,9 @@ class PumpTradeExecutor {
         signature,
         venue,
         tokenAmountRaw: soldRaw.toString(),
-        remainingTokenAmountRaw: remaining.toString(),
-        balanceVerified: true,
+        remainingTokenAmountRaw: remaining.observed ? remaining.amount.toString() : null,
+        balanceVerified: remaining.observed,
+        balanceCheckError: remaining.observed ? null : remaining.error,
       };
     } catch (error) {
       return {
@@ -747,7 +845,14 @@ class PumpTradeExecutor {
   async sell({ mint: mintValue }) {
     const mint = new PublicKey(mintValue);
     const tokenProgram = await this._tokenProgram(mint);
-    const walletBalance = await this._tokenBalanceRaw(mint, tokenProgram);
+    const balanceSnapshot = await this._tokenBalanceSnapshot(mint, tokenProgram);
+    if (!balanceSnapshot.observed) {
+      throw errorWithCode(
+        `Token balance is not indexed yet for ${mint.toBase58()}`,
+        'TOKEN_BALANCE_UNAVAILABLE',
+      );
+    }
+    const walletBalance = balanceSnapshot.amount;
     // Entry rejects pre-existing holdings for the mint, so the live wallet balance belongs
     // to this position. Always sell that complete balance instead of the possibly stale
     // amount cached immediately after the buy confirmation.
@@ -829,4 +934,5 @@ module.exports = {
   replaceAmmBuyWithExactQuoteIn,
   replaceBuyV2WithExactQuoteIn,
   secretBytes,
+  tokenDeltaFromTransaction,
 };

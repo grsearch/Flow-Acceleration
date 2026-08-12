@@ -71,6 +71,12 @@ async function main() {
   assert.ok(dashboard.includes('id="range-scalper-cohort-rows"'));
   assert.ok(dashboard.includes('id="range-scalper-position-rows"'));
   assert.ok(dashboard.includes("json('/api/range-scalper-shadow?positionLimit=100')"));
+  assert.ok(dashboard.includes('data-live-strategy="cya-early-pyramid"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="cya-early-pyramid"'));
+  assert.ok(dashboard.includes('id="cya-early-pyramid-cohort-rows"'));
+  assert.ok(dashboard.includes('id="cya-early-pyramid-position-rows"'));
+  assert.ok(dashboard.includes('id="cya-early-pyramid-time-sessions"'));
+  assert.ok(dashboard.includes("json('/api/cya-early-pyramid-shadow?positionLimit=100')"));
   assert.ok(dashboard.includes('data-live-strategy="bonding-momentum"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="bonding-momentum"'));
   assert.ok(dashboard.includes('id="bonding-momentum-cohort-rows"'));
@@ -370,6 +376,20 @@ async function main() {
     );
     assert.ok(Array.isArray(rangeScalper.cohorts));
     assert.ok(Array.isArray(rangeScalper.positions));
+    const cyaPyramid = await (await fetch(
+      `http://127.0.0.1:${port}/api/cya-early-pyramid-shadow`,
+    )).json();
+    assert.strictEqual(cyaPyramid.runtime.mode, 'SHADOW_K');
+    assert.strictEqual(cyaPyramid.runtime.sendsTransactions, false);
+    assert.strictEqual(cyaPyramid.runtime.entryProfiles.length, 2);
+    assert.strictEqual(cyaPyramid.runtime.exitProfiles.length, 2);
+    assert.strictEqual(cyaPyramid.runtime.strategy.research.simulatedPositionSol, 1);
+    assert.strictEqual(
+      cyaPyramid.runtime.strategy.research.isolatedPositionTable,
+      'cya_early_pyramid_shadow_positions',
+    );
+    assert.ok(Array.isArray(cyaPyramid.cohorts));
+    assert.ok(Array.isArray(cyaPyramid.positions));
     const bondingMomentum = await (await fetch(
       `http://127.0.0.1:${port}/api/bonding-curve-momentum-shadow`,
     )).json();

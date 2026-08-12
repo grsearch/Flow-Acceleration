@@ -176,6 +176,11 @@ class ResearchStore {
         table: 'range_scalper_shadow_positions',
         anchor: 'signal_at',
       },
+      'cya-early-pyramid': {
+        label: 'CYA Early Pyramid · K',
+        table: 'cya_early_pyramid_shadow_positions',
+        anchor: 'signal_at',
+      },
       'bonding-momentum': {
         label: 'Bonding Curve 动量 · H',
         table: 'bonding_curve_momentum_shadow_positions',
@@ -949,6 +954,79 @@ class ResearchStore {
         ON range_scalper_shadow_positions(mint, signal_at DESC);
       CREATE INDEX IF NOT EXISTS idx_range_scalper_shadow_profiles
         ON range_scalper_shadow_positions(entry_profile_id, exit_profile_id, signal_at);
+
+      CREATE TABLE IF NOT EXISTS cya_early_pyramid_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        entry_profile_id TEXT NOT NULL,
+        exit_profile_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        age_ms INTEGER,
+        curve_pct REAL,
+        buyers_1s INTEGER,
+        buyers_5s INTEGER,
+        net_flow_1s REAL,
+        net_flow_5s REAL,
+        return_2s_pct REAL,
+        features_json TEXT NOT NULL,
+        entry_target_at INTEGER NOT NULL,
+        entry_deadline_at INTEGER NOT NULL,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        average_entry_price REAL,
+        total_invested_sol REAL,
+        token_units REAL,
+        remaining_token_units REAL,
+        realized_proceeds_sol REAL NOT NULL DEFAULT 0,
+        add_count INTEGER NOT NULL DEFAULT 0,
+        last_add_at INTEGER,
+        last_add_price REAL,
+        first_take_profit_at INTEGER,
+        first_take_profit_price REAL,
+        second_take_profit_at INTEGER,
+        second_take_profit_price REAL,
+        scale_out_count INTEGER NOT NULL DEFAULT 0,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        trailing_stop_pct REAL NOT NULL,
+        hard_stop_pct REAL NOT NULL,
+        no_strength_ms INTEGER NOT NULL,
+        no_strength_mfe_pct REAL NOT NULL,
+        max_hold_ms INTEGER NOT NULL,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        estimated_cost_sol REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_cya_early_pyramid_status
+        ON cya_early_pyramid_shadow_positions(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_cya_early_pyramid_mint
+        ON cya_early_pyramid_shadow_positions(mint, signal_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_cya_early_pyramid_profiles
+        ON cya_early_pyramid_shadow_positions(entry_profile_id, exit_profile_id, signal_at);
 
       CREATE TABLE IF NOT EXISTS bonding_curve_momentum_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1956,6 +2034,14 @@ class ResearchStore {
         WHERE status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED')
         ORDER BY created_at
       `),
+      confirmedEmptyLivePositions: this.db.prepare(`
+        SELECT * FROM live_positions
+        WHERE mode = 'LIVE'
+          AND status = 'CLOSED'
+          AND exit_reason = 'ENTRY_CONFIRMED_EMPTY'
+          AND entry_signature IS NOT NULL
+        ORDER BY created_at
+      `),
       lastLivePositionForMint: this.db.prepare(`
         SELECT * FROM live_positions WHERE mint = ? ORDER BY created_at DESC LIMIT 1
       `),
@@ -2385,6 +2471,87 @@ class ResearchStore {
       `),
       activeRangeScalperShadowPositions: this.db.prepare(`
         SELECT * FROM range_scalper_shadow_positions
+        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY signal_at, id
+      `),
+      insertCyaEarlyPyramidShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO cya_early_pyramid_shadow_positions (
+          cohort_id, entry_profile_id, exit_profile_id, episode_id,
+          mint, symbol, status, rejection_reason, position_sol, configured_cost_pct,
+          signal_at, signal_price, age_ms, curve_pct, buyers_1s, buyers_5s,
+          net_flow_1s, net_flow_5s, return_2s_pct, features_json,
+          entry_target_at, entry_deadline_at, trailing_stop_pct, hard_stop_pct,
+          no_strength_ms, no_strength_mfe_pct, max_hold_ms, created_at, updated_at
+        ) VALUES (
+          @cohortId, @entryProfileId, @exitProfileId, @episodeId,
+          @mint, @symbol, @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @signalAt, @signalPrice, @ageMs, @curvePct, @buyers1s, @buyers5s,
+          @netFlow1s, @netFlow5s, @return2sPct, @featuresJson,
+          @entryTargetAt, @entryDeadlineAt, @trailingStopPct, @hardStopPct,
+          @noStrengthMs, @noStrengthMfePct, @maxHoldMs, @createdAt, @updatedAt
+        )
+      `),
+      getCyaEarlyPyramidShadowPosition: this.db.prepare(`
+        SELECT * FROM cya_early_pyramid_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      updateCyaEarlyPyramidShadowPosition: this.db.prepare(`
+        UPDATE cya_early_pyramid_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          average_entry_price = COALESCE(@averageEntryPrice, average_entry_price),
+          total_invested_sol = COALESCE(@totalInvestedSol, total_invested_sol),
+          token_units = COALESCE(@tokenUnits, token_units),
+          remaining_token_units = COALESCE(@remainingTokenUnits, remaining_token_units),
+          realized_proceeds_sol = COALESCE(@realizedProceedsSol, realized_proceeds_sol),
+          add_count = COALESCE(@addCount, add_count),
+          last_add_at = COALESCE(@lastAddAt, last_add_at),
+          last_add_price = COALESCE(@lastAddPrice, last_add_price),
+          first_take_profit_at = COALESCE(@firstTakeProfitAt, first_take_profit_at),
+          first_take_profit_price = COALESCE(@firstTakeProfitPrice, first_take_profit_price),
+          second_take_profit_at = COALESCE(@secondTakeProfitAt, second_take_profit_at),
+          second_take_profit_price = COALESCE(@secondTakeProfitPrice, second_take_profit_price),
+          scale_out_count = COALESCE(@scaleOutCount, scale_out_count),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          lowest_price = COALESCE(@lowestPrice, lowest_price),
+          last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          max_favorable_return_pct = COALESCE(@maxFavorableReturnPct, max_favorable_return_pct),
+          max_adverse_return_pct = COALESCE(@maxAdverseReturnPct, max_adverse_return_pct),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          estimated_cost_sol = COALESCE(@estimatedCostSol, estimated_cost_sol),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      reopenLivePositionForReconciliation: this.db.prepare(`
+        UPDATE live_positions SET
+          status = 'EXIT_FAILED',
+          token_amount_raw = NULL,
+          entry_error = @entryError,
+          exit_market = NULL,
+          exit_price = NULL,
+          exit_signature = NULL,
+          exit_reason = 'ENTRY_CONFIRMATION_UNKNOWN',
+          exit_error = NULL,
+          exit_requested_at = NULL,
+          closed_at = NULL,
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeCyaEarlyPyramidShadowPositions: this.db.prepare(`
+        SELECT * FROM cya_early_pyramid_shadow_positions
         WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY signal_at, id
       `),
@@ -3063,6 +3230,18 @@ class ResearchStore {
     return this.stmts.activeLivePositions.all();
   }
 
+  reopenLivePositionForReconciliation(id, entryError) {
+    this.stmts.reopenLivePositionForReconciliation.run({
+      id,
+      entryError,
+      updatedAt: Date.now(),
+    });
+  }
+
+  confirmedEmptyLivePositions() {
+    return this.stmts.confirmedEmptyLivePositions.all();
+  }
+
   lastLivePositionForMint(mint) {
     return this.stmts.lastLivePositionForMint.get(mint) || null;
   }
@@ -3640,6 +3819,98 @@ class ResearchStore {
 
   activeRangeScalperShadowPositions() {
     return this.stmts.activeRangeScalperShadowPositions.all();
+  }
+
+  createCyaEarlyPyramidShadowPosition(position) {
+    const now = Date.now();
+    const features = position.features || {};
+    const row = {
+      cohortId: position.cohortId,
+      entryProfileId: position.entryProfileId,
+      exitProfileId: position.exitProfileId,
+      episodeId: position.episodeId,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      signalAt: Math.trunc(position.signalAt),
+      signalPrice: position.signalPrice,
+      ageMs: Number.isFinite(features.ageMs) ? Math.trunc(features.ageMs) : null,
+      curvePct: finiteOrNull(features.curvePct),
+      buyers1s: Math.max(0, Math.trunc(features.buyers1s || 0)),
+      buyers5s: Math.max(0, Math.trunc(features.buyers5s || 0)),
+      netFlow1s: finiteOrNull(features.netFlow1s) ?? 0,
+      netFlow5s: finiteOrNull(features.netFlow5s) ?? 0,
+      return2sPct: finiteOrNull(features.return2sPct),
+      featuresJson: JSON.stringify(features),
+      entryTargetAt: Math.trunc(position.entryTargetAt),
+      entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
+      trailingStopPct: position.trailingStopPct,
+      hardStopPct: position.hardStopPct,
+      noStrengthMs: Math.trunc(position.noStrengthMs),
+      noStrengthMfePct: position.noStrengthMfePct,
+      maxHoldMs: Math.trunc(position.maxHoldMs),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertCyaEarlyPyramidShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getCyaEarlyPyramidShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateCyaEarlyPyramidShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    return this.stmts.updateCyaEarlyPyramidShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      averageEntryPrice: finiteOrNull(value('averageEntryPrice')),
+      totalInvestedSol: finiteOrNull(value('totalInvestedSol')),
+      tokenUnits: finiteOrNull(value('tokenUnits')),
+      remainingTokenUnits: finiteOrNull(value('remainingTokenUnits')),
+      realizedProceedsSol: finiteOrNull(value('realizedProceedsSol')),
+      addCount: value('addCount'),
+      lastAddAt: value('lastAddAt'),
+      lastAddPrice: finiteOrNull(value('lastAddPrice')),
+      firstTakeProfitAt: value('firstTakeProfitAt'),
+      firstTakeProfitPrice: finiteOrNull(value('firstTakeProfitPrice')),
+      secondTakeProfitAt: value('secondTakeProfitAt'),
+      secondTakeProfitPrice: finiteOrNull(value('secondTakeProfitPrice')),
+      scaleOutCount: value('scaleOutCount'),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      lowestPrice: finiteOrNull(value('lowestPrice')),
+      lastObservedAt: value('lastObservedAt'),
+      lastPrice: finiteOrNull(value('lastPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      estimatedCostSol: finiteOrNull(value('estimatedCostSol')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeCyaEarlyPyramidShadowPositions() {
+    return this.stmts.activeCyaEarlyPyramidShadowPositions.all();
   }
 
   createBondingCurveMomentumShadowPosition(position) {
@@ -4254,6 +4525,77 @@ class ResearchStore {
     };
     const cohorts = cacheStats
       ? this._cachedDashboardStats('range-scalper-shadow', 15_000, computeCohorts)
+      : computeCohorts();
+    return { cohorts, positions };
+  }
+
+  cyaEarlyPyramidShadowDashboard({ positionLimit = 100, cacheStats = false } = {}) {
+    const limit = Math.min(300, Math.max(1, Math.trunc(Number(positionLimit) || 100)));
+    const positions = this.db.prepare(`
+      SELECT *, CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+        THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM cya_early_pyramid_shadow_positions
+      ORDER BY CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        THEN 0 ELSE 1 END, updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const computeCohorts = () => {
+      const groups = this.db.prepare(`
+        SELECT cohort_id, entry_profile_id, exit_profile_id,
+          MIN(trailing_stop_pct) AS trailing_stop_pct,
+          COUNT(*) AS attempts,
+          COUNT(DISTINCT episode_id) AS signals,
+          COUNT(DISTINCT mint) AS independent_mints,
+          COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+          COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+          COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+          COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+          AVG(age_ms) AS average_age_ms,
+          AVG(curve_pct) AS average_curve_pct,
+          AVG(buyers_5s) AS average_buyers_5s,
+          AVG(net_flow_5s) AS average_net_flow_5s,
+          AVG(entry_jump_pct) AS average_entry_jump_pct,
+          AVG(total_invested_sol) AS average_invested_sol,
+          AVG(add_count) AS average_add_count,
+          AVG(scale_out_count) AS average_scale_out_count,
+          AVG(estimated_cost_sol) AS average_estimated_cost_sol,
+          AVG(max_favorable_return_pct) AS average_mfe_pct,
+          AVG(max_adverse_return_pct) AS average_mae_pct
+        FROM cya_early_pyramid_shadow_positions
+        GROUP BY cohort_id, entry_profile_id, exit_profile_id
+        ORDER BY entry_profile_id, exit_profile_id
+      `).all();
+      const resolved = this.db.prepare(`
+        SELECT net_return_pct FROM cya_early_pyramid_shadow_positions
+        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          AND net_return_pct IS NOT NULL ORDER BY net_return_pct
+      `);
+      return groups.map((group) => {
+        const returns = resolved.all(group.cohort_id)
+          .map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+        const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
+        const losses = returns.filter((value) => value < 0);
+        const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+        const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+        const sorted = [...returns].sort((a, b) => a - b);
+        const middle = Math.floor(sorted.length / 2);
+        const median = sorted.length
+          ? sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+          : null;
+        return {
+          ...group,
+          resolved: returns.length,
+          average_net_return_pct: returns.length
+            ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+          median_net_return_pct: median,
+          win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          max_winner_pct: wins[0] ?? null,
+        };
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats('cya-early-pyramid-shadow', 15_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -5253,6 +5595,18 @@ class ResearchStore {
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
       FROM range_scalper_shadow_positions
     `).get();
+    const cyaEarlyPyramidShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(add_count), 0) AS adds,
+        COALESCE(SUM(scale_out_count), 0) AS partial_exits
+      FROM cya_early_pyramid_shadow_positions
+    `).get();
     const bondingCurveMomentumShadowPositions = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COUNT(DISTINCT episode_id) AS signals,
@@ -5320,6 +5674,7 @@ class ResearchStore {
       launchPullbackShadowPositions,
       migratedDropReboundShadowPositions,
       rangeScalperShadowPositions,
+      cyaEarlyPyramidShadowPositions,
       bondingCurveMomentumShadowPositions,
       bondingCurveMomentumShadowSnapshots,
       graduationHoldShadowPositions,

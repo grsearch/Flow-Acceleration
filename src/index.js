@@ -14,6 +14,7 @@ const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite'
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
 const { RangeScalperShadowSuite } = require('./core/RangeScalperShadowSuite');
+const { CyaEarlyPyramidShadowSuite } = require('./core/CyaEarlyPyramidShadowSuite');
 const {
   BondingCurveMomentumShadowSuite,
 } = require('./core/BondingCurveMomentumShadowSuite');
@@ -85,6 +86,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   rangeScalperShadow.start();
+  const cyaEarlyPyramidShadow = new CyaEarlyPyramidShadowSuite({
+    config: runtimeConfig.cyaEarlyPyramidShadow,
+    store,
+  });
+  cyaEarlyPyramidShadow.start();
   const bondingCurveMomentumShadow = new BondingCurveMomentumShadowSuite({
     config: runtimeConfig.bondingCurveMomentumShadow,
     store,
@@ -110,6 +116,7 @@ function createRuntime(runtimeConfig = config) {
     launchQualityObserver,
     migratedDropReboundShadow,
     rangeScalperShadow,
+    cyaEarlyPyramidShadow,
     bondingCurveMomentumShadow,
     graduationHoldShadow,
   });
@@ -140,6 +147,7 @@ function createRuntime(runtimeConfig = config) {
       ...trader.trackedMints(now),
       ...migratedDropReboundShadow.trackedMints(now),
       ...rangeScalperShadow.trackedMints(now),
+      ...cyaEarlyPyramidShadow.trackedMints(),
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
     ])]);
@@ -257,6 +265,7 @@ function createRuntime(runtimeConfig = config) {
         store.queueRawTrade(trade);
         observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
         observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
+        observeShadow('cyaEarlyPyramid', () => cyaEarlyPyramidShadow.observeTrade(trade));
         observeShadow('bondingCurveMomentum', () => bondingCurveMomentumShadow.observeTrade(trade));
         observeShadow('graduationHold', () => graduationHoldShadow.observeTrade(trade));
         observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
@@ -392,6 +401,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
       observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
       observeShadow('rangeScalperAdvance', () => rangeScalperShadow.advanceTime(now));
+      observeShadow('cyaEarlyPyramidAdvance', () => cyaEarlyPyramidShadow.advanceTime(now));
       observeShadow('bondingCurveMomentumAdvance', () => bondingCurveMomentumShadow.advanceTime(now));
       observeShadow('graduationHoldAdvance', () => graduationHoldShadow.advanceTime(now));
       trader.advanceTime(now);
@@ -430,6 +440,7 @@ function createRuntime(runtimeConfig = config) {
     launchQualityObserver.stop();
     migratedDropReboundShadow.stop();
     rangeScalperShadow.stop();
+    cyaEarlyPyramidShadow.stop();
     bondingCurveMomentumShadow.stop();
     graduationHoldShadow.stop();
     await server.stop();
@@ -452,6 +463,7 @@ function createRuntime(runtimeConfig = config) {
       launchQualityObserver: launchQualityObserver.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
       rangeScalperShadow: rangeScalperShadow.health(),
+      cyaEarlyPyramidShadow: cyaEarlyPyramidShadow.health(),
       bondingCurveMomentumShadow: bondingCurveMomentumShadow.health(),
       graduationHoldShadow: graduationHoldShadow.health(),
     };
@@ -460,7 +472,7 @@ function createRuntime(runtimeConfig = config) {
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, launchPullbackShadow,
-    launchQualityObserver, migratedDropReboundShadow, rangeScalperShadow,
+    launchQualityObserver, migratedDropReboundShadow, rangeScalperShadow, cyaEarlyPyramidShadow,
     bondingCurveMomentumShadow, graduationHoldShadow,
   };
 }

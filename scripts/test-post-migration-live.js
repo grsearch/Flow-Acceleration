@@ -8,7 +8,11 @@ const path = require('path');
 const LiveTradingManager = require('../src/core/LiveTradingManager');
 const { PUMP_AMM_PROGRAM_ID } = require('@pump-fun/pump-swap-sdk');
 const { PublicKey, TransactionInstruction } = require('@solana/web3.js');
-const { replaceAmmBuyWithExactQuoteIn } = require('../src/core/PumpTradeExecutor');
+const {
+  classifyBuyReconciliation,
+  replaceAmmBuyWithExactQuoteIn,
+  tokenDeltaFromTransaction,
+} = require('../src/core/PumpTradeExecutor');
 const { ResearchStore } = require('../src/data/ResearchStore');
 
 function testPreviousLiveSchemaUpgrade() {
@@ -111,6 +115,44 @@ const decodedExactAmmBuy = require('@pump-fun/pump-swap-sdk')
 assert.strictEqual(decodedExactAmmBuy.name, 'buyExactQuoteIn');
 assert.strictEqual(decodedExactAmmBuy.data.spendableQuoteIn.toString(), '50000000');
 assert.strictEqual(decodedExactAmmBuy.data.minBaseAmountOut.toString(), '123456');
+
+const receiptMint = PublicKey.unique().toBase58();
+const receiptOwner = PublicKey.unique().toBase58();
+const receivedRaw = tokenDeltaFromTransaction({
+  meta: {
+    err: null,
+    preTokenBalances: [{
+      accountIndex: 6, mint: receiptMint, owner: receiptOwner,
+      uiTokenAmount: { amount: '0' },
+    }],
+    postTokenBalances: [{
+      accountIndex: 6, mint: receiptMint, owner: receiptOwner,
+      uiTokenAmount: { amount: '134585106701' },
+    }],
+  },
+}, receiptMint, receiptOwner);
+assert.strictEqual(receivedRaw, 134_585_106_701n);
+assert.deepStrictEqual(
+  classifyBuyReconciliation({ err: null, confirmationStatus: 'confirmed' }, 0n, {
+    transactionTokenDeltaRaw: receivedRaw,
+    transactionObserved: true,
+    balanceObserved: false,
+  }),
+  {
+    state: 'CONFIRMED',
+    tokenAmountRaw: '134585106701',
+    confirmationStatus: 'confirmed',
+    recoveredFrom: 'TRANSACTION_META',
+  },
+);
+assert.strictEqual(
+  classifyBuyReconciliation({ err: null, confirmationStatus: 'confirmed' }, 0n, {
+    transactionObserved: false,
+    balanceObserved: false,
+  }).state,
+  'UNKNOWN',
+  'an indexed signature plus an unindexed Token-2022 ATA must not close the position',
+);
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-post-live-'));
 const store = new ResearchStore({
@@ -246,6 +288,91 @@ setImmediate(() => {
     SELECT COUNT(*) AS n FROM live_positions WHERE mint = ?
   `).get(disabledMint).n, 0);
   await disabledManager.stop();
+
+  // Recover rows incorrectly closed by the old single-read Token-2022 balance
+  // check. Receipt reconciliation must reopen and then honor the elapsed max hold.
+  const legacyMint = 'MintLegacyEmpty1111111111111111111111111111';
+  const legacyDecision = store.recordLiveStrategyDecision({
+    strategyId: 'post_gd25_35_xleg',
+    episodeId: `${legacyMint}:episode`,
+    timestampMs: now - 30_000,
+    receivedAtMs: now - 30_000,
+    mint: legacyMint,
+    symbol: 'LEGACY',
+    ruleVersion: 'test',
+    market: 'PUMP_AMM',
+    referencePrice: 1,
+    features: {},
+    ruleMatched: true,
+    rejectionReasons: [],
+    mode: 'LIVE',
+    actionStatus: 'CLOSED',
+  });
+  const legacyPosition = store.createLivePosition({
+    strategyDecisionId: legacyDecision.id,
+    strategyId: 'post_gd25_35_xleg',
+    sourceType: 'post_gd25_35_xleg',
+    mint: legacyMint,
+    mode: 'LIVE',
+    status: 'OPENING',
+    positionSol: 0.05,
+    entryMarket: 'PUMP_AMM',
+    entryPrice: 1,
+  });
+  store.updateLivePosition(legacyPosition.id, {
+    status: 'CLOSED',
+    tokenAmountRaw: '0',
+    entrySignature: 'legacy-empty-signature',
+    entryError: 'Buy transaction confirmed but the trading wallet has no token balance',
+    exitReason: 'ENTRY_CONFIRMED_EMPTY',
+    openedAt: now - 30_000,
+    closedAt: now - 29_000,
+  });
+  const legacyOrderId = store.recordLiveOrder({
+    positionId: legacyPosition.id,
+    strategyDecisionId: legacyDecision.id,
+    strategyId: 'post_gd25_35_xleg',
+    mint: legacyMint,
+    side: 'BUY',
+    venue: 'PUMP_AMM',
+    attempt: 1,
+    requestedSol: 0.05,
+    requestedTokenRaw: '0',
+    status: 'CONFIRMED',
+    signature: 'legacy-empty-signature',
+  });
+  let recoveredSellCalls = 0;
+  const recoveryManager = new LiveTradingManager({
+    config: { ...config, dryRun: false },
+    store,
+    now: () => now,
+    executor: {
+      async reconcileBuy() {
+        return { state: 'CONFIRMED', tokenAmountRaw: '134585106701' };
+      },
+      async sell() {
+        recoveredSellCalls += 1;
+        return {
+          signature: 'legacy-recovery-sell', venue: 'PUMP_AMM',
+          tokenAmountRaw: '134585106701', remainingTokenAmountRaw: '0',
+          balanceVerified: true,
+        };
+      },
+    },
+  });
+  recoveryManager.start();
+  await Promise.allSettled([...recoveryManager.pending]);
+  await Promise.allSettled([...recoveryManager.pending]);
+  const recoveredPosition = store.db.prepare('SELECT * FROM live_positions WHERE id = ?')
+    .get(legacyPosition.id);
+  assert.strictEqual(recoveredPosition.status, 'CLOSED');
+  assert.strictEqual(recoveredPosition.token_amount_raw, '134585106701');
+  assert.strictEqual(recoveredPosition.exit_reason, 'ENTRY_RECONCILED_MAX_HOLD');
+  assert.strictEqual(recoveredPosition.closed_at > 0, true);
+  assert.strictEqual(recoveredSellCalls, 1);
+  assert.strictEqual(store.db.prepare('SELECT requested_token_raw FROM live_orders WHERE id = ?')
+    .get(legacyOrderId).requested_token_raw, '134585106701');
+  await recoveryManager.stop();
 
   await manager.stop();
   store.close();

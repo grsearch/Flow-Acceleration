@@ -140,6 +140,29 @@ class LiveTradingManager {
         this._requestExit(position, 'RESTART_RECOVERY', null);
       } else if (this.mode !== 'DISABLED') this._scheduleMaxHold(position);
     }
+    // Versions before the receipt-based reconciliation fix could close a
+    // confirmed Token-2022 buy while its ATA was still absent from the RPC
+    // account index. Recheck those exact historical false-empty rows on boot.
+    if (this.mode === 'LIVE' && typeof this.store.confirmedEmptyLivePositions === 'function') {
+      for (const row of this.store.confirmedEmptyLivePositions()) {
+        if (this.positions.has(row.mint)) continue;
+        const position = restoredPosition(row);
+        position.strategy = this.strategies.get(position.strategyId) || null;
+        position.status = 'EXIT_FAILED';
+        position.tokenAmountRaw = null;
+        position.exitReason = 'ENTRY_CONFIRMATION_UNKNOWN';
+        this.positions.set(position.mint, position);
+        this.store.reopenLivePositionForReconciliation(
+          position.id,
+          'Rechecking a legacy confirmed-empty entry against transaction metadata',
+        );
+        const order = this.store.latestLiveOrderForPositionSide(position.id, 'BUY');
+        this._track(this._recoverUnknownEntry(position, {
+          orderId: order?.id || null,
+          initialError: 'LEGACY_CONFIRMED_EMPTY_RECHECK',
+        }));
+      }
+    }
     if (this._trackingEnabled()) {
       const now = this.now();
       for (const token of this.store.allTokens()) {
@@ -636,6 +659,13 @@ class LiveTradingManager {
           lastError = error;
           result = { state: 'UNKNOWN' };
         }
+        if (result?.state === 'EMPTY') {
+          result = {
+            ...result,
+            state: 'UNKNOWN',
+            error: result.error || 'Confirmed buy token receipt has not been reconciled yet',
+          };
+        }
         if (result?.state && result.state !== 'UNKNOWN') break;
         if (attempt < attempts) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -663,33 +693,6 @@ class LiveTradingManager {
       this.metrics.entryFailures += 1;
       this.metrics.lastActionAt = reconciledAt;
       return 'FAILED';
-    }
-
-    if (result.state === 'EMPTY') {
-      const reason = result.error || 'Buy confirmed without a token balance';
-      if (orderId) {
-        this.store.updateLiveOrder(orderId, {
-          status: 'CONFIRMED',
-          requestedTokenRaw: '0',
-          error: reason,
-          confirmedAt: reconciledAt,
-        });
-      }
-      position.status = 'CLOSED';
-      position.exitReason = 'ENTRY_CONFIRMED_EMPTY';
-      this.store.updateLivePosition(position.id, {
-        status: 'CLOSED',
-        tokenAmountRaw: '0',
-        entrySignature: signature,
-        entryError: reason,
-        exitReason: 'ENTRY_CONFIRMED_EMPTY',
-        closedAt: reconciledAt,
-      });
-      this._updatePositionDecision(position, 'CLOSED', reason);
-      this.positions.delete(position.mint);
-      this.metrics.entryRecoveries += 1;
-      this.metrics.lastActionAt = reconciledAt;
-      return 'EMPTY';
     }
 
     if (result.state === 'CONFIRMED' && result.tokenAmountRaw !== '0') {

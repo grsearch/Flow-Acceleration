@@ -28,6 +28,7 @@ class ResearchServer {
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
     rangeScalperShadow = null,
+    cyaEarlyPyramidShadow = null,
     bondingCurveMomentumShadow = null,
     graduationHoldShadow = null,
   }) {
@@ -45,6 +46,7 @@ class ResearchServer {
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
     this.rangeScalperShadow = rangeScalperShadow;
+    this.cyaEarlyPyramidShadow = cyaEarlyPyramidShadow;
     this.bondingCurveMomentumShadow = bondingCurveMomentumShadow;
     this.graduationHoldShadow = graduationHoldShadow;
     this.app = express();
@@ -357,6 +359,24 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/cya-early-pyramid-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.cyaEarlyPyramidShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_K',
+          sendsTransactions: false,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        timeSessions: this.store.shadowTimeSessionDashboard('cya-early-pyramid'),
+        ...this.store.cyaEarlyPyramidShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/graduation-hold-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -396,6 +416,7 @@ class ResearchServer {
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
         rangeScalperShadow: this.rangeScalperShadow?.health() || null,
+        cyaEarlyPyramidShadow: this.cyaEarlyPyramidShadow?.health() || null,
         bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,
         graduationHoldShadow: this.graduationHoldShadow?.health() || null,
       });

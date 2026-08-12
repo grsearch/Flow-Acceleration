@@ -347,6 +347,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="range-scalper">
               <b>PumpSwap 区间波段 · J</b><small>高成交量震荡识别、重复回归交易，纯影子测试</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="cya-early-pyramid">
+              <b>CYA Early Pyramid · K</b><small>Early Curve order flow, staged adds and exits</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="bonding-momentum">
               <b>Bonding Curve 动量 · H（已停）</b><small>负期望，历史数据保留</small>
             </button>
@@ -482,6 +485,28 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>组合 / 状态</th><th>Mint</th><th>Range分数 / 振幅</th><th>成交量 / 钱包</th><th>偏离 / 反弹</th><th>信号 / 入场 / 中轴 / 出场</th><th>净收益 / MFE / MAE</th><th>持有 / 原因</th></tr></thead>
                 <tbody id="range-scalper-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="cya-early-pyramid" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>CYA Early Pyramid Shadow K</h2>
+                <p>Independent public-order-flow study. It does not follow the wallet and never signs transactions.</p>
+              </div>
+              <div class="strategy-expression" id="cya-early-pyramid-expression">AGE 5–30s / Curve 20–60% → 200ms fill → staged adds → partial exits + runner</div>
+              <div class="strategy-metric-groups" id="cya-early-pyramid-metrics"></div>
+              <div class="strategy-metric-groups" id="cya-early-pyramid-time-sessions"></div>
+              <div class="section-title"><h2>Cohort performance</h2><p>K5-30 and K3-30 entries are crossed with independent T20/T30 runner exits.</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Entry / exit</th><th>Signals / mint</th><th>Resolved / win</th><th>Average / median net</th><th>PF / max winner</th><th>Entry state</th><th>Adds / costs</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="cya-early-pyramid-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>Recent simulated positions</h2><p>Every row stores its actual position size and estimated multi-execution cost.</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Signal</th><th>Cohort / status</th><th>Mint</th><th>AGE / Curve</th><th>Flow / buyers</th><th>Signal / average / exit</th><th>Invested / adds / scales</th><th>Net / MFE / MAE</th><th>Hold / reason</th></tr></thead>
+                <tbody id="cya-early-pyramid-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1037,6 +1062,32 @@
       }).join('') : '<tr><td colspan="9" class="empty">尚无 Shadow J 波段仓位；完整 PumpSwap 成交仍会持续写入。</td></tr>';
     }
 
+    function renderCyaEarlyPyramidShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const research = strategy.research || {};
+      const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#cya-early-pyramid-expression').textContent = `Early Bonding Curve AGE 3–30s / Curve 20–60% → ${number(strategy.entryDelayMs)}ms simulated fill → add 1/12 every +${number(strategy.addStepPct)}% (max ${number(strategy.maxAdds)}) → +50%/+100% scale-outs → T20/T30 runner`;
+      renderMetricGroups('#cya-early-pyramid-metrics', [
+        ['Mode', runtime.enabled ? 'SHADOW K' : 'OFF', `Independent table: ${research.isolatedPositionTable || 'cya_early_pyramid_shadow_positions'}`],
+        ['Signals / positions', `${number(runtime.signals)} / ${number(runtime.opened)}`, `Pending ${number(runtime.pendingEntries)} · active ${number(runtime.activePositions)}`],
+        ['Adds / partial exits', `${number(runtime.adds)} / ${number(runtime.partialExits)}`, `Closed ${number(runtime.closed)} · no exit ${number(runtime.noExit)}`],
+        ['Base position / cost', `${number(research.simulatedPositionSol,3)} SOL`, `${pct(research.configuredCostPct)} before extra add/scale execution fees`],
+        ['Risk exits', `hard stop ${rate(strategy.hardStopPct)}`, `No strength ${age(strategy.noStrengthMs)} · max hold ${age(strategy.maxHoldMs)}`],
+      ], []);
+      renderTimeSessions('#cya-early-pyramid-time-sessions', data.timeSessions);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#cya-early-pyramid-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">jump ${number(row.price_jump)} · no entry ${number(row.no_entry)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}</td><td>${age(row.average_age_ms)} / ${pct(row.average_curve_pct)}<br><span class="table-note">${number(row.average_net_flow_5s,2)} SOL · ${number(row.average_buyers_5s,1)} buyers</span></td><td>${number(row.average_add_count,2)} / ${number(row.average_scale_out_count,2)}<br><span class="table-note">${number(row.average_invested_sol,3)} SOL · cost ${number(row.average_estimated_cost_sol,4)} SOL</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">Waiting for causal early-curve samples.</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#cya-early-pyramid-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.net_flow_1s,2)} / ${number(row.net_flow_5s,2)} SOL<br><span class="table-note">buyers ${number(row.buyers_1s)} / ${number(row.buyers_5s)}</span></td><td>${number(row.signal_price,10)} / ${number(row.average_entry_price,10)} / ${number(row.exit_price,10)}</td><td>${number(row.total_invested_sol ?? row.position_sol,3)} SOL / ${number(row.add_count)} / ${number(row.scale_out_count)}<br><span class="table-note">cost ${number(row.estimated_cost_sol,4)} SOL</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">No Shadow K position yet.</td></tr>';
+    }
+
     function renderBondingCurveMomentumShadow(data) {
       const runtime = data.runtime || {};
       const entryProfiles = runtime.entryProfiles || [];
@@ -1440,6 +1491,9 @@
         ],
         'range-scalper': () => [
           json('/api/range-scalper-shadow?positionLimit=100').then(renderRangeScalperShadow),
+        ],
+        'cya-early-pyramid': () => [
+          json('/api/cya-early-pyramid-shadow?positionLimit=100').then(renderCyaEarlyPyramidShadow),
         ],
         'bonding-momentum': () => [
           json('/api/bonding-curve-momentum-shadow?positionLimit=30&snapshotLimit=40').then(renderBondingCurveMomentumShadow),
