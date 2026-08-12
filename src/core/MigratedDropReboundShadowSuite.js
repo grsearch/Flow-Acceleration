@@ -77,6 +77,7 @@ class MigratedDropReboundShadowSuite {
       { id: 'PRE_MIGRATION', label: '毕业前', market: 'PUMP_BONDING_CURVE' },
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ];
+    this.lifecycleStageIds = new Set(this.lifecycleStages.map((stage) => stage.id));
     this.detectors = new Map();
     for (const stage of this.lifecycleStages) {
       for (const profile of this.entryProfiles.values()) {
@@ -193,7 +194,9 @@ class MigratedDropReboundShadowSuite {
       : trade.market === 'PUMP_AMM' && graduatedAt > 0 && timestampMs >= graduatedAt
         ? 'POST_MIGRATION'
         : null;
-    if (!lifecycleStage) return;
+    // A disabled lifecycle stage has no detector. Ignore it here so one
+    // research suite cannot abort the shared runtime trade pipeline.
+    if (!lifecycleStage || !this.lifecycleStageIds.has(lifecycleStage)) return;
     if (lifecycleStage === 'POST_MIGRATION') {
       if (!this.tracked.has(trade.mint)) this.onGraduated(token);
       if (timestampMs - graduatedAt > this.config.trackingAgeMs
@@ -281,7 +284,9 @@ class MigratedDropReboundShadowSuite {
   }
 
   _state(lifecycleStage, profileId, mint) {
-    const states = this.detectors.get(`${lifecycleStage}:${profileId}`).states;
+    const detector = this.detectors.get(`${lifecycleStage}:${profileId}`);
+    if (!detector) return null;
+    const { states } = detector;
     let state = states.get(mint);
     if (!state) {
       state = { prices: [], lastTimestampMs: 0, dropReady: true, candidate: null };
@@ -358,6 +363,7 @@ class MigratedDropReboundShadowSuite {
   _observeDetector(profile, lifecycleStage, trade, price, anchorAt, replay) {
     const timestampMs = trade.timestampMs;
     const state = this._state(lifecycleStage, profile.id, trade.mint);
+    if (!state) return;
     if (state.lastTimestampMs && timestampMs < state.lastTimestampMs) return;
     state.lastTimestampMs = timestampMs;
     state.prices.push({
