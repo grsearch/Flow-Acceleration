@@ -192,19 +192,11 @@ async function main() {
     )).json();
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
     assert.strictEqual(liveTrading.runtime.safetyLock, true);
-    assert.strictEqual(liveTrading.runtime.strategy.entry.signalVariant, 'primary_early_5_4');
-    assert.strictEqual(liveTrading.runtime.strategy.entry.market, 'PUMP_BONDING_CURVE');
-    assert.strictEqual(liveTrading.runtime.strategy.entry.minNetFlowW3Sol, 5);
-    assert.strictEqual(liveTrading.runtime.strategy.entry.minUniqueBuyersW3, 4);
-    assert.strictEqual(
-      liveTrading.runtime.strategy.exit.policy,
-      'PRIMARY_IMMEDIATE_TRAILING',
-    );
-    assert.strictEqual(liveTrading.runtime.strategy.exit.maxHoldMs, 60_000);
-    assert.strictEqual(liveTrading.runtime.strategy.exit.trailingActivationPct, 0);
-    assert.strictEqual(liveTrading.runtime.strategy.exit.trailingStopPct, 7.5);
-    assert.strictEqual(liveTrading.runtime.strategy.execution.buySlippagePct, 10);
-    assert.strictEqual(liveTrading.runtime.strategy.execution.sellSlippagePct, 15);
+    assert.strictEqual(liveTrading.runtime.strategies[0].id, 'post_gd25_35_xleg');
+    assert.strictEqual(liveTrading.runtime.strategies[0].market, 'PUMP_AMM');
+    assert.strictEqual(liveTrading.runtime.strategies[0].positionSizeSol, 0.05);
+    assert.strictEqual(liveTrading.runtime.strategies[0].trailingActivationPct, 8);
+    assert.strictEqual(liveTrading.runtime.strategies[0].trailingStopPct, 3);
     assert.ok(Array.isArray(liveTrading.positions));
     assert.ok(Array.isArray(liveTrading.orders));
     assert.ok(Array.isArray(liveTrading.decisions));
@@ -287,8 +279,7 @@ async function main() {
     )).json();
     assert.strictEqual(launchPullback.runtime.mode, 'SHADOW_F');
     assert.strictEqual(launchPullback.runtime.sendsTransactions, false);
-    assert.deepStrictEqual(
-      launchPullback.runtime.cohorts.map((cohort) => [
+    const launchCohorts = launchPullback.runtime.cohorts.map((cohort) => [
         cohort.cohortId,
         cohort.strategy.entry.minNetFlowSol,
         cohort.strategy.entry.maxCreatorSharePct,
@@ -300,7 +291,9 @@ async function main() {
         cohort.strategy.exit.maxHoldMs ?? null,
         cohort.strategy.exit.hardStopPct ?? null,
         cohort.strategy.research.isolatedTable,
-      ]),
+      ]);
+    assert.deepStrictEqual(
+      launchCohorts.slice(0, 6),
       [
         ['F1_3S', 15, 5, 'FIXED_HOLD', 3_000, null, null, null, null, null, 'launch_pullback_shadow_positions'],
         ['F1_8S', 15, 5, 'FIXED_HOLD', 8_000, null, null, null, null, null, 'launch_pullback_shadow_positions'],
@@ -308,12 +301,12 @@ async function main() {
         ['F2_8S', 20, 10, 'FIXED_HOLD', 8_000, null, null, null, null, null, 'launch_pullback_shadow_positions'],
         ['F3_3S', 20, 20, 'FIXED_HOLD', 3_000, null, null, null, null, null, 'launch_pullback_shadow_positions'],
         ['F3_8S', 20, 20, 'FIXED_HOLD', 8_000, null, null, null, null, null, 'launch_pullback_shadow_positions'],
-        ['FT_A', 20, 10, 'TRAILING_STOP', null, 0, 20, 3_000, 120_000, null, 'launch_pullback_shadow_positions'],
-        ['FT_B', 15, 5, 'TRAILING_STOP', null, 10, 20, 3_000, 120_000, 30, 'launch_pullback_shadow_positions'],
-        ['FT_C', 20, 10, 'TRAILING_STOP', null, 30, 20, 0, 120_000, 30, 'launch_pullback_shadow_positions'],
-        ['FT_D', 15, 5, 'TRAILING_STOP', null, 30, 15, 3_000, 120_000, 30, 'launch_pullback_shadow_positions'],
       ],
     );
+    assert(launchCohorts.some((row) => row[0] === 'FQ1_3S'));
+    assert(launchCohorts.some((row) => row[0] === 'FQ2_8S'));
+    assert(launchCohorts.some((row) => row[0] === 'FQ_X15' && row[5] === 8 && row[8] === 15_000));
+    assert(launchCohorts.some((row) => row[0] === 'FQ_X30' && row[5] === 10 && row[8] === 30_000));
     assert.ok(Array.isArray(launchPullback.cohorts));
     assert.ok(Array.isArray(launchPullback.positions));
     const migratedRebound = await (await fetch(
@@ -321,15 +314,11 @@ async function main() {
     )).json();
     assert.strictEqual(migratedRebound.runtime.mode, 'SHADOW_G');
     assert.strictEqual(migratedRebound.runtime.sendsTransactions, false);
-    assert.deepStrictEqual(
-      migratedRebound.runtime.lifecycleStages,
-      [
-        { id: 'PRE_MIGRATION', label: '毕业前', market: 'PUMP_BONDING_CURVE' },
-        { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
-      ],
-    );
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 8);
-    assert.strictEqual(migratedRebound.runtime.exitProfiles.length, 4);
+    assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
+      { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
+    ]);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 1);
+    assert.strictEqual(migratedRebound.runtime.exitProfiles.length, 3);
     assert.strictEqual(
       migratedRebound.runtime.strategy.scope,
       'PRE_MIGRATION_BONDING_CURVE_AND_POST_MIGRATION_PUMP_AMM',
@@ -339,12 +328,12 @@ async function main() {
       'migrated_drop_rebound_shadow_positions',
     );
     assert.deepStrictEqual(
-      migratedRebound.runtime.entryProfiles.find((profile) => profile.id === 'G0'),
+      migratedRebound.runtime.entryProfiles.find((profile) => profile.id === 'GD25_35'),
       {
-        id: 'G0',
-        label: '基准 1秒 / 跌15–35% / 反弹2–5% / 1秒确认',
+        id: 'GD25_35',
+        label: '深跌25–35%',
         windowMs: 1_000,
-        dropMinPct: 15,
+        dropMinPct: 25,
         dropMaxPct: 35,
         reboundMinPct: 2,
         reboundMaxPct: 5,

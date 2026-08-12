@@ -15,12 +15,13 @@ const fixtures = [
       'T−6 → T−4',
       '今日 Raw Trades',
       '止盈 (%)',
-      '新信号 / 入场',
+      '实盘入场',
+      '毕业后首次深跌反弹',
     ],
   },
   {
     file: 'README.md',
-    expected: ['严格限定', 'false → true', '可复现分析', 'W3≥8/10'],
+    expected: ['多策略实盘框架', 'false → true', '可复现分析', 'W3≥8/10'],
   },
   {
     file: '.env.example',

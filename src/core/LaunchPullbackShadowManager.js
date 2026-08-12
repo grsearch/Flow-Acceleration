@@ -94,6 +94,10 @@ class LaunchPullbackShadowManager {
           reference: 'PUMP_25_PULLBACK_7.5_REBOUND_3',
           minNetFlowSol: this.config.minNetFlowSol,
           maxCreatorSharePct: this.config.maxCreatorSharePct,
+          minBuyers: this.config.minBuyers || 0,
+          minRecentBuyers: this.config.minRecentBuyers || 0,
+          minRetentionPct: this.config.minRetentionPct || 0,
+          maxTop3SharePct: this.config.maxTop3SharePct ?? 100,
           entryDelayMs: this.config.entryDelayMs,
           entryTimeoutMs: this.config.entryTimeoutMs,
           maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
@@ -142,6 +146,18 @@ class LaunchPullbackShadowManager {
     if (!(netFlowSol >= this.config.minNetFlowSol)) reasons.push('NET_FLOW_BELOW_MIN');
     if (creatorSharePct > this.config.maxCreatorSharePct) {
       reasons.push('CREATOR_SHARE_ABOVE_MAX');
+    }
+    if (finite(features.buyers, 0) < (this.config.minBuyers || 0)) {
+      reasons.push('BUYERS_BELOW_MIN');
+    }
+    if (finite(features.recentBuyers, 0) < (this.config.minRecentBuyers || 0)) {
+      reasons.push('RECENT_BUYERS_BELOW_MIN');
+    }
+    if (finite(features.retentionPct, 0) < (this.config.minRetentionPct || 0)) {
+      reasons.push('RETENTION_BELOW_MIN');
+    }
+    if (finite(features.top3SharePct, 0) > (this.config.maxTop3SharePct ?? 100)) {
+      reasons.push('TOP3_SHARE_ABOVE_MAX');
     }
     const matched = reasons.length === 0;
     const saved = this.store.createLaunchPullbackShadowPosition({

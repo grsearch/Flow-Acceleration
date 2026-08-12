@@ -124,6 +124,7 @@ const guardedLiveTrading = liveTradingGuard(
   liveTradingSafetyLock,
   booleanEnv('FLOW_LIVE_DRY_RUN', true),
 );
+const retiredShadowsEnabled = booleanEnv('FLOW_RETIRED_SHADOWS_ENABLED', false);
 
 const config = {
   pump: {
@@ -195,11 +196,7 @@ const config = {
     ...guardedLiveTrading,
     rpcUrl: process.env.FLOW_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
-    signalVariant: liveEntryThreshold.signalVariant,
-    minNetFlowW3Sol: liveEntryThreshold.minNetFlowW3Sol,
-    minUniqueBuyersW3: liveEntryThreshold.minUniqueBuyersW3,
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
-    positionSizeSol: numberEnv('FLOW_LIVE_POSITION_SOL', 0.05, { min: 0.000001 }),
     maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 1, { min: 1, max: 20 }),
     minWalletReserveSol: numberEnv('FLOW_LIVE_MIN_WALLET_RESERVE_SOL', 0.05, { min: 0 }),
     mintCooldownMs: integerEnv('FLOW_LIVE_MINT_COOLDOWN_MS', 10 * 60_000, { min: 0 }),
@@ -234,11 +231,7 @@ const config = {
     commitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
       || process.env.FLOW_LIVE_COMMITMENT
       || 'confirmed',
-    trailingStopPct: numberEnv('FLOW_LIVE_PRIMARY_TRAILING_STOP_PCT', 7.5, {
-      min: 0.1,
-      max: 100,
-    }),
-    maxHoldMs: integerEnv('FLOW_LIVE_PRIMARY_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    maxHoldMs: 15_000,
     exitRetryCount: integerEnv('FLOW_LIVE_EXIT_RETRY_COUNT', 10, { min: 0, max: 60 }),
     exitRetryDelayMs: integerEnv('FLOW_LIVE_EXIT_RETRY_DELAY_MS', 1_000, { min: 100 }),
     entryReconcileCount: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_COUNT', 5, {
@@ -250,11 +243,63 @@ const config = {
       max: 30_000,
     }),
     killSwitchFile: process.env.FLOW_LIVE_KILL_SWITCH_FILE || './data/LIVE_TRADING_DISABLED',
+    ammPriceContinuity: {
+      minRatio: numberEnv('FLOW_LIVE_AMM_PRICE_MIN_RATIO', 0.2, { min: 0.0001, max: 1 }),
+      maxRatio: numberEnv('FLOW_LIVE_AMM_PRICE_MAX_RATIO', 5, { min: 1 }),
+      resetAfterMs: integerEnv('FLOW_LIVE_AMM_PRICE_RESET_MS', 15_000, { min: 1_000 }),
+    },
+    // Multiple live strategies can coexist here. Each one owns its own SOL size
+    // and independent decision history; the retired Primary live rule is not listed.
+    strategies: [
+      {
+        id: 'post_gd25_35_xleg',
+        label: '毕业后深跌反弹 · XLEG',
+        enabled: booleanEnv('FLOW_LIVE_POST_GD25_35_XLEG_ENABLED', true),
+        market: 'PUMP_AMM',
+        positionSizeSol: numberEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 0.05, {
+          min: 0.000001,
+        }),
+        trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_TRACKING_MS', 120_000, {
+          min: 30_000,
+          max: 10 * 60_000,
+        }),
+        maxSignalAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_MAX_SIGNAL_AGE_MS', 1_500, {
+          min: 100,
+        }),
+        windowMs: integerEnv('FLOW_LIVE_POST_GD25_35_WINDOW_MS', 1_000, { min: 250 }),
+        dropMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_DROP_MIN_PCT', 25, { min: 0.1 }),
+        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_DROP_MAX_PCT', 35, { min: 0.1 }),
+        reboundMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_REBOUND_MIN_PCT', 2, { min: 0.1 }),
+        reboundMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_REBOUND_MAX_PCT', 5, { min: 0.1 }),
+        reboundTimeoutMs: integerEnv('FLOW_LIVE_POST_GD25_35_REBOUND_TIMEOUT_MS', 1_000, {
+          min: 100,
+        }),
+        maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_POST_GD25_35_MAX_ENTRY_JUMP_PCT', 15, {
+          min: 0,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv('FLOW_LIVE_POST_GD25_35_TRAILING_ACTIVATION_PCT', 8, {
+          min: 0.1,
+        }),
+        trailingStopPct: numberEnv('FLOW_LIVE_POST_GD25_35_TRAILING_STOP_PCT', 3, {
+          min: 0.1,
+          max: 100,
+        }),
+        fastTakeProfitPct: numberEnv('FLOW_LIVE_POST_GD25_35_FAST_TP_PCT', 18, { min: 0 }),
+        fastTakeProfitWindowMs: integerEnv('FLOW_LIVE_POST_GD25_35_FAST_TP_WINDOW_MS', 5_000, {
+          min: 0,
+        }),
+        lossCheckAtMs: integerEnv('FLOW_LIVE_POST_GD25_35_LOSS_CHECK_MS', 6_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD25_35_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      },
+    ],
   },
 
   // Research-only execution path. It never creates or signs a transaction.
   signalShadow: {
-    enabled: booleanEnv('FLOW_SIGNAL_SHADOW_ENABLED', true),
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_SIGNAL_SHADOW_ENABLED', false),
     profiles: primaryThresholdProfiles,
     positionSizeSol: numberEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
     maxSignalAgeMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
@@ -282,7 +327,7 @@ const config = {
   // Direct Primary Flow research. Each 30-second signal episode is simulated once
   // per exit cohort; all cohorts share the same 200ms-delayed market fill.
   flowFirstShadow: {
-    enabled: booleanEnv('FLOW_FIRST_SHADOW_ENABLED', true),
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_FIRST_SHADOW_ENABLED', false),
     signalVariant: 'primary_3w',
     episodeGapMs: 30_000,
     positionSizeSol: numberEnv('FLOW_FIRST_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
@@ -391,7 +436,7 @@ const config = {
   // Isolated true Smart Wallet OPEN research. This path has its own table and
   // never signs or sends a transaction; existing Shadow strategies are unchanged.
   smartOpenShadow: {
-    enabled: booleanEnv('FLOW_SMART_OPEN_SHADOW_ENABLED', true),
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_SMART_OPEN_SHADOW_ENABLED', false),
     minSmartOpenSol: numberEnv('FLOW_SMART_OPEN_SHADOW_MIN_SOL', 1, { min: 0.000001 }),
     preBuyWindowMs: integerEnv('FLOW_SMART_OPEN_SHADOW_PREBUY_WINDOW_MS', 2_000, {
       min: 100,
@@ -515,6 +560,26 @@ const config = {
           { min: 0, max: 100 },
         ),
       },
+      {
+        id: 'FQ1',
+        label: 'FQ1 前向 · F1 + Buyers≥10 / Recent≥3 / Retention≥50% / Top3≤70%',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 10,
+        minRecentBuyers: 3,
+        minRetentionPct: 50,
+        maxTop3SharePct: 70,
+      },
+      {
+        id: 'FQ2',
+        label: 'FQ2 前向 · F1 + Buyers≥15 / Recent≥3 / Retention≥50% / Top3≤70%',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 15,
+        minRecentBuyers: 3,
+        minRetentionPct: 50,
+        maxTop3SharePct: 70,
+      },
     ],
     holds: [
       {
@@ -612,6 +677,26 @@ const config = {
           max: 100,
         }),
       },
+      {
+        id: 'FQ_X15',
+        label: 'FQ-X15 · FQ1盈利8%激活/回撤5%/15秒兜底',
+        profileId: 'FQ1',
+        trailingActivationPct: 8,
+        trailingDrawdownPct: 5,
+        minHoldMs: 1_000,
+        maxHoldMs: 15_000,
+        hardStopPct: 12.5,
+      },
+      {
+        id: 'FQ_X30',
+        label: 'FQ-X30 · FQ2盈利10%激活/回撤7.5%/30秒兜底',
+        profileId: 'FQ2',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 7.5,
+        minHoldMs: 2_000,
+        maxHoldMs: 30_000,
+        hardStopPct: 15,
+      },
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
@@ -624,7 +709,7 @@ const config = {
   // Independent pre-migration Bonding Curve momentum research. It evaluates
   // causal order-flow edges and simulated exits only; no execution path exists.
   bondingCurveMomentumShadow: {
-    enabled: booleanEnv('FLOW_BONDING_MOMENTUM_SHADOW_ENABLED', true),
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_BONDING_MOMENTUM_SHADOW_ENABLED', false),
     positionSizeSol: numberEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL', 0.05, {
       min: 0.000001,
     }),
@@ -772,7 +857,7 @@ const config = {
   // Primary Flow entry. It never opens a fresh position above the configured
   // Curve ceiling and never owns a signer or transaction executor.
   graduationHoldShadow: {
-    enabled: booleanEnv('FLOW_GRADUATION_HOLD_SHADOW_ENABLED', true),
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_GRADUATION_HOLD_SHADOW_ENABLED', false),
     signalVariant: 'primary_3w',
     positionSizeSol: numberEnv('FLOW_GRADUATION_HOLD_POSITION_SOL', 0.05, {
       min: 0.000001,
@@ -910,17 +995,16 @@ const config = {
   migratedDropReboundShadow: {
     enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
     lifecycleStages: [
-      { id: 'PRE_MIGRATION', label: '毕业前', market: 'PUMP_BONDING_CURVE' },
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ],
     stateRetentionMs: integerEnv('FLOW_REBOUND_DETECTOR_STATE_RETENTION_MS', 60_000, {
       min: 5_000,
       max: 10 * 60_000,
     }),
-    trackingAgeMs: integerEnv('FLOW_MIGRATED_REBOUND_TRACKING_MS', 5 * 60_000, {
+    trackingAgeMs: Math.min(120_000, integerEnv('FLOW_MIGRATED_REBOUND_TRACKING_MS', 120_000, {
       min: 30_000,
       max: 30 * 60_000,
-    }),
+    })),
     positionSizeSol: numberEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL', 0.05, {
       min: 0.000001,
     }),
@@ -966,46 +1050,6 @@ const config = {
     bigWinnerPct: numberEnv('FLOW_MIGRATED_REBOUND_BIG_WINNER_PCT', 50, { min: 1 }),
     entryProfiles: [
       {
-        id: 'G0',
-        label: '基准 1秒 / 跌15–35% / 反弹2–5% / 1秒确认',
-        windowMs: 1_000,
-        dropMinPct: 15,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-      },
-      {
-        id: 'GW05',
-        label: '窗口0.5秒',
-        windowMs: 500,
-        dropMinPct: 15,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-      },
-      {
-        id: 'GW20',
-        label: '窗口2秒',
-        windowMs: 2_000,
-        dropMinPct: 15,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-      },
-      {
-        id: 'GD15_25',
-        label: '浅跌15–25%',
-        windowMs: 1_000,
-        dropMinPct: 15,
-        dropMaxPct: 25,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-      },
-      {
         id: 'GD25_35',
         label: '深跌25–35%',
         windowMs: 1_000,
@@ -1014,36 +1058,6 @@ const config = {
         reboundMinPct: 2,
         reboundMaxPct: 5,
         reboundTimeoutMs: 1_000,
-      },
-      {
-        id: 'GR3',
-        label: '反弹3–5%',
-        windowMs: 1_000,
-        dropMinPct: 15,
-        dropMaxPct: 35,
-        reboundMinPct: 3,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-      },
-      {
-        id: 'GT05',
-        label: '0.5秒内反弹',
-        windowMs: 1_000,
-        dropMinPct: 15,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 500,
-      },
-      {
-        id: 'GT20',
-        label: '2秒内反弹',
-        windowMs: 1_000,
-        dropMinPct: 15,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 2_000,
       },
     ],
     exitProfiles: [
@@ -1085,27 +1099,6 @@ const config = {
           min: 0,
         }),
         maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
-          min: 1_000,
-        }),
-      },
-      {
-        id: 'XTAIL',
-        label: '大赢家尾部 +20%激活 / 回撤10% / 60秒兜底',
-        exitMode: 'TAIL',
-        hardStopPct: numberEnv('FLOW_MIGRATED_REBOUND_TAIL_HARD_STOP_PCT', 20, {
-          min: 0.1,
-          max: 100,
-        }),
-        trailingActivationPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_TAIL_ACTIVATION_PCT',
-          20,
-          { min: 0.1, max: 1_000 },
-        ),
-        trailingStopPct: numberEnv('FLOW_MIGRATED_REBOUND_TAIL_STOP_PCT', 10, {
-          min: 0.1,
-          max: 100,
-        }),
-        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_TAIL_MAX_HOLD_MS', 60_000, {
           min: 1_000,
         }),
       },
@@ -1198,8 +1191,8 @@ function validateConfig() {
     if (!config.liveTrading.privateKey) {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
-    if (!process.env.FLOW_LIVE_POSITION_SOL) {
-      errors.push('FLOW_LIVE_POSITION_SOL must be explicitly set for live trading');
+    if (!process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL) {
+      errors.push('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL must be explicitly set for live trading');
     }
   }
   return errors;

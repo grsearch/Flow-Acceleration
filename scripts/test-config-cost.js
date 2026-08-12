@@ -36,12 +36,17 @@ assert.strictEqual(config.liveTrading.enabled, false);
 assert.strictEqual(config.liveTrading.requestedEnabled, false);
 assert.strictEqual(config.liveTrading.safetyLock, true);
 assert.strictEqual(config.liveTrading.dryRun, true);
-assert.strictEqual(config.liveTrading.signalVariant, 'primary_early_5_4');
-assert.strictEqual(config.liveTrading.minNetFlowW3Sol, 5);
-assert.strictEqual(config.liveTrading.minUniqueBuyersW3, 4);
 assert.strictEqual(config.liveTrading.maxDailySpendSol, undefined);
-assert.strictEqual(config.liveTrading.trailingStopPct, 7.5);
-assert.strictEqual(config.liveTrading.maxHoldMs, 60_000);
+assert.strictEqual(config.liveTrading.maxDailyTrades, undefined);
+assert.strictEqual(config.liveTrading.maxDailyLossSol, undefined);
+assert.strictEqual(config.liveTrading.strategies[0].id, 'post_gd25_35_xleg');
+assert.strictEqual(config.liveTrading.strategies[0].positionSizeSol, 0.05);
+assert.strictEqual(config.liveTrading.strategies[0].market, 'PUMP_AMM');
+assert.strictEqual(config.liveTrading.strategies[0].dropMinPct, 25);
+assert.strictEqual(config.liveTrading.strategies[0].dropMaxPct, 35);
+assert.strictEqual(config.liveTrading.strategies[0].trailingActivationPct, 8);
+assert.strictEqual(config.liveTrading.strategies[0].trailingStopPct, 3);
+assert.strictEqual(config.liveTrading.strategies[0].maxHoldMs, 15_000);
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);
 assert.strictEqual(config.liveTrading.sellSlippagePct, 15);
 assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
@@ -49,7 +54,7 @@ assert.strictEqual(config.liveTrading.readCommitment, 'processed');
 assert.strictEqual(config.liveTrading.confirmationCommitment, 'confirmed');
 assert.strictEqual(config.liveTrading.contextSlotRetryCount, 2);
 assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 25);
-assert.strictEqual(config.signalShadow.enabled, true);
+assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
   config.signalShadow.profiles.map((profile) => [
     profile.id,
@@ -67,7 +72,7 @@ assert.strictEqual(config.signalShadow.trailingStopPct, 7.5);
 assert.strictEqual(config.signalShadow.positionSizeSol, 0.05);
 assert.ok(Math.abs(costBreakdown(config.signalShadow.costModel).deterministicCostPct - 3.22) < 1e-12);
 assert.deepStrictEqual(config.strategy.primaryThresholdProfiles, config.signalShadow.profiles);
-assert.strictEqual(config.flowFirstShadow.enabled, true);
+assert.strictEqual(config.flowFirstShadow.enabled, false);
 assert.strictEqual(config.flowFirstShadow.signalVariant, 'primary_3w');
 assert.strictEqual(config.flowFirstShadow.episodeGapMs, 30_000);
 assert.strictEqual(config.flowFirstShadow.positionSizeSol, 0.05);
@@ -102,7 +107,7 @@ assert.ok(
   Math.abs(costBreakdown(config.smartPullbackShadow.costModel).deterministicCostPct - 3.22)
     < 1e-12,
 );
-assert.strictEqual(config.smartOpenShadow.enabled, true);
+assert.strictEqual(config.smartOpenShadow.enabled, false);
 assert.strictEqual(config.smartOpenShadow.minSmartOpenSol, 1);
 assert.strictEqual(config.smartOpenShadow.preBuyWindowMs, 2_000);
 assert.strictEqual(config.smartOpenShadow.minPreBuyers, 2);
@@ -130,12 +135,19 @@ assert.strictEqual(config.launchPullbackShadow.enabled, true);
 assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 0.05);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
 assert.deepStrictEqual(
-  config.launchPullbackShadow.profiles.map((profile) => [
+  config.launchPullbackShadow.profiles.slice(0, 3).map((profile) => [
     profile.id,
     profile.minNetFlowSol,
     profile.maxCreatorSharePct,
   ]),
   [['F1', 15, 5], ['F2', 20, 10], ['F3', 20, 20]],
+);
+assert.deepStrictEqual(
+  config.launchPullbackShadow.profiles.slice(3).map((profile) => [
+    profile.id, profile.minBuyers, profile.minRecentBuyers,
+    profile.minRetentionPct, profile.maxTop3SharePct,
+  ]),
+  [['FQ1', 10, 3, 50, 70], ['FQ2', 15, 3, 50, 70]],
 );
 assert.deepStrictEqual(
   config.launchPullbackShadow.holds.map((hold) => [hold.id, hold.fixedHoldMs]),

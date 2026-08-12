@@ -471,10 +471,38 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_primary_live_decisions_match_ts
         ON primary_live_decisions(rule_matched, timestamp_ms);
 
+      CREATE TABLE IF NOT EXISTS live_strategy_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        strategy_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        timestamp_ms INTEGER NOT NULL,
+        received_at_ms INTEGER,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        rule_version TEXT NOT NULL,
+        market TEXT NOT NULL,
+        reference_price REAL,
+        features_json TEXT NOT NULL DEFAULT '{}',
+        rule_matched INTEGER NOT NULL,
+        rejection_reasons_json TEXT NOT NULL DEFAULT '[]',
+        mode TEXT NOT NULL,
+        action_status TEXT NOT NULL,
+        action_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(strategy_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_live_strategy_decisions_ts
+        ON live_strategy_decisions(strategy_id, timestamp_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_live_strategy_decisions_match_ts
+        ON live_strategy_decisions(strategy_id, rule_matched, timestamp_ms DESC);
+
       CREATE TABLE IF NOT EXISTS live_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         decision_id INTEGER REFERENCES smart_open_decisions(id),
         primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
+        strategy_decision_id INTEGER REFERENCES live_strategy_decisions(id),
+        strategy_id TEXT,
         source_type TEXT NOT NULL DEFAULT 'PRIMARY_SIGNAL',
         signal_id INTEGER REFERENCES flow_signals(signal_id),
         mint TEXT NOT NULL,
@@ -510,6 +538,8 @@ class ResearchStore {
         position_id INTEGER NOT NULL REFERENCES live_positions(id),
         decision_id INTEGER REFERENCES smart_open_decisions(id),
         primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
+        strategy_decision_id INTEGER REFERENCES live_strategy_decisions(id),
+        strategy_id TEXT,
         mint TEXT NOT NULL,
         side TEXT NOT NULL,
         venue TEXT,
@@ -1394,7 +1424,29 @@ class ResearchStore {
       || Number(positionByName.get('trigger_wallet')?.notnull) === 1
       || !orderByName.has('primary_decision_id')
       || Number(orderByName.get('decision_id')?.notnull) === 1;
-    if (!needsRebuild) return;
+    if (!needsRebuild) {
+      if (!positionByName.has('strategy_decision_id')) {
+        this.db.exec(`ALTER TABLE live_positions
+          ADD COLUMN strategy_decision_id INTEGER REFERENCES live_strategy_decisions(id)`);
+      }
+      if (!positionByName.has('strategy_id')) {
+        this.db.exec('ALTER TABLE live_positions ADD COLUMN strategy_id TEXT');
+      }
+      if (!orderByName.has('strategy_decision_id')) {
+        this.db.exec(`ALTER TABLE live_orders
+          ADD COLUMN strategy_decision_id INTEGER REFERENCES live_strategy_decisions(id)`);
+      }
+      if (!orderByName.has('strategy_id')) {
+        this.db.exec('ALTER TABLE live_orders ADD COLUMN strategy_id TEXT');
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_live_positions_strategy
+          ON live_positions(strategy_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_live_orders_strategy
+          ON live_orders(strategy_id, created_at DESC);
+      `);
+      return;
+    }
 
     const executionExpression = orderByName.has('execution_json') ? 'execution_json' : 'NULL';
     const foreignKeys = Number(this.db.pragma('foreign_keys', { simple: true })) === 1;
@@ -1409,6 +1461,8 @@ class ResearchStore {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             decision_id INTEGER REFERENCES smart_open_decisions(id),
             primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
+            strategy_decision_id INTEGER REFERENCES live_strategy_decisions(id),
+            strategy_id TEXT,
             source_type TEXT NOT NULL DEFAULT 'PRIMARY_SIGNAL',
             signal_id INTEGER REFERENCES flow_signals(signal_id),
             mint TEXT NOT NULL,
@@ -1452,6 +1506,8 @@ class ResearchStore {
             position_id INTEGER NOT NULL REFERENCES live_positions(id),
             decision_id INTEGER REFERENCES smart_open_decisions(id),
             primary_decision_id INTEGER REFERENCES primary_live_decisions(id),
+            strategy_decision_id INTEGER REFERENCES live_strategy_decisions(id),
+            strategy_id TEXT,
             mint TEXT NOT NULL,
             side TEXT NOT NULL,
             venue TEXT,
@@ -1487,6 +1543,10 @@ class ResearchStore {
           CREATE INDEX idx_live_orders_position ON live_orders(position_id, id);
           CREATE INDEX idx_live_orders_created_id
             ON live_orders(created_at DESC, id DESC);
+          CREATE INDEX idx_live_positions_strategy
+            ON live_positions(strategy_id, updated_at DESC);
+          CREATE INDEX idx_live_orders_strategy
+            ON live_orders(strategy_id, created_at DESC);
         `);
       })();
     } finally {
@@ -1726,13 +1786,36 @@ class ResearchStore {
           updated_at = @updatedAt
         WHERE id = @id
       `),
+      insertLiveStrategyDecision: this.db.prepare(`
+        INSERT OR IGNORE INTO live_strategy_decisions (
+          strategy_id, episode_id, timestamp_ms, received_at_ms, mint, symbol,
+          rule_version, market, reference_price, features_json, rule_matched,
+          rejection_reasons_json, mode, action_status, action_reason, created_at, updated_at
+        ) VALUES (
+          @strategyId, @episodeId, @timestampMs, @receivedAtMs, @mint, @symbol,
+          @ruleVersion, @market, @referencePrice, @featuresJson, @ruleMatched,
+          @rejectionReasonsJson, @mode, @actionStatus, @actionReason, @createdAt, @updatedAt
+        )
+      `),
+      getLiveStrategyDecision: this.db.prepare(`
+        SELECT * FROM live_strategy_decisions WHERE strategy_id = ? AND episode_id = ?
+      `),
+      updateLiveStrategyDecision: this.db.prepare(`
+        UPDATE live_strategy_decisions SET
+          action_status = @actionStatus,
+          action_reason = @actionReason,
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
       insertLivePosition: this.db.prepare(`
         INSERT INTO live_positions (
-          decision_id, primary_decision_id, source_type, signal_id,
+          decision_id, primary_decision_id, strategy_decision_id, strategy_id,
+          source_type, signal_id,
           mint, trigger_wallet, mode, status, position_sol,
           entry_market, entry_price, highest_price, created_at, updated_at
         ) VALUES (
-          @decisionId, @primaryDecisionId, @sourceType, @signalId,
+          @decisionId, @primaryDecisionId, @strategyDecisionId, @strategyId,
+          @sourceType, @signalId,
           @mint, @triggerWallet, @mode, @status, @positionSol,
           @entryMarket, @entryPrice, @highestPrice, @createdAt, @updatedAt
         )
@@ -1767,11 +1850,13 @@ class ResearchStore {
       `),
       insertLiveOrder: this.db.prepare(`
         INSERT INTO live_orders (
-          position_id, decision_id, primary_decision_id, mint, side, venue, attempt,
+          position_id, decision_id, primary_decision_id, strategy_decision_id, strategy_id,
+          mint, side, venue, attempt,
           requested_sol, requested_token_raw, status, signature, error,
           execution_json, submitted_at, confirmed_at, created_at, updated_at
         ) VALUES (
-          @positionId, @decisionId, @primaryDecisionId, @mint, @side, @venue, @attempt,
+          @positionId, @decisionId, @primaryDecisionId, @strategyDecisionId, @strategyId,
+          @mint, @side, @venue, @attempt,
           @requestedSol, @requestedTokenRaw, @status, @signature, @error,
           @executionJson, @submittedAt, @confirmedAt, @createdAt, @updatedAt
         )
@@ -2703,11 +2788,54 @@ class ResearchStore {
     });
   }
 
+  recordLiveStrategyDecision(decision) {
+    const now = Date.now();
+    const row = {
+      strategyId: decision.strategyId,
+      episodeId: decision.episodeId,
+      timestampMs: decision.timestampMs,
+      receivedAtMs: decision.receivedAtMs || decision.timestampMs,
+      mint: decision.mint,
+      symbol: decision.symbol || null,
+      ruleVersion: decision.ruleVersion,
+      market: decision.market,
+      referencePrice: finiteOrNull(decision.referencePrice),
+      featuresJson: JSON.stringify(decision.features || {}),
+      ruleMatched: Number(decision.ruleMatched === true),
+      rejectionReasonsJson: JSON.stringify(decision.rejectionReasons || []),
+      mode: decision.mode,
+      actionStatus: decision.actionStatus,
+      actionReason: decision.actionReason || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertLiveStrategyDecision.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getLiveStrategyDecision.get(
+      decision.strategyId,
+      decision.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateLiveStrategyDecision(id, actionStatus, actionReason = null) {
+    this.stmts.updateLiveStrategyDecision.run({
+      id,
+      actionStatus,
+      actionReason,
+      updatedAt: Date.now(),
+    });
+  }
+
   createLivePosition(position) {
     const now = Date.now();
     const row = {
       decisionId: position.decisionId || null,
       primaryDecisionId: position.primaryDecisionId || null,
+      strategyDecisionId: position.strategyDecisionId || null,
+      strategyId: position.strategyId || null,
       sourceType: position.sourceType || 'PRIMARY_SIGNAL',
       signalId: position.signalId || null,
       mint: position.mint,
@@ -2762,6 +2890,8 @@ class ResearchStore {
       positionId: order.positionId,
       decisionId: order.decisionId || null,
       primaryDecisionId: order.primaryDecisionId || null,
+      strategyDecisionId: order.strategyDecisionId || null,
+      strategyId: order.strategyId || null,
       mint: order.mint,
       side: order.side,
       venue: order.venue || null,
@@ -4404,8 +4534,15 @@ class ResearchStore {
     return { cohorts, positions };
   }
 
-  liveTradingDashboard({ positionLimit = 100, orderLimit = 100, decisionLimit = 100 } = {}) {
+  liveTradingDashboard({
+    strategyId = null,
+    positionLimit = 100,
+    orderLimit = 100,
+    decisionLimit = 100,
+  } = {}) {
     const safeLimit = (value) => Math.min(500, Math.max(1, Math.trunc(Number(value) || 100)));
+    const strategy = strategyId ? String(strategyId) : null;
+    const filter = strategy ? 'WHERE strategy_id = ?' : '';
     const positions = this.db.prepare(`
       SELECT *,
         CASE
@@ -4417,17 +4554,18 @@ class ResearchStore {
           ELSE NULL
         END AS gross_return_pct
       FROM live_positions
+      ${filter}
       ORDER BY
         CASE WHEN status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED') THEN 0 ELSE 1 END,
         updated_at DESC,
         id DESC
       LIMIT ?
-    `).all(safeLimit(positionLimit));
+    `).all(...(strategy ? [strategy, safeLimit(positionLimit)] : [safeLimit(positionLimit)]));
     const orders = this.db.prepare(`
-      SELECT * FROM live_orders
+      SELECT * FROM live_orders ${filter}
       ORDER BY created_at DESC, id DESC
       LIMIT ?
-    `).all(safeLimit(orderLimit)).map((row) => {
+    `).all(...(strategy ? [strategy, safeLimit(orderLimit)] : [safeLimit(orderLimit)])).map((row) => {
       let execution = null;
       try {
         execution = row.execution_json ? JSON.parse(row.execution_json) : null;
@@ -4437,18 +4575,24 @@ class ResearchStore {
       return { ...row, execution };
     });
     const decisions = this.db.prepare(`
-      SELECT * FROM primary_live_decisions
+      SELECT * FROM live_strategy_decisions ${filter}
       ORDER BY timestamp_ms DESC, id DESC
       LIMIT ?
-    `).all(safeLimit(decisionLimit)).map((row) => {
+    `).all(...(strategy ? [strategy, safeLimit(decisionLimit)] : [safeLimit(decisionLimit)])).map((row) => {
       let rejectionReasons = [];
+      let features = {};
       try {
         const parsed = JSON.parse(row.rejection_reasons_json || '[]');
         if (Array.isArray(parsed)) rejectionReasons = parsed;
       } catch (_) {
         rejectionReasons = ['INVALID_REJECTION_REASONS'];
       }
-      return { ...row, rejection_reasons: rejectionReasons };
+      try {
+        features = JSON.parse(row.features_json || '{}');
+      } catch (_) {
+        features = { parseError: true };
+      }
+      return { ...row, rejection_reasons: rejectionReasons, features };
     });
     const decisionStats = this.db.prepare(`
       SELECT
@@ -4457,8 +4601,8 @@ class ResearchStore {
         COALESCE(SUM(action_status = 'RULE_REJECTED'), 0) AS rule_rejected,
         COALESCE(SUM(action_status = 'MATCHED_DISABLED'), 0) AS matched_disabled,
         COALESCE(SUM(action_status = 'RISK_REJECTED'), 0) AS risk_rejected
-      FROM primary_live_decisions
-    `).get();
+      FROM live_strategy_decisions ${filter}
+    `).get(...(strategy ? [strategy] : []));
     const positionStats = this.db.prepare(`
       SELECT
         COUNT(*) AS positions,
@@ -4474,8 +4618,8 @@ class ResearchStore {
           WHEN status = 'CLOSED' AND entry_price > 0 AND exit_price > 0
             THEN ((exit_price / entry_price) - 1) * 100
         END) AS average_gross_return_pct
-      FROM live_positions
-    `).get();
+      FROM live_positions ${filter}
+    `).get(...(strategy ? [strategy] : []));
     const orderStats = this.db.prepare(`
       SELECT
         COUNT(*) AS orders,
@@ -4484,8 +4628,8 @@ class ResearchStore {
         )), 0) AS confirmed_orders,
         COALESCE(SUM(status = 'FAILED'), 0) AS failed_orders,
         COALESCE(SUM(status = 'CONFIRMATION_UNKNOWN'), 0) AS unknown_orders
-      FROM live_orders
-    `).get();
+      FROM live_orders ${filter}
+    `).get(...(strategy ? [strategy] : []));
     const pricedClosed = Number(positionStats.priced_closed_positions) || 0;
     const wins = Number(positionStats.wins) || 0;
 
@@ -4499,6 +4643,7 @@ class ResearchStore {
       positions,
       orders,
       decisions,
+      strategyId: strategy,
     };
   }
 
