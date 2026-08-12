@@ -14,7 +14,7 @@ function makeStore() {
   }, { configuredTradingCostPct: 0 });
 }
 
-function makeConfig({ withTrailing = false } = {}) {
+function makeConfig({ withTrailing = false, withDeep = false } = {}) {
   return {
     enabled: true,
     positionSizeSol: 0.05,
@@ -53,6 +53,16 @@ function makeConfig({ withTrailing = false } = {}) {
         id: 'FT_D', label: 'FT-D', profileId: 'F1', trailingActivationPct: 30,
         trailingDrawdownPct: 15, minHoldMs: 3_000, maxHoldMs: 120_000,
         hardStopPct: 30,
+      },
+    ] : [],
+    deepCohorts: withDeep ? [
+      {
+        id: 'DEEP_D12_5_R5', cohortId: 'FD12_5_R5_5S', label: 'FD12.5-R5',
+        profileId: 'DEEP_D12_5_R5', pullbackPct: 12.5, reboundPct: 5,
+        lowStableMs: 1_000, minNewBuyers: 2, flowWindowMs: 1_000,
+        minWindowNetFlowSol: 0.01, maxPullbackPct: 25,
+        minNetFlowSol: 15, maxCreatorSharePct: 5,
+        fixedHoldMs: 5_000,
       },
     ] : [],
     costModel: {
@@ -132,6 +142,74 @@ function testTrailingCohorts() {
     WHERE mint = 'max-hold' AND cohort_id = 'FT_A'
   `).get();
   assert.deepStrictEqual(maxHold, { status: 'CLOSED', exit_reason: 'MAX_HOLD_120S' });
+  assert.strictEqual(suite.health().sendsTransactions, false);
+  store.close();
+}
+
+function testDeepCohortsStayIsolated() {
+  const store = makeStore();
+  let now = 4_000_000;
+  const suite = new LaunchPullbackShadowSuite({
+    config: makeConfig({ withDeep: true }),
+    store,
+    now: () => now,
+  });
+  suite.start();
+
+  suite.onReference(reference('legacy-only', now));
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-only'").get().n,
+    6,
+    'legacy 7.5% reference must not create the new deep cohort',
+  );
+  assert.strictEqual(suite.health().referencesSeen, 1);
+
+  now += 10_000;
+  const deep = reference('deep-only', now);
+  deep.referenceProfileId = 'DEEP_D12_5_R5';
+  deep.features.deepReboundPct = 5.2;
+  deep.features.lowStableMs = 1_200;
+  deep.features.buyersSincePullbackLow = 3;
+  deep.features.windowNetFlowSol = 0.4;
+  deep.features.flowWindowMs = 1_000;
+  suite.onReference(deep);
+  assert.strictEqual(suite.health().referencesSeen, 2,
+    'suite metrics must count each independent reference profile once');
+  const deepRows = store.db.prepare(`
+    SELECT cohort_id, reference_profile_id, low_stable_ms,
+      buyers_since_pullback_low, window_net_flow_sol
+    FROM launch_pullback_shadow_positions WHERE mint='deep-only'
+  `).all();
+  assert.deepStrictEqual(deepRows, [{
+    cohort_id: 'FD12_5_R5_5S',
+    reference_profile_id: 'DEEP_D12_5_R5',
+    low_stable_ms: 1200,
+    buyers_since_pullback_low: 3,
+    window_net_flow_sol: 0.4,
+  }]);
+
+  now += 10_000;
+  const tooDeep = reference('too-deep', now);
+  tooDeep.referenceProfileId = 'DEEP_D12_5_R5';
+  tooDeep.rejectionReason = 'MAX_PULLBACK_31.00PCT';
+  suite.onReference(tooDeep);
+  const rejected = store.db.prepare(`
+    SELECT status, rejection_reason FROM launch_pullback_shadow_positions
+    WHERE mint='too-deep'
+  `).get();
+  assert.deepStrictEqual(rejected, {
+    status: 'RULE_REJECTED',
+    rejection_reason: 'MAX_PULLBACK_31.00PCT',
+  }, 'pullbacks beyond the safety ceiling must be recorded without opening');
+
+  now -= 10_000;
+  suite.observeTrade(trade('deep-only', now + 200, 1.01));
+  suite.observeTrade(trade('deep-only', now + 5_200, 1.2));
+  suite.observeTrade(trade('deep-only', now + 5_400, 1.21));
+  assert.strictEqual(
+    store.db.prepare("SELECT status FROM launch_pullback_shadow_positions WHERE mint='deep-only'").get().status,
+    'CLOSED',
+  );
   assert.strictEqual(suite.health().sendsTransactions, false);
   store.close();
 }
@@ -256,3 +334,4 @@ function main() {
 
 main();
 testTrailingCohorts();
+testDeepCohortsStayIsolated();

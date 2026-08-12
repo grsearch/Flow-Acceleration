@@ -758,6 +758,7 @@ class ResearchStore {
         rejection_reason TEXT,
         position_sol REAL NOT NULL,
         configured_cost_pct REAL NOT NULL,
+        reference_profile_id TEXT NOT NULL DEFAULT 'LEGACY_7_5_R3',
         reference_at INTEGER NOT NULL,
         reference_price REAL NOT NULL,
         pump_25_at INTEGER,
@@ -766,6 +767,11 @@ class ResearchStore {
         first_pullback_at INTEGER,
         pullback_low_price REAL,
         max_pullback_pct REAL,
+        reference_rebound_pct REAL,
+        low_stable_ms INTEGER,
+        buyers_since_pullback_low INTEGER,
+        window_net_flow_sol REAL,
+        flow_window_ms INTEGER,
         net_flow_sol REAL,
         creator_share_pct REAL,
         buyers INTEGER,
@@ -1193,6 +1199,34 @@ class ResearchStore {
     `);
 
     this._migrateLiveTradingSchema();
+
+    const pullbackColumns = new Set(
+      this.db.prepare('PRAGMA table_info(launch_pullback_shadow_positions)')
+        .all().map((column) => column.name),
+    );
+    const pullbackMigrations = [
+      [
+        'reference_profile_id',
+        "ALTER TABLE launch_pullback_shadow_positions ADD COLUMN reference_profile_id TEXT NOT NULL DEFAULT 'LEGACY_7_5_R3'",
+      ],
+      [
+        'reference_rebound_pct',
+        'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN reference_rebound_pct REAL',
+      ],
+      ['low_stable_ms', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN low_stable_ms INTEGER'],
+      [
+        'buyers_since_pullback_low',
+        'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN buyers_since_pullback_low INTEGER',
+      ],
+      [
+        'window_net_flow_sol',
+        'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN window_net_flow_sol REAL',
+      ],
+      ['flow_window_ms', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN flow_window_ms INTEGER'],
+    ];
+    for (const [column, sql] of pullbackMigrations) {
+      if (!pullbackColumns.has(column)) this.db.exec(sql);
+    }
 
     const reboundColumns = new Set(
       this.db.prepare('PRAGMA table_info(migrated_drop_rebound_shadow_positions)')
@@ -2165,17 +2199,23 @@ class ResearchStore {
       insertLaunchPullbackShadowPosition: this.db.prepare(`
         INSERT OR IGNORE INTO launch_pullback_shadow_positions (
           cohort_id, mint, symbol, status, rejection_reason,
-          position_sol, configured_cost_pct, reference_at, reference_price,
+          position_sol, configured_cost_pct, reference_profile_id,
+          reference_at, reference_price,
           pump_25_at, reference_peak_at, reference_peak_price,
           first_pullback_at, pullback_low_price, max_pullback_pct,
+          reference_rebound_pct, low_stable_ms, buyers_since_pullback_low,
+          window_net_flow_sol, flow_window_ms,
           net_flow_sol, creator_share_pct, buyers, recent_buyers,
           retention_pct, top1_share_pct, top3_share_pct,
           entry_target_at, entry_deadline_at, created_at, updated_at
         ) VALUES (
           @cohortId, @mint, @symbol, @status, @rejectionReason,
-          @positionSol, @configuredCostPct, @referenceAt, @referencePrice,
+          @positionSol, @configuredCostPct, @referenceProfileId,
+          @referenceAt, @referencePrice,
           @pump25At, @referencePeakAt, @referencePeakPrice,
           @firstPullbackAt, @pullbackLowPrice, @maxPullbackPct,
+          @referenceReboundPct, @lowStableMs, @buyersSincePullbackLow,
+          @windowNetFlowSol, @flowWindowMs,
           @netFlowSol, @creatorSharePct, @buyers, @recentBuyers,
           @retentionPct, @top1SharePct, @top3SharePct,
           @entryTargetAt, @entryDeadlineAt, @createdAt, @updatedAt
@@ -3353,6 +3393,7 @@ class ResearchStore {
       rejectionReason: position.rejectionReason || null,
       positionSol: position.positionSol,
       configuredCostPct: position.configuredCostPct,
+      referenceProfileId: position.referenceProfileId || 'LEGACY_7_5_R3',
       referenceAt: position.referenceAt,
       referencePrice: position.referencePrice,
       pump25At: position.pump25At || null,
@@ -3361,6 +3402,13 @@ class ResearchStore {
       firstPullbackAt: position.firstPullbackAt || null,
       pullbackLowPrice: finiteOrNull(position.pullbackLowPrice),
       maxPullbackPct: finiteOrNull(position.maxPullbackPct),
+      referenceReboundPct: finiteOrNull(position.referenceReboundPct),
+      lowStableMs: Number.isFinite(position.lowStableMs) ? Math.trunc(position.lowStableMs) : null,
+      buyersSincePullbackLow: Number.isFinite(position.buyersSincePullbackLow)
+        ? Math.trunc(position.buyersSincePullbackLow) : null,
+      windowNetFlowSol: finiteOrNull(position.windowNetFlowSol),
+      flowWindowMs: Number.isFinite(position.flowWindowMs)
+        ? Math.trunc(position.flowWindowMs) : null,
       netFlowSol: finiteOrNull(position.netFlowSol),
       creatorSharePct: finiteOrNull(position.creatorSharePct),
       buyers: Number.isFinite(position.buyers) ? Math.trunc(position.buyers) : null,

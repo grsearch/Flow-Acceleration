@@ -91,7 +91,17 @@ class LaunchPullbackShadowManager {
         name: `Launch Pullback ${this.config.cohortId}`,
         entry: {
           profileId: this.config.profileId,
-          reference: 'PUMP_25_PULLBACK_7.5_REBOUND_3',
+          referenceProfileId: this.config.referenceProfileId || 'LEGACY_7_5_R3',
+          reference: {
+            pumpPct: 25,
+            pullbackPct: this.config.referencePullbackPct ?? 7.5,
+            reboundPct: this.config.referenceReboundPct ?? 3,
+            lowStableMs: this.config.lowStableMs || 0,
+            minNewBuyers: this.config.minNewBuyers || 0,
+            flowWindowMs: this.config.flowWindowMs || 0,
+            minWindowNetFlowSol: this.config.minWindowNetFlowSol ?? null,
+            maxPullbackPct: this.config.maxPullbackPct ?? null,
+          },
           minNetFlowSol: this.config.minNetFlowSol,
           maxCreatorSharePct: this.config.maxCreatorSharePct,
           minBuyers: this.config.minBuyers || 0,
@@ -134,6 +144,8 @@ class LaunchPullbackShadowManager {
 
   onReference(reference) {
     if (!this.config.enabled || !reference?.mint) return null;
+    const referenceProfileId = reference.referenceProfileId || 'LEGACY_7_5_R3';
+    if (referenceProfileId !== (this.config.referenceProfileId || 'LEGACY_7_5_R3')) return null;
     const referenceAt = finite(reference.referenceAt);
     const referencePrice = finite(reference.referencePrice);
     if (!(referenceAt > 0) || !(referencePrice > 0)) return null;
@@ -142,7 +154,7 @@ class LaunchPullbackShadowManager {
     const features = reference.features || {};
     const netFlowSol = finite(features.netFlowSol);
     const creatorSharePct = finite(features.creatorSharePct, 0);
-    const reasons = [];
+    const reasons = reference.rejectionReason ? [reference.rejectionReason] : [];
     if (!(netFlowSol >= this.config.minNetFlowSol)) reasons.push('NET_FLOW_BELOW_MIN');
     if (creatorSharePct > this.config.maxCreatorSharePct) {
       reasons.push('CREATOR_SHARE_ABOVE_MAX');
@@ -168,6 +180,7 @@ class LaunchPullbackShadowManager {
       rejectionReason: reasons.join(',') || null,
       positionSol: this.config.positionSizeSol,
       configuredCostPct: this.costs.deterministicCostPct,
+      referenceProfileId,
       referenceAt,
       referencePrice,
       pump25At: reference.pump25At,
@@ -176,6 +189,15 @@ class LaunchPullbackShadowManager {
       firstPullbackAt: reference.firstPullbackAt,
       pullbackLowPrice: reference.pullbackLowPrice,
       maxPullbackPct: reference.maxPullbackPct,
+      referenceReboundPct: finite(
+        features.deepReboundPct,
+        finite(reference.pullbackLowPrice) > 0
+          ? ((referencePrice / reference.pullbackLowPrice) - 1) * 100 : null,
+      ),
+      lowStableMs: finite(features.lowStableMs),
+      buyersSincePullbackLow: finite(features.buyersSincePullbackLow),
+      windowNetFlowSol: finite(features.windowNetFlowSol),
+      flowWindowMs: finite(features.flowWindowMs),
       netFlowSol,
       creatorSharePct,
       buyers: finite(features.buyers),
