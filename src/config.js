@@ -197,7 +197,7 @@ const config = {
     rpcUrl: process.env.FLOW_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
-    maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 1, { min: 1, max: 20 }),
+    maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 3, { min: 1, max: 20 }),
     minWalletReserveSol: numberEnv('FLOW_LIVE_MIN_WALLET_RESERVE_SOL', 0.05, { min: 0 }),
     mintCooldownMs: integerEnv('FLOW_LIVE_MINT_COOLDOWN_MS', 10 * 60_000, { min: 0 }),
     maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_MAX_ENTRY_PRICE_JUMP_PCT', 10, {

@@ -39,6 +39,7 @@ assert.strictEqual(config.liveTrading.dryRun, true);
 assert.strictEqual(config.liveTrading.maxDailySpendSol, undefined);
 assert.strictEqual(config.liveTrading.maxDailyTrades, undefined);
 assert.strictEqual(config.liveTrading.maxDailyLossSol, undefined);
+assert.strictEqual(config.liveTrading.maxConcurrentPositions, 3);
 assert.strictEqual(config.liveTrading.strategies[0].id, 'post_gd25_35_xleg');
 assert.strictEqual(config.liveTrading.strategies[0].positionSizeSol, 0.05);
 assert.strictEqual(config.liveTrading.strategies[0].market, 'PUMP_AMM');

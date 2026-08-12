@@ -848,7 +848,7 @@
           ['亏损检查', age(strategy.lossCheckAtMs)], ['最大持仓兜底', age(strategy.maxHoldMs)],
         ]],
         ['仓位与风控', [
-          ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`], ['最大并发', `${number(runtime.maxConcurrentPositions || 1)} 仓`],
+          ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`], ['最大并发', `${number(runtime.maxConcurrentPositions || 3)} 仓`],
           ['每日开仓额度', '不设上限'], ['钱包最低保留', `${number(runtime.minWalletReserveSol,4)} SOL`],
           ['同 Mint', '永久只做首次机会'], ['当前活动仓位', number(runtime.activePositions)],
           ['紧急开关', runtime.killSwitchActive ? '已禁止开仓' : '正常'], ['当前模式', mode],
