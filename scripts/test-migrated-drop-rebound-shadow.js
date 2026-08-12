@@ -107,6 +107,40 @@ function run() {
       entryFailureCostPct: 0,
     },
   };
+  // Production may intentionally enable only POST_MIGRATION research. Curve
+  // trades must then be ignored instead of aborting the shared trade pipeline.
+  const postOnlySuite = new MigratedDropReboundShadowSuite({
+    config: {
+      ...config,
+      lifecycleStages: config.lifecycleStages.filter((stage) => stage.id === 'POST_MIGRATION'),
+    },
+    store,
+    now: () => now,
+  });
+  const disabledStageMint = 'DisabledPreMigration111111111111111111111111';
+  recordCreate(store, disabledStageMint, base - 5_000);
+  assert.doesNotThrow(() => {
+    postOnlySuite.observeTrade(trade(
+      disabledStageMint,
+      base + 1,
+      1,
+      'PUMP_BONDING_CURVE',
+    ));
+    postOnlySuite.observeTrade(trade(
+      disabledStageMint,
+      base + 101,
+      0.7,
+      'PUMP_BONDING_CURVE',
+    ));
+    postOnlySuite.observeTrade(trade(
+      disabledStageMint,
+      base + 201,
+      0.72,
+      'PUMP_BONDING_CURVE',
+    ));
+  });
+  assert.strictEqual(postOnlySuite.health().signals, 0);
+
   let suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
 
