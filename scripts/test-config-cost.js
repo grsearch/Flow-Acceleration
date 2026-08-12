@@ -1,7 +1,9 @@
 'use strict';
 
 const assert = require('assert');
-const { config, normalizeEndpoint, liveTradingGuard } = require('../src/config');
+const {
+  config, normalizeEndpoint, liveTradingGuard, shadowPositionEnv,
+} = require('../src/config');
 const { costBreakdown, expectedNetReturnPct } = require('../src/core/CostModel');
 
 assert.strictEqual(
@@ -10,6 +12,12 @@ assert.strictEqual(
 );
 assert.strictEqual(normalizeEndpoint('http://127.0.0.1:10000/'), 'http://127.0.0.1:10000');
 assert.throws(() => normalizeEndpoint('grpc://example.com'), /Unsupported/);
+
+process.env.FLOW_TEST_SHADOW_POSITION_SOL = '0.05';
+assert.strictEqual(shadowPositionEnv('FLOW_TEST_SHADOW_POSITION_SOL'), 1);
+process.env.FLOW_TEST_SHADOW_POSITION_SOL = '0.4';
+assert.strictEqual(shadowPositionEnv('FLOW_TEST_SHADOW_POSITION_SOL'), 0.4);
+delete process.env.FLOW_TEST_SHADOW_POSITION_SOL;
 
 const costs = costBreakdown({
   platformFeePct: 1,
@@ -70,13 +78,13 @@ assert.deepStrictEqual(
   ],
 );
 assert.strictEqual(config.signalShadow.trailingStopPct, 7.5);
-assert.strictEqual(config.signalShadow.positionSizeSol, 0.05);
-assert.ok(Math.abs(costBreakdown(config.signalShadow.costModel).deterministicCostPct - 3.22) < 1e-12);
+assert.strictEqual(config.signalShadow.positionSizeSol, 1);
+assert.ok(Math.abs(costBreakdown(config.signalShadow.costModel).deterministicCostPct - 2.251) < 1e-12);
 assert.deepStrictEqual(config.strategy.primaryThresholdProfiles, config.signalShadow.profiles);
 assert.strictEqual(config.flowFirstShadow.enabled, false);
 assert.strictEqual(config.flowFirstShadow.signalVariant, 'primary_3w');
 assert.strictEqual(config.flowFirstShadow.episodeGapMs, 30_000);
-assert.strictEqual(config.flowFirstShadow.positionSizeSol, 0.05);
+assert.strictEqual(config.flowFirstShadow.positionSizeSol, 1);
 assert.deepStrictEqual(
   config.flowFirstShadow.cohorts.map((cohort) => [
     cohort.id,
@@ -91,7 +99,7 @@ assert.deepStrictEqual(
   ],
 );
 assert.ok(
-  Math.abs(costBreakdown(config.flowFirstShadow.costModel).deterministicCostPct - 3.22)
+  Math.abs(costBreakdown(config.flowFirstShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
 assert.strictEqual(config.smartPullbackShadow.enabled, true);
@@ -105,7 +113,7 @@ assert.deepStrictEqual(
   [['A', 7.5], ['B', 12.5]],
 );
 assert.ok(
-  Math.abs(costBreakdown(config.smartPullbackShadow.costModel).deterministicCostPct - 3.22)
+  Math.abs(costBreakdown(config.smartPullbackShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
 assert.strictEqual(config.smartOpenShadow.enabled, false);
@@ -129,11 +137,11 @@ assert.deepStrictEqual(
   ],
 );
 assert.ok(
-  Math.abs(costBreakdown(config.smartOpenShadow.costModel).deterministicCostPct - 3.22)
+  Math.abs(costBreakdown(config.smartOpenShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
 assert.strictEqual(config.launchPullbackShadow.enabled, true);
-assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 0.05);
+assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 1);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
 assert.deepStrictEqual(
   config.launchPullbackShadow.profiles.slice(0, 3).map((profile) => [
@@ -155,7 +163,7 @@ assert.deepStrictEqual(
   [['3S', 3_000], ['8S', 8_000]],
 );
 assert.ok(
-  Math.abs(costBreakdown(config.launchPullbackShadow.costModel).deterministicCostPct - 3.22)
+  Math.abs(costBreakdown(config.launchPullbackShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
 assert.strictEqual(config.launchQualityObserver.enabled, true);
@@ -179,9 +187,38 @@ assert.deepStrictEqual(
   ['XM', 'X6', 'XB', 'XF'],
 );
 assert.ok(
-  Math.abs(costBreakdown(config.rangeScalperShadow.costModel).deterministicCostPct - 3.22)
+  Math.abs(costBreakdown(config.rangeScalperShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
+assert.strictEqual(config.cyaEarlyPyramidShadow.enabled, true);
+assert.strictEqual(config.cyaEarlyPyramidShadow.positionSizeSol, 1);
+assert.deepStrictEqual(
+  config.cyaEarlyPyramidShadow.entryProfiles.map((profile) => profile.id),
+  ['K5_30', 'K3_30'],
+);
+assert.deepStrictEqual(
+  config.cyaEarlyPyramidShadow.exitProfiles.map((profile) => profile.id),
+  ['T20', 'T30'],
+);
+assert.ok(
+  Math.abs(costBreakdown(config.cyaEarlyPyramidShadow.costModel).deterministicCostPct - 2.251)
+    < 1e-12,
+);
+for (const shadow of [
+  config.signalShadow,
+  config.flowFirstShadow,
+  config.smartPullbackShadow,
+  config.smartOpenShadow,
+  config.launchPullbackShadow,
+  config.cyaEarlyPyramidShadow,
+  config.bondingCurveMomentumShadow,
+  config.graduationHoldShadow,
+  config.migratedDropReboundShadow,
+  config.rangeScalperShadow,
+]) {
+  assert.strictEqual(shadow.positionSizeSol, 1);
+  assert.ok(Math.abs(costBreakdown(shadow.costModel).deterministicCostPct - 2.251) < 1e-12);
+}
 
 assert.deepStrictEqual(liveTradingGuard(true, true, false), {
   enabled: false,

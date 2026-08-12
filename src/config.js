@@ -125,6 +125,21 @@ const guardedLiveTrading = liveTradingGuard(
   booleanEnv('FLOW_LIVE_DRY_RUN', true),
 );
 const retiredShadowsEnabled = booleanEnv('FLOW_RETIRED_SHADOWS_ENABLED', false);
+// One shared fallback keeps every research-only strategy on the same economic
+// scale. A strategy-specific environment variable may still override it.
+const defaultShadowPositionSol = numberEnv('FLOW_SHADOW_DEFAULT_POSITION_SOL', 1, {
+  min: 0.000001,
+});
+
+// Old deployments copied 0.05 into every strategy-specific variable. Treat
+// that exact former default as inherited so a normal code upgrade really moves
+// every Shadow to the shared 1 SOL default. Other explicit custom sizes remain
+// valid; setting the shared default itself to 0.05 still opts all Shadows back.
+function shadowPositionEnv(name) {
+  const raw = process.env[name];
+  if (raw == null || raw === '' || Number(raw) === 0.05) return defaultShadowPositionSol;
+  return numberEnv(name, defaultShadowPositionSol, { min: 0.000001 });
+}
 
 // Forward-only first-pullback entry experiments. These profiles are consumed by
 // both the observer (causal reference detection) and Shadow F (simulated entry).
@@ -355,7 +370,7 @@ const config = {
   signalShadow: {
     enabled: retiredShadowsEnabled && booleanEnv('FLOW_SIGNAL_SHADOW_ENABLED', false),
     profiles: primaryThresholdProfiles,
-    positionSizeSol: numberEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
+    positionSizeSol: shadowPositionEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL'),
     maxSignalAgeMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     entryDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
@@ -372,9 +387,7 @@ const config = {
     maxHoldMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL'),
     }),
   },
 
@@ -384,7 +397,7 @@ const config = {
     enabled: retiredShadowsEnabled && booleanEnv('FLOW_FIRST_SHADOW_ENABLED', false),
     signalVariant: 'primary_3w',
     episodeGapMs: 30_000,
-    positionSizeSol: numberEnv('FLOW_FIRST_SHADOW_POSITION_SOL', 0.05, { min: 0.000001 }),
+    positionSizeSol: shadowPositionEnv('FLOW_FIRST_SHADOW_POSITION_SOL'),
     maxSignalAgeMs: integerEnv('FLOW_FIRST_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     entryDelayMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
@@ -420,9 +433,7 @@ const config = {
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_FIRST_SHADOW_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_FIRST_SHADOW_POSITION_SOL'),
     }),
   },
 
@@ -454,7 +465,7 @@ const config = {
       min: 0,
       max: 100,
     }),
-    positionSizeSol: numberEnv('FLOW_SMART_PULLBACK_POSITION_SOL', 0.05, { min: 0.000001 }),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
     entryDelayMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
     exitDelayMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_DELAY_MS', 200, { min: 0 }),
@@ -481,9 +492,7 @@ const config = {
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_SMART_PULLBACK_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
     }),
   },
 
@@ -500,9 +509,7 @@ const config = {
       min: 0,
       max: 100,
     }),
-    positionSizeSol: numberEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL', 0.05, {
-      min: 0.000001,
-    }),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
     entryDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
     exitDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
@@ -554,9 +561,7 @@ const config = {
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
     }),
   },
 
@@ -564,9 +569,7 @@ const config = {
   // LaunchQualityObserver, but every simulated position lives in its own table.
   launchPullbackShadow: {
     enabled: booleanEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENABLED', true),
-    positionSizeSol: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL', 0.05, {
-      min: 0.000001,
-    }),
+    positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
     entryDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_TIMEOUT_MS', 2_000, {
       min: 1,
@@ -769,9 +772,99 @@ const config = {
     })),
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Independent early Bonding Curve research derived from the observed CYA
+  // wallet pattern. It uses public order flow only and never follows, signs,
+  // or sends the monitored wallet's transactions.
+  cyaEarlyPyramidShadow: {
+    enabled: booleanEnv('FLOW_CYA_EARLY_PYRAMID_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
+    stateWindowMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_WINDOW_MS', 5_000, {
+      min: 2_000,
+      max: 30_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_RETENTION_MS', 240_000, {
+      min: 30_000,
+      max: 15 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0,
+      max: 100,
+    }),
+    addStepPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_STEP_PCT', 15, {
+      min: 0.1,
+      max: 500,
+    }),
+    addFraction: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_FRACTION', 1 / 12, {
+      min: 0.001,
+      max: 1,
+    }),
+    addCooldownMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ADD_COOLDOWN_MS', 250, {
+      min: 0,
+      max: 30_000,
+    }),
+    maxAdds: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ADDS', 6, { min: 0, max: 20 }),
+    firstTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP1_PCT', 50, { min: 1 }),
+    secondTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP2_PCT', 100, { min: 1 }),
+    hardStopPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_HARD_STOP_PCT', 30, {
+      min: 0.1,
+      max: 100,
+    }),
+    noStrengthMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MS', 25_000, {
+      min: 1_000,
+    }),
+    noStrengthMfePct: numberEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MFE_PCT', 20, {
+      min: 0,
+    }),
+    maxHoldMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_HOLD_MS', 180_000, {
+      min: 1_000,
+    }),
+    entryProfiles: [
+      {
+        id: 'K5_30',
+        label: 'K5-30 · AGE 5–30s / Curve 20–60%',
+        minAgeMs: 5_000,
+        maxAgeMs: 30_000,
+        minCurvePct: 20,
+        maxCurvePct: 60,
+        minBuyers5s: 3,
+        maxBuyers5s: 14,
+        minNetFlow5s: 0.1,
+        maxNetFlow5s: 15,
+        maxReturn2sPct: 15,
+      },
+      {
+        id: 'K3_30',
+        label: 'K3-30 · AGE 3–30s / Curve 20–60%',
+        minAgeMs: 3_000,
+        maxAgeMs: 30_000,
+        minCurvePct: 20,
+        maxCurvePct: 60,
+        minBuyers5s: 2,
+        maxBuyers5s: 18,
+        minNetFlow5s: 0,
+        maxNetFlow5s: 20,
+        maxReturn2sPct: 25,
+      },
+    ],
+    exitProfiles: [
+      { id: 'T20', label: 'Runner peak drawdown 20%', trailingStopPct: 20 },
+      { id: 'T30', label: 'Runner peak drawdown 30%', trailingStopPct: 30 },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
     }),
   },
 
@@ -779,9 +872,7 @@ const config = {
   // causal order-flow edges and simulated exits only; no execution path exists.
   bondingCurveMomentumShadow: {
     enabled: retiredShadowsEnabled && booleanEnv('FLOW_BONDING_MOMENTUM_SHADOW_ENABLED', false),
-    positionSizeSol: numberEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL', 0.05, {
-      min: 0.000001,
-    }),
+    positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
     stateWindowMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_WINDOW_MS', 5_000, {
       min: 5_000,
       max: 30_000,
@@ -916,9 +1007,7 @@ const config = {
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
     }),
   },
 
@@ -928,9 +1017,7 @@ const config = {
   graduationHoldShadow: {
     enabled: retiredShadowsEnabled && booleanEnv('FLOW_GRADUATION_HOLD_SHADOW_ENABLED', false),
     signalVariant: 'primary_3w',
-    positionSizeSol: numberEnv('FLOW_GRADUATION_HOLD_POSITION_SOL', 0.05, {
-      min: 0.000001,
-    }),
+    positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
     maxSignalLatencyMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_SIGNAL_LATENCY_MS', 1_500, {
       min: 100,
     }),
@@ -1052,9 +1139,7 @@ const config = {
     bigWinnerPct: numberEnv('FLOW_GRADUATION_HOLD_BIG_WINNER_PCT', 50, { min: 1 }),
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_GRADUATION_HOLD_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
     }),
   },
 
@@ -1074,9 +1159,7 @@ const config = {
       min: 30_000,
       max: 30 * 60_000,
     })),
-    positionSizeSol: numberEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL', 0.05, {
-      min: 0.000001,
-    }),
+    positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
     entryDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
       min: 1,
@@ -1174,9 +1257,7 @@ const config = {
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
     }),
   },
 
@@ -1185,9 +1266,7 @@ const config = {
   // the extended subscription. This suite never owns a signer or executor.
   rangeScalperShadow: {
     enabled: booleanEnv('FLOW_RANGE_SCALPER_SHADOW_ENABLED', true),
-    positionSizeSol: numberEnv('FLOW_RANGE_SCALPER_POSITION_SOL', 0.05, {
-      min: 0.000001,
-    }),
+    positionSizeSol: shadowPositionEnv('FLOW_RANGE_SCALPER_POSITION_SOL'),
     initialObservationMs: integerEnv('FLOW_RANGE_SCALPER_INITIAL_OBSERVATION_MS', 120_000, {
       min: 30_000,
       max: 10 * 60_000,
@@ -1286,9 +1365,7 @@ const config = {
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_RANGE_SCALPER_POSITION_SOL', 0.05, {
-        min: 0.000001,
-      }),
+      positionSizeSol: shadowPositionEnv('FLOW_RANGE_SCALPER_POSITION_SOL'),
     }),
   },
 
@@ -1384,6 +1461,7 @@ module.exports = {
   config,
   normalizeEndpoint,
   liveTradingGuard,
+  shadowPositionEnv,
   validateConfig,
   streamTokenFor,
 };

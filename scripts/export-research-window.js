@@ -53,6 +53,7 @@ const EXPLICIT_FILTERS = Object.freeze({
   launch_pullback_shadow_positions: { where: 'reference_at >= ? AND reference_at < ?', anchor: 'reference_at' },
   migrated_drop_rebound_shadow_positions: { where: 'rebound_at >= ? AND rebound_at < ?', anchor: 'rebound_at' },
   range_scalper_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
+  cya_early_pyramid_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   bonding_curve_momentum_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   graduation_hold_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   bonding_curve_momentum_shadow_snapshots: { where: 'target_at >= ? AND target_at < ?', anchor: 'target_at' },

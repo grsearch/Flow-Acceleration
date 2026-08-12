@@ -80,6 +80,7 @@ W3 = T-2s ~ T
 - `migrated_drop_rebound_shadow_positions`：独立的生命周期超跌反弹 Shadow G 参数组；用 `lifecycle_stage` 严格区分毕业前与毕业后模拟入场、MFE/MAE和退出结果。
 - `graduation_hold_shadow_positions`：独立的毕业概率持仓 Shadow I0/I1/I2；共享早期 Primary 模拟入场，但分别保存移动止盈对照、97%毕业前退出和严格门槛穿越毕业结果。
 - `range_scalper_shadow_positions`：独立的 PumpSwap 区间波段 Shadow J；保存区间质量、重复 Episode、三组回踩入场与四组退出结果。
+- `cya_early_pyramid_shadow_positions`：独立的 CYA Early Pyramid Shadow K；保存早期 Curve 订单流入场、分批加仓、两次减仓、尾仓退出及逐仓估算成本。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
 SQLite 使用 WAL 和批量写入。默认保留 168 小时热数据；超过 `FLOW_RAW_RETENTION_HOURS` 的 Raw Trade 会先压缩为 `data/archive/*.ndjson.gz`，成功写入归档后才从热库删除；Signals 与 Future Labels 不删除。
@@ -208,7 +209,7 @@ pnpm analyze -- --out=reports/strategy-analysis.json
 
 默认对照组分别为激进 `3 SOL / 3 Buyers`、均衡 `5 SOL / 4 Buyers` 和保守 `7 SOL / 5 Buyers`。每组在候选周期内只记录第一次穿越；信号后200ms开始寻找 Bonding Curve 模拟成交，2秒内没有成交或追价超过10%则不入场。入场后立即启用峰值价格回撤7.5%退出，所有仓位最长60秒。
 
-模拟仓位、所属门槛版本、净收益和退出原因保存在 `primary_signal_shadow_positions` 及对应的 `flow_signals`。Dashboard 的“实盘交易”页面会按三组分别统计，并与真实 Primary 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。默认模拟仓位为0.05 SOL并使用完整成本模型；公共执行参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量，均衡组直接复用实盘 `FLOW_LIVE_MIN_*` 门槛。
+模拟仓位、所属门槛版本、净收益和退出原因保存在 `primary_signal_shadow_positions` 及对应的 `flow_signals`。Dashboard 的“实盘交易”页面会按三组分别统计，并与真实 Primary 仓位分开显示，接口为 `GET /api/primary-signal-shadow`。所有 Shadow 新样本的公共默认仓位为1 SOL，并按该仓位扣除固定链上成本；策略专属环境变量仍可覆盖。历史记录保留各自行内的 `position_sol/configured_cost_pct`，不会被回写。公共执行参数使用 `FLOW_SIGNAL_SHADOW_*` 环境变量，均衡组直接复用实盘 `FLOW_LIVE_MIN_*` 门槛。
 
 ## Smart Wallet 回踩 Shadow A/B
 
@@ -254,13 +255,21 @@ FT-A/B/C/D使用全新的 `cohort_id`，Dashboard 会分别统计，不会把新
 
 在旧组不变的前提下，另设四个深回踩前向 cohort：`FD10_R3_5S`、`FD12_5_R3_5S`、`FD12_5_R5_5S` 与 `FD15_R5_5S`。它们分别测试10%～15%的首波回踩和3%/5%低点反弹，要求低点至少稳定0.5～1秒、低点之后至少出现2个新买家、最近1秒净流入重新为正；若回踩超过25%则只记录规则拒绝，不模拟接飞刀。四组共用 F1 的 NetFlow/Creator 质量门槛和固定5秒退出，因此统计差异主要来自入场深度与确认强度。深回踩参考点由 Observer E 独立跟踪，具有独立 `reference_profile_id`，不会改写或混入原7.5%参考点。
 
-模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。收益扣除0.05 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
+模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。新样本收益扣除默认1 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
 
 ## PumpSwap Range Scalper Shadow J
 
 Shadow J 对每个新毕业 Mint 先订阅 PumpSwap 成交120秒，用滚动60秒成交构建因果区间状态：成交笔数、SOL成交量、独立钱包、买卖占比、振幅、价格路径效率、均值穿越次数、最大钱包集中度和短期趋势。只有高成交量、低趋势、持续来回穿越均值的市场才延长订阅，最长20分钟；区间连续失效30秒且没有活动仓位时自动退订，避免无边界增加 Helius 消耗。
 
-每个合格区间并行测试三组入场：`JA` 为偏离中轴1σ后反弹2%，`JB` 为偏离1.5σ且最近1秒净流入转正，`JC` 为下轨反弹并要求新买家与卖压衰减。每次价格回到中轴后重新武装，因此同一 Mint 可产生多个独立 Episode。每个入场同时模拟中轴退出、固定+6%、上轨退出和中轴资金流反转四组卖法，统一使用200ms执行延迟、8%硬止损与20–30秒兜底，并扣除0.05 SOL仓位的确定性成本。该策略只有 Shadow 路径、独立表与 Dashboard 页面，永不签名或发送链上交易。
+每个合格区间并行测试三组入场：`JA` 为偏离中轴1σ后反弹2%，`JB` 为偏离1.5σ且最近1秒净流入转正，`JC` 为下轨反弹并要求新买家与卖压衰减。每次价格回到中轴后重新武装，因此同一 Mint 可产生多个独立 Episode。每个入场同时模拟中轴退出、固定+6%、上轨退出和中轴资金流反转四组卖法，统一使用200ms执行延迟、8%硬止损与20–30秒兜底，并扣除默认1 SOL仓位的确定性成本。该策略只有 Shadow 路径、独立表与 Dashboard 页面，永不签名或发送链上交易。
+
+## CYA Early Pyramid Shadow K
+
+Shadow K 把钱包分析结论转成独立的公开订单流实验，不读取目标钱包动作作为信号。`K5_30` 测试 AGE 5–30秒、Curve 20–60%的较严格窗口；`K3_30` 放宽到 AGE 3–30秒。两组都限制5秒买家数、净流入和2秒涨幅，避免在订单流已经拥挤时追入。信号后使用200ms后的真实 Bonding Curve 成交模拟入场。
+
+初始仓位默认1 SOL。价格每继续上涨15%且订单流仍未拥挤时，按初始仓位的1/12模拟加仓，最多6次；+50%和+100%分别减仓，剩余尾仓独立测试峰值回撤20%和30%。未出现强度时25秒退出，未减仓前硬止损30%，最长持有3分钟。每笔仓位单独记录累计投入、加仓/减仓次数及多次执行产生的估算费用，接口为 `GET /api/cya-early-pyramid-shadow`；该路径没有执行器、不读取私钥，永不签名或发送链上交易。
+
+从本版本开始，`FLOW_SHADOW_DEFAULT_POSITION_SOL=1` 是所有 Shadow 的公共仓位默认值。为了让旧服务器直接升级生效，策略专属 `*_POSITION_SOL=0.05` 会被识别为历史默认并继承新的1 SOL公共值；其它自定义数值仍是显式覆盖项。若确实要让全部 Shadow 回到0.05 SOL，应把公共默认本身设为0.05。历史记录不会重算或混入新策略，实盘仓位配置也不受影响。
 
 ## Lifecycle Drop/Rebound Shadow G
 
@@ -270,7 +279,7 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 两个生命周期层都使用同一组可比参数。基准入场为“1秒滚动高点下跌15%–35%，随后从运行低点反弹2%–5%，且反弹在候选开始后1秒内出现”。同一跌势只触发一次，必须先恢复到未达到15%跌幅才会重新武装。每层同时跑八个正交入场组：0.5/1/2秒窗口、15%–25%与25%–35%跌幅分层、2%与3%反弹下限、0.5/1/2秒反弹时限；每组只改变一个核心变量。
 
-每个入场组同时模拟四种退出：固定3秒、固定8秒、旧版“+8%激活/峰值回撤3%/快速+18%/6秒亏损检查/15秒兜底”，以及保留大赢家的“硬止损20%/+20%激活/峰值回撤10%/60秒兜底”。因此总矩阵是 `2 生命周期 × 8 入场 × 4 退出 = 64` 个独立组合。模拟入场和退出均使用200ms执行延迟后的对应市场真实成交，收益扣除0.05 SOL仓位的确定性成本；MFE、MAE和实际入场跳价一并保存。兼容接口仍为 `GET /api/migrated-drop-rebound-shadow`。该策略没有执行器、不读取私钥，永不签名或发送交易。
+每个入场组同时模拟四种退出：固定3秒、固定8秒、旧版“+8%激活/峰值回撤3%/快速+18%/6秒亏损检查/15秒兜底”，以及保留大赢家的“硬止损20%/+20%激活/峰值回撤10%/60秒兜底”。因此总矩阵是 `2 生命周期 × 8 入场 × 4 退出 = 64` 个独立组合。模拟入场和退出均使用200ms执行延迟后的对应市场真实成交，新样本收益扣除默认1 SOL仓位的确定性成本；MFE、MAE和实际入场跳价一并保存。兼容接口仍为 `GET /api/migrated-drop-rebound-shadow`。该策略没有执行器、不读取私钥，永不签名或发送交易。
 
 ## Flow-First Shadow C
 
@@ -282,7 +291,7 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 - C7.5：入场即激活移动止盈，峰值回撤7.5%退出，60秒兜底。
 - C12.5：入场即激活移动止盈，峰值回撤12.5%退出，60秒兜底。
 
-模拟仓位保存在 `flow_first_shadow_positions`，接口为 `GET /api/flow-first-shadow`。Dashboard 按独立 Episode/Mint 显示扣除完整0.05 SOL成本模型后的平均与中位净收益、胜率、PF、实际入场跳价、MFE、最大赢家、Top5盈利贡献、去掉Top5后的平均收益以及大赢家兑现率。该路径没有执行器、不读取私钥，也永不签名或发送链上交易。
+模拟仓位保存在 `flow_first_shadow_positions`，接口为 `GET /api/flow-first-shadow`。Dashboard 按独立 Episode/Mint 显示扣除默认1 SOL完整成本模型后的平均与中位净收益、胜率、PF、实际入场跳价、MFE、最大赢家、Top5盈利贡献、去掉Top5后的平均收益以及大赢家兑现率。该路径没有执行器、不读取私钥，也永不签名或发送链上交易。
 
 ## 多策略实盘框架
 
@@ -309,7 +318,7 @@ AND 每个 Mint 只取第一个 Episode
 
 当前卖出策略为 `XLEG`：前5秒达到 `+18%` 立即止盈；否则在盈利 `+8%` 后激活移动止盈，峰值回撤 `3%` 卖出；持有6秒仍为亏损则退出，15秒强制兜底。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
 
-买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时先查询签名历史和交易钱包的Token余额，只有确认持有Token后才恢复仓位。仍无法确认时保留 `ENTRY_CONFIRMATION_UNKNOWN` 阻止同 Mint 再开仓，但不会盲目发送卖出重试。服务重启时会自动重新核对这类历史卡仓。
+买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时同时查询签名历史、确认交易的 `pre/postTokenBalances` 和交易钱包的Token余额。即使Token-2022 ATA尚未被RPC账户索引，只要交易回执显示钱包实际收到Token，也会按真实raw数量恢复仓位。单次余额为0或账户暂不可见只保持 `ENTRY_CONFIRMATION_UNKNOWN`，不会再误写 `ENTRY_CONFIRMED_EMPTY`，也不会盲目发送卖出。服务重启时会自动重新核对未知仓位，以及旧版本曾误关的 `ENTRY_CONFIRMED_EMPTY` 仓位；恢复成功且已超过持仓兜底时间时会立即进入正常卖出流程。
 
 先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`live_strategy_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
 
