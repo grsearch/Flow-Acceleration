@@ -286,7 +286,7 @@ AND 低点在 1 秒内反弹 2%～5%
 AND 每个 Mint 只取第一个 Episode
 ```
 
-实盘决策统一写入 `live_strategy_decisions`，仓位和订单同时保存 `strategy_id`。接口和 Dashboard 可按策略筛选，因此后续增加多个实盘策略时，可以分别设置开关与单笔 SOL 数额，历史数据不会混在一起。当前策略的单笔金额为 `FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL=0.05`；没有每日笔数上限，也没有当日累计亏损自动停机，但安全锁、钱包最低 SOL 保留额、单 Mint 单仓和全局并发限制仍然有效。
+实盘决策统一写入 `live_strategy_decisions`，仓位和订单同时保存 `strategy_id`。接口和 Dashboard 可按策略筛选，因此后续增加多个实盘策略时，可以分别设置开关与单笔 SOL 数额，历史数据不会混在一起。当前策略的单笔金额为 `FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL=0.05`，全局最大并发默认为 `FLOW_LIVE_MAX_POSITIONS=3`（最多同时占用 `0.15 SOL`，不含费用）；没有每日笔数上限，也没有当日累计亏损自动停机，但安全锁、钱包最低 SOL 保留额、单 Mint 单仓和全局并发限制仍然有效。
 
 执行模块有三种模式：
 
