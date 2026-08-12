@@ -1111,6 +1111,118 @@ const config = {
     }),
   },
 
+  // Independent post-migration range-regime research. Every graduation receives
+  // a short PumpSwap observation window; only qualified oscillating markets keep
+  // the extended subscription. This suite never owns a signer or executor.
+  rangeScalperShadow: {
+    enabled: booleanEnv('FLOW_RANGE_SCALPER_SHADOW_ENABLED', true),
+    positionSizeSol: numberEnv('FLOW_RANGE_SCALPER_POSITION_SOL', 0.05, {
+      min: 0.000001,
+    }),
+    initialObservationMs: integerEnv('FLOW_RANGE_SCALPER_INITIAL_OBSERVATION_MS', 120_000, {
+      min: 30_000,
+      max: 10 * 60_000,
+    }),
+    maxTrackingMs: integerEnv('FLOW_RANGE_SCALPER_MAX_TRACKING_MS', 20 * 60_000, {
+      min: 120_000,
+      max: 60 * 60_000,
+    }),
+    windowMs: integerEnv('FLOW_RANGE_SCALPER_WINDOW_MS', 60_000, {
+      min: 10_000,
+      max: 5 * 60_000,
+    }),
+    recentFlowWindowMs: integerEnv('FLOW_RANGE_SCALPER_RECENT_FLOW_MS', 1_000, {
+      min: 250,
+      max: 10_000,
+    }),
+    rangeLossConfirmMs: integerEnv('FLOW_RANGE_SCALPER_RANGE_LOSS_CONFIRM_MS', 30_000, {
+      min: 1_000,
+      max: 5 * 60_000,
+    }),
+    unsubscribeGraceMs: integerEnv('FLOW_RANGE_SCALPER_UNSUBSCRIBE_GRACE_MS', 5_000, {
+      min: 0,
+      max: 60_000,
+    }),
+    minTrades: integerEnv('FLOW_RANGE_SCALPER_MIN_TRADES', 60, { min: 5 }),
+    minVolumeSol: numberEnv('FLOW_RANGE_SCALPER_MIN_VOLUME_SOL', 20, { min: 0 }),
+    minUniqueWallets: integerEnv('FLOW_RANGE_SCALPER_MIN_UNIQUE_WALLETS', 20, { min: 2 }),
+    minBuySharePct: numberEnv('FLOW_RANGE_SCALPER_MIN_BUY_SHARE_PCT', 35, {
+      min: 0, max: 100,
+    }),
+    maxBuySharePct: numberEnv('FLOW_RANGE_SCALPER_MAX_BUY_SHARE_PCT', 65, {
+      min: 0, max: 100,
+    }),
+    minRangePct: numberEnv('FLOW_RANGE_SCALPER_MIN_RANGE_PCT', 12, { min: 0.1 }),
+    maxEfficiencyRatio: numberEnv('FLOW_RANGE_SCALPER_MAX_EFFICIENCY_RATIO', 0.35, {
+      min: 0.01, max: 1,
+    }),
+    minMeanCrosses: integerEnv('FLOW_RANGE_SCALPER_MIN_MEAN_CROSSES', 4, { min: 1 }),
+    maxTopWalletSharePct: numberEnv('FLOW_RANGE_SCALPER_MAX_TOP_WALLET_SHARE_PCT', 25, {
+      min: 0.1, max: 100,
+    }),
+    maxTrendPct: numberEnv('FLOW_RANGE_SCALPER_MAX_TREND_PCT', 12, { min: 0.1 }),
+    minRangeScore: numberEnv('FLOW_RANGE_SCALPER_MIN_RANGE_SCORE', 65, {
+      min: 0, max: 100,
+    }),
+    entryDelayMs: integerEnv('FLOW_RANGE_SCALPER_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_RANGE_SCALPER_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_RANGE_SCALPER_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_RANGE_SCALPER_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_RANGE_SCALPER_MAX_ENTRY_JUMP_PCT', 3, {
+      min: 0, max: 100,
+    }),
+    entryProfiles: [
+      {
+        id: 'JA',
+        label: 'JA · 1σ 偏离 + 2% 反弹',
+        deviationSigma: 1,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+      },
+      {
+        id: 'JB',
+        label: 'JB · 1.5σ 偏离 + 正净流入',
+        deviationSigma: 1.5,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+        minRecentNetFlowSol: 0.1,
+      },
+      {
+        id: 'JC',
+        label: 'JC · 下轨反弹 + 卖压衰减',
+        deviationSigma: 1,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+        minRecentBuyers: 2,
+        maxSellDecayRatio: 0.5,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'XM', label: 'XM · 回归中轴', exitMode: 'MIDLINE',
+        hardStopPct: 8, maxHoldMs: 20_000,
+      },
+      {
+        id: 'X6', label: 'X6 · 固定 +6%', exitMode: 'TAKE_PROFIT',
+        takeProfitPct: 6, hardStopPct: 8, maxHoldMs: 20_000,
+      },
+      {
+        id: 'XB', label: 'XB · 上轨退出', exitMode: 'UPPER_BAND',
+        hardStopPct: 8, maxHoldMs: 30_000,
+      },
+      {
+        id: 'XF', label: 'XF · 中轴且资金反转', exitMode: 'FLOW_REVERSAL',
+        hardStopPct: 8, maxHoldMs: 30_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_RANGE_SCALPER_POSITION_SOL', 0.05, {
+        min: 0.000001,
+      }),
+    }),
+  },
+
   // Observer-only Launch Quality research. Reference percentages label market
   // structure for later analysis; they never become an entry or execution rule.
   launchQualityObserver: {

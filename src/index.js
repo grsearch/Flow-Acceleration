@@ -13,6 +13,7 @@ const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
+const { RangeScalperShadowSuite } = require('./core/RangeScalperShadowSuite');
 const {
   BondingCurveMomentumShadowSuite,
 } = require('./core/BondingCurveMomentumShadowSuite');
@@ -79,6 +80,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   migratedDropReboundShadow.start();
+  const rangeScalperShadow = new RangeScalperShadowSuite({
+    config: runtimeConfig.rangeScalperShadow,
+    store,
+  });
+  rangeScalperShadow.start();
   const bondingCurveMomentumShadow = new BondingCurveMomentumShadowSuite({
     config: runtimeConfig.bondingCurveMomentumShadow,
     store,
@@ -103,11 +109,25 @@ function createRuntime(runtimeConfig = config) {
     launchPullbackShadow,
     launchQualityObserver,
     migratedDropReboundShadow,
+    rangeScalperShadow,
     bondingCurveMomentumShadow,
     graduationHoldShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
-  const runtimeMetrics = { parsedEvents: 0, parseErrors: 0, ignoredEvents: 0 };
+  const runtimeMetrics = {
+    parsedEvents: 0,
+    parseErrors: 0,
+    ignoredEvents: 0,
+    shadowModuleErrors: {},
+  };
+  const observeShadow = (name, callback) => {
+    try {
+      callback();
+    } catch (error) {
+      runtimeMetrics.shadowModuleErrors[name] = (runtimeMetrics.shadowModuleErrors[name] || 0) + 1;
+      console.error(`[Shadow:${name}] isolated failure:`, error.message);
+    }
+  };
   let maintenanceTimer = null;
   let archiveTimer = null;
   let stopping = false;
@@ -119,6 +139,7 @@ function createRuntime(runtimeConfig = config) {
       ...graduatedPending,
       ...trader.trackedMints(now),
       ...migratedDropReboundShadow.trackedMints(now),
+      ...rangeScalperShadow.trackedMints(now),
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
     ])]);
@@ -154,15 +175,15 @@ function createRuntime(runtimeConfig = config) {
   engine.on('signal', (signal) => {
     const saved = persistSignal(signal, 'FLOW_ACCEL_SIGNAL');
     if (saved) {
-      flowFirstShadow.onSignal(saved);
-      graduationHoldShadow.onSignal(saved);
+      observeShadow('flowFirstSignal', () => flowFirstShadow.onSignal(saved));
+      observeShadow('graduationHoldSignal', () => graduationHoldShadow.onSignal(saved));
     }
   });
   engine.on('shadowSignal', (signal) => persistSignal(signal, 'FLOW_SHADOW_SIGNAL'));
   engine.on('primaryThresholdSignal', (signal) => {
     const saved = persistSignal(signal, 'PRIMARY_THRESHOLD_SIGNAL');
     if (!saved) return;
-    signalShadow.onSignal(saved);
+    observeShadow('primarySignalEvent', () => signalShadow.onSignal(saved));
   });
 
   stream.on('transaction', (transaction, context) => {
@@ -181,24 +202,30 @@ function createRuntime(runtimeConfig = config) {
         if (event.type === 'create') {
           const token = store.recordCreate(event);
           engine.handleCreate(token || event);
-          launchQualityObserver.onCreate(token || event);
+          observeShadow('launchQualityCreate', () => launchQualityObserver.onCreate(token || event));
           continue;
         }
         if (event.type === 'complete') {
           const token = store.recordComplete(event);
           engine.handleComplete(event);
-          migratedDropReboundShadow.onGraduated(token || event);
+          observeShadow('migratedDropReboundGraduate', () => (
+            migratedDropReboundShadow.onGraduated(token || event)
+          ));
+          observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
-          graduationHoldShadow.onGraduated(token || event);
+          observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
         }
         if (event.type === 'migration') {
           const token = store.recordMigration(event);
           engine.handleComplete({ ...event, completedAt: event.migratedAt });
-          migratedDropReboundShadow.onGraduated(token || event);
+          observeShadow('migratedDropReboundGraduate', () => (
+            migratedDropReboundShadow.onGraduated(token || event)
+          ));
+          observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
-          graduationHoldShadow.onGraduated(token || event);
+          observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
         }
@@ -228,28 +255,33 @@ function createRuntime(runtimeConfig = config) {
           )
           : null;
         store.queueRawTrade(trade);
-        migratedDropReboundShadow.observeTrade(trade);
-        bondingCurveMomentumShadow.observeTrade(trade);
-        graduationHoldShadow.observeTrade(trade);
-        launchQualityObserver.observeTrade(trade);
-        launchPullbackShadow.observeTrade(trade);
-        signalShadow.observeTrade(trade);
+        observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
+        observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
+        observeShadow('bondingCurveMomentum', () => bondingCurveMomentumShadow.observeTrade(trade));
+        observeShadow('graduationHold', () => graduationHoldShadow.observeTrade(trade));
+        observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
+        observeShadow('launchPullback', () => launchPullbackShadow.observeTrade(trade));
+        observeShadow('primarySignal', () => signalShadow.observeTrade(trade));
         engine.handleTrade(trade, store.getToken(trade.mint));
-        flowFirstShadow.observeTrade(trade);
+        observeShadow('flowFirst', () => flowFirstShadow.observeTrade(trade));
         labeler.onTrade(trade);
         trader.observeTrade(trade);
         if (isSmartWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
           if (smartEvent?.inserted) {
             const normalizedSmartEvent = { ...trade, ...smartEvent, id: smartEvent.id };
-            smartOpenShadow.onSmartWalletEvent(normalizedSmartEvent, smartOpenContext || {});
+            observeShadow('smartOpenEvent', () => (
+              smartOpenShadow.onSmartWalletEvent(normalizedSmartEvent, smartOpenContext || {})
+            ));
             if (trade.side === 'BUY') {
-              smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id });
+              observeShadow('smartPullbackEvent', () => (
+                smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id })
+              ));
             }
           }
         }
-        smartPullbackShadow.observeTrade(trade);
-        smartOpenShadow.observeTrade(trade);
+        observeShadow('smartPullback', () => smartPullbackShadow.observeTrade(trade));
+        observeShadow('smartOpen', () => smartOpenShadow.observeTrade(trade));
       } catch (error) {
         runtimeMetrics.parseErrors += 1;
         console.error(`[Runtime] ${event.type} failed:`, error.message);
@@ -317,6 +349,13 @@ function createRuntime(runtimeConfig = config) {
       + 'isolated table; sends transactions=false.',
     );
     console.log(
+      `PumpSwap Range Scalper Shadow J: observe=${runtimeConfig.rangeScalperShadow
+        .initialObservationMs / 1_000}s, extend<=${runtimeConfig.rangeScalperShadow
+        .maxTrackingMs / 60_000}m; ${runtimeConfig.rangeScalperShadow.entryProfiles.length} `
+      + `entries x ${runtimeConfig.rangeScalperShadow.exitProfiles.length} exits; `
+      + 'dynamic subscription, isolated table, sends transactions=false.',
+    );
+    console.log(
       `Bonding Curve Momentum Shadow H: ${runtimeConfig.bondingCurveMomentumShadow.entryProfiles.length} `
       + `entry profiles x ${runtimeConfig.bondingCurveMomentumShadow.exitProfiles.length} exits; `
       + `snapshots=${runtimeConfig.bondingCurveMomentumShadow.snapshotHorizonsMs
@@ -344,15 +383,16 @@ function createRuntime(runtimeConfig = config) {
       const now = Date.now();
       engine.cleanup(now);
       labeler.advanceTime(now);
-      signalShadow.advanceTime(now);
-      flowFirstShadow.advanceTime(now);
-      smartPullbackShadow.advanceTime(now);
-      smartOpenShadow.advanceTime(now);
-      launchPullbackShadow.advanceTime(now);
-      launchQualityObserver.advanceTime(now);
-      migratedDropReboundShadow.advanceTime(now);
-      bondingCurveMomentumShadow.advanceTime(now);
-      graduationHoldShadow.advanceTime(now);
+      observeShadow('primarySignalAdvance', () => signalShadow.advanceTime(now));
+      observeShadow('flowFirstAdvance', () => flowFirstShadow.advanceTime(now));
+      observeShadow('smartPullbackAdvance', () => smartPullbackShadow.advanceTime(now));
+      observeShadow('smartOpenAdvance', () => smartOpenShadow.advanceTime(now));
+      observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
+      observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
+      observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
+      observeShadow('rangeScalperAdvance', () => rangeScalperShadow.advanceTime(now));
+      observeShadow('bondingCurveMomentumAdvance', () => bondingCurveMomentumShadow.advanceTime(now));
+      observeShadow('graduationHoldAdvance', () => graduationHoldShadow.advanceTime(now));
       trader.advanceTime(now);
       refreshAmmSubscriptions(now);
     }, 1_000);
@@ -388,6 +428,7 @@ function createRuntime(runtimeConfig = config) {
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     migratedDropReboundShadow.stop();
+    rangeScalperShadow.stop();
     bondingCurveMomentumShadow.stop();
     graduationHoldShadow.stop();
     await server.stop();
@@ -409,6 +450,7 @@ function createRuntime(runtimeConfig = config) {
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
+      rangeScalperShadow: rangeScalperShadow.health(),
       bondingCurveMomentumShadow: bondingCurveMomentumShadow.health(),
       graduationHoldShadow: graduationHoldShadow.health(),
     };
@@ -417,7 +459,7 @@ function createRuntime(runtimeConfig = config) {
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, launchPullbackShadow,
-    launchQualityObserver, migratedDropReboundShadow,
+    launchQualityObserver, migratedDropReboundShadow, rangeScalperShadow,
     bondingCurveMomentumShadow, graduationHoldShadow,
   };
 }

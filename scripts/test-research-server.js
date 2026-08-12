@@ -58,6 +58,11 @@ async function main() {
   assert.ok(dashboard.includes('毕业前 Curve / 毕业后 PumpSwap 分层'));
   assert.ok(dashboard.includes('两生命周期 × 八组入场 × 四组退出，共64个独立组合'));
   assert.ok(dashboard.includes("json('/api/migrated-drop-rebound-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="range-scalper"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="range-scalper"'));
+  assert.ok(dashboard.includes('id="range-scalper-cohort-rows"'));
+  assert.ok(dashboard.includes('id="range-scalper-position-rows"'));
+  assert.ok(dashboard.includes("json('/api/range-scalper-shadow?positionLimit=100')"));
   assert.ok(dashboard.includes('data-live-strategy="bonding-momentum"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="bonding-momentum"'));
   assert.ok(dashboard.includes('id="bonding-momentum-cohort-rows"'));
@@ -125,6 +130,7 @@ async function main() {
     'smart-open',
     'launch-pullback',
     'migrated-rebound',
+    'range-scalper',
     'bonding-momentum',
     'graduation-hold',
   ]) {
@@ -176,6 +182,7 @@ async function main() {
       '/api/smart-open-shadow',
       '/api/launch-pullback-shadow',
       '/api/migrated-drop-rebound-shadow',
+      '/api/range-scalper-shadow',
       '/api/bonding-curve-momentum-shadow',
       '/api/graduation-hold-shadow',
       '/api/launch-quality-observer',
@@ -342,6 +349,19 @@ async function main() {
     );
     assert.ok(Array.isArray(migratedRebound.cohorts));
     assert.ok(Array.isArray(migratedRebound.positions));
+    const rangeScalper = await (await fetch(
+      `http://127.0.0.1:${port}/api/range-scalper-shadow`,
+    )).json();
+    assert.strictEqual(rangeScalper.runtime.mode, 'SHADOW_J');
+    assert.strictEqual(rangeScalper.runtime.sendsTransactions, false);
+    assert.strictEqual(rangeScalper.runtime.entryProfiles.length, 3);
+    assert.strictEqual(rangeScalper.runtime.exitProfiles.length, 4);
+    assert.strictEqual(
+      rangeScalper.runtime.strategy.research.isolatedTable,
+      'range_scalper_shadow_positions',
+    );
+    assert.ok(Array.isArray(rangeScalper.cohorts));
+    assert.ok(Array.isArray(rangeScalper.positions));
     const bondingMomentum = await (await fetch(
       `http://127.0.0.1:${port}/api/bonding-curve-momentum-shadow`,
     )).json();
