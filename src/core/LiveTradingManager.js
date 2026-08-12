@@ -2,9 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { evaluatePrimarySignal, RULE_VERSION } = require('./PrimarySignalStrategy');
 
-const PRIMARY_TRAILING_EXIT_STRATEGY = 'PRIMARY_IMMEDIATE_TRAILING';
+const LIVE_RULE_VERSION = 'post_migration_gd25_35_xleg_v1';
 
 function errorText(error) {
   return String(error?.message || error || 'Unknown error')
@@ -19,7 +18,9 @@ function orderExecution(execution, event, submittedAt, finishedAt) {
     manager: {
       triggerType: event.signalVariant?.startsWith('primary_early_')
         ? 'PRIMARY_THRESHOLD'
-        : (event.signalId ? 'PRIMARY_SIGNAL' : 'LEGACY_EVENT'),
+        : (event.strategyId ? 'LIVE_STRATEGY' : (event.signalId ? 'PRIMARY_SIGNAL' : 'LEGACY_EVENT')),
+      strategyId: event.strategyId || null,
+      episodeId: event.episodeId || null,
       signalId: event.signalId || null,
       signalEpisodeId: event.signalEpisodeId || null,
       signalSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
@@ -49,6 +50,8 @@ function restoredPosition(row) {
     id: row.id,
     decisionId: row.decision_id,
     primaryDecisionId: row.primary_decision_id,
+    strategyDecisionId: row.strategy_decision_id,
+    strategyId: row.strategy_id,
     signalId: row.signal_id,
     sourceType: row.source_type,
     mint: row.mint,
@@ -77,6 +80,12 @@ class LiveTradingManager {
     this.executor = executor;
     this.now = now;
     this.mode = !config.enabled ? 'DISABLED' : (config.dryRun ? 'DRY_RUN' : 'LIVE');
+    this.strategies = new Map((config.strategies || [])
+      .filter((strategy) => strategy.enabled !== false)
+      .map((strategy) => [strategy.id, strategy]));
+    this.tracked = new Map();
+    this.detectors = new Map([...this.strategies.keys()].map((id) => [id, new Map()]));
+    this.ammPriceStates = new Map();
     this.positions = new Map();
     this.timers = new Map();
     this.pending = new Set();
@@ -94,12 +103,15 @@ class LiveTradingManager {
       exitFailures: 0,
       lastActionAt: null,
       lastError: null,
+      candidates: 0,
+      signals: 0,
     };
   }
 
   start() {
     for (const row of this.store.activeLivePositions()) {
       const position = restoredPosition(row);
+      position.strategy = this.strategies.get(position.strategyId) || null;
       this.positions.set(position.mint, position);
       if (position.mode === 'LIVE' && this.mode !== 'LIVE') {
         this.metrics.lastError = 'ACTIVE_LIVE_POSITION_REQUIRES_LIVE_MODE';
@@ -128,137 +140,130 @@ class LiveTradingManager {
         this._requestExit(position, 'RESTART_RECOVERY', null);
       } else if (this.mode !== 'DISABLED') this._scheduleMaxHold(position);
     }
+    if (this._trackingEnabled()) {
+      const now = this.now();
+      for (const token of this.store.allTokens()) {
+        const graduatedAt = Number(token.graduated_at);
+        if (graduatedAt > 0 && now - graduatedAt <= this._maxTrackingAgeMs()) {
+          this.onGraduated(token);
+        }
+      }
+    }
   }
 
   health() {
-    const entry = {
-      signalVariant: this.config.signalVariant,
-      market: 'PUMP_BONDING_CURVE',
-      minNetFlowW3Sol: this.config.minNetFlowW3Sol,
-      minUniqueBuyersW3: this.config.minUniqueBuyersW3,
-      maxSignalAgeMs: this.config.maxSignalAgeMs,
-      maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
-    };
     return {
       mode: this.mode,
       enabled: this.config.enabled,
       requestedEnabled: this.config.requestedEnabled,
       safetyLock: this.config.safetyLock,
       dryRun: this.config.dryRun,
-      rule: entry,
-      strategy: {
-        name: 'Primary Early Threshold Immediate Trailing Live',
-        ruleVersion: RULE_VERSION,
-        entry,
-        exit: {
-          policy: PRIMARY_TRAILING_EXIT_STRATEGY,
-          trailingActivationPct: 0,
-          trailingStopPct: this.config.trailingStopPct,
-          maxHoldMs: this.config.maxHoldMs,
-          exitRetryCount: this.config.exitRetryCount,
-          exitRetryDelayMs: this.config.exitRetryDelayMs,
-        },
-        risk: {
-          positionSizeSol: this.config.positionSizeSol,
-          maxConcurrentPositions: this.config.maxConcurrentPositions,
-          minWalletReserveSol: this.config.minWalletReserveSol,
-          mintCooldownMs: this.config.mintCooldownMs,
-        },
-        execution: {
-          buyMode: 'EXACT_QUOTE_IN_V2_FIXED_SOL',
-          hardSpendCap: true,
-          buySlippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
-          sellSlippagePct: this.config.sellSlippagePct ?? this.config.slippagePct,
-          entryReconcileCount: this.config.entryReconcileCount,
-          entryReconcileDelayMs: this.config.entryReconcileDelayMs,
-          computeUnitLimit: this.config.computeUnitLimit,
-          priorityFeeMicroLamports: this.config.priorityFeeMicroLamports,
-          readCommitment: this.config.readCommitment || 'processed',
-          preflightCommitment: this.config.readCommitment || 'processed',
-          confirmationCommitment: this.config.confirmationCommitment
-            || this.config.commitment
-            || 'confirmed',
-          contextSlotRetryCount: this.config.contextSlotRetryCount ?? 2,
-          contextSlotRetryDelayMs: this.config.contextSlotRetryDelayMs ?? 25,
-          commitment: this.config.confirmationCommitment
-            || this.config.commitment
-            || 'confirmed',
-        },
-      },
+      strategies: [...this.strategies.values()].map((strategy) => ({
+        ...strategy,
+        mode: this.mode,
+        ruleVersion: LIVE_RULE_VERSION,
+        activePositions: [...this.positions.values()]
+          .filter((position) => position.strategyId === strategy.id).length,
+      })),
+      maxConcurrentPositions: this.config.maxConcurrentPositions,
+      minWalletReserveSol: this.config.minWalletReserveSol,
+      buySlippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
+      sellSlippagePct: this.config.sellSlippagePct ?? this.config.slippagePct,
+      trackedMints: this.tracked.size,
       activePositions: this.positions.size,
       killSwitchActive: this._killSwitchActive(),
       ...this.metrics,
     };
   }
 
-  onSignal(signal) {
-    if (!signal?.signalId) return null;
-    const evaluated = evaluatePrimarySignal(signal, this.config, this.now());
-    this.metrics.evaluated += 1;
-    if (evaluated.matched) this.metrics.matched += 1;
-    const initialStatus = !evaluated.matched
-      ? 'RULE_REJECTED'
-      : this.mode === 'DISABLED' ? 'MATCHED_DISABLED' : 'QUEUED';
-    const decision = this.store.recordPrimaryLiveDecision({
-      signalId: signal.signalId,
-      signalEpisodeId: signal.signalEpisodeId,
-      timestampMs: signal.timestampMs,
-      receivedAtMs: signal.createdAt,
-      mint: signal.mint,
-      symbol: signal.symbol,
-      ruleVersion: evaluated.ruleVersion,
-      signalVariant: signal.signalVariant,
-      netFlowW3: evaluated.netFlowW3,
-      uniqueBuyersW3: evaluated.uniqueBuyersW3,
-      signalPrice: signal.price,
-      signalAgeMs: evaluated.signalAgeMs,
-      ruleMatched: evaluated.matched,
-      rejectionReasons: evaluated.rejectReasons,
-      mode: this.mode,
-      actionStatus: initialStatus,
-      actionReason: evaluated.rejectReasons.join(',') || null,
-    });
+  onSignal() {
+    // Legacy Primary live entry is intentionally retired. Primary signals remain
+    // fully persisted and may still feed independent Shadow research.
+    return null;
+  }
 
-    if (decision?.inserted && evaluated.matched && this.mode !== 'DISABLED' && !this.stopping) {
-      const trigger = {
-        ...signal,
-        receivedAtMs: signal.createdAt,
-      };
-      this.entryQueue = this.entryQueue
-        .then(() => this._enter(decision, trigger))
-        .catch((error) => this._rememberError(error));
-      this._track(this.entryQueue);
+  onGraduated(token) {
+    if (!this._trackingEnabled() || !token?.mint) return;
+    const graduatedAt = Number(
+      token.graduated_at ?? token.graduatedAt ?? token.migratedAt
+        ?? token.completedAt ?? token.timestampMs,
+    );
+    if (!(graduatedAt > 0)) return;
+    const current = this.tracked.get(token.mint);
+    this.tracked.set(token.mint, {
+      mint: token.mint,
+      symbol: token.symbol || current?.symbol || null,
+      graduatedAt: Math.min(graduatedAt, current?.graduatedAt || graduatedAt),
+    });
+  }
+
+  trackedMints(now = this.now()) {
+    for (const [mint, token] of this.tracked) {
+      if (now - token.graduatedAt <= this._maxTrackingAgeMs()) continue;
+      if (this.positions.has(mint)) continue;
+      this.tracked.delete(mint);
+      for (const states of this.detectors.values()) states.delete(mint);
+      this.ammPriceStates.delete(mint);
     }
-    return decision;
+    return [...this.tracked.keys()];
   }
 
   observeTrade(trade) {
-    const position = this.positions.get(trade?.mint);
-    if (!position || !Number.isFinite(trade.price) || trade.price <= 0) {
+    const ammPrice = Number(trade?.reservePrice) > 0
+      ? Number(trade.reservePrice)
+      : Number(trade?.price);
+    const observedTrade = trade?.market === 'PUMP_AMM' && ammPrice > 0
+      ? { ...trade, price: ammPrice }
+      : trade;
+    if (observedTrade?.market === 'PUMP_AMM' && observedTrade?.mint && ammPrice > 0) {
+      const token = this.store.getToken(observedTrade.mint);
+      const graduatedAt = Number(token?.graduated_at
+        ?? this.tracked.get(observedTrade.mint)?.graduatedAt);
+      if (graduatedAt > 0 && !this.tracked.has(observedTrade.mint)) this.onGraduated(token);
+      if (this.tracked.has(observedTrade.mint) && this._acceptAmmPrice(observedTrade)) {
+        for (const strategy of this.strategies.values()) {
+          this._observeStrategy(strategy, observedTrade, graduatedAt);
+        }
+      }
+    }
+
+    const position = this.positions.get(observedTrade?.mint);
+    if (!position || !Number.isFinite(observedTrade.price) || observedTrade.price <= 0) {
       return;
     }
     if (position.status !== 'OPEN') return;
-    if (trade.market === 'PUMP_AMM') {
-      const token = this.store.getToken(trade.mint);
-      if (!token?.graduated_at || trade.timestampMs < token.graduated_at) return;
+    if (observedTrade.market === 'PUMP_AMM') {
+      const token = this.store.getToken(observedTrade.mint);
+      if (!token?.graduated_at || observedTrade.timestampMs < token.graduated_at) return;
       if (position.entryPrice > 0) {
-        const ratio = trade.price / position.entryPrice;
+        const ratio = observedTrade.price / position.entryPrice;
         if (ratio < 0.05 || ratio > 20) return;
       }
-    } else if (trade.market !== 'PUMP_BONDING_CURVE') return;
+    } else if (observedTrade.market !== 'PUMP_BONDING_CURVE') return;
 
-    const highest = Math.max(Number(position.highestPrice) || 0, trade.price);
-    position.lastObservedPrice = trade.price;
+    const highest = Math.max(Number(position.highestPrice) || 0, observedTrade.price);
+    position.lastObservedPrice = observedTrade.price;
     if (highest !== position.highestPrice) {
       position.highestPrice = highest;
       this.store.updateLivePosition(position.id, { highestPrice: highest });
     }
     if (!(position.entryPrice > 0)) return;
-    const drawdownPct = ((trade.price / highest) - 1) * 100;
-    if (this.config.trailingStopPct > 0
-      && drawdownPct <= -this.config.trailingStopPct) {
-      this._requestExit(position, 'TRAILING_IMMEDIATE', trade.price);
+    this._evaluatePositionExit(position, observedTrade.timestampMs, observedTrade.price);
+  }
+
+  advanceTime(now = this.now()) {
+    for (const states of this.detectors.values()) {
+      for (const [mint, state] of states) {
+        if (state.candidate && now > state.candidate.expiresAt) state.candidate = null;
+        if (!state.candidate && now - state.lastTimestampMs > 60_000) states.delete(mint);
+      }
     }
+    for (const position of this.positions.values()) {
+      if (position.status === 'OPEN' && position.lastObservedPrice > 0) {
+        this._evaluatePositionExit(position, now, position.lastObservedPrice);
+      }
+    }
+    this.trackedMints(now);
   }
 
   async stop() {
@@ -279,7 +284,13 @@ class LiveTradingManager {
   }
 
   _updatePositionDecision(position, actionStatus, actionReason = null) {
-    if (position.primaryDecisionId) {
+    if (position.strategyDecisionId) {
+      this.store.updateLiveStrategyDecision(
+        position.strategyDecisionId,
+        actionStatus,
+        actionReason,
+      );
+    } else if (position.primaryDecisionId) {
       this.store.updatePrimaryLiveDecision(
         position.primaryDecisionId,
         actionStatus,
@@ -295,11 +306,147 @@ class LiveTradingManager {
     return fs.existsSync(path.resolve(this.config.killSwitchFile));
   }
 
+  _trackingEnabled() {
+    // DISABLED is execution-disabled, not observation-disabled. Keep recording
+    // strategy matches so a safety-locked deployment still produces evidence.
+    return this.strategies.size > 0;
+  }
+
+  _maxTrackingAgeMs() {
+    return Math.max(0, ...[...this.strategies.values()]
+      .map((strategy) => Number(strategy.trackingAgeMs) || 0));
+  }
+
+  _acceptAmmPrice(trade) {
+    const settings = this.config.ammPriceContinuity || {
+      minRatio: 0.2,
+      maxRatio: 5,
+      resetAfterMs: 15_000,
+    };
+    const current = this.ammPriceStates.get(trade.mint);
+    if (!current || trade.timestampMs - current.at > settings.resetAfterMs) {
+      this.ammPriceStates.set(trade.mint, { price: trade.price, at: trade.timestampMs });
+      return true;
+    }
+    const ratio = trade.price / current.price;
+    if (ratio < settings.minRatio || ratio > settings.maxRatio) return false;
+    current.price = trade.price;
+    current.at = trade.timestampMs;
+    return true;
+  }
+
+  _observeStrategy(strategy, trade, graduatedAt) {
+    if (!(graduatedAt > 0) || trade.timestampMs < graduatedAt
+      || trade.timestampMs - graduatedAt > strategy.trackingAgeMs) return;
+    const states = this.detectors.get(strategy.id);
+    let state = states.get(trade.mint);
+    if (!state) {
+      state = { prices: [], candidate: null, dropReady: true, lastTimestampMs: 0 };
+      states.set(trade.mint, state);
+    }
+    if (state.lastTimestampMs && trade.timestampMs < state.lastTimestampMs) return;
+    state.lastTimestampMs = trade.timestampMs;
+    state.prices.push({ timestampMs: trade.timestampMs, price: trade.price });
+    const cutoff = trade.timestampMs - strategy.windowMs;
+    while (state.prices.length && state.prices[0].timestampMs < cutoff) state.prices.shift();
+    let peak = state.prices[0];
+    for (const row of state.prices) if (row.price > peak.price) peak = row;
+    const rollingDropPct = ((trade.price / peak.price) - 1) * 100;
+    if (rollingDropPct > -strategy.dropMinPct) state.dropReady = true;
+    if (rollingDropPct < -strategy.dropMaxPct) state.dropReady = false;
+
+    if (state.candidate) {
+      const candidate = state.candidate;
+      if (trade.timestampMs > candidate.expiresAt) {
+        state.candidate = null;
+      } else {
+        if (trade.price < candidate.lowPrice) {
+          candidate.lowPrice = trade.price;
+          candidate.lowAt = trade.timestampMs;
+        }
+        const dropPct = ((candidate.lowPrice / candidate.peakPrice) - 1) * 100;
+        const reboundPct = ((trade.price / candidate.lowPrice) - 1) * 100;
+        if (dropPct < -strategy.dropMaxPct) {
+          state.candidate = null;
+          state.dropReady = false;
+        } else if (reboundPct >= strategy.reboundMinPct) {
+          state.candidate = null;
+          state.dropReady = false;
+          if (reboundPct <= strategy.reboundMaxPct) {
+            this._emitStrategySignal(strategy, trade, graduatedAt, candidate, dropPct, reboundPct);
+          }
+        }
+      }
+    }
+
+    if (!state.candidate && state.dropReady
+      && rollingDropPct <= -strategy.dropMinPct && rollingDropPct >= -strategy.dropMaxPct) {
+      state.candidate = {
+        peakPrice: peak.price,
+        peakAt: peak.timestampMs,
+        lowPrice: trade.price,
+        lowAt: trade.timestampMs,
+        expiresAt: trade.timestampMs + strategy.reboundTimeoutMs,
+      };
+      state.dropReady = false;
+      this.metrics.candidates += 1;
+    }
+  }
+
+  _emitStrategySignal(strategy, trade, graduatedAt, candidate, dropPct, reboundPct) {
+    const episodeId = `${strategy.id}:${trade.mint}:FIRST`;
+    this.metrics.evaluated += 1;
+    this.metrics.matched += 1;
+    this.metrics.signals += 1;
+    const decision = this.store.recordLiveStrategyDecision({
+      strategyId: strategy.id,
+      episodeId,
+      timestampMs: trade.timestampMs,
+      receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+      mint: trade.mint,
+      symbol: this.tracked.get(trade.mint)?.symbol || null,
+      ruleVersion: LIVE_RULE_VERSION,
+      market: 'PUMP_AMM',
+      referencePrice: trade.price,
+      features: {
+        migratedAt: graduatedAt,
+        migrationAgeMs: trade.timestampMs - graduatedAt,
+        peakAt: candidate.peakAt,
+        lowAt: candidate.lowAt,
+        dropPct,
+        reboundPct,
+        windowMs: strategy.windowMs,
+      },
+      ruleMatched: true,
+      rejectionReasons: [],
+      mode: this.mode,
+      actionStatus: this.mode === 'DISABLED' ? 'MATCHED_DISABLED' : 'QUEUED',
+    });
+    if (!decision?.inserted || this.mode === 'DISABLED' || this.stopping) return;
+    const event = {
+      strategyId: strategy.id,
+      episodeId,
+      mint: trade.mint,
+      symbol: this.tracked.get(trade.mint)?.symbol || null,
+      price: trade.price,
+      slot: trade.slot,
+      timestampMs: trade.timestampMs,
+      receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+      market: 'PUMP_AMM',
+    };
+    this.entryQueue = this.entryQueue
+      .then(() => this._enter(decision, event))
+      .catch((error) => this._rememberError(error));
+    this._track(this.entryQueue);
+  }
+
   _riskReason(event) {
     if (this._killSwitchActive()) return 'KILL_SWITCH';
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
+    const strategy = this.strategies.get(event.strategyId);
+    const maxSignalAgeMs = strategy?.maxSignalAgeMs || this.config.maxSignalAgeMs;
     if (Number.isFinite(receivedAt)
-      && this.now() - receivedAt > this.config.maxSignalAgeMs) return 'STALE_SIGNAL';
+      && this.now() - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
     if (this.positions.has(event.mint)) return 'ACTIVE_MINT';
     if (this.positions.size >= this.config.maxConcurrentPositions) return 'MAX_POSITIONS';
     const last = this.store.lastLivePositionForMint(event.mint);
@@ -311,33 +458,37 @@ class LiveTradingManager {
 
   async _enter(decision, event) {
     if (this.stopping) return;
+    const strategy = this.strategies.get(event.strategyId);
+    if (!strategy) return;
     const riskReason = this._riskReason(event);
     if (riskReason) {
       this.metrics.riskRejected += 1;
-      this.store.updatePrimaryLiveDecision(decision.id, 'RISK_REJECTED', riskReason);
+      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', riskReason);
       return;
     }
 
     let position;
     try {
       position = this.store.createLivePosition({
-        primaryDecisionId: decision.id,
-        signalId: event.signalId,
-        sourceType: 'PRIMARY_THRESHOLD',
+        strategyDecisionId: decision.id,
+        strategyId: strategy.id,
+        signalId: null,
+        sourceType: strategy.id,
         mint: event.mint,
         triggerWallet: null,
         mode: this.mode,
         status: 'OPENING',
-        positionSol: this.config.positionSizeSol,
-        entryMarket: 'PUMP_BONDING_CURVE',
+        positionSol: strategy.positionSizeSol,
+        entryMarket: 'PUMP_AMM',
         entryPrice: event.price,
       });
       position.tokenAmountRaw = null;
       position.openedAt = null;
+      position.strategy = strategy;
       this.positions.set(position.mint, position);
     } catch (error) {
       this.metrics.riskRejected += 1;
-      this.store.updatePrimaryLiveDecision(decision.id, 'RISK_REJECTED', 'ACTIVE_MINT');
+      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', 'ACTIVE_MINT');
       return;
     }
 
@@ -346,20 +497,20 @@ class LiveTradingManager {
     try {
       let result;
       if (this.mode === 'DRY_RUN') {
-        if (!(event.price > 0)) throw new Error('Missing Primary signal price for simulation');
+        if (!(event.price > 0)) throw new Error('Missing PumpSwap signal price for simulation');
         const raw = BigInt(Math.max(
           1,
-          Math.round((this.config.positionSizeSol / event.price) * 1e6),
+          Math.round((strategy.positionSizeSol / event.price) * 1e6),
         ));
         result = {
-          signature: `DRY-PRIMARY-${decision.id}`,
-          venue: 'PUMP_BONDING_CURVE',
+          signature: `DRY-${strategy.id}-${decision.id}`,
+          venue: 'PUMP_AMM',
           tokenAmountRaw: raw.toString(),
           expectedPrice: event.price,
           execution: {
             version: 2,
-            buyMode: 'DRY_RUN_FIXED_SOL',
-            positionSol: this.config.positionSizeSol,
+            buyMode: 'DRY_RUN_PUMP_AMM_FIXED_SOL',
+            positionSol: strategy.positionSizeSol,
             signalSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
             readCommitment: this.config.readCommitment || 'processed',
             confirmationCommitment: this.config.confirmationCommitment
@@ -368,12 +519,11 @@ class LiveTradingManager {
           },
         };
       } else {
-        result = await this.executor.buy({
+        result = await this.executor.buyAmm({
           mint: event.mint,
-          solAmount: this.config.positionSizeSol,
+          solAmount: strategy.positionSizeSol,
           referencePrice: event.price,
-          maxPriceJumpPct: this.config.maxEntryPriceJumpPct,
-          signalSlot: event.slot,
+          maxPriceJumpPct: strategy.maxEntryPriceJumpPct,
         });
       }
       const openedAt = this.now();
@@ -385,12 +535,13 @@ class LiveTradingManager {
       position.openedAt = openedAt;
       this.store.recordLiveOrder({
         positionId: position.id,
-        primaryDecisionId: decision.id,
+        strategyDecisionId: decision.id,
+        strategyId: strategy.id,
         mint: position.mint,
         side: 'BUY',
         venue: result.venue,
         attempt: 1,
-        requestedSol: this.config.positionSizeSol,
+        requestedSol: strategy.positionSizeSol,
         requestedTokenRaw: result.tokenAmountRaw,
         status: 'CONFIRMED',
         signature: result.signature,
@@ -407,7 +558,7 @@ class LiveTradingManager {
         highestPrice: position.highestPrice,
         openedAt,
       });
-      this.store.updatePrimaryLiveDecision(decision.id, 'OPEN', null);
+      this.store.updateLiveStrategyDecision(decision.id, 'OPEN', null);
       this.metrics.entries += 1;
       this.metrics.lastActionAt = openedAt;
       this._armPositionExit(position);
@@ -417,12 +568,13 @@ class LiveTradingManager {
       const confirmationUnknown = Boolean(error.signature) && !transactionFailed;
       const orderId = this.store.recordLiveOrder({
         positionId: position.id,
-        primaryDecisionId: decision.id,
+        strategyDecisionId: decision.id,
+        strategyId: strategy.id,
         mint: position.mint,
         side: 'BUY',
-        venue: 'PUMP_BONDING_CURVE',
+        venue: 'PUMP_AMM',
         attempt: 1,
-        requestedSol: this.config.positionSizeSol,
+        requestedSol: strategy.positionSizeSol,
         status: confirmationUnknown ? 'CONFIRMATION_UNKNOWN' : 'FAILED',
         signature: error.signature,
         error: errorText(error),
@@ -441,7 +593,7 @@ class LiveTradingManager {
           entryError: errorText(error),
           exitReason: 'ENTRY_CONFIRMATION_UNKNOWN',
         });
-        this.store.updatePrimaryLiveDecision(
+        this.store.updateLiveStrategyDecision(
           decision.id,
           'ENTRY_CONFIRMATION_UNKNOWN',
           errorText(error),
@@ -457,7 +609,7 @@ class LiveTradingManager {
         entryError: errorText(error),
         exitReason: transactionFailed ? 'ENTRY_TRANSACTION_FAILED' : 'ENTRY_REJECTED',
       });
-      this.store.updatePrimaryLiveDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
+      this.store.updateLiveStrategyDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
       this.positions.delete(position.mint);
       this.metrics.entryFailures += 1;
       this.metrics.lastActionAt = failedAt;
@@ -570,7 +722,8 @@ class LiveTradingManager {
       this.metrics.entries += 1;
       this.metrics.entryRecoveries += 1;
       this.metrics.lastActionAt = reconciledAt;
-      if (reconciledAt - openedAt >= this.config.maxHoldMs) {
+      const strategy = position.strategy || this.strategies.get(position.strategyId);
+      if (reconciledAt - openedAt >= (strategy?.maxHoldMs || this.config.maxHoldMs)) {
         this._requestExit(position, 'ENTRY_RECONCILED_MAX_HOLD', null);
       } else {
         this._armPositionExit(position);
@@ -607,14 +760,19 @@ class LiveTradingManager {
   }
 
   _armPositionExit(position) {
+    const strategy = position.strategy || this.strategies.get(position.strategyId);
     const lastPrice = position.lastObservedPrice == null
       ? Number.NaN
       : Number(position.lastObservedPrice);
     const drawdownPct = Number.isFinite(lastPrice) && position.highestPrice > 0
       ? ((lastPrice / position.highestPrice) - 1) * 100
       : 0;
-    if (drawdownPct <= -this.config.trailingStopPct) {
-      this._requestExit(position, 'TRAILING_IMMEDIATE', lastPrice);
+    const peakReturnPct = position.entryPrice > 0 && position.highestPrice > 0
+      ? ((position.highestPrice / position.entryPrice) - 1) * 100
+      : 0;
+    if (peakReturnPct >= (strategy?.trailingActivationPct || 0)
+      && drawdownPct <= -(strategy?.trailingStopPct || 0)) {
+      this._requestExit(position, 'TRAILING_XLEG', lastPrice);
     } else {
       this._scheduleMaxHold(position);
     }
@@ -623,13 +781,32 @@ class LiveTradingManager {
   _scheduleMaxHold(position) {
     if (this.timers.has(position.id)) clearTimeout(this.timers.get(position.id));
     const openedAt = position.openedAt || position.createdAt || this.now();
-    const delay = Math.max(0, openedAt + this.config.maxHoldMs - this.now());
+    const strategy = position.strategy || this.strategies.get(position.strategyId);
+    const delay = Math.max(0, openedAt + (strategy?.maxHoldMs || this.config.maxHoldMs) - this.now());
     const timer = setTimeout(() => {
       this.timers.delete(position.id);
       this._requestExit(position, 'MAX_HOLD', null);
     }, delay);
     if (timer.unref) timer.unref();
     this.timers.set(position.id, timer);
+  }
+
+  _evaluatePositionExit(position, timestampMs, price) {
+    const strategy = position.strategy || this.strategies.get(position.strategyId);
+    if (!strategy || position.status !== 'OPEN' || !(position.entryPrice > 0) || !(price > 0)) return;
+    const ageMs = timestampMs - position.openedAt;
+    const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const peakReturnPct = ((position.highestPrice / position.entryPrice) - 1) * 100;
+    const drawdownPct = ((price / position.highestPrice) - 1) * -100;
+    let reason = null;
+    if (strategy.fastTakeProfitPct > 0 && ageMs <= strategy.fastTakeProfitWindowMs
+      && grossReturnPct >= strategy.fastTakeProfitPct) reason = 'FAST_TAKE_PROFIT';
+    if (!reason && peakReturnPct >= strategy.trailingActivationPct
+      && drawdownPct >= strategy.trailingStopPct) reason = 'TRAILING_XLEG';
+    if (!reason && strategy.lossCheckAtMs > 0 && ageMs >= strategy.lossCheckAtMs
+      && grossReturnPct < 0) reason = 'LOSS_CHECK';
+    if (!reason && ageMs >= strategy.maxHoldMs) reason = 'MAX_HOLD';
+    if (reason) this._requestExit(position, reason, price);
   }
 
   _requestExit(position, reason, observedPrice) {
@@ -654,7 +831,8 @@ class LiveTradingManager {
       try {
         const result = position.mode === 'DRY_RUN'
           ? {
-            signature: `DRY-SELL-${position.primaryDecisionId || position.decisionId}`,
+            signature: `DRY-SELL-${position.strategyDecisionId
+              || position.primaryDecisionId || position.decisionId}`,
             venue: this.store.getToken(position.mint)?.graduated_at
               ? 'PUMP_AMM' : 'PUMP_BONDING_CURVE',
             tokenAmountRaw: position.tokenAmountRaw,
@@ -689,6 +867,8 @@ class LiveTradingManager {
           positionId: position.id,
           decisionId: position.decisionId,
           primaryDecisionId: position.primaryDecisionId,
+          strategyDecisionId: position.strategyDecisionId,
+          strategyId: position.strategyId,
           mint: position.mint,
           side: 'SELL',
           venue: result.venue,
@@ -735,6 +915,8 @@ class LiveTradingManager {
           positionId: position.id,
           decisionId: position.decisionId,
           primaryDecisionId: position.primaryDecisionId,
+          strategyDecisionId: position.strategyDecisionId,
+          strategyId: position.strategyId,
           mint: position.mint,
           side: 'SELL',
           attempt,

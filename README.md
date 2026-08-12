@@ -1,10 +1,10 @@
-# Pump.fun Flow Acceleration Research + Primary Signal Executor
+# Pump.fun Flow Acceleration Research + Multi-Strategy Executor
 
-这是一个研究信号严格限定在 **Pump.fun Bonding Curve（毕业前）** 的全量采集项目，并带有默认关闭的 Primary 信号实盘执行模块。研究主线验证：
+这是一个同时采集 Pump.fun 毕业前 Bonding Curve 与所需毕业后 PumpSwap 成交的研究项目，并带有默认关闭、按策略隔离的实盘执行模块。研究主线验证：
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
 
-全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。实盘模块只使用明确的 Primary Flow 规则，不使用 Smart Wallet 触发、RSI、EMA、MACD、社交数据、Holder 变化、KOL 或 AI 评分；默认 `DISABLED`，不会读取私钥或提交交易。
+全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前实盘只使用毕业后 PumpSwap 深跌反弹规则，不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、Holder 变化、KOL 或 AI 评分；默认 `DISABLED`，不会读取私钥或提交交易。
 
 ## 数据链路
 
@@ -70,9 +70,10 @@ W3 = T-2s ~ T
 - `signal_returns`：1/2/3/5/8/10/15/20/30/60 秒 Raw Return、确定性成本后的 Net Return、每个 horizon 的观测 lag、`COMPLETE/RIGHT_CENSORED` 标签状态，以及 5/10/30 秒 MFE/MAE。某个 horizon 后首笔成交超过 `FLOW_LABEL_MAX_OBSERVATION_LAG_MS`，或 MFE/MAE 时间窗没有完整观测覆盖时，不会用旧价格或 0% 补值。
 - `smart_wallet_events`：两个研究钱包的成交、Curve、AGE、最近 Flow Signal 与时间差。
 - `smart_wallet_positions`：按实际 Token 数量维护的 Smart Wallet 仓位；买卖被区分为 `OPEN / ADD / REDUCE / CLOSE / SELL`。
-- `primary_live_decisions`：每个 Primary 信号批次的 W3 NetFlow、Buyers、规则结果、风控拒绝和执行状态。
+- `live_strategy_decisions`：按 `strategy_id` 保存每个实盘策略的 Episode、特征、规则结果、风控拒绝和执行状态。
+- `primary_live_decisions`：仅保留旧 Primary 实盘判定的历史兼容数据；新策略不再写入。
 - `smart_open_decisions`：仅用于兼容旧版 Smart OPEN 历史数据；新策略不再写入。
-- `live_positions` / `live_orders`：模拟或实盘的仓位、每次买卖尝试、签名、失败原因与退出原因。
+- `live_positions` / `live_orders`：按 `strategy_id` 保存模拟或实盘仓位、每次买卖尝试、签名、失败原因与退出原因。
 - `smart_open_shadow_positions`：独立的真实 Smart Wallet OPEN Shadow D0/D1/D2 样本；不与旧回踩或 Primary Shadow 混表。
 - `launch_quality_observations` / `launch_quality_snapshots`：Launch 前60秒结构、首次回踩参考点和未来收益标签。
 - `launch_pullback_shadow_positions`：独立的 Launch 首次回踩 Shadow F1/F2/F3 仓位；不与 Observer E 或任何旧 Shadow 混表。
@@ -274,34 +275,34 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 模拟仓位保存在 `flow_first_shadow_positions`，接口为 `GET /api/flow-first-shadow`。Dashboard 按独立 Episode/Mint 显示扣除完整0.05 SOL成本模型后的平均与中位净收益、胜率、PF、实际入场跳价、MFE、最大赢家、Top5盈利贡献、去掉Top5后的平均收益以及大赢家兑现率。该路径没有执行器、不读取私钥，也永不签名或发送链上交易。
 
-## Primary 信号模拟与实盘
+## 多策略实盘框架
 
-实时入场规则固定为：
+旧的 Primary Early 实盘入口已经移除，Primary 信号只继续用于研究和历史 Shadow。当前唯一实盘候选来自最近24小时样本中表现相对稳定的毕业后深跌反弹组合：
 
 ```text
-signal_variant = primary_early_5_4
-AND is_primary = true
-AND W3 NetFlow >= 5 SOL
-AND W3 unique Buyers >= 4
+毕业后 120 秒内的 PumpSwap 成交
+AND 1 秒窗口从局部高点下跌 25%～35%
+AND 低点在 1 秒内反弹 2%～5%
+AND 每个 Mint 只取第一个 Episode
 ```
 
-研究引擎仍以 `FLOW_MIN_NET_W3_SOL=1` 保存宽口径 `primary_3w`。实盘门槛在同一候选周期内独立观察，因此即使早期研究信号已经发出，后续第一次达到 `5 SOL / 4 Buyers` 仍会触发；每个候选周期只允许一次均衡组实盘判定，并写入 `primary_live_decisions`。规则未命中、执行关闭和风控拒绝样本都会保留；Smart Wallet 事件继续完整采集，只触发独立的 Shadow A/B 与 D，不触发真实开仓。
+实盘决策统一写入 `live_strategy_decisions`，仓位和订单同时保存 `strategy_id`。接口和 Dashboard 可按策略筛选，因此后续增加多个实盘策略时，可以分别设置开关与单笔 SOL 数额，历史数据不会混在一起。当前策略的单笔金额为 `FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL=0.05`；没有每日笔数上限，也没有当日累计亏损自动停机，但安全锁、钱包最低 SOL 保留额、单 Mint 单仓和全局并发限制仍然有效。
 
 执行模块有三种模式：
 
 - `DISABLED`：当前强制模式，只保存规则判定。
 - `DRY_RUN`：只有先显式解除 `FLOW_LIVE_TRADING_SAFETY_LOCK`，再设置 `FLOW_LIVE_TRADING_ENABLED=true` 并保留 `FLOW_LIVE_DRY_RUN=true` 才能启用。
-- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写 `FLOW_LIVE_POSITION_SOL`。
+- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写当前策略的 `FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL`。
 
-本次A/B研究发布中，`FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
+`FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-实盘买卖使用 Pump.fun 官方 `@pump-fun/pump-sdk` 的 `buyV2/sellV2` 指令。币在持仓中毕业时，卖出会切换到官方 PumpSwap SDK。程序限制单 Mint 单仓、并发仓位、每日投入、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制，旧的单一 `FLOW_LIVE_SLIPPAGE_PCT` 不再使用。
+当前实盘策略直接使用官方 PumpSwap SDK 买卖。买入使用固定 SOL 输入，`0.05 SOL` 是硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制单 Mint 单仓、并发仓位、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制。
 
-当前实盘卖出策略固定为 `PRIMARY_IMMEDIATE_TRAILING`：链上买入确认后以实际入场价作为首个峰值，确认前观察到的价格不会计入持仓峰值；之后价格从峰值回撤7.5%时卖出，60秒仍未退出则强制卖出。对应配置为 `FLOW_LIVE_PRIMARY_TRAILING_STOP_PCT` 和 `FLOW_LIVE_PRIMARY_MAX_HOLD_MS`，旧版 Smart SELL、止损和止盈变量不再参与决策。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
+当前卖出策略为 `XLEG`：前5秒达到 `+18%` 立即止盈；否则在盈利 `+8%` 后激活移动止盈，峰值回撤 `3%` 卖出；持有6秒仍为亏损则退出，15秒强制兜底。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
 
 买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时先查询签名历史和交易钱包的Token余额，只有确认持有Token后才恢复仓位。仍无法确认时保留 `ENTRY_CONFIRMATION_UNKNOWN` 阻止同 Mint 再开仓，但不会盲目发送卖出重试。服务重启时会自动重新核对这类历史卡仓。
 
-先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`primary_live_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
+先至少运行一段时间 DRY RUN 并核对 `GET /api/live-trading`、`live_strategy_decisions`、`live_positions` 和 `live_orders`，再启用真实签名。私钥只从环境变量读取，不写数据库、不通过 Dashboard 返回、也不会打印到日志。
 
 ## 部署
 
@@ -325,3 +326,40 @@ sudo systemctl --no-pager --full status flow-acceleration
 ```
 
 也可以在已经配置好 `.env` 时使用 `START_SERVICE=1 sudo -E bash deploy/install.sh`，让安装脚本完成后立即启动并显示服务状态。
+
+### 每日 08:00 自动导出最近 24 小时并上传腾讯 COS
+
+每日归档不再调用 `better-sqlite3 backup()` 复制整个历史库，也不会执行任何 WAL checkpoint。`scripts/export-research-window.js` 会在一个一致性读事务内只查询源库，把最近 24 小时数据直接写入小型归档库；历史元数据表完整保留，源服务无需停止或重启。导出包包含 SQLite、schema、时间边界与逐表行数、服务状态、最近日志和版本信息，并在上传前执行 `quick_check`、tar 完整性检查及 SHA-256。
+
+先安装腾讯官方 COSCLI，然后安装 timer：
+
+```bash
+sudo bash deploy/install-daily-export.sh /opt/flow-acceleration
+sudoedit /etc/flow-acceleration/backup-cos.env
+```
+
+新服务器也可以在主安装时直接加 `INSTALL_DAILY_EXPORT=1`，一次安装程序服务和每日 timer（仍需预先安装 COSCLI）：
+
+```bash
+INSTALL_DAILY_EXPORT=1 sudo -E bash deploy/install.sh /opt/flow-acceleration
+```
+
+如果程序实际位于 `/home/ubuntu/Flow-Acceleration`，把上面安装命令的最后一个参数换成该路径即可。
+
+服务器凭据文件由服务用户持有、权限为 `0600`，只在服务器填写，绝不能提交。模板已经预填：
+
+- Bucket：`guigu-1403019446`
+- Region：`na-siliconvalley`
+- Endpoint：`cos.na-siliconvalley.myqcloud.com`
+- COS 路径：`flow-acceleration/daily/YYYY/MM/DD/`
+- 本地保留：7 天
+
+填写 `FLOW_BACKUP_COS_SECRET_ID` 与 `FLOW_BACKUP_COS_SECRET_KEY` 后，先手动验证一次，再查看下一次计划时间：
+
+```bash
+sudo systemctl start flow-acceleration-backup.service
+sudo journalctl -u flow-acceleration-backup.service -n 100 --no-pager
+systemctl list-timers flow-acceleration-backup.timer --all
+```
+
+Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，即使服务器位于硅谷也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予该 Bucket 前缀所需的上传和查询权限。

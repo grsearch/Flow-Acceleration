@@ -117,6 +117,7 @@ function createRuntime(runtimeConfig = config) {
       .filter((mint) => store.getToken(mint)?.graduated_at);
     stream.setAmmMints([...new Set([
       ...graduatedPending,
+      ...trader.trackedMints(now),
       ...migratedDropReboundShadow.trackedMints(now),
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
@@ -162,7 +163,6 @@ function createRuntime(runtimeConfig = config) {
     const saved = persistSignal(signal, 'PRIMARY_THRESHOLD_SIGNAL');
     if (!saved) return;
     signalShadow.onSignal(saved);
-    if (saved.signalVariant === runtimeConfig.liveTrading.signalVariant) trader.onSignal(saved);
   });
 
   stream.on('transaction', (transaction, context) => {
@@ -188,6 +188,7 @@ function createRuntime(runtimeConfig = config) {
           const token = store.recordComplete(event);
           engine.handleComplete(event);
           migratedDropReboundShadow.onGraduated(token || event);
+          trader.onGraduated(token || event);
           graduationHoldShadow.onGraduated(token || event);
           refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
@@ -196,6 +197,7 @@ function createRuntime(runtimeConfig = config) {
           const token = store.recordMigration(event);
           engine.handleComplete({ ...event, completedAt: event.migratedAt });
           migratedDropReboundShadow.onGraduated(token || event);
+          trader.onGraduated(token || event);
           graduationHoldShadow.onGraduated(token || event);
           refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
@@ -266,11 +268,9 @@ function createRuntime(runtimeConfig = config) {
     if (runtimeConfig.liveTrading.safetyLock) {
       console.log('Live trading safety lock: ON. Signing and chain submission are disabled.');
     }
-    console.log(
-      `Live entry: Primary W3 net>=${runtimeConfig.liveTrading.minNetFlowW3Sol}SOL, `
-      + `buyers>=${runtimeConfig.liveTrading.minUniqueBuyersW3}; `
-      + `trailing drawdown=${runtimeConfig.liveTrading.trailingStopPct}% from entry.`,
-    );
+    console.log(`Live strategies: ${runtimeConfig.liveTrading.strategies.map((strategy) => (
+      `${strategy.id}=${strategy.positionSizeSol}SOL/${strategy.market}`
+    )).join(', ')}; legacy Primary live entry=retired.`);
     console.log(
       `Shadow entry cohorts: ${runtimeConfig.signalShadow.profiles.map((profile) => (
         `${profile.id}=${profile.minNetFlowW3Sol}SOL/${profile.minUniqueBuyersW3}buyers`
@@ -353,6 +353,7 @@ function createRuntime(runtimeConfig = config) {
       migratedDropReboundShadow.advanceTime(now);
       bondingCurveMomentumShadow.advanceTime(now);
       graduationHoldShadow.advanceTime(now);
+      trader.advanceTime(now);
       refreshAmmSubscriptions(now);
     }, 1_000);
 

@@ -183,6 +183,9 @@ class ResearchServer {
         runtime,
         monitoredWallets: this.config.smartWallets,
         ...this.store.liveTradingDashboard({
+          strategyId: request.query.strategyId
+            || runtime.strategies?.[0]?.id
+            || null,
           positionLimit: numeric(request.query.positionLimit, 30),
           orderLimit: numeric(request.query.orderLimit, 30),
           decisionLimit: numeric(request.query.decisionLimit, 30),

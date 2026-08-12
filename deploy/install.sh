@@ -48,6 +48,7 @@ rsync -a \
   --exclude='node_modules' \
   --exclude='data/*.db*' \
   --exclude='data/archive/*' \
+  --exclude='data/exports/*' \
   --exclude='logs/*' \
   --exclude='.env' \
   "$PROJECT_DIR/" "$INSTALL_DIR/"
@@ -79,6 +80,11 @@ if command -v systemd-analyze >/dev/null 2>&1; then
 fi
 systemctl enable "$SERVICE_NAME"
 
+if [[ "${INSTALL_DAILY_EXPORT:-0}" == "1" ]]; then
+  SERVICE_USER="$SERVICE_USER" SERVICE_GROUP="$SERVICE_GROUP" \
+    NODE_BIN="$NODE_BIN" bash "$INSTALL_DIR/deploy/install-daily-export.sh" "$INSTALL_DIR"
+fi
+
 if [[ "${START_SERVICE:-0}" == "1" ]]; then
   if ! grep -Eq '^(FLOW_GRPC_TOKEN|HELIUS_LASERSTREAM_TOKEN|HELIUS_API_KEY)=.+' "$INSTALL_DIR/.env"; then
     echo "START_SERVICE=1 requested, but no Helius token is configured in $INSTALL_DIR/.env"
@@ -93,3 +99,6 @@ echo "1. Fill FLOW_GRPC_ENDPOINTS and FLOW_GRPC_TOKEN in $INSTALL_DIR/.env"
 echo "2. systemctl restart $SERVICE_NAME"
 echo "3. systemctl --no-pager --full status $SERVICE_NAME"
 echo "4. Open http://<server>:3001"
+if [[ "${INSTALL_DAILY_EXPORT:-0}" != "1" ]]; then
+  echo "5. Optional daily COS export: INSTALL_DAILY_EXPORT=1 sudo -E bash deploy/install.sh $INSTALL_DIR"
+fi

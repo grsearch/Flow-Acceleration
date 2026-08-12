@@ -26,8 +26,11 @@ const {
   pumpIdl,
 } = require('@pump-fun/pump-sdk');
 const {
+  OFFLINE_PUMP_AMM_PROGRAM,
   OnlinePumpAmmSdk,
   PUMP_AMM_SDK,
+  PUMP_AMM_PROGRAM_ID,
+  buyQuoteInput: quoteAmmBuy,
   canonicalPumpPoolPda,
 } = require('@pump-fun/pump-swap-sdk');
 const BN = require('bn.js');
@@ -99,6 +102,24 @@ function replaceBuyV2WithExactQuoteIn(instructions, spendableQuoteIn, minTokensO
     });
   });
   if (!replaced) throw new Error('Pump buy instruction was not generated');
+  return output;
+}
+
+function replaceAmmBuyWithExactQuoteIn(instructions, spendableQuoteIn, minBaseAmountOut) {
+  const index = instructions.findIndex((instruction) => (
+    instruction.programId.equals(PUMP_AMM_PROGRAM_ID) && instruction.data.length > 8
+  ));
+  if (index < 0) throw new Error('PumpSwap buy instruction was not generated');
+  const output = [...instructions];
+  output[index] = new TransactionInstruction({
+    programId: output[index].programId,
+    keys: output[index].keys,
+    data: OFFLINE_PUMP_AMM_PROGRAM.coder.instruction.encode('buyExactQuoteIn', {
+      spendableQuoteIn: new BN(u64(spendableQuoteIn, 'spendableQuoteIn').toString()),
+      minBaseAmountOut: new BN(u64(minBaseAmountOut, 'minBaseAmountOut').toString()),
+      trackVolume: { 0: true },
+    }),
+  });
   return output;
 }
 
@@ -559,6 +580,144 @@ class PumpTradeExecutor {
     }
   }
 
+  async buyAmm({
+    mint: mintValue,
+    solAmount,
+    referencePrice,
+    maxPriceJumpPct,
+  }) {
+    const startedAt = Date.now();
+    const execution = {
+      version: 1,
+      buyMode: 'PUMP_AMM_FIXED_SOL_HARD_CAP',
+      hardSpendCap: true,
+      positionSol: solAmount,
+      slippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
+      readCommitment: this.readCommitment,
+      confirmationCommitment: this.confirmationCommitment,
+      skipPreflight: false,
+      startedAt,
+      timelineMs: {},
+    };
+    const mark = (name) => {
+      execution.timelineMs[name] = Date.now() - startedAt;
+    };
+
+    try {
+      const mint = new PublicKey(mintValue);
+      const tokenProgram = await this._tokenProgram(mint);
+      const balanceBefore = await this._tokenBalanceRaw(mint, tokenProgram);
+      if (balanceBefore > 0n) {
+        throw errorWithCode(
+          'Trading wallet already holds this mint',
+          'WALLET_ALREADY_HOLDS_MINT',
+        );
+      }
+
+      const spendLamports = BigInt(Math.round(solAmount * LAMPORTS_PER_SOL));
+      const reserveLamports = Math.round(this.config.minWalletReserveSol * LAMPORTS_PER_SOL);
+      const [walletLamports, state, latestBlockhash] = await Promise.all([
+        this.connection.getBalance(this.signer.publicKey, this.readCommitment),
+        this.onlineAmm.swapSolanaState(
+          canonicalPumpPoolPda(mint, NATIVE_MINT),
+          this.signer.publicKey,
+        ),
+        this.connection.getLatestBlockhash(this.readCommitment),
+      ]);
+      mark('state_and_blockhash_ready_ms');
+      if (!state.baseMint.equals(mint) || !state.pool.quoteMint.equals(NATIVE_MINT)) {
+        throw errorWithCode('PumpSwap pool mint direction is invalid', 'INVALID_AMM_POOL');
+      }
+      if (walletLamports - Number(spendLamports) < reserveLamports) {
+        throw errorWithCode('Wallet reserve guard rejected entry', 'WALLET_RESERVE');
+      }
+
+      const spend = new BN(spendLamports.toString());
+      const quoted = quoteAmmBuy({
+        quote: spend,
+        slippage: 0,
+        baseReserve: state.poolBaseAmount,
+        quoteReserve: state.poolQuoteAmount,
+        virtualQuoteReserves: state.pool.virtualQuoteReserves,
+        globalConfig: state.globalConfig,
+        baseMintAccount: state.baseMintAccount,
+        baseMint: state.baseMint,
+        coinCreator: state.pool.coinCreator,
+        creator: state.pool.creator,
+        feeConfig: state.feeConfig,
+      });
+      const minBaseOut = minimumTokensOut(
+        quoted.base,
+        this.config.buySlippagePct ?? this.config.slippagePct,
+      );
+      if (minBaseOut.lten(0)) throw errorWithCode('PumpSwap quote returned zero tokens', 'ZERO_QUOTE');
+      const decimals = Number(state.baseMintAccount.decimals ?? 6);
+      const quotedTokens = Number(quoted.base.toString()) / (10 ** decimals);
+      const expectedPrice = quotedTokens > 0 ? solAmount / quotedTokens : null;
+      execution.spendableQuoteRaw = spendLamports.toString();
+      execution.quotedTokenRaw = quoted.base.toString();
+      execution.minimumTokenRaw = minBaseOut.toString();
+      execution.quotedPrice = expectedPrice;
+      mark('quote_ready_ms');
+      if (Number.isFinite(referencePrice) && referencePrice > 0
+        && Number.isFinite(expectedPrice) && maxPriceJumpPct >= 0) {
+        const jumpPct = ((expectedPrice / referencePrice) - 1) * 100;
+        execution.referencePrice = referencePrice;
+        execution.priceJumpPct = jumpPct;
+        if (jumpPct > maxPriceJumpPct) {
+          throw errorWithCode(
+            `Entry price moved ${jumpPct.toFixed(2)}%, above ${maxPriceJumpPct}%`,
+            'PRICE_JUMP',
+          );
+        }
+      }
+
+      // Build the canonical account list, then switch only the instruction payload
+      // to buy_exact_quote_in. This spends the requested SOL budget exactly while
+      // the configured tolerance controls only the minimum token amount received.
+      const baseInstructions = await PUMP_AMM_SDK.buyInstructions(state, minBaseOut, spend);
+      const instructions = replaceAmmBuyWithExactQuoteIn(
+        baseInstructions,
+        spendLamports,
+        minBaseOut,
+      );
+      mark('instructions_ready_ms');
+      const signature = await this._send(instructions, { latestBlockhash, onStage: mark });
+      const balanceAfter = await this._tokenBalanceRaw(
+        mint,
+        tokenProgram,
+        this.confirmationCommitment,
+      );
+      const acquired = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
+      if (acquired <= 0n) {
+        const error = errorWithCode(
+          'PumpSwap buy confirmed but no token balance was received',
+          'CONFIRMED_EMPTY',
+        );
+        error.signature = signature;
+        throw error;
+      }
+      const acquiredTokens = Number(acquired) / (10 ** decimals);
+      const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
+      mark('balance_reconciled_ms');
+      mark('total_ms');
+      return {
+        signature,
+        venue: 'PUMP_AMM',
+        tokenAmountRaw: acquired.toString(),
+        quotedTokenAmountRaw: quoted.base.toString(),
+        minimumTokenAmountRaw: minBaseOut.toString(),
+        expectedPrice: filledPrice,
+        quotedPrice: expectedPrice,
+        execution,
+      };
+    } catch (error) {
+      mark('total_ms');
+      error.execution = execution;
+      throw error;
+    }
+  }
+
   async _confirmedSellResult({ mint, tokenProgram, signature, venue, soldRaw }) {
     try {
       const remaining = await this._tokenBalanceRaw(
@@ -667,6 +826,7 @@ module.exports = {
   confirmedTransactionFailure,
   exactQuoteInInstructionData,
   minimumTokensOut,
+  replaceAmmBuyWithExactQuoteIn,
   replaceBuyV2WithExactQuoteIn,
   secretBytes,
 };

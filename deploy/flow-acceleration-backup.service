@@ -1,0 +1,30 @@
+[Unit]
+Description=Flow Acceleration daily 24-hour research export to Tencent COS
+Documentation=file://@INSTALL_DIR@/README.md
+After=network-online.target flow-acceleration.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@INSTALL_DIR@
+EnvironmentFile=@INSTALL_DIR@/.env
+EnvironmentFile=/etc/flow-acceleration/backup-cos.env
+Environment=FLOW_BACKUP_PROJECT_DIR=@INSTALL_DIR@
+Environment=FLOW_BACKUP_NODE_BIN=@NODE_BIN@
+Environment=FLOW_BACKUP_COSCLI_BIN=@COSCLI_BIN@
+ExecStart=/usr/bin/env bash @INSTALL_DIR@/scripts/export-last24h-cos.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=20
+IOWeight=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=@INSTALL_DIR@
+ReadWritePaths=@INSTALL_DIR@/data/exports
+TimeoutStartSec=6h
