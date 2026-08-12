@@ -126,6 +126,60 @@ const guardedLiveTrading = liveTradingGuard(
 );
 const retiredShadowsEnabled = booleanEnv('FLOW_RETIRED_SHADOWS_ENABLED', false);
 
+// Forward-only first-pullback entry experiments. These profiles are consumed by
+// both the observer (causal reference detection) and Shadow F (simulated entry).
+// Keep their IDs immutable so results never merge with the historical 7.5% groups.
+const launchDeepPullbackProfiles = [
+  {
+    id: 'DEEP_D10_R3',
+    cohortId: 'FD10_R3_5S',
+    label: 'FD10-R3 · 回踩10% / 反弹3% / 稳定0.5秒',
+    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D10_R3_PULLBACK_PCT', 10, {
+      min: 0.1, max: 100,
+    }),
+    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D10_R3_REBOUND_PCT', 3, { min: 0 }),
+    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D10_R3_LOW_STABLE_MS', 500, { min: 0 }),
+  },
+  {
+    id: 'DEEP_D12_5_R3',
+    cohortId: 'FD12_5_R3_5S',
+    label: 'FD12.5-R3 · 回踩12.5% / 反弹3% / 稳定0.5秒',
+    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R3_PULLBACK_PCT', 12.5, {
+      min: 0.1, max: 100,
+    }),
+    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R3_REBOUND_PCT', 3, { min: 0 }),
+    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D12_5_R3_LOW_STABLE_MS', 500, { min: 0 }),
+  },
+  {
+    id: 'DEEP_D12_5_R5',
+    cohortId: 'FD12_5_R5_5S',
+    label: 'FD12.5-R5 · 回踩12.5% / 反弹5% / 稳定1秒',
+    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R5_PULLBACK_PCT', 12.5, {
+      min: 0.1, max: 100,
+    }),
+    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R5_REBOUND_PCT', 5, { min: 0 }),
+    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D12_5_R5_LOW_STABLE_MS', 1_000, { min: 0 }),
+  },
+  {
+    id: 'DEEP_D15_R5',
+    cohortId: 'FD15_R5_5S',
+    label: 'FD15-R5 · 回踩15% / 反弹5% / 稳定1秒',
+    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D15_R5_PULLBACK_PCT', 15, {
+      min: 0.1, max: 100,
+    }),
+    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D15_R5_REBOUND_PCT', 5, { min: 0 }),
+    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D15_R5_LOW_STABLE_MS', 1_000, { min: 0 }),
+  },
+].map((profile) => ({
+  ...profile,
+  minNewBuyers: integerEnv('FLOW_LAUNCH_DEEP_MIN_NEW_BUYERS', 2, { min: 0 }),
+  flowWindowMs: integerEnv('FLOW_LAUNCH_DEEP_FLOW_WINDOW_MS', 1_000, { min: 100 }),
+  minWindowNetFlowSol: numberEnv('FLOW_LAUNCH_DEEP_MIN_WINDOW_NET_FLOW_SOL', 0.01, { min: 0 }),
+  maxPullbackPct: numberEnv('FLOW_LAUNCH_DEEP_MAX_PULLBACK_PCT', 25, {
+    min: 0.1, max: 100,
+  }),
+}));
+
 const config = {
   pump: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
@@ -698,6 +752,21 @@ const config = {
         hardStopPct: 15,
       },
     ],
+    // New entry cohorts intentionally do not reuse F1/F2/F3/FT IDs. All four
+    // share the same quality/exit gates so their entry depth is comparable.
+    deepCohorts: launchDeepPullbackProfiles.map((profile) => ({
+      ...profile,
+      profileId: profile.id,
+      minNetFlowSol: numberEnv('FLOW_LAUNCH_DEEP_MIN_NET_FLOW_SOL', 15, { min: 0 }),
+      maxCreatorSharePct: numberEnv('FLOW_LAUNCH_DEEP_MAX_CREATOR_SHARE_PCT', 5, {
+        min: 0, max: 100,
+      }),
+      minBuyers: 0,
+      minRecentBuyers: 0,
+      minRetentionPct: 0,
+      maxTop3SharePct: 100,
+      fixedHoldMs: integerEnv('FLOW_LAUNCH_DEEP_FIXED_HOLD_MS', 5_000, { min: 250 }),
+    })),
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL', 0.05, {
@@ -1249,6 +1318,7 @@ const config = {
       3,
       { min: 0, max: 1_000 },
     ),
+    deepReferenceProfiles: launchDeepPullbackProfiles.map((profile) => ({ ...profile })),
     recentBuyerWindowMs: integerEnv(
       'FLOW_LAUNCH_QUALITY_RECENT_BUYER_WINDOW_MS',
       10_000,

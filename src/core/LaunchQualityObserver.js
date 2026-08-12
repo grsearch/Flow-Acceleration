@@ -63,6 +63,7 @@ function newState(token) {
     returns: new Map(),
     outcomeMfe: new Map(LABEL_HORIZONS_MS.map((horizon) => [horizon, 0])),
     outcomeMae: new Map(LABEL_HORIZONS_MS.map((horizon) => [horizon, 0])),
+    deepReferenceStates: new Map(),
   };
 }
 
@@ -77,6 +78,8 @@ class LaunchQualityObserver {
       launchesObserved: 0,
       snapshotsWritten: 0,
       referencePullbacks: 0,
+      deepReferences: 0,
+      deepRejected: 0,
       labelsCompleted: 0,
       rightCensored: 0,
       lastActionAt: null,
@@ -161,6 +164,16 @@ class LaunchQualityObserver {
           reboundPct: this.config.reboundReferencePct,
           note: 'Reference labels only; they are not entry thresholds.',
         },
+        deepShadowReferences: (this.config.deepReferenceProfiles || []).map((profile) => ({
+          id: profile.id,
+          pullbackPct: profile.pullbackPct,
+          reboundPct: profile.reboundPct,
+          lowStableMs: profile.lowStableMs,
+          minNewBuyers: profile.minNewBuyers,
+          flowWindowMs: profile.flowWindowMs,
+          minWindowNetFlowSol: profile.minWindowNetFlowSol,
+          maxPullbackPct: profile.maxPullbackPct,
+        })),
         research: {
           buyerWindowMs: this.config.recentBuyerWindowMs,
           retentionFloorPct: this.config.retentionFloorPct,
@@ -269,6 +282,7 @@ class LaunchQualityObserver {
     );
     this._recordPumpMilestones(state, timestampMs, price);
     this._observeReferencePullback(state, timestampMs, price, replay);
+    this._observeDeepReferencePullbacks(state, timestampMs, price, replay);
     this._updateOutcomeExcursions(state, timestampMs, price);
   }
 
@@ -347,6 +361,122 @@ class LaunchQualityObserver {
       } catch (error) {
         this.metrics.lastError = error?.message || String(error);
       }
+    }
+  }
+
+  _observeDeepReferencePullbacks(state, timestampMs, price, replay = false) {
+    if (!state.pumpAt[25]) return;
+    const lifecycleDeadline = state.createdAt + this.config.maxLaunchAgeMs;
+    for (const profile of this.config.deepReferenceProfiles || []) {
+      let tracker = state.deepReferenceStates.get(profile.id);
+      if (!tracker) {
+        tracker = {
+          peakAt: state.peakAt,
+          peakPrice: state.peakPrice,
+          lowAt: state.peakAt,
+          lowPrice: state.peakPrice,
+          firstPullbackAt: null,
+          maxPullbackPct: 0,
+          terminal: false,
+        };
+        state.deepReferenceStates.set(profile.id, tracker);
+      }
+      if (tracker.terminal) continue;
+
+      if (timestampMs > lifecycleDeadline) {
+        tracker.terminal = true;
+        continue;
+      }
+
+      if (!tracker.firstPullbackAt && price > tracker.peakPrice) {
+        tracker.peakAt = timestampMs;
+        tracker.peakPrice = price;
+        tracker.lowAt = timestampMs;
+        tracker.lowPrice = price;
+      }
+      if (price < tracker.lowPrice) {
+        tracker.lowAt = timestampMs;
+        tracker.lowPrice = price;
+      }
+      tracker.maxPullbackPct = Math.max(
+        tracker.maxPullbackPct,
+        (1 - tracker.lowPrice / tracker.peakPrice) * 100,
+      );
+      if (tracker.maxPullbackPct > profile.maxPullbackPct) {
+        tracker.terminal = true;
+        this.metrics.deepRejected += 1;
+        if (!replay) {
+          this._emitDeepReference(state, profile, tracker, timestampMs, price,
+            `MAX_PULLBACK_${tracker.maxPullbackPct.toFixed(2)}PCT`);
+        }
+        continue;
+      }
+      if (!tracker.firstPullbackAt && tracker.maxPullbackPct >= profile.pullbackPct) {
+        tracker.firstPullbackAt = timestampMs;
+      }
+      if (!tracker.firstPullbackAt) continue;
+
+      const reboundPct = ((price / tracker.lowPrice) - 1) * 100;
+      const lowStableMs = timestampMs - tracker.lowAt;
+      const buyersSinceLow = [...state.wallets.values()].filter((wallet) => (
+        wallet.firstBuyAt != null && wallet.firstBuyAt >= tracker.lowAt
+      )).length;
+      const windowStart = timestampMs - profile.flowWindowMs;
+      const windowNetFlowSol = state.flowEvents.filter((event) => (
+        event.timestampMs >= windowStart
+      )).reduce((total, event) => (
+        total + (event.side === 'BUY' ? event.solAmount : -event.solAmount)
+      ), 0);
+      if (timestampMs < tracker.lowAt) continue;
+      if (reboundPct < profile.reboundPct
+        || lowStableMs < profile.lowStableMs
+        || buyersSinceLow < profile.minNewBuyers
+        || windowNetFlowSol < profile.minWindowNetFlowSol) continue;
+
+      tracker.terminal = true;
+      this.metrics.deepReferences += 1;
+      if (!replay) {
+        this._emitDeepReference(state, profile, tracker, timestampMs, price, null, {
+          reboundPct,
+          lowStableMs,
+          buyersSinceLow,
+          windowNetFlowSol,
+        });
+      }
+    }
+  }
+
+  _emitDeepReference(state, profile, tracker, timestampMs, price, rejectionReason, evidence = {}) {
+    this.metrics.lastActionAt = this.now();
+    if (!this.onReference) return;
+    try {
+      this.onReference({
+        mint: state.mint,
+        symbol: state.symbol,
+        creator: state.creator,
+        createdAt: state.createdAt,
+        referenceProfileId: profile.id,
+        referenceAt: timestampMs,
+        referencePrice: price,
+        pump25At: state.pumpAt[25],
+        referencePeakAt: tracker.peakAt,
+        referencePeakPrice: tracker.peakPrice,
+        firstPullbackAt: tracker.firstPullbackAt || timestampMs,
+        pullbackLowAt: tracker.lowAt,
+        pullbackLowPrice: tracker.lowPrice,
+        maxPullbackPct: tracker.maxPullbackPct,
+        rejectionReason,
+        features: {
+          ...this._features(state, timestampMs),
+          deepReboundPct: evidence.reboundPct ?? ((price / tracker.lowPrice) - 1) * 100,
+          lowStableMs: evidence.lowStableMs ?? timestampMs - tracker.lowAt,
+          buyersSincePullbackLow: evidence.buyersSinceLow ?? 0,
+          windowNetFlowSol: evidence.windowNetFlowSol ?? 0,
+          flowWindowMs: profile.flowWindowMs,
+        },
+      });
+    } catch (error) {
+      this.metrics.lastError = error?.message || String(error);
     }
   }
 
@@ -505,12 +635,22 @@ class LaunchQualityObserver {
       }
       const snapshotDeadline = state.createdAt + Math.max(...this.config.snapshotHorizonsMs)
         + this.config.maxObservationLagMs;
-      if (state.labelFinalized && now > Math.max(labelDeadline, snapshotDeadline)) {
+      const deepReferenceDeadline = (this.config.deepReferenceProfiles || []).length
+        ? state.createdAt + this.config.maxLaunchAgeMs + this.config.maxObservationLagMs
+        : 0;
+      if (state.labelFinalized
+        && now > Math.max(labelDeadline, snapshotDeadline, deepReferenceDeadline)) {
         this.states.delete(state.mint);
       }
       return;
     }
     if (now <= state.createdAt + this.config.maxLaunchAgeMs) return;
+    const deepProfilesPending = [...state.deepReferenceStates.values()]
+      .some((tracker) => !tracker.terminal);
+    if (deepProfilesPending
+      && now <= state.createdAt + this.config.maxLaunchAgeMs + this.config.maxObservationLagMs) {
+      return;
+    }
     this.store.updateLaunchQualityObservation(state.mint, {
       status: 'NO_REFERENCE_PULLBACK',
       labelStatus: 'NO_REFERENCE',

@@ -137,4 +137,53 @@ function main() {
   console.log('test-launch-quality-observer: ok');
 }
 
+function testDeepPullbackConfirmations() {
+  const store = makeStore();
+  let now = 200_000;
+  const references = [];
+  const observer = new LaunchQualityObserver({
+    config: {
+      enabled: true,
+      snapshotHorizonsMs: [5_000],
+      maxLaunchAgeMs: 90_000,
+      pumpReferencePct: 25,
+      pullbackReferencePct: 7.5,
+      reboundReferencePct: 3,
+      recentBuyerWindowMs: 10_000,
+      retentionFloorPct: 10,
+      maxObservationLagMs: 2_000,
+      deepReferenceProfiles: [{
+        id: 'DEEP_D12_5_R5', pullbackPct: 12.5, reboundPct: 5,
+        lowStableMs: 1_000, minNewBuyers: 2, flowWindowMs: 1_000,
+        minWindowNetFlowSol: 0.01, maxPullbackPct: 25,
+      }],
+    },
+    store,
+    now: () => now,
+    onReference: (reference) => references.push(reference),
+  });
+  observer.onCreate({
+    mint: 'launch-quality-mint', symbol: 'LQ', creator: 'creator-wallet', createdAt: now,
+  });
+  const feed = (input) => {
+    now = input.timestampMs;
+    observer.observeTrade(trade(input));
+  };
+  feed({ timestampMs: 200_100, price: 1, wallet: 'a' });
+  feed({ timestampMs: 200_500, price: 1.3, wallet: 'b' });
+  feed({ timestampMs: 201_000, price: 1.1, side: 'SELL', wallet: 'a', solAmount: 0.3 });
+  feed({ timestampMs: 201_400, price: 1.145, wallet: 'c', solAmount: 0.2 });
+  assert.strictEqual(references.filter((row) => row.referenceProfileId).length, 0,
+    'rebound before the one-second stability window must not qualify');
+  feed({ timestampMs: 202_100, price: 1.16, wallet: 'd', solAmount: 0.2 });
+  const deep = references.find((row) => row.referenceProfileId === 'DEEP_D12_5_R5');
+  assert.ok(deep, 'deep pullback must emit after price, time, buyer and flow confirmation');
+  assert.ok(deep.features.lowStableMs >= 1_000);
+  assert.ok(deep.features.buyersSincePullbackLow >= 2);
+  assert.ok(deep.features.windowNetFlowSol > 0);
+  assert.strictEqual(observer.health().deepReferences, 1);
+  store.close();
+}
+
 main();
+testDeepPullbackConfirmations();

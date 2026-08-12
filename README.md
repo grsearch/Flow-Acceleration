@@ -252,6 +252,8 @@ F 路径保留三个质量过滤档位，每档分别固定持有3秒和8秒，�
 
 FT-A/B/C/D使用全新的 `cohort_id`，Dashboard 会分别统计，不会把新结果并入原F1/F2/F3固定持仓历史。这些组仍是右尾依赖型研究实验，仅用于前向Shadow验证。
 
+在旧组不变的前提下，另设四个深回踩前向 cohort：`FD10_R3_5S`、`FD12_5_R3_5S`、`FD12_5_R5_5S` 与 `FD15_R5_5S`。它们分别测试10%～15%的首波回踩和3%/5%低点反弹，要求低点至少稳定0.5～1秒、低点之后至少出现2个新买家、最近1秒净流入重新为正；若回踩超过25%则只记录规则拒绝，不模拟接飞刀。四组共用 F1 的 NetFlow/Creator 质量门槛和固定5秒退出，因此统计差异主要来自入场深度与确认强度。深回踩参考点由 Observer E 独立跟踪，具有独立 `reference_profile_id`，不会改写或混入原7.5%参考点。
+
 模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。收益扣除0.05 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
 
 ## PumpSwap Range Scalper Shadow J

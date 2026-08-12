@@ -338,7 +338,8 @@ function createRuntime(runtimeConfig = config) {
         `${profile.id}=net>=${profile.minNetFlowSol}SOL/creator<=${profile.maxCreatorSharePct}%`
       )).join(', ')}; holds=${runtimeConfig.launchPullbackShadow.holds
         .map((hold) => `${hold.fixedHoldMs}ms`).join(',')}; trailing=${runtimeConfig
-        .launchPullbackShadow.trailingCohorts?.map((cohort) => cohort.id).join(',') || 'none'}; `
+        .launchPullbackShadow.trailingCohorts?.map((cohort) => cohort.id).join(',') || 'none'}; deep=${runtimeConfig
+        .launchPullbackShadow.deepCohorts?.map((cohort) => cohort.cohortId).join(',') || 'none'}; `
       + 'isolated cohorts; sends transactions=false.',
     );
     console.log(
