@@ -16,6 +16,14 @@ async function main() {
   for (const [, source] of inlineScripts) {
     assert.doesNotThrow(() => new Function(source), 'dashboard script should parse');
   }
+  const liveRenderer = dashboard.match(
+    /function renderLiveTrading\(data\) \{[\s\S]*?\n    function renderLaunchPullbackShadow/,
+  )?.[0] || '';
+  assert.ok(liveRenderer, 'live trading renderer should be present');
+  assert.ok(
+    !liveRenderer.includes('rangeScalper'),
+    'live renderer must not reference health-only Range Scalper state',
+  );
   assert.ok(dashboard.includes('name="exitExecutionDelayMs"'));
   assert.ok(dashboard.includes('name="exitExecutionDelayMs" type="number" min="0" step="50" value="200"'));
   assert.ok(dashboard.includes('name="firstSignalOnly"'));
