@@ -53,6 +53,11 @@ async function main() {
   assert.ok(dashboard.includes('id="smart-open-metrics"'));
   assert.ok(dashboard.includes('id="smart-open-position-rows"'));
   assert.ok(dashboard.includes("json('/api/smart-open-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="flow-smart-confirm"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="flow-smart-confirm"'));
+  assert.ok(dashboard.includes('id="flow-smart-confirm-metrics"'));
+  assert.ok(dashboard.includes('id="flow-smart-confirm-position-rows"'));
+  assert.ok(dashboard.includes("json('/api/flow-smart-confirm-shadow?positionLimit=30')"));
   assert.ok(dashboard.includes('data-live-strategy="launch-pullback"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-pullback"'));
   assert.ok(dashboard.includes('id="launch-pullback-metrics"'));
@@ -297,6 +302,27 @@ async function main() {
     );
     assert.ok(Array.isArray(smartOpen.cohorts));
     assert.ok(Array.isArray(smartOpen.positions));
+    const flowSmartConfirm = await (await fetch(
+      `http://127.0.0.1:${port}/api/flow-smart-confirm-shadow`,
+    )).json();
+    assert.strictEqual(flowSmartConfirm.runtime.mode, 'SHADOW_L');
+    assert.strictEqual(flowSmartConfirm.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      flowSmartConfirm.runtime.cohorts.map((cohort) => [
+        cohort.cohortId,
+        cohort.strategy.entry.maxConfirmationDelayMs,
+        cohort.strategy.entry.priceBasis,
+        cohort.strategy.research.isolatedTable,
+      ]),
+      [
+        ['L5_F5', 5_000, 'FIRST_TRADE_AFTER_SMART_OPEN', 'flow_smart_confirm_shadow_positions'],
+        ['L15_F5', 15_000, 'FIRST_TRADE_AFTER_SMART_OPEN', 'flow_smart_confirm_shadow_positions'],
+        ['L5_T15', 5_000, 'FIRST_TRADE_AFTER_SMART_OPEN', 'flow_smart_confirm_shadow_positions'],
+        ['L15_T20', 15_000, 'FIRST_TRADE_AFTER_SMART_OPEN', 'flow_smart_confirm_shadow_positions'],
+      ],
+    );
+    assert.ok(Array.isArray(flowSmartConfirm.cohorts));
+    assert.ok(Array.isArray(flowSmartConfirm.positions));
     const launchPullback = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-pullback-shadow`,
     )).json();
@@ -330,6 +356,9 @@ async function main() {
     assert(launchCohorts.some((row) => row[0] === 'FQ2_8S'));
     assert(launchCohorts.some((row) => row[0] === 'FQ_X15' && row[5] === 8 && row[8] === 15_000));
     assert(launchCohorts.some((row) => row[0] === 'FQ_X30' && row[5] === 10 && row[8] === 30_000));
+    assert(launchCohorts.some((row) => row[0] === 'FO_C70_10S' && row[4] === 10_000));
+    assert(launchCohorts.some((row) => row[0] === 'FO_RB10_T20' && row[5] === 20 && row[8] === 120_000));
+    assert(launchCohorts.some((row) => row[0] === 'FO_D12_R3_T15' && row[5] === 10 && row[6] === 15));
     assert.ok(Array.isArray(launchPullback.cohorts));
     assert.ok(Array.isArray(launchPullback.positions));
     const migratedRebound = await (await fetch(

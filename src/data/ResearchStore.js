@@ -161,6 +161,11 @@ class ResearchStore {
         table: 'smart_open_shadow_positions',
         anchor: 'smart_open_at',
       },
+      'flow-smart-confirm': {
+        label: 'Flow to Smart Confirm L',
+        table: 'flow_smart_confirm_shadow_positions',
+        anchor: 'smart_open_at',
+      },
       'launch-pullback': {
         label: 'Launch 回踩 · F',
         table: 'launch_pullback_shadow_positions',
@@ -759,6 +764,58 @@ class ResearchStore {
         ON smart_open_shadow_positions(cohort_id, status, updated_at);
       CREATE INDEX IF NOT EXISTS idx_smart_open_shadow_mint
         ON smart_open_shadow_positions(mint, smart_open_at DESC);
+
+      CREATE TABLE IF NOT EXISTS flow_smart_confirm_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        smart_event_id INTEGER NOT NULL
+          REFERENCES smart_wallet_events(id) ON DELETE CASCADE,
+        signal_id INTEGER
+          REFERENCES flow_signals(signal_id) ON DELETE CASCADE,
+        smart_wallet TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        signal_rank_in_mint INTEGER,
+        signal_variant TEXT NOT NULL,
+        netflow_w3 REAL,
+        unique_buyers_w3 INTEGER,
+        smart_open_at INTEGER NOT NULL,
+        smart_open_price REAL NOT NULL,
+        smart_open_sol REAL NOT NULL,
+        confirmation_delay_ms INTEGER NOT NULL,
+        curve_pct REAL,
+        age_ms INTEGER,
+        entry_target_at INTEGER,
+        entry_deadline_at INTEGER,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        highest_price REAL,
+        max_favorable_return_pct REAL,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, smart_event_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_flow_smart_confirm_shadow_status
+        ON flow_smart_confirm_shadow_positions(cohort_id, status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_flow_smart_confirm_shadow_mint
+        ON flow_smart_confirm_shadow_positions(mint, smart_open_at DESC);
 
       CREATE TABLE IF NOT EXISTS launch_pullback_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1897,6 +1954,9 @@ class ResearchStore {
         ORDER BY timestamp_ms DESC
         LIMIT 1
       `),
+      flowSignalById: this.db.prepare(`
+        SELECT * FROM flow_signals WHERE signal_id = ?
+      `),
       recentCurveTrades: this.db.prepare(`
         SELECT timestamp_ms AS timestampMs, received_at_ms AS receivedAtMs,
           market, mint, wallet, side, sol_amount AS solAmount,
@@ -2309,6 +2369,54 @@ class ResearchStore {
       `),
       activeSmartOpenShadowPositions: this.db.prepare(`
         SELECT * FROM smart_open_shadow_positions
+        WHERE cohort_id = ? AND status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY smart_open_at, id
+      `),
+      insertFlowSmartConfirmShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO flow_smart_confirm_shadow_positions (
+          cohort_id, smart_event_id, signal_id, smart_wallet, mint, symbol,
+          status, rejection_reason, position_sol, configured_cost_pct,
+          signal_at, signal_price, signal_rank_in_mint, signal_variant,
+          netflow_w3, unique_buyers_w3, smart_open_at, smart_open_price,
+          smart_open_sol, confirmation_delay_ms, curve_pct, age_ms,
+          entry_target_at, entry_deadline_at, created_at, updated_at
+        ) VALUES (
+          @cohortId, @smartEventId, @signalId, @smartWallet, @mint, @symbol,
+          @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @signalAt, @signalPrice, @signalRankInMint, @signalVariant,
+          @netFlowW3, @uniqueBuyersW3, @smartOpenAt, @smartOpenPrice,
+          @smartOpenSol, @confirmationDelayMs, @curvePct, @ageMs,
+          @entryTargetAt, @entryDeadlineAt, @createdAt, @updatedAt
+        )
+      `),
+      getFlowSmartConfirmShadowPosition: this.db.prepare(`
+        SELECT * FROM flow_smart_confirm_shadow_positions
+        WHERE cohort_id = ? AND smart_event_id = ?
+      `),
+      updateFlowSmartConfirmShadowPosition: this.db.prepare(`
+        UPDATE flow_smart_confirm_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          max_favorable_return_pct = COALESCE(@maxFavorableReturnPct, max_favorable_return_pct),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeFlowSmartConfirmShadowPositions: this.db.prepare(`
+        SELECT * FROM flow_smart_confirm_shadow_positions
         WHERE cohort_id = ? AND status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY smart_open_at, id
       `),
@@ -3264,6 +3372,10 @@ class ResearchStore {
     return this.stmts.activeLivePositions.all();
   }
 
+  flowSignal(signalId) {
+    return this.stmts.flowSignalById.get(signalId) || null;
+  }
+
   reopenLivePositionForReconciliation(id, entryError) {
     this.stmts.reopenLivePositionForReconciliation.run({
       id,
@@ -3910,6 +4022,78 @@ class ResearchStore {
 
   activeRangeScalperShadowPositions() {
     return this.stmts.activeRangeScalperShadowPositions.all();
+  }
+
+  createFlowSmartConfirmShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      cohortId: position.cohortId,
+      smartEventId: position.smartEventId,
+      signalId: position.signalId,
+      smartWallet: position.smartWallet,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      signalAt: position.signalAt,
+      signalPrice: position.signalPrice,
+      signalRankInMint: Number.isFinite(position.signalRankInMint)
+        ? Math.trunc(position.signalRankInMint) : null,
+      signalVariant: position.signalVariant,
+      netFlowW3: finiteOrNull(position.netFlowW3),
+      uniqueBuyersW3: Number.isFinite(position.uniqueBuyersW3)
+        ? Math.trunc(position.uniqueBuyersW3) : null,
+      smartOpenAt: position.smartOpenAt,
+      smartOpenPrice: position.smartOpenPrice,
+      smartOpenSol: position.smartOpenSol,
+      confirmationDelayMs: Math.trunc(position.confirmationDelayMs),
+      curvePct: finiteOrNull(position.curvePct),
+      ageMs: Number.isFinite(position.ageMs) ? Math.trunc(position.ageMs) : null,
+      entryTargetAt: position.entryTargetAt || null,
+      entryDeadlineAt: position.entryDeadlineAt || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertFlowSmartConfirmShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getFlowSmartConfirmShadowPosition.get(
+      row.cohortId,
+      row.smartEventId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateFlowSmartConfirmShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    return this.stmts.updateFlowSmartConfirmShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeFlowSmartConfirmShadowPositions(cohortId) {
+    return this.stmts.activeFlowSmartConfirmShadowPositions.all(cohortId);
   }
 
   createCyaEarlyPyramidShadowPosition(position) {
@@ -5342,6 +5526,67 @@ class ResearchStore {
     return { cohorts, positions };
   }
 
+  flowSmartConfirmShadowDashboard({ positionLimit = 200, cacheStats = false } = {}) {
+    const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
+    const positions = this.db.prepare(`
+      SELECT *, CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+        THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM flow_smart_confirm_shadow_positions
+      ORDER BY CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const computeCohorts = () => this.db.prepare(`
+      SELECT DISTINCT cohort_id FROM flow_smart_confirm_shadow_positions ORDER BY cohort_id
+    `).all().map(({ cohort_id: cohortId }) => {
+      const counts = this.db.prepare(`
+        SELECT COUNT(*) AS evaluated, COUNT(DISTINCT mint) AS independent_mints,
+          COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rule_rejected,
+          COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+          COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+          COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+          COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+          COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          AVG(confirmation_delay_ms) AS average_confirmation_delay_ms,
+          AVG(entry_jump_pct) AS average_entry_jump_pct
+        FROM flow_smart_confirm_shadow_positions WHERE cohort_id = ?
+      `).get(cohortId);
+      const returns = this.db.prepare(`
+        SELECT net_return_pct FROM flow_smart_confirm_shadow_positions
+        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          AND net_return_pct IS NOT NULL ORDER BY net_return_pct
+      `).all(cohortId).map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+      const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
+      const losses = returns.filter((value) => value < 0);
+      const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+      const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+      const median = returns.length
+        ? returns.length % 2
+          ? returns[(returns.length - 1) / 2]
+          : (returns[returns.length / 2 - 1] + returns[returns.length / 2]) / 2
+        : null;
+      return {
+        cohort_id: cohortId,
+        ...counts,
+        qualified_confirmations: Number(counts.evaluated || 0) - Number(counts.rule_rejected || 0),
+        resolved: returns.length,
+        average_net_return_pct: returns.length
+          ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+        median_net_return_pct: median,
+        win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+        profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+        max_winner_pct: wins[0] ?? null,
+        top_5_winner_contribution_pct: totalProfit > 0
+          ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100 : null,
+      };
+    });
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats('flow-smart-confirm-shadow', 15_000, computeCohorts)
+      : computeCohorts();
+    return { cohorts, positions };
+  }
+
   liveTradingDashboard({
     strategyId = null,
     positionLimit = 100,
@@ -5679,6 +5924,14 @@ class ResearchStore {
         COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected
       FROM smart_open_shadow_positions
     `).get();
+    const flowSmartConfirmShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rejected
+      FROM flow_smart_confirm_shadow_positions
+    `).get();
     const launchPullbackShadowPositions = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
@@ -5787,6 +6040,7 @@ class ResearchStore {
       flowFirstShadowPositions,
       smartPullbackShadowPositions,
       smartOpenShadowPositions,
+      flowSmartConfirmShadowPositions,
       launchPullbackShadowPositions,
       migratedDropReboundShadowPositions,
       rangeScalperShadowPositions,

@@ -75,6 +75,7 @@ W3 = T-2s ~ T
 - `smart_open_decisions`：仅用于兼容旧版 Smart OPEN 历史数据；新策略不再写入。
 - `live_positions` / `live_orders`：按 `strategy_id` 保存模拟或实盘仓位、每次买卖尝试、签名、失败原因与退出原因。
 - `smart_open_shadow_positions`：独立的真实 Smart Wallet OPEN Shadow D0/D1/D2 样本；不与旧回踩或 Primary Shadow 混表。
+- `flow_smart_confirm_shadow_positions`：Primary Rank 1 后 Smart OPEN 确认、再按后续成交入场的严格前向 Shadow L 样本。
 - `launch_quality_observations` / `launch_quality_snapshots`：Launch 前60秒结构、首次回踩参考点和未来收益标签。
 - `launch_pullback_shadow_positions`：独立的 Launch 首次回踩 Shadow F1/F2/F3 仓位；不与 Observer E 或任何旧 Shadow 混表。
 - `migrated_drop_rebound_shadow_positions`：独立的生命周期超跌反弹 Shadow G 参数组；用 `lifecycle_stage` 严格区分毕业前与毕业后模拟入场、MFE/MAE和退出结果。
@@ -186,6 +187,18 @@ Smart Wallet 事件按 Token 余额保存 `OPEN / ADD / REDUCE / CLOSE / SELL` �
 平台费、双边滑点、价格冲击和固定链上费用构成成功成交的确定性成本。Future Label 只扣除这些确定性成本，不再把随机执行失败混入市场收益标签。买入失败表示没有建仓，只损失失败尝试成本；卖出失败使用 `exit-retry-count`、重试间隔和失败费用沿真实逐笔价格路径重新执行。若正常策略本身为负，买入失败可能在数学上改善每信号收益，因此输出同时提供条件于已执行交易的收益并给出警告，不能把它误读成策略改善。
 
 止盈、止损、移动止损、滚动 NetFlow 衰减和 Smart Wallet SELL 按逐笔路径判断谁先触发；触发以后再应用卖出延迟与失败重试。`hold-ms` 现在表示动态条件都未触发时的最大持仓兜底。若全部动态退出均关闭，结果会返回 `FIXED_TIME_EXIT_ONLY` 警告。`Observed Entry Gap` 是信号到下一笔可观察市场成交的间隔，不代表机器人真实上链延迟。
+
+## Flow -> Smart Confirmation Shadow L
+
+该路径把 Smart Wallet 确认改成严格的前向实验：只接受 `primary_3w Rank 1`
+后 5 秒或 15 秒内出现的 Smart Wallet `OPEN`，并在 OPEN 后 200ms 开始等待
+下一笔 Bonding Curve 成交作为模拟入场。L5/L15 分别测试固定 5 秒与较宽移动
+止盈，仓位写入 `flow_smart_confirm_shadow_positions`，不会签名或发送交易。
+
+Launch First Pullback 的 F/FQ/FT/FD 历史组保持不变。新增 `FO_*` 独立优化组测试
+Top3 持仓集中度不高于 70% 的 10 秒持有/移动止盈，以及 Creator 不高于 5%、
+最近买家不少于 10 的 30 秒右尾与 12.5% 深回踩长持有。所有新组使用新 cohort
+ID，不会与历史结果混算。
 
 ### 可复现分析
 
