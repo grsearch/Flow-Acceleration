@@ -282,3 +282,90 @@ function run() {
 }
 
 run();
+
+function testEarlyOpportunityProfiles() {
+  const base = 1_900_000_000_000;
+  let now = base;
+  const store = new ResearchStore({
+    dbPath: ':memory:', rawRetentionHours: 168, archiveDir: './data/archive',
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const config = {
+    enabled: true,
+    lifecycleStages: [{ id: 'POST_MIGRATION', label: 'post', market: 'PUMP_AMM' }],
+    stateRetentionMs: 60_000, trackingAgeMs: 120_000, positionSizeSol: 1,
+    entryDelayMs: 200, entryTimeoutMs: 2_000, exitDelayMs: 200, exitTimeoutMs: 5_000,
+    maxEntryPriceJumpPct: 15,
+    entryProfiles: [
+      {
+        id: 'GE30_R23_F1', label: 'first', windowMs: 1_000,
+        dropMinPct: 15, dropMaxPct: 35, reboundMinPct: 2, reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000, maxLifecycleAgeMs: 30_000, maxSignalsPerMint: 1,
+      },
+      {
+        id: 'GE30_R23_F3', label: 'first-three', windowMs: 1_000,
+        dropMinPct: 15, dropMaxPct: 35, reboundMinPct: 2, reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000, maxLifecycleAgeMs: 30_000, maxSignalsPerMint: 3,
+      },
+    ],
+    exitProfiles: [{ id: 'X3', label: '3s', exitMode: 'FIXED_HOLD', fixedHoldMs: 3_000 }],
+    costModel: {
+      platformFeePct: 0, buySlippagePct: 0, sellSlippagePct: 0,
+      priceImpactPct: 0, baseTxFeeSol: 0, priorityFeeSol: 0,
+      jitoTipSol: 0, fixedCostSol: 0, positionSizeSol: 1,
+    },
+  };
+  const mint = 'EarlyOpportunity1111111111111111111111111111';
+  recordCreate(store, mint, base);
+  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  let suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  suite.onGraduated(store.getToken(mint));
+  const cycle = (start) => {
+    suite.observeTrade(trade(mint, base + start, 1));
+    suite.observeTrade(trade(mint, base + start + 100, 0.8));
+    suite.observeTrade(trade(mint, base + start + 200, 0.82));
+  };
+  cycle(1_000);
+  cycle(3_000);
+  cycle(5_000);
+  cycle(7_000);
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE entry_profile_id='GE30_R23_F1'").get().n,
+    1,
+  );
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE entry_profile_id='GE30_R23_F3'").get().n,
+    3,
+  );
+
+  // Counts are restored from persisted episodes; restart cannot reopen F1.
+  suite.stop();
+  suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  suite.onGraduated(store.getToken(mint));
+  cycle(9_000);
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE entry_profile_id='GE30_R23_F1'").get().n,
+    1,
+  );
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE entry_profile_id='GE30_R23_F3'").get().n,
+    3,
+  );
+
+  const lateMint = 'LateOpportunity11111111111111111111111111111';
+  recordCreate(store, lateMint, base);
+  store.recordComplete({ mint: lateMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(lateMint));
+  suite.observeTrade(trade(lateMint, base + 31_000, 1));
+  suite.observeTrade(trade(lateMint, base + 31_100, 0.8));
+  suite.observeTrade(trade(lateMint, base + 31_200, 0.82));
+  assert.strictEqual(
+    store.db.prepare('SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE mint=?').get(lateMint).n,
+    0,
+  );
+  store.close();
+}
+
+testEarlyOpportunityProfiles();

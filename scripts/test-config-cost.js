@@ -179,7 +179,11 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   config.launchPullbackShadow.optimizationCohorts.map((cohort) => cohort.id),
-  ['FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20', 'FO_D12_R3_10S', 'FO_D12_R3_T15'],
+  ['FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20', 'FO_D12_R3_10S', 'FO_D12_R3_T15'],
+);
+assert.strictEqual(
+  config.launchPullbackShadow.optimizationCohorts[0].maxEntryPriceJumpPct,
+  2,
 );
 assert.ok(
   Math.abs(costBreakdown(config.launchPullbackShadow.costModel).deterministicCostPct - 2.251)
@@ -199,7 +203,16 @@ assert.strictEqual(config.rangeScalperShadow.maxTrackingMs, 1_200_000);
 assert.strictEqual(config.rangeScalperShadow.windowMs, 60_000);
 assert.deepStrictEqual(
   config.rangeScalperShadow.entryProfiles.map((profile) => profile.id),
-  ['JA', 'JB', 'JC'],
+  ['JA', 'JB', 'JC', 'JW'],
+);
+assert.deepStrictEqual(
+  config.rangeScalperShadow.entryProfiles.find((profile) => profile.id === 'JW'),
+  {
+    id: 'JW', label: 'JW · JB条件预热后仅交易第2/3波', warmupProfileId: 'JB',
+    deviationSigma: 1.5, reboundPct: 2, reboundTimeoutMs: 5_000,
+    minRecentNetFlowSol: 0.1, minOpportunityIndex: 2,
+    maxOpportunityIndex: 3, exitProfileIds: ['X6'],
+  },
 );
 assert.deepStrictEqual(
   config.rangeScalperShadow.exitProfiles.map((profile) => profile.id),
@@ -209,7 +222,7 @@ assert.ok(
   Math.abs(costBreakdown(config.rangeScalperShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
-assert.strictEqual(config.cyaEarlyPyramidShadow.enabled, true);
+assert.strictEqual(config.cyaEarlyPyramidShadow.enabled, false);
 assert.strictEqual(config.cyaEarlyPyramidShadow.positionSizeSol, 1);
 assert.deepStrictEqual(
   config.cyaEarlyPyramidShadow.entryProfiles.map((profile) => profile.id),
@@ -218,6 +231,16 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   config.cyaEarlyPyramidShadow.exitProfiles.map((profile) => profile.id),
   ['T20', 'T30'],
+);
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.entryProfiles.map((profile) => [
+    profile.id, profile.maxLifecycleAgeMs ?? null, profile.maxSignalsPerMint ?? null,
+  ]),
+  [
+    ['GD25_35', null, null],
+    ['GE30_R23_F1', 30_000, 1],
+    ['GE30_R23_F3', 30_000, 3],
+  ],
 );
 assert.ok(
   Math.abs(costBreakdown(config.cyaEarlyPyramidShadow.costModel).deterministicCostPct - 2.251)

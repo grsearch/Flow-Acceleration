@@ -67,6 +67,13 @@ function makeConfig({ withTrailing = false, withDeep = false, withOptimization =
     ] : [],
     optimizationCohorts: withOptimization ? [
       {
+        id: 'FO_F2_J2_3S', label: 'FO-F2-J2', profileId: 'FO_F2_J2',
+        referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+        referenceReboundPct: 3, minNetFlowSol: 20, maxCreatorSharePct: 10,
+        maxTop3SharePct: 100, maxEntryPriceJumpPct: 2,
+        exitPolicy: 'FIXED_HOLD', fixedHoldMs: 3_000,
+      },
+      {
         id: 'FO_C70_10S', label: 'FO-C70', profileId: 'FO_C70',
         referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
         referenceReboundPct: 3, minNetFlowSol: 0, maxCreatorSharePct: 100,
@@ -241,16 +248,40 @@ function testOptimizationCohortsStayIsolated() {
   suite.onReference(reference('legacy-optimization', now));
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization'").get().n,
-    7,
-    'legacy reference should create six original cohorts plus its matching FO cohort',
+    8,
+    'legacy reference should create six original cohorts plus two matching FO cohorts',
   );
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_C70_10S'").get().n,
     1,
   );
   assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_F2_J2_3S'").get().n,
+    1,
+  );
+  assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_D12_R3_10S'").get().n,
     0,
+  );
+
+  now += 5_000;
+  suite.onReference(reference('low-jump-filter', now));
+  suite.observeTrade(trade('low-jump-filter', now + 200, 1.03));
+  assert.deepStrictEqual(
+    store.db.prepare(`
+      SELECT status, rejection_reason FROM launch_pullback_shadow_positions
+      WHERE mint='low-jump-filter' AND cohort_id='FO_F2_J2_3S'
+    `).get(),
+    { status: 'PRICE_JUMP', rejection_reason: 'ENTRY_PRICE_JUMP_3.00PCT' },
+    'new F2 cohort must enforce its own two-percent entry-jump ceiling',
+  );
+  assert.strictEqual(
+    store.db.prepare(`
+      SELECT status FROM launch_pullback_shadow_positions
+      WHERE mint='low-jump-filter' AND cohort_id='F2_3S'
+    `).get().status,
+    'OPEN',
+    'historical F2 must retain the original ten-percent ceiling',
   );
 
   now += 10_000;

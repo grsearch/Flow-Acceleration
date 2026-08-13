@@ -125,6 +125,14 @@ const guardedLiveTrading = liveTradingGuard(
   booleanEnv('FLOW_LIVE_DRY_RUN', true),
 );
 const retiredShadowsEnabled = booleanEnv('FLOW_RETIRED_SHADOWS_ENABLED', false);
+// Cohorts with a sufficiently large, consistently negative forward sample are
+// disabled behind a second explicit override. This prevents an old server .env
+// containing strategy-specific `..._ENABLED=true` values from silently
+// restarting them after an upgrade. Historical rows and raw collection remain.
+const provenNegativeShadowsEnabled = booleanEnv(
+  'FLOW_PROVEN_NEGATIVE_SHADOWS_ENABLED',
+  false,
+);
 // One shared fallback keeps every research-only strategy on the same economic
 // scale. A strategy-specific environment variable may still override it.
 const defaultShadowPositionSol = numberEnv('FLOW_SHADOW_DEFAULT_POSITION_SOL', 1, {
@@ -850,6 +858,23 @@ const config = {
     // continuing buyers retained a useful 30s right tail.
     optimizationCohorts: [
       {
+        id: 'FO_F2_J2_3S',
+        label: 'FO-F2-J2 · F2 + 入场跳价<=2% / fixed 3s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_F2_J2',
+        minNetFlowSol: 20,
+        maxCreatorSharePct: 10,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        maxEntryPriceJumpPct: 2,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 3_000,
+      },
+      {
         id: 'FO_C70_10S',
         label: 'FO-C70 · Top3<=70% / fixed 10s',
         referenceProfileId: 'LEGACY_7_5_R3',
@@ -968,7 +993,8 @@ const config = {
   // wallet pattern. It uses public order flow only and never follows, signs,
   // or sends the monitored wallet's transactions.
   cyaEarlyPyramidShadow: {
-    enabled: booleanEnv('FLOW_CYA_EARLY_PYRAMID_SHADOW_ENABLED', true),
+    enabled: provenNegativeShadowsEnabled
+      && booleanEnv('FLOW_CYA_EARLY_PYRAMID_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
     stateWindowMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_WINDOW_MS', 5_000, {
       min: 2_000,
@@ -1399,6 +1425,30 @@ const config = {
         reboundMaxPct: 5,
         reboundTimeoutMs: 1_000,
       },
+      {
+        id: 'GE30_R23_F1',
+        label: '毕业后30秒内 · 反弹2%–3% · 每Mint首次',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+      },
+      {
+        id: 'GE30_R23_F3',
+        label: '毕业后30秒内 · 反弹2%–3% · 每Mint前三次',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 3,
+      },
     ],
     exitProfiles: [
       {
@@ -1531,6 +1581,18 @@ const config = {
         reboundTimeoutMs: 5_000,
         minRecentBuyers: 2,
         maxSellDecayRatio: 0.5,
+      },
+      {
+        id: 'JW',
+        label: 'JW · JB条件预热后仅交易第2/3波',
+        warmupProfileId: 'JB',
+        deviationSigma: 1.5,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+        minRecentNetFlowSol: 0.1,
+        minOpportunityIndex: 2,
+        maxOpportunityIndex: 3,
+        exitProfileIds: ['X6'],
       },
     ],
     exitProfiles: [

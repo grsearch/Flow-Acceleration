@@ -69,7 +69,10 @@ async function main() {
   assert.ok(dashboard.includes('id="migrated-rebound-position-rows"'));
   assert.ok(dashboard.includes('生命周期超跌反弹 · G'));
   assert.ok(dashboard.includes('毕业前 Curve / 毕业后 PumpSwap 分层'));
-  assert.ok(dashboard.includes('两生命周期 × 八组入场 × 四组退出，共64个独立组合'));
+  assert.ok(dashboard.includes('GE30_R23_F1/F3 使用全新 cohort，不混入历史'));
+  assert.ok(dashboard.includes('FO_F2_J2_3S'));
+  assert.ok(dashboard.includes('第1波只预热，仅交易第2/3波'));
+  assert.ok(dashboard.includes('CYA Early Pyramid · K（已停）'));
   assert.ok(dashboard.includes("json('/api/migrated-drop-rebound-shadow?positionLimit=30')"));
   assert.ok(dashboard.includes('data-live-strategy="range-scalper"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="range-scalper"'));
@@ -357,6 +360,7 @@ async function main() {
     assert(launchCohorts.some((row) => row[0] === 'FQ_X15' && row[5] === 8 && row[8] === 15_000));
     assert(launchCohorts.some((row) => row[0] === 'FQ_X30' && row[5] === 10 && row[8] === 30_000));
     assert(launchCohorts.some((row) => row[0] === 'FO_C70_10S' && row[4] === 10_000));
+    assert(launchCohorts.some((row) => row[0] === 'FO_F2_J2_3S' && row[4] === 3_000));
     assert(launchCohorts.some((row) => row[0] === 'FO_RB10_T20' && row[5] === 20 && row[8] === 120_000));
     assert(launchCohorts.some((row) => row[0] === 'FO_D12_R3_T15' && row[5] === 10 && row[6] === 15));
     assert.ok(Array.isArray(launchPullback.cohorts));
@@ -369,7 +373,7 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 1);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 3);
     assert.strictEqual(migratedRebound.runtime.exitProfiles.length, 3);
     assert.strictEqual(
       migratedRebound.runtime.strategy.scope,
@@ -392,6 +396,20 @@ async function main() {
         reboundTimeoutMs: 1_000,
       },
     );
+    assert.deepStrictEqual(
+      migratedRebound.runtime.entryProfiles
+        .filter((profile) => profile.id.startsWith('GE30_'))
+        .map((profile) => [
+          profile.id,
+          profile.maxLifecycleAgeMs,
+          profile.maxSignalsPerMint,
+          profile.reboundMaxPct,
+        ]),
+      [
+        ['GE30_R23_F1', 30_000, 1, 3],
+        ['GE30_R23_F3', 30_000, 3, 3],
+      ],
+    );
     assert.ok(Array.isArray(migratedRebound.cohorts));
     assert.ok(Array.isArray(migratedRebound.positions));
     const rangeScalper = await (await fetch(
@@ -399,11 +417,26 @@ async function main() {
     )).json();
     assert.strictEqual(rangeScalper.runtime.mode, 'SHADOW_J');
     assert.strictEqual(rangeScalper.runtime.sendsTransactions, false);
-    assert.strictEqual(rangeScalper.runtime.entryProfiles.length, 3);
+    assert.strictEqual(rangeScalper.runtime.entryProfiles.length, 4);
     assert.strictEqual(rangeScalper.runtime.exitProfiles.length, 4);
     assert.strictEqual(
       rangeScalper.runtime.strategy.research.isolatedTable,
       'range_scalper_shadow_positions',
+    );
+    assert.deepStrictEqual(
+      rangeScalper.runtime.entryProfiles.find((profile) => profile.id === 'JW'),
+      {
+        id: 'JW',
+        label: 'JW · JB条件预热后仅交易第2/3波',
+        warmupProfileId: 'JB',
+        deviationSigma: 1.5,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+        minRecentNetFlowSol: 0.1,
+        minOpportunityIndex: 2,
+        maxOpportunityIndex: 3,
+        exitProfileIds: ['X6'],
+      },
     );
     assert.ok(Array.isArray(rangeScalper.cohorts));
     assert.ok(Array.isArray(rangeScalper.positions));
@@ -411,6 +444,7 @@ async function main() {
       `http://127.0.0.1:${port}/api/cya-early-pyramid-shadow`,
     )).json();
     assert.strictEqual(cyaPyramid.runtime.mode, 'SHADOW_K');
+    assert.strictEqual(cyaPyramid.runtime.enabled, false);
     assert.strictEqual(cyaPyramid.runtime.sendsTransactions, false);
     assert.strictEqual(cyaPyramid.runtime.entryProfiles.length, 2);
     assert.strictEqual(cyaPyramid.runtime.exitProfiles.length, 2);

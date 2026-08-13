@@ -342,16 +342,16 @@
               <b>Flow → Smart 确认 · L</b><small>Primary Rank 1 后 Smart OPEN，再按下一笔成交入场</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback">
-              <b>Launch 回踩 · F / FT / FD / FO</b><small>旧组保留；新增低集中度、长持有与深回踩对照</small>
+              <b>Launch 回踩 · F / FT / FD / FO</b><small>旧组保留；新增 F2 低跳价固定3秒对照</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migrated-rebound">
-              <b>生命周期超跌反弹 · G</b><small>毕业前 Curve / 毕业后 PumpSwap 分层</small>
+              <b>生命周期超跌反弹 · G</b><small>新增毕业后30秒内、首1/3次机会分层</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="range-scalper">
-              <b>PumpSwap 区间波段 · J</b><small>高成交量震荡识别、重复回归交易，纯影子测试</small>
+              <b>PumpSwap 区间波段 · J</b><small>新增第1波预热、仅交易第2/3波的 JW</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="cya-early-pyramid">
-              <b>CYA Early Pyramid · K</b><small>Early Curve order flow, staged adds and exits</small>
+              <b>CYA Early Pyramid · K（已停）</b><small>负期望，历史数据保留</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="bonding-momentum">
               <b>Bonding Curve 动量 · H（已停）</b><small>负期望，历史数据保留</small>
@@ -1012,7 +1012,7 @@
         return `固定${age(exit.fixedHoldMs)}`;
       }))].join(' · ');
       const research = runtimeCohorts[0]?.strategy?.research || {};
-      document.querySelector('#launch-pullback-expression').textContent = `旧 F/FT/FD 组保持不变；FO 新组独立比较 Top3≤70%、Creator≤5% + 最近买家≥10、12.5%深回踩，以及10～30秒固定持有/较宽移动止盈；${entryRules || '等待过滤配置'}；退出 ${holdRules || '等待配置'}`;
+      document.querySelector('#launch-pullback-expression').textContent = `旧 F/FT/FD/FO 组保持不变；新增 FO_F2_J2_3S：F2 信号 + 实际入场跳价≤2% + 固定3秒。所有组独立计数；${entryRules || '等待过滤配置'}；退出 ${holdRules || '等待配置'}`;
       const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW F' : '关闭', `独立表 ${research.isolatedTable || 'launch_pullback_shadow_positions'}`],
         ['参考点', number(runtime.referencesSeen), `最宽组合格 ${number(runtime.qualifiedReferences)} · 去重 ${number(runtime.deduplicated)}`],
@@ -1028,7 +1028,7 @@
           : `固定${age(exit.fixedHoldMs)}`;
         return {
           label: labels[runtimeCohort.cohortId] || runtimeCohort.cohortId,
-          note: `${entry.profileId || 'F'} · 回踩${rate(reference.pullbackPct)} / 反弹${rate(reference.reboundPct)}${reference.lowStableMs ? ` · 稳定${age(reference.lowStableMs)} · 新买家≥${number(reference.minNewBuyers)} · ${age(reference.flowWindowMs)}净流>${number(reference.minWindowNetFlowSol,2)} SOL · 最大回踩${rate(reference.maxPullbackPct)}` : ''} · NetFlow≥${number(entry.minNetFlowSol,1)} SOL · Creator≤${rate(entry.maxCreatorSharePct)} · ${exitNote}`,
+          note: `${entry.profileId || 'F'} · 回踩${rate(reference.pullbackPct)} / 反弹${rate(reference.reboundPct)}${reference.lowStableMs ? ` · 稳定${age(reference.lowStableMs)} · 新买家≥${number(reference.minNewBuyers)} · ${age(reference.flowWindowMs)}净流>${number(reference.minWindowNetFlowSol,2)} SOL · 最大回踩${rate(reference.maxPullbackPct)}` : ''} · NetFlow≥${number(entry.minNetFlowSol,1)} SOL · Creator≤${rate(entry.maxCreatorSharePct)} · 入场跳价≤${rate(entry.maxEntryPriceJumpPct)} · ${exitNote}`,
           metrics: [
             ['净收益', pct(cohort.average_net_return_pct), `中位 ${pct(cohort.median_net_return_pct)} · PF ${number(cohort.profit_factor,2)}`],
             ['胜率 / 去Top5', `${rate(cohort.win_rate_pct)} / ${pct(cohort.average_net_return_ex_top5_pct)}`, `完成 ${number(cohort.resolved)} · 合格 ${number(cohort.qualified_references)} · 跳价拒绝 ${number(cohort.price_jump)}`],
@@ -1061,14 +1061,14 @@
       lifecycleLabels.PRE_MIGRATION ||= '毕业前';
       lifecycleLabels.POST_MIGRATION ||= '毕业后';
       const detectorStates = runtime.detectorStates || {};
-      document.querySelector('#migrated-rebound-expression').textContent = `毕业前 Curve / 毕业后 PumpSwap 分层 → 各自基准1秒跌15%–35% → 低点反弹2%–5%且1秒内确认 → ${age(runtime.strategy?.entryDelayMs)}后模拟入场 → 4种退出并行`;
+      document.querySelector('#migrated-rebound-expression').textContent = `旧生命周期组保持不变；新增毕业后30秒内跌25%–35%、低点反弹2%–3%，分别只取每 Mint 首1次 / 首3次机会，并与全部退出组独立组合。${age(runtime.strategy?.entryDelayMs)}后模拟入场。`;
       renderMetricGroups('#migrated-rebound-metrics', [
         ['运行模式', runtime.enabled ? 'SHADOW G' : '关闭', `独立表 ${research.isolatedTable || 'migrated_drop_rebound_shadow_positions'}`],
         ['毕业后AMM订阅', number(runtime.trackedMints), `新毕业 Mint 追踪 ${age(runtime.strategy?.trackingAgeMs)}`],
         ['毕业前 / 毕业后状态', `${number(detectorStates.PRE_MIGRATION)} / ${number(detectorStates.POST_MIGRATION)}`, '检测状态严格分离，不混用基准价'],
         ['下跌候选 / 信号', `${number(runtime.candidates)} / ${number(runtime.signals)}`, `回放抑制 ${number(runtime.replaySignalsSuppressed)} · 超时 ${number(runtime.reboundTimeouts)}`],
         ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
-        ['参数矩阵', `${number(lifecycleStages.length || 2)} × ${number(entryProfiles.length)} × ${number(exitProfiles.length)}`, '两生命周期 × 八组入场 × 四组退出，共64个独立组合'],
+        ['参数矩阵', `${number(lifecycleStages.length || 2)} × ${number(entryProfiles.length)} × ${number(exitProfiles.length)}`, '旧参数组保留；GE30_R23_F1/F3 使用全新 cohort，不混入历史'],
         ['模拟成本', pct(research.configuredCostPct), `仓位 ${number(research.simulatedPositionSol,4)} SOL · 链上交易永不发送`],
         ['AMM异常价隔离', number(runtime.ammPriceOutliersIgnored), `新价格区间确认 ${number(runtime.ammPriceRegimesConfirmed)} · 原始成交仍保留`],
       ], []);
@@ -1098,7 +1098,7 @@
       const research = strategy.research || {};
       const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
       const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
-      document.querySelector('#range-scalper-expression').textContent = `毕业后观察${age(strategy.initialObservationMs)} → 60秒高量震荡评分 → 合格Mint延长至${age(strategy.maxTrackingMs)} → JA/JB/JC回踩反弹 → XM中轴 / X6固定6% / XB上轨 / XF资金反转`;
+      document.querySelector('#range-scalper-expression').textContent = `毕业后观察${age(strategy.initialObservationMs)} → 60秒高量震荡评分 → 合格Mint延长至${age(strategy.maxTrackingMs)} → 旧 JA/JB/JC 保持不变；新增 JW 使用 JB 条件，第1波只预热，仅交易第2/3波，固定+6% / 止损8% / 20秒兜底`;
       renderMetricGroups('#range-scalper-metrics', [
         ['运行模式', runtime.enabled ? 'SHADOW J' : '关闭', `独立表 ${research.isolatedTable || 'range_scalper_shadow_positions'}`],
         ['跟踪 / 区间有效', `${number(runtime.trackedMints)} / ${number(runtime.rangeActive)}`, `已延长订阅 ${number(runtime.extendedMints)}`],
