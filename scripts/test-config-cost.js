@@ -149,6 +149,12 @@ assert.ok(
   Math.abs(costBreakdown(config.smartOpenShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
+assert.strictEqual(config.flowSmartConfirmShadow.enabled, true);
+assert.strictEqual(config.flowSmartConfirmShadow.positionSizeSol, 1);
+assert.deepStrictEqual(
+  config.flowSmartConfirmShadow.cohorts.map((cohort) => [cohort.id, cohort.maxConfirmationDelayMs]),
+  [['L5_F5', 5_000], ['L15_F5', 15_000], ['L5_T15', 5_000], ['L15_T20', 15_000]],
+);
 assert.strictEqual(config.launchPullbackShadow.enabled, true);
 assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 1);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
@@ -170,6 +176,10 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   config.launchPullbackShadow.holds.map((hold) => [hold.id, hold.fixedHoldMs]),
   [['3S', 3_000], ['8S', 8_000]],
+);
+assert.deepStrictEqual(
+  config.launchPullbackShadow.optimizationCohorts.map((cohort) => cohort.id),
+  ['FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20', 'FO_D12_R3_10S', 'FO_D12_R3_T15'],
 );
 assert.ok(
   Math.abs(costBreakdown(config.launchPullbackShadow.costModel).deterministicCostPct - 2.251)

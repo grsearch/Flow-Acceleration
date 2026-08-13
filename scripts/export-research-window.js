@@ -50,6 +50,9 @@ const EXPLICIT_FILTERS = Object.freeze({
     where: 'smart_buy_at >= ? AND smart_buy_at < ?', anchor: 'smart_buy_at',
   },
   smart_open_shadow_positions: { where: 'smart_open_at >= ? AND smart_open_at < ?', anchor: 'smart_open_at' },
+  flow_smart_confirm_shadow_positions: {
+    where: 'smart_open_at >= ? AND smart_open_at < ?', anchor: 'smart_open_at',
+  },
   launch_pullback_shadow_positions: { where: 'reference_at >= ? AND reference_at < ?', anchor: 'reference_at' },
   migrated_drop_rebound_shadow_positions: { where: 'rebound_at >= ? AND rebound_at < ?', anchor: 'rebound_at' },
   range_scalper_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },

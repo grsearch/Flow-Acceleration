@@ -25,6 +25,7 @@ class ResearchServer {
   constructor({
     config, store, engine, stream, labeler, trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
+    flowSmartConfirmShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
     rangeScalperShadow = null,
@@ -42,6 +43,7 @@ class ResearchServer {
     this.flowFirstShadow = flowFirstShadow;
     this.smartPullbackShadow = smartPullbackShadow;
     this.smartOpenShadow = smartOpenShadow;
+    this.flowSmartConfirmShadow = flowSmartConfirmShadow;
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
@@ -359,6 +361,23 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/flow-smart-confirm-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.flowSmartConfirmShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_L',
+          sendsTransactions: false,
+          cohorts: [],
+        },
+        timeSessions: this.store.shadowTimeSessionDashboard('flow-smart-confirm'),
+        ...this.store.flowSmartConfirmShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/cya-early-pyramid-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -412,6 +431,7 @@ class ResearchServer {
         flowFirstShadow: this.flowFirstShadow?.health() || null,
         smartPullbackShadow: this.smartPullbackShadow?.health() || null,
         smartOpenShadow: this.smartOpenShadow?.health() || null,
+        flowSmartConfirmShadow: this.flowSmartConfirmShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
