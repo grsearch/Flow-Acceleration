@@ -25,6 +25,7 @@ class LaunchPullbackShadowSuite {
             holds: undefined,
             trailingCohorts: undefined,
             deepCohorts: undefined,
+            optimizationCohorts: undefined,
           },
           store,
           now,
@@ -55,6 +56,7 @@ class LaunchPullbackShadowSuite {
           holds: undefined,
           trailingCohorts: undefined,
           deepCohorts: undefined,
+          optimizationCohorts: undefined,
         },
         store,
         now,
@@ -80,6 +82,32 @@ class LaunchPullbackShadowSuite {
           holds: undefined,
           trailingCohorts: undefined,
           deepCohorts: undefined,
+          optimizationCohorts: undefined,
+        },
+        store,
+        now,
+      }));
+    }
+
+    for (const cohort of config.optimizationCohorts || []) {
+      if (this.managers.has(cohort.id)) {
+        throw new Error(`Duplicate Launch Pullback cohort: ${cohort.id}`);
+      }
+      this.managers.set(cohort.id, new LaunchPullbackShadowManager({
+        config: {
+          ...config,
+          ...cohort,
+          cohortId: cohort.id,
+          cohortLabel: cohort.label,
+          profileId: cohort.profileId,
+          referenceProfileId: cohort.referenceProfileId,
+          referencePullbackPct: cohort.referencePullbackPct,
+          referenceReboundPct: cohort.referenceReboundPct,
+          profiles: undefined,
+          holds: undefined,
+          trailingCohorts: undefined,
+          deepCohorts: undefined,
+          optimizationCohorts: undefined,
         },
         store,
         now,

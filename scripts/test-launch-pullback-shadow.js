@@ -14,7 +14,7 @@ function makeStore() {
   }, { configuredTradingCostPct: 0 });
 }
 
-function makeConfig({ withTrailing = false, withDeep = false } = {}) {
+function makeConfig({ withTrailing = false, withDeep = false, withOptimization = false } = {}) {
   return {
     enabled: true,
     positionSizeSol: 0.05,
@@ -63,6 +63,20 @@ function makeConfig({ withTrailing = false, withDeep = false } = {}) {
         minWindowNetFlowSol: 0.01, maxPullbackPct: 25,
         minNetFlowSol: 15, maxCreatorSharePct: 5,
         fixedHoldMs: 5_000,
+      },
+    ] : [],
+    optimizationCohorts: withOptimization ? [
+      {
+        id: 'FO_C70_10S', label: 'FO-C70', profileId: 'FO_C70',
+        referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+        referenceReboundPct: 3, minNetFlowSol: 0, maxCreatorSharePct: 100,
+        maxTop3SharePct: 70, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 10_000,
+      },
+      {
+        id: 'FO_D12_R3_10S', label: 'FO-D12-R3', profileId: 'FO_D12_R3',
+        referenceProfileId: 'DEEP_D12_5_R3', referencePullbackPct: 12.5,
+        referenceReboundPct: 3, minNetFlowSol: 15, maxCreatorSharePct: 5,
+        maxTop3SharePct: 100, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 10_000,
       },
     ] : [],
     costModel: {
@@ -214,6 +228,45 @@ function testDeepCohortsStayIsolated() {
   store.close();
 }
 
+function testOptimizationCohortsStayIsolated() {
+  const store = makeStore();
+  let now = 5_000_000;
+  const suite = new LaunchPullbackShadowSuite({
+    config: makeConfig({ withOptimization: true }),
+    store,
+    now: () => now,
+  });
+  suite.start();
+
+  suite.onReference(reference('legacy-optimization', now));
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization'").get().n,
+    7,
+    'legacy reference should create six original cohorts plus its matching FO cohort',
+  );
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_C70_10S'").get().n,
+    1,
+  );
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_D12_R3_10S'").get().n,
+    0,
+  );
+
+  now += 10_000;
+  const deep = reference('deep-optimization', now);
+  deep.referenceProfileId = 'DEEP_D12_5_R3';
+  suite.onReference(deep);
+  assert.deepStrictEqual(
+    store.db.prepare("SELECT cohort_id, status FROM launch_pullback_shadow_positions WHERE mint='deep-optimization'").all(),
+    [{ cohort_id: 'FO_D12_R3_10S', status: 'PENDING_ENTRY' }],
+    'deep reference should create only the matching deep FO cohort',
+  );
+  assert.strictEqual(suite.health().referenceGroups.length, 2);
+  assert.strictEqual(suite.health().sendsTransactions, false);
+  store.close();
+}
+
 function reference(mint, at, netFlowSol = 20, creatorSharePct = 4) {
   return {
     mint,
@@ -335,3 +388,4 @@ function main() {
 main();
 testTrailingCohorts();
 testDeepCohortsStayIsolated();
+testOptimizationCohortsStayIsolated();

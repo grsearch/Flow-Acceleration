@@ -22,6 +22,9 @@ function main() {
     CREATE INDEX idx_raw_trades_ts ON raw_trades(timestamp_ms);
     CREATE TABLE flow_signals (signal_id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, mint TEXT);
     CREATE TABLE signal_returns (signal_id INTEGER PRIMARY KEY, updated_at INTEGER NOT NULL, return_5s REAL);
+    CREATE TABLE flow_smart_confirm_shadow_positions (
+      id INTEGER PRIMARY KEY, smart_open_at INTEGER NOT NULL, mint TEXT
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -32,6 +35,10 @@ function main() {
   db.prepare('INSERT INTO flow_signals VALUES (?, ?, ?)').run(11, startMs - 5, 'old');
   db.prepare('INSERT INTO signal_returns VALUES (?, ?, ?)').run(10, endMs + 10_000, 12.3);
   db.prepare('INSERT INTO signal_returns VALUES (?, ?, ?)').run(11, startMs + 10, -5);
+  db.prepare('INSERT INTO flow_smart_confirm_shadow_positions VALUES (?, ?, ?)')
+    .run(20, startMs + 20, 'confirmed-inside');
+  db.prepare('INSERT INTO flow_smart_confirm_shadow_positions VALUES (?, ?, ?)')
+    .run(21, endMs + 20, 'confirmed-future');
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
@@ -53,6 +60,11 @@ function main() {
     [10],
   );
   assert.strictEqual(exported.prepare('SELECT COUNT(*) AS count FROM metadata').get().count, 1);
+  assert.deepStrictEqual(
+    exported.prepare('SELECT id FROM flow_smart_confirm_shadow_positions ORDER BY id')
+      .all().map((row) => row.id),
+    [20],
+  );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();
   assert.match(fs.readFileSync(schema, 'utf8'), /CREATE TABLE\s+(?:main\.)?["']?raw_trades/i);

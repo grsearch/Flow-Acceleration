@@ -10,6 +10,7 @@ const { PrimarySignalShadowSuite } = require('./core/PrimarySignalShadowSuite');
 const { FlowFirstShadowSuite } = require('./core/FlowFirstShadowSuite');
 const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
 const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
+const { FlowSmartConfirmShadowSuite } = require('./core/FlowSmartConfirmShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
@@ -65,6 +66,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   smartOpenShadow.start();
+  const flowSmartConfirmShadow = new FlowSmartConfirmShadowSuite({
+    config: runtimeConfig.flowSmartConfirmShadow,
+    store,
+  });
+  flowSmartConfirmShadow.start();
   const launchPullbackShadow = new LaunchPullbackShadowSuite({
     config: runtimeConfig.launchPullbackShadow,
     store,
@@ -112,6 +118,7 @@ function createRuntime(runtimeConfig = config) {
     flowFirstShadow,
     smartPullbackShadow,
     smartOpenShadow,
+    flowSmartConfirmShadow,
     launchPullbackShadow,
     launchQualityObserver,
     migratedDropReboundShadow,
@@ -282,6 +289,9 @@ function createRuntime(runtimeConfig = config) {
             observeShadow('smartOpenEvent', () => (
               smartOpenShadow.onSmartWalletEvent(normalizedSmartEvent, smartOpenContext || {})
             ));
+            observeShadow('flowSmartConfirmEvent', () => (
+              flowSmartConfirmShadow.onSmartWalletOpen(normalizedSmartEvent)
+            ));
             if (trade.side === 'BUY') {
               observeShadow('smartPullbackEvent', () => (
                 smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id })
@@ -291,6 +301,7 @@ function createRuntime(runtimeConfig = config) {
         }
         observeShadow('smartPullback', () => smartPullbackShadow.observeTrade(trade));
         observeShadow('smartOpen', () => smartOpenShadow.observeTrade(trade));
+        observeShadow('flowSmartConfirm', () => flowSmartConfirmShadow.observeTrade(trade));
       } catch (error) {
         runtimeMetrics.parseErrors += 1;
         console.error(`[Runtime] ${event.type} failed:`, error.message);
@@ -335,6 +346,10 @@ function createRuntime(runtimeConfig = config) {
       )).join(', ')}; isolated table; sends transactions=false.`,
     );
     console.log(
+      `Flow->Smart Confirm Shadow L: ${runtimeConfig.flowSmartConfirmShadow.cohorts
+        .map((cohort) => cohort.id).join(', ')}; forward entry only; sends transactions=false.`,
+    );
+    console.log(
       `Launch Quality Observer: snapshots=${runtimeConfig.launchQualityObserver.snapshotHorizonsMs
         .map((value) => `${value / 1_000}s`).join(',')}; `
       + `reference=${runtimeConfig.launchQualityObserver.pumpReferencePct}% pump / `
@@ -348,7 +363,8 @@ function createRuntime(runtimeConfig = config) {
       )).join(', ')}; holds=${runtimeConfig.launchPullbackShadow.holds
         .map((hold) => `${hold.fixedHoldMs}ms`).join(',')}; trailing=${runtimeConfig
         .launchPullbackShadow.trailingCohorts?.map((cohort) => cohort.id).join(',') || 'none'}; deep=${runtimeConfig
-        .launchPullbackShadow.deepCohorts?.map((cohort) => cohort.cohortId).join(',') || 'none'}; `
+        .launchPullbackShadow.deepCohorts?.map((cohort) => cohort.cohortId).join(',') || 'none'}; optimize=${runtimeConfig
+        .launchPullbackShadow.optimizationCohorts?.map((cohort) => cohort.id).join(',') || 'none'}; `
       + 'isolated cohorts; sends transactions=false.',
     );
     console.log(
@@ -397,6 +413,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('flowFirstAdvance', () => flowFirstShadow.advanceTime(now));
       observeShadow('smartPullbackAdvance', () => smartPullbackShadow.advanceTime(now));
       observeShadow('smartOpenAdvance', () => smartOpenShadow.advanceTime(now));
+      observeShadow('flowSmartConfirmAdvance', () => flowSmartConfirmShadow.advanceTime(now));
       observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
       observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
@@ -436,6 +453,7 @@ function createRuntime(runtimeConfig = config) {
     flowFirstShadow.stop();
     smartPullbackShadow.stop();
     smartOpenShadow.stop();
+    flowSmartConfirmShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     migratedDropReboundShadow.stop();
@@ -459,6 +477,7 @@ function createRuntime(runtimeConfig = config) {
       flowFirstShadow: flowFirstShadow.health(),
       smartPullbackShadow: smartPullbackShadow.health(),
       smartOpenShadow: smartOpenShadow.health(),
+      flowSmartConfirmShadow: flowSmartConfirmShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
@@ -471,7 +490,8 @@ function createRuntime(runtimeConfig = config) {
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
-    flowFirstShadow, smartPullbackShadow, smartOpenShadow, launchPullbackShadow,
+    flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
+    launchPullbackShadow,
     launchQualityObserver, migratedDropReboundShadow, rangeScalperShadow, cyaEarlyPyramidShadow,
     bondingCurveMomentumShadow, graduationHoldShadow,
   };
