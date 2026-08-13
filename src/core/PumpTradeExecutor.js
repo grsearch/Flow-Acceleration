@@ -188,6 +188,30 @@ function tokenDeltaFromTransaction(transactionResponse, mintValue, ownerValue) {
   return matchedOwner ? delta : 0n;
 }
 
+function walletSolSettlementFromTransaction(transactionResponse, ownerValue) {
+  const meta = transactionResponse?.meta;
+  const message = transactionResponse?.transaction?.message;
+  const keys = message?.accountKeys || message?.staticAccountKeys || [];
+  // A failed on-chain transaction still consumes its network/priority fee. Keep
+  // that wallet delta so realized PnL reconciles to the wallet, not just swaps.
+  if (!meta || keys.length === 0) return null;
+  const owner = String(ownerValue || '');
+  const index = keys.findIndex((key) => {
+    const value = key?.pubkey ?? key;
+    return String(value?.toBase58?.() ?? value ?? '') === owner;
+  });
+  if (index < 0) return null;
+  const pre = Number(meta.preBalances?.[index]);
+  const post = Number(meta.postBalances?.[index]);
+  if (!Number.isSafeInteger(pre) || !Number.isSafeInteger(post)) return null;
+  const fee = Number(meta.fee || 0);
+  return {
+    walletSolDelta: (post - pre) / LAMPORTS_PER_SOL,
+    networkFeeSol: Number.isFinite(fee) ? fee / LAMPORTS_PER_SOL : null,
+    walletIndex: index,
+  };
+}
+
 function classifyBuyReconciliation(status, tokenBalanceRaw, {
   transactionTokenDeltaRaw = null,
   transactionObserved = false,
@@ -297,6 +321,18 @@ class PumpTradeExecutor {
 
   async _tokenBalanceRaw(mint, tokenProgram, commitment = this.readCommitment) {
     return (await this._tokenBalanceSnapshot(mint, tokenProgram, commitment)).amount;
+  }
+
+  async transactionSettlement(signature) {
+    if (!signature || typeof this.connection.getTransaction !== 'function') return null;
+    const response = await this.connection.getTransaction(signature, {
+      commitment: this.confirmationCommitment,
+      maxSupportedTransactionVersion: 0,
+    });
+    return walletSolSettlementFromTransaction(
+      response,
+      this.signer.publicKey.toBase58(),
+    );
   }
 
   async _tokenBalanceSnapshot(mint, tokenProgram, commitment = this.readCommitment) {
@@ -636,6 +672,7 @@ class PumpTradeExecutor {
       const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
       mark('balance_reconciled_ms');
       mark('total_ms');
+      execution.settlement = await this.transactionSettlement(signature).catch(() => null);
       return {
         signature,
         venue: 'PUMP_BONDING_CURVE',
@@ -776,6 +813,7 @@ class PumpTradeExecutor {
           const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
           mark('balance_reconciled_ms');
           mark('total_ms');
+          execution.settlement = await this.transactionSettlement(signature).catch(() => null);
           return {
             signature,
             venue: 'PUMP_AMM',
@@ -798,6 +836,7 @@ class PumpTradeExecutor {
       const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
       mark('balance_reconciled_ms');
       mark('total_ms');
+      execution.settlement = await this.transactionSettlement(signature).catch(() => null);
       return {
         signature,
         venue: 'PUMP_AMM',
@@ -816,6 +855,7 @@ class PumpTradeExecutor {
   }
 
   async _confirmedSellResult({ mint, tokenProgram, signature, venue, soldRaw }) {
+    const settlement = await this.transactionSettlement(signature).catch(() => null);
     try {
       const remaining = await this._tokenBalanceSnapshot(
         mint,
@@ -829,6 +869,7 @@ class PumpTradeExecutor {
         remainingTokenAmountRaw: remaining.observed ? remaining.amount.toString() : null,
         balanceVerified: remaining.observed,
         balanceCheckError: remaining.observed ? null : remaining.error,
+        settlement,
       };
     } catch (error) {
       return {
@@ -838,6 +879,7 @@ class PumpTradeExecutor {
         remainingTokenAmountRaw: null,
         balanceVerified: false,
         balanceCheckError: String(error?.message || error).slice(0, 1_000),
+        settlement,
       };
     }
   }
@@ -935,4 +977,5 @@ module.exports = {
   replaceBuyV2WithExactQuoteIn,
   secretBytes,
   tokenDeltaFromTransaction,
+  walletSolSettlementFromTransaction,
 };

@@ -304,7 +304,7 @@ AND 低点在 1 秒内反弹 2%～5%
 AND 每个 Mint 只取第一个 Episode
 ```
 
-实盘决策统一写入 `live_strategy_decisions`，仓位和订单同时保存 `strategy_id`。接口和 Dashboard 可按策略筛选，因此后续增加多个实盘策略时，可以分别设置开关与单笔 SOL 数额，历史数据不会混在一起。当前策略的单笔金额为 `FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL=0.05`，全局最大并发默认为 `FLOW_LIVE_MAX_POSITIONS=3`（最多同时占用 `0.15 SOL`，不含费用）；没有每日笔数上限，也没有当日累计亏损自动停机，但安全锁、钱包最低 SOL 保留额、单 Mint 单仓和全局并发限制仍然有效。
+实盘决策统一写入 `live_strategy_decisions`，仓位和订单同时保存 `strategy_id`。接口和 Dashboard 可按策略筛选，因此后续增加多个实盘策略时，可以分别设置开关与单笔 SOL 数额，历史数据不会混在一起。当前策略的单笔金额为 `FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL=1`，全局最大并发默认为 `FLOW_LIVE_MAX_POSITIONS=3`（最多同时占用 `3 SOL`，不含费用）；没有每日笔数上限，也没有当日累计亏损自动停机，但安全锁、钱包最低 SOL 保留额、单 Mint 单仓和全局并发限制仍然有效。
 
 执行模块有三种模式：
 
@@ -314,7 +314,7 @@ AND 每个 Mint 只取第一个 Episode
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-当前实盘策略直接使用官方 PumpSwap SDK 买卖。买入使用固定 SOL 输入，`0.05 SOL` 是硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制单 Mint 单仓、并发仓位、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制。
+当前实盘策略直接使用官方 PumpSwap SDK 买卖。买入使用固定 SOL 输入，`1 SOL` 是硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制单 Mint 单仓、并发仓位、钱包 SOL 保留额、信号新鲜度、追价幅度、Mint 冷却和滑点；买入不会在已持有该 Mint 时继续加仓。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制。买入和卖出的总优先费目标都由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`，程序会根据 Compute Unit 上限自动换算成链上要求的 micro-lamports/CU。
 
 当前卖出策略为 `XLEG`：前5秒达到 `+18%` 立即止盈；否则在盈利 `+8%` 后激活移动止盈，峰值回撤 `3%` 卖出；持有6秒仍为亏损则退出，15秒强制兜底。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
 
@@ -381,3 +381,5 @@ systemctl list-timers flow-acceleration-backup.timer --all
 ```
 
 Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，即使服务器位于硅谷也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予该 Bucket 前缀所需的上传和查询权限。
+
+安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传和验证均有独立超时与重试，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`DONE` 或 `FAILED`），COSCLI 卡住时不会无限占用下一次任务。

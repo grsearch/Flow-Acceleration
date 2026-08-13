@@ -391,16 +391,16 @@
             <div class="grid live-metric-grid" id="live-metrics"></div>
             <div class="grid strategy-grid" id="live-strategy-cards"></div>
             <article class="card record-section">
-              <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；收益为价格粗收益，未扣滑点和链上费用</p></div>
+              <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；已关闭实盘按链上钱包 SOL 实际收支结算，包含链上费用</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 出场价</th><th>粗收益</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
+                <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 出场价</th><th>链上实际盈亏</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
                 <tbody id="live-position-rows"></tbody>
               </table></div>
             </article>
             <article class="card record-section">
               <div class="section-title"><h2>最近订单</h2><p id="live-order-summary">买入与卖出尝试均保留</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>提交时间</th><th>方向</th><th>Mint</th><th>场所</th><th>尝试</th><th>请求数量</th><th>状态</th><th>签名 / 错误</th></tr></thead>
+                <thead><tr><th>提交时间</th><th>方向</th><th>Mint</th><th>场所</th><th>尝试</th><th>请求数量</th><th>钱包 SOL 变化</th><th>状态</th><th>签名 / 错误</th></tr></thead>
                 <tbody id="live-order-rows"></tbody>
               </table></div>
             </article>
@@ -875,9 +875,9 @@
         ['策略判定', stats.decisions, `命中率 ${rate(matchRate)}`],
         ['规则命中', stats.matched, `规则拒绝 ${number(stats.rule_rejected)}`],
         ['仓位记录', stats.positions, `活动 ${number(stats.active_positions)}`],
-        ['已关闭仓位', stats.closed_positions, `可计价 ${number(stats.priced_closed_positions)}`],
-        ['可计价胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
-        ['平均粗收益', pct(stats.average_gross_return_pct), '未扣滑点和费用'],
+        ['已关闭仓位', stats.closed_positions, `链上已结算 ${number(stats.settled_closed_positions)}`],
+        ['链上实际胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
+        ['平均实际收益', pct(stats.average_realized_return_pct), `累计 ${number(stats.total_realized_pnl_sol,6)} SOL`],
         ['累计开仓规模', `${number(stats.deployed_sol,4)} SOL`, `平均持仓 ${age(stats.average_hold_ms)}`],
         ['订单确认 / 失败', `${number(stats.confirmed_orders)} / ${number(stats.failed_orders)}`, `状态未知 ${number(stats.unknown_orders)}`],
       ];
@@ -906,6 +906,7 @@
         ['链上执行', [
           ['买入模式', 'PumpSwap 固定SOL硬上限'], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
           ['卖出数量', '链上当前余额 100%'], ['卖后余额核对', '残余自动重试'],
+          ['买/卖优先费', `${number(runtime.priorityFeeSol,6)} SOL / 笔`],
         ]],
       ];
       document.querySelector('#live-strategy-cards').innerHTML = cards.map(([title,rows]) => `<article class="card strategy-card"><h3>${title}</h3><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${escapeHtml(value)}</b></div>`).join('')}</div></article>`).join('');
@@ -913,7 +914,11 @@
       const positions = data.positions || [];
       document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
         const signatures = [transactionLink(row.entry_signature, '买'), transactionLink(row.exit_signature, '卖')].filter(Boolean).join('<br>') || '—';
-        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${pct(row.gross_return_pct)}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(row.exit_reason || row.entry_error || row.exit_error || '—')}</td><td>${signatures}</td></tr>`;
+        const settled = row.realized_pnl_sol == null
+          ? (row.mode === 'DRY_RUN' ? pct(row.price_return_pct) : '待链上结算')
+          : `${row.realized_pnl_sol >= 0 ? '+' : ''}${number(row.realized_pnl_sol,6)} SOL<br>${pct(row.realized_return_pct)}`;
+        const priceNote = row.price_return_pct == null ? '' : `<br><span class="table-note">价格 ${pct(row.price_return_pct)}</span>`;
+        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(row.exit_reason || row.entry_error || row.exit_error || '—')}</td><td>${signatures}</td></tr>`;
       }).join('') : '<tr><td colspan="10" class="empty">暂无仓位记录；策略判定仍会继续采集</td></tr>';
 
       document.querySelector('#live-order-summary').textContent = `共 ${number(stats.orders)} 笔 · 确认 ${number(stats.confirmed_orders)} · 失败 ${number(stats.failed_orders)} · 状态未知 ${number(stats.unknown_orders)}`;
@@ -921,8 +926,9 @@
       document.querySelector('#live-order-rows').innerHTML = orders.length ? orders.map(row => {
         const requested = row.side === 'BUY' ? `${number(row.requested_sol,4)} SOL` : row.requested_token_raw ? `${escapeHtml(row.requested_token_raw)} raw` : '—';
         const detail = transactionLink(row.signature, 'Tx') || `<span class="${row.error ? 'error' : 'muted'}">${escapeHtml(row.error || '—')}</span>`;
-        return `<tr><td>${dateTime(row.submitted_at || row.created_at)}</td><td>${statusChip(row.side)}</td><td>${mintLink(row.mint)}</td><td>${escapeHtml(row.venue || '—')}</td><td>${number(row.attempt)}</td><td>${requested}</td><td>${statusChip(row.status)}</td><td class="wrap-cell">${detail}</td></tr>`;
-      }).join('') : '<tr><td colspan="8" class="empty">暂无订单记录</td></tr>';
+        const solDelta = row.wallet_sol_delta == null ? '待结算' : `${row.wallet_sol_delta >= 0 ? '+' : ''}${number(row.wallet_sol_delta,6)} SOL`;
+        return `<tr><td>${dateTime(row.submitted_at || row.created_at)}</td><td>${statusChip(row.side)}</td><td>${mintLink(row.mint)}</td><td>${escapeHtml(row.venue || '—')}</td><td>${number(row.attempt)}</td><td>${requested}</td><td class="${tone(row.wallet_sol_delta)}">${solDelta}</td><td>${statusChip(row.status)}</td><td class="wrap-cell">${detail}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无订单记录</td></tr>';
 
       const decisions = data.decisions || [];
       document.querySelector('#live-decision-rows').innerHTML = decisions.length ? decisions.map(row => {

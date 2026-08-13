@@ -215,7 +215,9 @@ async function main() {
     assert.strictEqual(liveTrading.runtime.safetyLock, true);
     assert.strictEqual(liveTrading.runtime.strategies[0].id, 'post_gd25_35_xleg');
     assert.strictEqual(liveTrading.runtime.strategies[0].market, 'PUMP_AMM');
-    assert.strictEqual(liveTrading.runtime.strategies[0].positionSizeSol, 0.05);
+    assert.strictEqual(liveTrading.runtime.strategies[0].positionSizeSol, 1);
+    assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
+    assert.strictEqual(liveTrading.runtime.priorityFeeMicroLamports, 2_000_000);
     assert.strictEqual(liveTrading.runtime.strategies[0].trailingActivationPct, 8);
     assert.strictEqual(liveTrading.runtime.strategies[0].trailingStopPct, 3);
     assert.ok(Array.isArray(liveTrading.positions));

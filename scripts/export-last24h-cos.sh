@@ -15,8 +15,11 @@ PREFIX="${FLOW_BACKUP_COS_PREFIX:-flow-acceleration/daily}"
 RETENTION_DAYS="${FLOW_BACKUP_LOCAL_RETENTION_DAYS:-7}"
 THREADS="${FLOW_BACKUP_COS_THREADS:-4}"
 LOG_LINES="${FLOW_BACKUP_LOG_LINES:-20000}"
+EXPORT_TIMEOUT="${FLOW_BACKUP_EXPORT_TIMEOUT:-2h}"
+UPLOAD_TIMEOUT="${FLOW_BACKUP_UPLOAD_TIMEOUT:-30m}"
+VERIFY_TIMEOUT="${FLOW_BACKUP_VERIFY_TIMEOUT:-5m}"
 
-for required in flock tar gzip sha256sum mktemp date tail find sort xargs sed nice systemctl journalctl sleep; do
+for required in flock tar gzip sha256sum mktemp date tail find sort xargs sed nice systemctl journalctl sleep timeout; do
   command -v "$required" >/dev/null 2>&1 || { echo "Missing required command: $required" >&2; exit 1; }
 done
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { echo "Node.js executable not found" >&2; exit 1; }
@@ -48,12 +51,31 @@ ARCHIVE="$EXPORT_DIR/$BASE_NAME"
 SHA_FILE="$ARCHIVE.sha256"
 STAGE="$(mktemp -d "$EXPORT_DIR/.stage-XXXXXXXX")"
 COS_CONFIG="$(mktemp)"
+STATE_FILE="$EXPORT_DIR/last-run.env"
 SUCCESS=0
 
+write_state() {
+  local state="$1"
+  local detail="${2:-}"
+  local temporary="$STATE_FILE.tmp"
+  {
+    printf 'STATE=%q\n' "$state"
+    printf 'UPDATED_AT=%q\n' "$(TZ=Asia/Shanghai date --iso-8601=seconds)"
+    printf 'ARCHIVE=%q\n' "$ARCHIVE"
+    printf 'REMOTE=%q\n' "${REMOTE_OBJECT:-}"
+    printf 'DETAIL=%q\n' "$detail"
+  } > "$temporary"
+  mv -f -- "$temporary" "$STATE_FILE"
+}
+
 cleanup() {
+  local exit_code=$?
   rm -f -- "$COS_CONFIG"
   case "$STAGE" in "$EXPORT_DIR"/.stage-*) rm -rf -- "$STAGE" ;; esac
-  [[ "$SUCCESS" == "1" ]] || echo "Export failed; any completed archive remains in $EXPORT_DIR for retry." >&2
+  if [[ "$SUCCESS" != "1" ]]; then
+    write_state FAILED "exit=$exit_code"
+    echo "Export failed; any completed archive remains in $EXPORT_DIR for retry." >&2
+  fi
 }
 trap cleanup EXIT
 
@@ -62,10 +84,11 @@ MANIFEST="$STAGE/manifest.json"
 SCHEMA="$STAGE/schema.sql"
 
 echo "Creating consistent 24-hour window export from $DB_PATH"
+write_state EXPORTING
 systemctl show flow-acceleration.service -p ActiveState -p MainPID -p ExecMainStartTimestamp \
   > "$STAGE/service-before.txt" 2>&1 || true
 PID_BEFORE="$(systemctl show flow-acceleration.service -p MainPID --value 2>/dev/null || true)"
-nice -n 10 "$NODE_BIN" "$PROJECT_DIR/scripts/export-research-window.js" \
+timeout --foreground "$EXPORT_TIMEOUT" nice -n 10 "$NODE_BIN" "$PROJECT_DIR/scripts/export-research-window.js" \
   "--db=$DB_PATH" \
   "--out=$DB_EXPORT" \
   "--hours=24" \
@@ -125,6 +148,7 @@ EOF
 chmod 600 "$COS_CONFIG"
 
 REMOTE_DIR="cos://flowbackup/${PREFIX#/}/$DATE_PATH"
+REMOTE_OBJECT="$REMOTE_DIR/$BASE_NAME"
 echo "Uploading $BASE_NAME to $REMOTE_DIR"
 retry() {
   local attempt=1
@@ -136,15 +160,21 @@ retry() {
     attempt=$((attempt + 1))
   done
 }
-retry "$COSCLI_BIN" -c "$COS_CONFIG" cp "$ARCHIVE" "$REMOTE_DIR/$BASE_NAME" --thread-num "$THREADS"
-retry "$COSCLI_BIN" -c "$COS_CONFIG" cp "$SHA_FILE" "$REMOTE_DIR/$BASE_NAME.sha256" --thread-num 1
-retry "$COSCLI_BIN" -c "$COS_CONFIG" ls "$REMOTE_DIR/$BASE_NAME" >/dev/null
+write_state UPLOADING
+retry timeout --foreground "$UPLOAD_TIMEOUT" "$COSCLI_BIN" -c "$COS_CONFIG" cp \
+  "$ARCHIVE" "$REMOTE_OBJECT" --thread-num "$THREADS" --part-size 64 --fail-output=false
+retry timeout --foreground "$VERIFY_TIMEOUT" "$COSCLI_BIN" -c "$COS_CONFIG" cp \
+  "$SHA_FILE" "$REMOTE_OBJECT.sha256" --thread-num 1 --fail-output=false
+write_state VERIFYING
+retry timeout --foreground "$VERIFY_TIMEOUT" "$COSCLI_BIN" -c "$COS_CONFIG" ls \
+  "$REMOTE_OBJECT" >/dev/null
 
 find "$EXPORT_DIR" -maxdepth 1 -type f \
   \( -name 'flow-acceleration-last24h-*.tar.gz' -o -name 'flow-acceleration-last24h-*.tar.gz.sha256' \) \
   -mtime "+$RETENTION_DAYS" -delete
 
 SUCCESS=1
+write_state DONE "sha256=$(cut -d' ' -f1 "$SHA_FILE")"
 echo "Daily export complete"
 echo "local=$ARCHIVE"
 echo "remote=$REMOTE_DIR/$BASE_NAME"
