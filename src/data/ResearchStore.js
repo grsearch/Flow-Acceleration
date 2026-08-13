@@ -176,6 +176,11 @@ class ResearchStore {
         table: 'migrated_drop_rebound_shadow_positions',
         anchor: 'rebound_at',
       },
+      'migration-continuity': {
+        label: 'Migration Continuity · M',
+        table: 'migration_continuity_shadow_positions',
+        anchor: 'signal_at',
+      },
       'range-scalper': {
         label: 'PumpSwap Range Scalper · J',
         table: 'range_scalper_shadow_positions',
@@ -945,6 +950,62 @@ class ResearchStore {
         ON migrated_drop_rebound_shadow_positions(mint, rebound_at DESC);
       CREATE INDEX IF NOT EXISTS idx_migrated_drop_rebound_profiles
         ON migrated_drop_rebound_shadow_positions(entry_profile_id, exit_profile_id, rebound_at);
+
+      CREATE TABLE IF NOT EXISTS migration_continuity_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        exit_profile_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        graduated_at INTEGER NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        entry_buyers INTEGER NOT NULL,
+        entry_buy_sol REAL NOT NULL,
+        entry_sell_sol REAL NOT NULL,
+        entry_net_flow_sol REAL NOT NULL,
+        entry_sell_buy_ratio REAL NOT NULL,
+        entry_return_pct REAL NOT NULL,
+        entry_target_at INTEGER NOT NULL,
+        entry_deadline_at INTEGER NOT NULL,
+        entry_at INTEGER,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        trailing_activated_at INTEGER,
+        exit_mode TEXT NOT NULL,
+        min_hold_ms INTEGER,
+        fixed_hold_ms INTEGER,
+        trailing_activation_pct REAL,
+        trailing_stop_pct REAL,
+        hard_stop_pct REAL,
+        max_hold_ms INTEGER,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_migration_continuity_shadow_status
+        ON migration_continuity_shadow_positions(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_migration_continuity_shadow_mint
+        ON migration_continuity_shadow_positions(mint, signal_at DESC);
 
       CREATE TABLE IF NOT EXISTS range_scalper_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2551,6 +2612,69 @@ class ResearchStore {
         FROM migrated_drop_rebound_shadow_positions
         WHERE lifecycle_stage = ? AND entry_profile_id = ? AND mint = ?
       `),
+      insertMigrationContinuityShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO migration_continuity_shadow_positions (
+          cohort_id, exit_profile_id, episode_id, mint, symbol, status,
+          rejection_reason, position_sol, configured_cost_pct, graduated_at,
+          signal_at, signal_price, entry_buyers, entry_buy_sol, entry_sell_sol,
+          entry_net_flow_sol, entry_sell_buy_ratio, entry_return_pct,
+          entry_target_at, entry_deadline_at, exit_mode, min_hold_ms,
+          fixed_hold_ms, trailing_activation_pct, trailing_stop_pct,
+          hard_stop_pct, max_hold_ms, created_at, updated_at
+        ) VALUES (
+          @cohortId, @exitProfileId, @episodeId, @mint, @symbol, @status,
+          @rejectionReason, @positionSol, @configuredCostPct, @graduatedAt,
+          @signalAt, @signalPrice, @entryBuyers, @entryBuySol, @entrySellSol,
+          @entryNetFlowSol, @entrySellBuyRatio, @entryReturnPct,
+          @entryTargetAt, @entryDeadlineAt, @exitMode, @minHoldMs,
+          @fixedHoldMs, @trailingActivationPct, @trailingStopPct,
+          @hardStopPct, @maxHoldMs, @createdAt, @updatedAt
+        )
+      `),
+      getMigrationContinuityShadowPosition: this.db.prepare(`
+        SELECT * FROM migration_continuity_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      updateMigrationContinuityShadowPosition: this.db.prepare(`
+        UPDATE migration_continuity_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          lowest_price = COALESCE(@lowestPrice, lowest_price),
+          last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct, max_favorable_return_pct
+          ),
+          max_adverse_return_pct = COALESCE(
+            @maxAdverseReturnPct, max_adverse_return_pct
+          ),
+          trailing_activated_at = COALESCE(@trailingActivatedAt, trailing_activated_at),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeMigrationContinuityShadowPositions: this.db.prepare(`
+        SELECT * FROM migration_continuity_shadow_positions
+        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY signal_at, id
+      `),
+      hasMigrationContinuityShadowSignal: this.db.prepare(`
+        SELECT 1 AS present
+        FROM migration_continuity_shadow_positions
+        WHERE mint = ?
+        LIMIT 1
+      `),
       insertRangeScalperShadowPosition: this.db.prepare(`
         INSERT OR IGNORE INTO range_scalper_shadow_positions (
           cohort_id, entry_profile_id, exit_profile_id, episode_id, swing_index,
@@ -3951,6 +4075,87 @@ class ResearchStore {
     )?.count || 0);
   }
 
+  createMigrationContinuityShadowPosition(position) {
+    const now = Date.now();
+    const nullableInteger = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
+    const row = {
+      cohortId: position.cohortId,
+      exitProfileId: position.exitProfileId,
+      episodeId: position.episodeId,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: position.positionSol,
+      configuredCostPct: position.configuredCostPct,
+      graduatedAt: Math.trunc(position.graduatedAt),
+      signalAt: Math.trunc(position.signalAt),
+      signalPrice: position.signalPrice,
+      entryBuyers: Math.max(0, Math.trunc(position.entryBuyers || 0)),
+      entryBuySol: finiteOrNull(position.entryBuySol) ?? 0,
+      entrySellSol: finiteOrNull(position.entrySellSol) ?? 0,
+      entryNetFlowSol: finiteOrNull(position.entryNetFlowSol) ?? 0,
+      entrySellBuyRatio: finiteOrNull(position.entrySellBuyRatio) ?? 0,
+      entryReturnPct: finiteOrNull(position.entryReturnPct) ?? 0,
+      entryTargetAt: Math.trunc(position.entryTargetAt),
+      entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
+      exitMode: position.exitMode,
+      minHoldMs: nullableInteger(position.minHoldMs),
+      fixedHoldMs: nullableInteger(position.fixedHoldMs),
+      trailingActivationPct: finiteOrNull(position.trailingActivationPct),
+      trailingStopPct: finiteOrNull(position.trailingStopPct),
+      hardStopPct: finiteOrNull(position.hardStopPct),
+      maxHoldMs: nullableInteger(position.maxHoldMs),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertMigrationContinuityShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getMigrationContinuityShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateMigrationContinuityShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    return this.stmts.updateMigrationContinuityShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      lowestPrice: finiteOrNull(value('lowestPrice')),
+      lastObservedAt: value('lastObservedAt'),
+      lastPrice: finiteOrNull(value('lastPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
+      trailingActivatedAt: value('trailingActivatedAt'),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeMigrationContinuityShadowPositions() {
+    return this.stmts.activeMigrationContinuityShadowPositions.all();
+  }
+
+  hasMigrationContinuityShadowSignal(mint) {
+    return Boolean(this.stmts.hasMigrationContinuityShadowSignal.get(mint));
+  }
+
   createRangeScalperShadowPosition(position) {
     const now = Date.now();
     const features = position.features || {};
@@ -4764,6 +4969,73 @@ class ResearchStore {
       ORDER BY lifecycle_stage, entry_profile_id
     `).all();
     return { cohorts, entryProfiles, positions };
+  }
+
+  migrationContinuityShadowDashboard({ positionLimit = 100, cacheStats = false } = {}) {
+    const limit = Math.min(300, Math.max(1, Math.trunc(Number(positionLimit) || 100)));
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+          THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM migration_continuity_shadow_positions
+      ORDER BY
+        CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const computeCohorts = () => this.db.prepare(`
+      SELECT cohort_id, exit_profile_id,
+        MIN(exit_mode) AS exit_mode,
+        MIN(min_hold_ms) AS min_hold_ms,
+        MIN(fixed_hold_ms) AS fixed_hold_ms,
+        MIN(trailing_activation_pct) AS trailing_activation_pct,
+        MIN(trailing_stop_pct) AS trailing_stop_pct,
+        MIN(hard_stop_pct) AS hard_stop_pct,
+        MIN(max_hold_ms) AS max_hold_ms,
+        COUNT(*) AS signals,
+        COUNT(DISTINCT mint) AS independent_mints,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+        COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+        AVG(entry_buyers) AS average_entry_buyers,
+        AVG(entry_net_flow_sol) AS average_entry_net_flow_sol,
+        AVG(entry_sell_buy_ratio) AS average_entry_sell_buy_ratio,
+        AVG(entry_return_pct) AS average_entry_return_pct,
+        AVG(entry_jump_pct) AS average_entry_jump_pct,
+        AVG(max_favorable_return_pct) AS average_mfe_pct,
+        AVG(max_adverse_return_pct) AS average_mae_pct,
+        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+          AS average_net_return_pct,
+        100.0 * COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0)
+          / NULLIF(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS win_rate_pct,
+        SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0
+          THEN net_return_pct ELSE 0 END)
+          / NULLIF(ABS(SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct < 0
+            THEN net_return_pct ELSE 0 END)), 0) AS profit_factor
+      FROM migration_continuity_shadow_positions
+      GROUP BY cohort_id, exit_profile_id
+      ORDER BY exit_profile_id
+    `).all().map((cohort) => {
+      const rows = this.db.prepare(`
+        SELECT net_return_pct
+        FROM migration_continuity_shadow_positions
+        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          AND net_return_pct IS NOT NULL
+        ORDER BY net_return_pct
+      `).all(cohort.cohort_id).map((row) => Number(row.net_return_pct));
+      const middle = Math.floor(rows.length / 2);
+      return {
+        ...cohort,
+        median_net_return_pct: rows.length
+          ? rows.length % 2 ? rows[middle] : (rows[middle - 1] + rows[middle]) / 2
+          : null,
+      };
+    });
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats('migration-continuity-shadow', 15_000, computeCohorts)
+      : computeCohorts();
+    return { cohorts, positions };
   }
 
   rangeScalperShadowDashboard({ positionLimit = 100, cacheStats = false } = {}) {
@@ -5979,6 +6251,16 @@ class ResearchStore {
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
       FROM migrated_drop_rebound_shadow_positions
     `).get();
+    const migrationContinuityShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
+      FROM migration_continuity_shadow_positions
+    `).get();
     const rangeScalperShadowPositions = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COUNT(DISTINCT episode_id) AS signals,
@@ -6068,6 +6350,7 @@ class ResearchStore {
       flowSmartConfirmShadowPositions,
       launchPullbackShadowPositions,
       migratedDropReboundShadowPositions,
+      migrationContinuityShadowPositions,
       rangeScalperShadowPositions,
       cyaEarlyPyramidShadowPositions,
       bondingCurveMomentumShadowPositions,

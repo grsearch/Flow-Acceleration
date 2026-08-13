@@ -1499,6 +1499,83 @@ const config = {
     }),
   },
 
+  // Independent post-migration continuation study. The entry thresholds were
+  // selected from the chronological migration-cohort backtest; every exit is
+  // stored as a separate cohort so long-hold winner capture stays auditable.
+  migrationContinuityShadow: {
+    enabled: booleanEnv('FLOW_MIGRATION_CONTINUITY_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
+    confirmWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_CONFIRM_MS', 5_000, {
+      min: 1_000, max: 15_000,
+    }),
+    detectionDeadlineMs: integerEnv('FLOW_MIGRATION_CONTINUITY_DETECTION_MS', 10_000, {
+      min: 5_000, max: 30_000,
+    }),
+    flowWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_FLOW_WINDOW_MS', 3_000, {
+      min: 1_000, max: 10_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0, max: 100,
+    }),
+    entryProfile: {
+      id: 'MC_C5',
+      label: 'MC-C · 毕业后5秒质量延续',
+      minBuyers: integerEnv('FLOW_MIGRATION_CONTINUITY_MIN_BUYERS', 20, { min: 1 }),
+      minNetFlowSol: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_NET_FLOW_SOL', 5, { min: 0 }),
+      minReturnPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_RETURN_PCT', 5, { min: -100 }),
+      maxSellBuyRatio: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_SELL_BUY_RATIO', 0.6, {
+        min: 0, max: 10,
+      }),
+    },
+    exitProfiles: [
+      {
+        id: 'E60', label: '固定60秒', exitMode: 'FIXED_HOLD', fixedHoldMs: 60_000,
+        hardStopPct: 20, maxHoldMs: 60_000,
+      },
+      {
+        id: 'E120', label: '固定120秒', exitMode: 'FIXED_HOLD', fixedHoldMs: 120_000,
+        hardStopPct: 20, maxHoldMs: 120_000,
+      },
+      {
+        id: 'T10', label: '5秒保护 / +10%激活 / 回撤10%', exitMode: 'TRAILING',
+        minHoldMs: 5_000, trailingActivationPct: 10, trailingStopPct: 10,
+        hardStopPct: 20, maxHoldMs: 120_000,
+      },
+      {
+        id: 'T12_5', label: '10秒保护 / +15%激活 / 回撤12.5%', exitMode: 'TRAILING',
+        minHoldMs: 10_000, trailingActivationPct: 15, trailingStopPct: 12.5,
+        hardStopPct: 20, maxHoldMs: 180_000,
+      },
+      {
+        id: 'FLOW', label: '10秒保护 / 3秒订单流转弱', exitMode: 'FLOW_FADE',
+        minHoldMs: 10_000, minSellBuyRatio: 1.2, maxNetFlowSol: -2,
+        hardStopPct: 20, maxHoldMs: 180_000,
+      },
+      {
+        id: 'RUNNER', label: '15秒保护 / +20%激活 / 自适应尾仓',
+        exitMode: 'ADAPTIVE_TRAILING', minHoldMs: 15_000, trailingActivationPct: 20,
+        hardStopPct: 25, maxHoldMs: 300_000,
+        trailingTiers: [
+          { belowPct: 50, stopPct: 12.5 },
+          { belowPct: 100, stopPct: 20 },
+          { belowPct: Infinity, stopPct: 25 },
+        ],
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
+    }),
+  },
+
   // Independent post-migration range-regime research. Every graduation receives
   // a short PumpSwap observation window; only qualified oscillating markets keep
   // the extended subscription. This suite never owns a signer or executor.

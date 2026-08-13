@@ -242,6 +242,16 @@ assert.deepStrictEqual(
     ['GE30_R23_F3', 30_000, 3],
   ],
 );
+assert.strictEqual(config.migrationContinuityShadow.enabled, true);
+assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
+assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
+  id: 'MC_C5', label: 'MC-C · 毕业后5秒质量延续',
+  minBuyers: 20, minNetFlowSol: 5, minReturnPct: 5, maxSellBuyRatio: 0.6,
+});
+assert.deepStrictEqual(
+  config.migrationContinuityShadow.exitProfiles.map((profile) => profile.id),
+  ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER'],
+);
 assert.ok(
   Math.abs(costBreakdown(config.cyaEarlyPyramidShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,

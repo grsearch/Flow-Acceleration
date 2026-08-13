@@ -28,6 +28,7 @@ class ResearchServer {
     flowSmartConfirmShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
+    migrationContinuityShadow = null,
     rangeScalperShadow = null,
     cyaEarlyPyramidShadow = null,
     bondingCurveMomentumShadow = null,
@@ -47,6 +48,7 @@ class ResearchServer {
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
+    this.migrationContinuityShadow = migrationContinuityShadow;
     this.rangeScalperShadow = rangeScalperShadow;
     this.cyaEarlyPyramidShadow = cyaEarlyPyramidShadow;
     this.bondingCurveMomentumShadow = bondingCurveMomentumShadow;
@@ -323,6 +325,19 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/migration-continuity-shadow', (request, response) => {
+      response.json({
+        runtime: this.migrationContinuityShadow?.health() || {
+          enabled: false, mode: 'SHADOW_M', sendsTransactions: false,
+        },
+        timeSessions: this.store.shadowTimeSessionDashboard('migration-continuity'),
+        ...this.store.migrationContinuityShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/bonding-curve-momentum-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -435,6 +450,7 @@ class ResearchServer {
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
+        migrationContinuityShadow: this.migrationContinuityShadow?.health() || null,
         rangeScalperShadow: this.rangeScalperShadow?.health() || null,
         cyaEarlyPyramidShadow: this.cyaEarlyPyramidShadow?.health() || null,
         bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,

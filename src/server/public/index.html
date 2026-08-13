@@ -347,6 +347,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migrated-rebound">
               <b>生命周期超跌反弹 · G</b><small>新增毕业后30秒内、首1/3次机会分层</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migration-continuity">
+              <b>Migration Continuity · M</b><small>毕业后5秒质量确认，60～300秒退出组合</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="range-scalper">
               <b>PumpSwap 区间波段 · J</b><small>新增第1波预热、仅交易第2/3波的 JW</small>
             </button>
@@ -466,6 +469,28 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>生命周期 / 组别</th><th>状态</th><th>Mint</th><th>Lifecycle AGE</th><th>跌幅 / 反弹 / 用时</th><th>信号价 / 入场 / 最高 / 最低 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="migrated-rebound-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="migration-continuity" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Migration Continuity Shadow M</h2>
+                <p>毕业后5秒质量延续入场；六种退出独立建仓，只做模拟，永不签名或发送交易。</p>
+              </div>
+              <div class="strategy-expression" id="migration-continuity-expression">等待 Shadow M 配置…</div>
+              <div class="strategy-metric-groups" id="migration-continuity-metrics"></div>
+              <div class="strategy-metric-groups" id="migration-continuity-time-sessions"></div>
+              <div class="section-title"><h2>退出组合表现</h2><p>固定60/120秒、延迟移动止盈、订单流转弱与自适应尾仓分别计数。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>退出组</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位净收益</th><th>PF</th><th>入场质量</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="migration-continuity-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>1 SOL 成本模型，200ms模拟成交与退出延迟。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>退出组 / 状态</th><th>Mint</th><th>Buyers / NetFlow</th><th>涨幅 / Sell÷Buy</th><th>信号 / 入场 / 最高 / 最低 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="migration-continuity-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1092,6 +1117,31 @@
       }).join('') : '<tr><td colspan="10" class="empty">暂无 Shadow G 仓位；毕业前 Curve 与订阅期内毕业后 PumpSwap 成交仍持续写入，供离线回测</td></tr>';
     }
 
+    function renderMigrationContinuityShadow(data) {
+      const runtime = data.runtime || {};
+      const entry = runtime.entryProfile || {};
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      const research = runtime.strategy?.research || {};
+      document.querySelector('#migration-continuity-expression').textContent = `毕业后${age(runtime.strategy?.flowWindowMs || 5000)}确认：Buyers≥${number(entry.minBuyers)} / NetFlow≥${number(entry.minNetFlowSol,1)} SOL / 涨幅≥${rate(entry.minReturnPct)} / Sell÷Buy≤${number(entry.maxSellBuyRatio,2)} → ${number(runtime.strategy?.entryDelayMs)}ms模拟入场 → 60～300秒独立退出组`;
+      renderMetricGroups('#migration-continuity-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW M' : '关闭', `独立表 ${research.isolatedTable || 'migration_continuity_shadow_positions'}`],
+        ['评估 / 命中', `${number(runtime.evaluated)} / ${number(runtime.matched)}`, `拒绝 ${number(runtime.rejected)} · 回放抑制 ${number(runtime.replayEvaluationsSuppressed)}`],
+        ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
+        ['成本与执行', `${number(research.simulatedPositionSol,2)} SOL / ${pct(research.configuredCostPct)}`, `跳价拒绝 ${number(runtime.priceJump)} · 无入场 ${number(runtime.noEntry)}`],
+      ], []);
+      renderTimeSessions('#migration-continuity-time-sessions', data.timeSessions);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#migration-continuity-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</b><br><span class="table-note">${escapeHtml(row.exit_mode || '')} · 最长 ${age(row.max_hold_ms)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)}</td><td>${number(row.average_entry_buyers,1)} Buyers · ${number(row.average_entry_net_flow_sol,2)} SOL<br><span class="table-note">涨幅 ${pct(row.average_entry_return_pct)} · Sell÷Buy ${number(row.average_entry_sell_buy_ratio,2)}</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="7" class="empty">等待毕业后5秒质量延续信号。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#migration-continuity-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const prices = `${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.lowest_price,10)} / ${number(row.exit_price,10)}`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${number(row.entry_buyers)} / ${number(row.entry_net_flow_sol,2)} SOL</td><td>${pct(row.entry_return_pct)} / ${number(row.entry_sell_buy_ratio,2)}</td><td>${prices}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">暂无 Shadow M 模拟仓位。</td></tr>';
+    }
+
     function renderRangeScalperShadow(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -1550,6 +1600,9 @@
         ],
         'migrated-rebound': () => [
           json('/api/migrated-drop-rebound-shadow?positionLimit=30').then(renderMigratedDropReboundShadow),
+        ],
+        'migration-continuity': () => [
+          json('/api/migration-continuity-shadow?positionLimit=100').then(renderMigrationContinuityShadow),
         ],
         'range-scalper': () => [
           json('/api/range-scalper-shadow?positionLimit=100').then(renderRangeScalperShadow),

@@ -14,6 +14,7 @@ const { FlowSmartConfirmShadowSuite } = require('./core/FlowSmartConfirmShadowSu
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
+const { MigrationContinuityShadowSuite } = require('./core/MigrationContinuityShadowSuite');
 const { RangeScalperShadowSuite } = require('./core/RangeScalperShadowSuite');
 const { CyaEarlyPyramidShadowSuite } = require('./core/CyaEarlyPyramidShadowSuite');
 const {
@@ -87,6 +88,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   migratedDropReboundShadow.start();
+  const migrationContinuityShadow = new MigrationContinuityShadowSuite({
+    config: runtimeConfig.migrationContinuityShadow,
+    store,
+  });
+  migrationContinuityShadow.start();
   const rangeScalperShadow = new RangeScalperShadowSuite({
     config: runtimeConfig.rangeScalperShadow,
     store,
@@ -122,6 +128,7 @@ function createRuntime(runtimeConfig = config) {
     launchPullbackShadow,
     launchQualityObserver,
     migratedDropReboundShadow,
+    migrationContinuityShadow,
     rangeScalperShadow,
     cyaEarlyPyramidShadow,
     bondingCurveMomentumShadow,
@@ -153,6 +160,7 @@ function createRuntime(runtimeConfig = config) {
       ...graduatedPending,
       ...trader.trackedMints(now),
       ...migratedDropReboundShadow.trackedMints(now),
+      ...migrationContinuityShadow.trackedMints(now),
       ...rangeScalperShadow.trackedMints(now),
       ...cyaEarlyPyramidShadow.trackedMints(),
       ...bondingCurveMomentumShadow.trackedMints(),
@@ -226,6 +234,9 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('migratedDropReboundGraduate', () => (
             migratedDropReboundShadow.onGraduated(token || event)
           ));
+          observeShadow('migrationContinuityGraduate', () => (
+            migrationContinuityShadow.onGraduated(token || event)
+          ));
           observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
@@ -237,6 +248,9 @@ function createRuntime(runtimeConfig = config) {
           engine.handleComplete({ ...event, completedAt: event.migratedAt });
           observeShadow('migratedDropReboundGraduate', () => (
             migratedDropReboundShadow.onGraduated(token || event)
+          ));
+          observeShadow('migrationContinuityGraduate', () => (
+            migrationContinuityShadow.onGraduated(token || event)
           ));
           observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
@@ -271,6 +285,7 @@ function createRuntime(runtimeConfig = config) {
           : null;
         store.queueRawTrade(trade);
         observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
+        observeShadow('migrationContinuity', () => migrationContinuityShadow.observeTrade(trade));
         observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
         observeShadow('cyaEarlyPyramid', () => cyaEarlyPyramidShadow.observeTrade(trade));
         observeShadow('bondingCurveMomentum', () => bondingCurveMomentumShadow.observeTrade(trade));
@@ -417,6 +432,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
       observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
+      observeShadow('migrationContinuityAdvance', () => migrationContinuityShadow.advanceTime(now));
       observeShadow('rangeScalperAdvance', () => rangeScalperShadow.advanceTime(now));
       observeShadow('cyaEarlyPyramidAdvance', () => cyaEarlyPyramidShadow.advanceTime(now));
       observeShadow('bondingCurveMomentumAdvance', () => bondingCurveMomentumShadow.advanceTime(now));
@@ -457,6 +473,7 @@ function createRuntime(runtimeConfig = config) {
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     migratedDropReboundShadow.stop();
+    migrationContinuityShadow.stop();
     rangeScalperShadow.stop();
     cyaEarlyPyramidShadow.stop();
     bondingCurveMomentumShadow.stop();
@@ -481,6 +498,7 @@ function createRuntime(runtimeConfig = config) {
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
+      migrationContinuityShadow: migrationContinuityShadow.health(),
       rangeScalperShadow: rangeScalperShadow.health(),
       cyaEarlyPyramidShadow: cyaEarlyPyramidShadow.health(),
       bondingCurveMomentumShadow: bondingCurveMomentumShadow.health(),
@@ -493,7 +511,7 @@ function createRuntime(runtimeConfig = config) {
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     launchPullbackShadow,
     launchQualityObserver, migratedDropReboundShadow, rangeScalperShadow, cyaEarlyPyramidShadow,
-    bondingCurveMomentumShadow, graduationHoldShadow,
+    migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
   };
 }
 

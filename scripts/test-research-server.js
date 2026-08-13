@@ -74,6 +74,11 @@ async function main() {
   assert.ok(dashboard.includes('第1波只预热，仅交易第2/3波'));
   assert.ok(dashboard.includes('CYA Early Pyramid · K（已停）'));
   assert.ok(dashboard.includes("json('/api/migrated-drop-rebound-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="migration-continuity"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="migration-continuity"'));
+  assert.ok(dashboard.includes('id="migration-continuity-cohort-rows"'));
+  assert.ok(dashboard.includes('id="migration-continuity-position-rows"'));
+  assert.ok(dashboard.includes("json('/api/migration-continuity-shadow?positionLimit=100')"));
   assert.ok(dashboard.includes('data-live-strategy="range-scalper"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="range-scalper"'));
   assert.ok(dashboard.includes('id="range-scalper-cohort-rows"'));
@@ -204,6 +209,7 @@ async function main() {
       '/api/smart-open-shadow',
       '/api/launch-pullback-shadow',
       '/api/migrated-drop-rebound-shadow',
+      '/api/migration-continuity-shadow',
       '/api/range-scalper-shadow',
       '/api/bonding-curve-momentum-shadow',
       '/api/graduation-hold-shadow',
@@ -497,6 +503,21 @@ async function main() {
     );
     assert.ok(Array.isArray(graduationHold.cohorts));
     assert.ok(Array.isArray(graduationHold.positions));
+    const migrationContinuity = await (await fetch(
+      `http://127.0.0.1:${port}/api/migration-continuity-shadow`,
+    )).json();
+    assert.strictEqual(migrationContinuity.runtime.mode, 'SHADOW_M');
+    assert.strictEqual(migrationContinuity.runtime.sendsTransactions, false);
+    assert.strictEqual(
+      migrationContinuity.runtime.strategy.research.isolatedTable,
+      'migration_continuity_shadow_positions',
+    );
+    assert.deepStrictEqual(
+      migrationContinuity.runtime.exitProfiles.map((profile) => profile.id),
+      ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER'],
+    );
+    assert.ok(Array.isArray(migrationContinuity.cohorts));
+    assert.ok(Array.isArray(migrationContinuity.positions));
     const launchQuality = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-quality-observer`,
     )).json();
