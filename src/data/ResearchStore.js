@@ -520,6 +520,10 @@ class ResearchStore {
         mode TEXT NOT NULL,
         status TEXT NOT NULL,
         position_sol REAL NOT NULL,
+        entry_sol_delta REAL,
+        exit_sol_delta REAL,
+        realized_pnl_sol REAL,
+        realized_return_pct REAL,
         token_amount_raw TEXT,
         entry_market TEXT,
         entry_price REAL,
@@ -556,6 +560,8 @@ class ResearchStore {
         attempt INTEGER NOT NULL,
         requested_sol REAL,
         requested_token_raw TEXT,
+        wallet_sol_delta REAL,
+        network_fee_sol REAL,
         status TEXT NOT NULL,
         signature TEXT,
         error TEXT,
@@ -1634,6 +1640,7 @@ class ResearchStore {
         CREATE INDEX IF NOT EXISTS idx_live_orders_strategy
           ON live_orders(strategy_id, created_at DESC);
       `);
+      this._ensureLiveSettlementColumns();
       return;
     }
 
@@ -1745,6 +1752,21 @@ class ResearchStore {
     if (violations.length > 0) {
       throw new Error(`Live trading schema migration has ${violations.length} FK violation(s)`);
     }
+    this._ensureLiveSettlementColumns();
+  }
+
+  _ensureLiveSettlementColumns() {
+    const ensure = (table, name, definition) => {
+      const columns = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all()
+        .map((column) => column.name));
+      if (!columns.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    };
+    ensure('live_positions', 'entry_sol_delta', 'REAL');
+    ensure('live_positions', 'exit_sol_delta', 'REAL');
+    ensure('live_positions', 'realized_pnl_sol', 'REAL');
+    ensure('live_positions', 'realized_return_pct', 'REAL');
+    ensure('live_orders', 'wallet_sol_delta', 'REAL');
+    ensure('live_orders', 'network_fee_sol', 'REAL');
   }
 
   _prepare() {
@@ -2017,12 +2039,16 @@ class ResearchStore {
           entry_price = COALESCE(@entryPrice, entry_price),
           entry_signature = COALESCE(@entrySignature, entry_signature),
           entry_error = @entryError,
+          entry_sol_delta = COALESCE(@entrySolDelta, entry_sol_delta),
           highest_price = COALESCE(@highestPrice, highest_price),
           exit_market = COALESCE(@exitMarket, exit_market),
           exit_price = COALESCE(@exitPrice, exit_price),
           exit_signature = COALESCE(@exitSignature, exit_signature),
           exit_reason = COALESCE(@exitReason, exit_reason),
           exit_error = @exitError,
+          exit_sol_delta = COALESCE(@exitSolDelta, exit_sol_delta),
+          realized_pnl_sol = COALESCE(@realizedPnlSol, realized_pnl_sol),
+          realized_return_pct = COALESCE(@realizedReturnPct, realized_return_pct),
           opened_at = COALESCE(@openedAt, opened_at),
           exit_requested_at = COALESCE(@exitRequestedAt, exit_requested_at),
           closed_at = COALESCE(@closedAt, closed_at),
@@ -2050,12 +2076,14 @@ class ResearchStore {
           position_id, decision_id, primary_decision_id, strategy_decision_id, strategy_id,
           mint, side, venue, attempt,
           requested_sol, requested_token_raw, status, signature, error,
-          execution_json, submitted_at, confirmed_at, created_at, updated_at
+          wallet_sol_delta, network_fee_sol, execution_json,
+          submitted_at, confirmed_at, created_at, updated_at
         ) VALUES (
           @positionId, @decisionId, @primaryDecisionId, @strategyDecisionId, @strategyId,
           @mint, @side, @venue, @attempt,
           @requestedSol, @requestedTokenRaw, @status, @signature, @error,
-          @executionJson, @submittedAt, @confirmedAt, @createdAt, @updatedAt
+          @walletSolDelta, @networkFeeSol, @executionJson,
+          @submittedAt, @confirmedAt, @createdAt, @updatedAt
         )
       `),
       updateLiveOrder: this.db.prepare(`
@@ -2063,6 +2091,8 @@ class ResearchStore {
           status = COALESCE(@status, status),
           requested_token_raw = COALESCE(@requestedTokenRaw, requested_token_raw),
           error = @error,
+          wallet_sol_delta = COALESCE(@walletSolDelta, wallet_sol_delta),
+          network_fee_sol = COALESCE(@networkFeeSol, network_fee_sol),
           execution_json = COALESCE(@executionJson, execution_json),
           confirmed_at = COALESCE(@confirmedAt, confirmed_at),
           updated_at = @updatedAt
@@ -3213,12 +3243,16 @@ class ResearchStore {
       entryPrice: finiteOrNull(value('entryPrice')),
       entrySignature: value('entrySignature'),
       entryError: value('entryError'),
+      entrySolDelta: finiteOrNull(value('entrySolDelta')),
       highestPrice: finiteOrNull(value('highestPrice')),
       exitMarket: value('exitMarket'),
       exitPrice: finiteOrNull(value('exitPrice')),
       exitSignature: value('exitSignature'),
       exitReason: value('exitReason'),
       exitError: value('exitError'),
+      exitSolDelta: finiteOrNull(value('exitSolDelta')),
+      realizedPnlSol: finiteOrNull(value('realizedPnlSol')),
+      realizedReturnPct: finiteOrNull(value('realizedReturnPct')),
       openedAt: value('openedAt'),
       exitRequestedAt: value('exitRequestedAt'),
       closedAt: value('closedAt'),
@@ -3263,6 +3297,8 @@ class ResearchStore {
       status: order.status,
       signature: order.signature || null,
       error: order.error || null,
+      walletSolDelta: finiteOrNull(order.walletSolDelta),
+      networkFeeSol: finiteOrNull(order.networkFeeSol),
       executionJson: order.execution ? JSON.stringify(order.execution) : null,
       submittedAt: order.submittedAt || null,
       confirmedAt: order.confirmedAt || null,
@@ -3279,6 +3315,8 @@ class ResearchStore {
       status: value('status'),
       requestedTokenRaw: value('requestedTokenRaw'),
       error: value('error'),
+      walletSolDelta: finiteOrNull(value('walletSolDelta')),
+      networkFeeSol: finiteOrNull(value('networkFeeSol')),
       executionJson: value('execution') ? JSON.stringify(value('execution')) : null,
       confirmedAt: value('confirmedAt'),
       updatedAt: Date.now(),
@@ -3287,6 +3325,59 @@ class ResearchStore {
 
   latestLiveOrderForPositionSide(positionId, side) {
     return this.stmts.latestLiveOrderForPositionSide.get(positionId, side) || null;
+  }
+
+  unsettledLiveOrders(limit = 500) {
+    return this.db.prepare(`
+      SELECT o.*
+      FROM live_orders o
+      JOIN live_positions p ON p.id = o.position_id
+      WHERE p.mode = 'LIVE'
+        AND o.signature IS NOT NULL
+        AND o.wallet_sol_delta IS NULL
+        AND (o.side = 'BUY' OR p.status = 'CLOSED')
+      ORDER BY o.id DESC
+      LIMIT ?
+    `).all(Math.min(2_000, Math.max(1, Math.trunc(Number(limit) || 500))));
+  }
+
+  refreshLivePositionSettlement(positionId) {
+    const totals = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN side = 'BUY' THEN wallet_sol_delta ELSE 0 END) AS entry_delta,
+        SUM(CASE WHEN side = 'SELL' THEN wallet_sol_delta ELSE 0 END) AS exit_delta,
+        SUM(wallet_sol_delta) AS pnl_sol,
+        SUM(side = 'BUY' AND wallet_sol_delta IS NOT NULL) AS settled_buys,
+        SUM(side = 'SELL' AND wallet_sol_delta IS NOT NULL) AS settled_sells
+      FROM live_orders
+      WHERE position_id = ?
+    `).get(positionId);
+    const entryDelta = finiteOrNull(totals.entry_delta);
+    const exitDelta = finiteOrNull(totals.exit_delta);
+    const pnlSol = finiteOrNull(totals.pnl_sol);
+    const position = this.db.prepare('SELECT status FROM live_positions WHERE id = ?').get(positionId);
+    const complete = position?.status === 'CLOSED'
+      && Number(totals.settled_buys) > 0
+      && Number(totals.settled_sells) > 0
+      && entryDelta < 0;
+    const realizedPnlSol = complete ? pnlSol : null;
+    const realizedReturnPct = complete ? (pnlSol / Math.abs(entryDelta)) * 100 : null;
+    this.db.prepare(`
+      UPDATE live_positions SET
+        entry_sol_delta = ?,
+        exit_sol_delta = ?,
+        realized_pnl_sol = ?,
+        realized_return_pct = ?,
+        updated_at = updated_at
+      WHERE id = ?
+    `).run(entryDelta, exitDelta, realizedPnlSol, realizedReturnPct, positionId);
+    return {
+      entrySolDelta: entryDelta,
+      exitSolDelta: exitDelta,
+      realizedPnlSol,
+      realizedReturnPct,
+      complete,
+    };
   }
 
   createPrimarySignalShadowPosition(position) {
@@ -3907,6 +3998,21 @@ class ResearchStore {
       estimatedCostSol: finiteOrNull(value('estimatedCostSol')),
       updatedAt: Date.now(),
     });
+  }
+
+  updateLiveOrderSettlement(id, settlement) {
+    this.db.prepare(`
+      UPDATE live_orders SET
+        wallet_sol_delta = ?,
+        network_fee_sol = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      finiteOrNull(settlement?.walletSolDelta),
+      finiteOrNull(settlement?.networkFeeSol),
+      Date.now(),
+      id,
+    );
   }
 
   activeCyaEarlyPyramidShadowPositions() {
@@ -5254,6 +5360,12 @@ class ResearchStore {
         CASE
           WHEN entry_price > 0 AND exit_price > 0 THEN ((exit_price / entry_price) - 1) * 100
           ELSE NULL
+        END AS price_return_pct,
+        CASE
+          WHEN realized_return_pct IS NOT NULL THEN realized_return_pct
+          WHEN mode = 'DRY_RUN' AND entry_price > 0 AND exit_price > 0
+            THEN ((exit_price / entry_price) - 1) * 100
+          ELSE NULL
         END AS gross_return_pct
       FROM live_positions
       ${filter}
@@ -5315,7 +5427,11 @@ class ResearchStore {
         COALESCE(SUM(CASE WHEN opened_at IS NOT NULL THEN position_sol ELSE 0 END), 0) AS deployed_sol,
         AVG(CASE WHEN opened_at IS NOT NULL AND closed_at IS NOT NULL THEN closed_at - opened_at END) AS average_hold_ms,
         COALESCE(SUM(status = 'CLOSED' AND entry_price > 0 AND exit_price > 0), 0) AS priced_closed_positions,
-        COALESCE(SUM(status = 'CLOSED' AND entry_price > 0 AND exit_price > entry_price), 0) AS wins,
+        COALESCE(SUM(status = 'CLOSED' AND realized_pnl_sol IS NOT NULL), 0) AS settled_closed_positions,
+        COALESCE(SUM(status = 'CLOSED' AND realized_pnl_sol > 0), 0) AS wins,
+        SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl_sol END) AS total_realized_pnl_sol,
+        AVG(CASE WHEN status = 'CLOSED' THEN realized_return_pct END)
+          AS average_realized_return_pct,
         AVG(CASE
           WHEN status = 'CLOSED' AND entry_price > 0 AND exit_price > 0
             THEN ((exit_price / entry_price) - 1) * 100
@@ -5332,7 +5448,7 @@ class ResearchStore {
         COALESCE(SUM(status = 'CONFIRMATION_UNKNOWN'), 0) AS unknown_orders
       FROM live_orders ${filter}
     `).get(...(strategy ? [strategy] : []));
-    const pricedClosed = Number(positionStats.priced_closed_positions) || 0;
+    const settledClosed = Number(positionStats.settled_closed_positions) || 0;
     const wins = Number(positionStats.wins) || 0;
 
     return {
@@ -5340,7 +5456,7 @@ class ResearchStore {
         ...decisionStats,
         ...positionStats,
         ...orderStats,
-        win_rate_pct: pricedClosed > 0 ? (wins / pricedClosed) * 100 : null,
+        win_rate_pct: settledClosed > 0 ? (wins / settledClosed) * 100 : null,
       },
       positions,
       orders,

@@ -19,11 +19,11 @@ COSCLI_BIN="${COSCLI_BIN:-$(command -v coscli 2>/dev/null || true)}"
   echo "coscli is required. Install Tencent COSCLI, then rerun this installer." >&2
   exit 1
 }
-for required in systemctl systemd-analyze install sed flock tar gzip sha256sum; do
+for required in systemctl systemd-analyze install sed flock tar gzip sha256sum timeout cmp; do
   command -v "$required" >/dev/null 2>&1 || { echo "Missing required command: $required" >&2; exit 1; }
 done
 
-mkdir -p /etc/flow-acceleration "$INSTALL_DIR/data/exports"
+mkdir -p /etc/flow-acceleration "$INSTALL_DIR/data/exports/.coscli-home"
 if [[ ! -f /etc/flow-acceleration/backup-cos.env ]]; then
   install -m 600 -o "$SERVICE_USER" -g "$SERVICE_GROUP" \
     "$INSTALL_DIR/deploy/backup-cos.env.example" \
@@ -32,8 +32,9 @@ if [[ ! -f /etc/flow-acceleration/backup-cos.env ]]; then
 fi
 chown "$SERVICE_USER:$SERVICE_GROUP" /etc/flow-acceleration/backup-cos.env
 chmod 600 /etc/flow-acceleration/backup-cos.env
-chown "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR/data/exports"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR/data/exports"
 chmod 700 "$INSTALL_DIR/data/exports"
+chmod 700 "$INSTALL_DIR/data/exports/.coscli-home"
 chmod 700 "$INSTALL_DIR/scripts/export-last24h-cos.sh"
 
 render_unit() {
@@ -59,8 +60,35 @@ systemd-analyze verify \
   /etc/systemd/system/flow-acceleration-backup.timer
 systemctl enable --now flow-acceleration-backup.timer
 
+# Remove only obsolete Flow Acceleration export jobs. Older deployments used a
+# six-hour cron entry which either uploaded a stale archive or ran the old
+# last-10h exporter. Other cron jobs remain untouched.
+remove_legacy_cron() {
+  local cron_user="$1"
+  local before after
+  before="$(mktemp)"
+  after="$(mktemp)"
+  if crontab -u "$cron_user" -l > "$before" 2>/dev/null; then
+    grep -Ev '(cos-auto-upload-export\.sh|export-last10h\.sh|export-last24h-cos\.sh)' \
+      "$before" > "$after" || true
+    if ! cmp -s "$before" "$after"; then
+      crontab -u "$cron_user" "$after"
+      echo "Removed obsolete Flow Acceleration export cron for $cron_user."
+    fi
+  fi
+  rm -f -- "$before" "$after"
+}
+if command -v crontab >/dev/null 2>&1; then
+  remove_legacy_cron "$SERVICE_USER"
+  [[ "$SERVICE_USER" == "root" ]] || remove_legacy_cron root
+fi
+
+systemctl reset-failed flow-acceleration-backup.service || true
+systemctl restart flow-acceleration-backup.timer
+
 echo "Daily export timer installed."
 echo "1. Edit /etc/flow-acceleration/backup-cos.env and add SecretId/SecretKey."
 echo "2. Test once: systemctl start flow-acceleration-backup.service"
 echo "3. Inspect: journalctl -u flow-acceleration-backup.service -n 100 --no-pager"
 echo "4. Schedule: systemctl list-timers flow-acceleration-backup.timer --all"
+echo "5. Last result: cat $INSTALL_DIR/data/exports/last-run.env"

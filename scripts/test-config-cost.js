@@ -3,6 +3,7 @@
 const assert = require('assert');
 const {
   config, normalizeEndpoint, liveTradingGuard, shadowPositionEnv,
+  livePositionEnv, priorityFeeMicroLamports,
 } = require('../src/config');
 const { costBreakdown, expectedNetReturnPct } = require('../src/core/CostModel');
 
@@ -18,6 +19,12 @@ assert.strictEqual(shadowPositionEnv('FLOW_TEST_SHADOW_POSITION_SOL'), 1);
 process.env.FLOW_TEST_SHADOW_POSITION_SOL = '0.4';
 assert.strictEqual(shadowPositionEnv('FLOW_TEST_SHADOW_POSITION_SOL'), 0.4);
 delete process.env.FLOW_TEST_SHADOW_POSITION_SOL;
+process.env.FLOW_TEST_LIVE_POSITION_SOL = '0.05';
+assert.strictEqual(livePositionEnv('FLOW_TEST_LIVE_POSITION_SOL'), 1);
+process.env.FLOW_TEST_LIVE_POSITION_SOL = '0.4';
+assert.strictEqual(livePositionEnv('FLOW_TEST_LIVE_POSITION_SOL'), 0.4);
+delete process.env.FLOW_TEST_LIVE_POSITION_SOL;
+assert.strictEqual(priorityFeeMicroLamports(0.0005, 250_000), 2_000_000);
 
 const costs = costBreakdown({
   platformFeePct: 1,
@@ -49,7 +56,9 @@ assert.strictEqual(config.liveTrading.maxDailyTrades, undefined);
 assert.strictEqual(config.liveTrading.maxDailyLossSol, undefined);
 assert.strictEqual(config.liveTrading.maxConcurrentPositions, 3);
 assert.strictEqual(config.liveTrading.strategies[0].id, 'post_gd25_35_xleg');
-assert.strictEqual(config.liveTrading.strategies[0].positionSizeSol, 0.05);
+assert.strictEqual(config.liveTrading.strategies[0].positionSizeSol, 1);
+assert.strictEqual(config.liveTrading.priorityFeeSol, 0.0005);
+assert.strictEqual(config.liveTrading.priorityFeeMicroLamports, 2_000_000);
 assert.strictEqual(config.liveTrading.strategies[0].market, 'PUMP_AMM');
 assert.strictEqual(config.liveTrading.strategies[0].dropMinPct, 25);
 assert.strictEqual(config.liveTrading.strategies[0].dropMaxPct, 35);

@@ -141,6 +141,22 @@ function shadowPositionEnv(name) {
   return numberEnv(name, defaultShadowPositionSol, { min: 0.000001 });
 }
 
+// The live strategy used 0.05 SOL as its former deployment default. Treat that
+// exact legacy value as inherited so upgrading an existing server moves the
+// active strategy to the new 1 SOL size without requiring a manual .env edit.
+// Other values remain explicit operator overrides.
+function livePositionEnv(name, fallback = 1) {
+  const raw = process.env[name];
+  if (raw == null || raw === '' || Number(raw) === 0.05) return fallback;
+  return numberEnv(name, fallback, { min: 0.000001 });
+}
+
+function priorityFeeMicroLamports(priorityFeeSol, computeUnitLimit) {
+  if (!(priorityFeeSol > 0) || !(computeUnitLimit > 0)) return 0;
+  // 1 SOL = 1e9 lamports and 1 lamport = 1e6 micro-lamports.
+  return Math.ceil((priorityFeeSol * 1e15) / computeUnitLimit);
+}
+
 // Forward-only first-pullback entry experiments. These profiles are consumed by
 // both the observer (causal reference detection) and Shadow F (simulated entry).
 // Keep their IDs immutable so results never merge with the historical 7.5% groups.
@@ -279,9 +295,7 @@ const config = {
       min: 100_000,
       max: 1_400_000,
     }),
-    priorityFeeMicroLamports: integerEnv('FLOW_LIVE_PRIORITY_FEE_MICROLAMPORTS', 20_000, {
-      min: 0,
-    }),
+    priorityFeeSol: numberEnv('FLOW_LIVE_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
     // The transaction stream is processed-level. Quote against the same newest view,
     // but retain confirmed-level finality for position state and reconciliation.
     readCommitment: process.env.FLOW_LIVE_READ_COMMITMENT || 'processed',
@@ -325,9 +339,7 @@ const config = {
         label: '毕业后深跌反弹 · XLEG',
         enabled: booleanEnv('FLOW_LIVE_POST_GD25_35_XLEG_ENABLED', true),
         market: 'PUMP_AMM',
-        positionSizeSol: numberEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 0.05, {
-          min: 0.000001,
-        }),
+        positionSizeSol: livePositionEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 1),
         trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_TRACKING_MS', 120_000, {
           min: 30_000,
           max: 10 * 60_000,
@@ -1426,6 +1438,13 @@ const config = {
   },
 };
 
+// Solana requests priority price per CU, while operators reason about the total
+// fee per transaction. Derive one shared buy/sell CU price from the SOL target.
+config.liveTrading.priorityFeeMicroLamports = priorityFeeMicroLamports(
+  config.liveTrading.priorityFeeSol,
+  config.liveTrading.computeUnitLimit,
+);
+
 function streamTokenFor(endpoint) {
   if (config.stream.allenHarkEndpoints.has(endpoint)) return config.stream.allenHarkToken || undefined;
   return config.stream.heliusToken || undefined;
@@ -1462,6 +1481,8 @@ module.exports = {
   normalizeEndpoint,
   liveTradingGuard,
   shadowPositionEnv,
+  livePositionEnv,
+  priorityFeeMicroLamports,
   validateConfig,
   streamTokenFor,
 };

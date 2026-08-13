@@ -12,6 +12,7 @@ const {
   classifyBuyReconciliation,
   replaceAmmBuyWithExactQuoteIn,
   tokenDeltaFromTransaction,
+  walletSolSettlementFromTransaction,
 } = require('../src/core/PumpTradeExecutor');
 const { ResearchStore } = require('../src/data/ResearchStore');
 
@@ -98,6 +99,10 @@ function testPreviousLiveSchemaUpgrade() {
     .some((column) => column.name === 'strategy_id'));
   assert.ok(upgraded.db.prepare('PRAGMA table_info(live_orders)').all()
     .some((column) => column.name === 'strategy_decision_id'));
+  assert.ok(upgraded.db.prepare('PRAGMA table_info(live_positions)').all()
+    .some((column) => column.name === 'realized_pnl_sol'));
+  assert.ok(upgraded.db.prepare('PRAGMA table_info(live_orders)').all()
+    .some((column) => column.name === 'wallet_sol_delta'));
   upgraded.close();
   fs.rmSync(directory, { recursive: true, force: true });
 }
@@ -118,6 +123,20 @@ assert.strictEqual(decodedExactAmmBuy.data.minBaseAmountOut.toString(), '123456'
 
 const receiptMint = PublicKey.unique().toBase58();
 const receiptOwner = PublicKey.unique().toBase58();
+const settlement = walletSolSettlementFromTransaction({
+  transaction: { message: { accountKeys: [receiptOwner, PublicKey.unique().toBase58()] } },
+  meta: {
+    err: { InstructionError: [3, 'Custom'] },
+    fee: 500_000,
+    preBalances: [2_000_000_000, 0],
+    postBalances: [1_010_500_000, 0],
+  },
+}, receiptOwner);
+assert.deepStrictEqual(settlement, {
+  walletSolDelta: -0.9895,
+  networkFeeSol: 0.0005,
+  walletIndex: 0,
+});
 const receivedRaw = tokenDeltaFromTransaction({
   meta: {
     err: null,
@@ -246,6 +265,45 @@ setImmediate(() => {
   const closed = store.liveTradingDashboard({ strategyId: 'post_gd25_35_xleg' }).positions[0];
   assert.strictEqual(closed.status, 'CLOSED');
   assert.strictEqual(closed.exit_reason, 'LOSS_CHECK');
+  assert.strictEqual(Math.round(closed.price_return_pct * 100), -541);
+
+  // Real live PnL uses signed wallet SOL deltas (including fees), while price
+  // return remains a separate execution diagnostic.
+  const settledDecision = store.recordLiveStrategyDecision({
+    strategyId: 'settlement_test', episodeId: 'settlement-test:1',
+    timestampMs: now, receivedAtMs: now, mint: 'MintSettlementTest',
+    ruleVersion: 'test', market: 'PUMP_AMM', referencePrice: 1,
+    features: {}, ruleMatched: true, rejectionReasons: [], mode: 'LIVE',
+    actionStatus: 'CLOSED',
+  });
+  const settledPosition = store.createLivePosition({
+    strategyDecisionId: settledDecision.id, strategyId: 'settlement_test',
+    sourceType: 'settlement_test', mint: 'MintSettlementTest', mode: 'LIVE',
+    status: 'OPENING', positionSol: 1, entryMarket: 'PUMP_AMM', entryPrice: 1,
+  });
+  store.updateLivePosition(settledPosition.id, {
+    status: 'CLOSED', entryPrice: 1, exitPrice: 1.1,
+    openedAt: now, closedAt: now + 1_000, exitReason: 'TEST',
+  });
+  store.recordLiveOrder({
+    positionId: settledPosition.id, strategyDecisionId: settledDecision.id,
+    strategyId: 'settlement_test', mint: 'MintSettlementTest', side: 'BUY',
+    attempt: 1, status: 'CONFIRMED', signature: 'settlement-buy',
+    walletSolDelta: -0.989, networkFeeSol: 0.0005,
+  });
+  store.recordLiveOrder({
+    positionId: settledPosition.id, strategyDecisionId: settledDecision.id,
+    strategyId: 'settlement_test', mint: 'MintSettlementTest', side: 'SELL',
+    attempt: 1, status: 'CONFIRMED', signature: 'settlement-sell',
+    walletSolDelta: 1.06, networkFeeSol: 0.0005,
+  });
+  store.refreshLivePositionSettlement(settledPosition.id);
+  const settledDashboard = store.liveTradingDashboard({ strategyId: 'settlement_test' });
+  assert.strictEqual(settledDashboard.positions[0].realized_pnl_sol, 0.07100000000000006);
+  assert.ok(Math.abs(settledDashboard.positions[0].realized_return_pct - 7.178968655207286) < 1e-9);
+  assert.ok(Math.abs(settledDashboard.positions[0].price_return_pct - 10) < 1e-9);
+  assert.strictEqual(settledDashboard.stats.settled_closed_positions, 1);
+  assert.strictEqual(settledDashboard.stats.win_rate_pct, 100);
 
   // The same mint never creates a second live episode.
   trade(100, 8_000);

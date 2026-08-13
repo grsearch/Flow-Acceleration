@@ -14,6 +14,7 @@ EnvironmentFile=/etc/flow-acceleration/backup-cos.env
 Environment=FLOW_BACKUP_PROJECT_DIR=@INSTALL_DIR@
 Environment=FLOW_BACKUP_NODE_BIN=@NODE_BIN@
 Environment=FLOW_BACKUP_COSCLI_BIN=@COSCLI_BIN@
+Environment=HOME=@INSTALL_DIR@/data/exports/.coscli-home
 ExecStart=/usr/bin/env bash @INSTALL_DIR@/scripts/export-last24h-cos.sh
 Nice=10
 IOSchedulingClass=best-effort
@@ -28,3 +29,6 @@ ProtectHome=read-only
 ReadOnlyPaths=@INSTALL_DIR@
 ReadWritePaths=@INSTALL_DIR@/data/exports
 TimeoutStartSec=6h
+
+[Install]
+WantedBy=multi-user.target

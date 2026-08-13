@@ -172,6 +172,44 @@ class LiveTradingManager {
         }
       }
     }
+    if (this.mode === 'LIVE' && this.executor?.transactionSettlement
+      && typeof this.store.unsettledLiveOrders === 'function') {
+      this._track(this._reconcileHistoricalSettlements());
+    }
+  }
+
+  async _reconcileOrderSettlement({ orderId, positionId, signature, attempts = 5 }) {
+    if (!signature || !this.executor?.transactionSettlement) return null;
+    const delayMs = Math.max(250, Number(this.config.entryReconcileDelayMs) || 1_000);
+    for (let attempt = 1; attempt <= attempts && !this.stopping; attempt += 1) {
+      try {
+        const settlement = await this.executor.transactionSettlement(signature);
+        if (settlement && Number.isFinite(settlement.walletSolDelta)) {
+          this.store.updateLiveOrderSettlement(orderId, settlement);
+          return this.store.refreshLivePositionSettlement(positionId);
+        }
+      } catch (error) {
+        if (attempt === attempts) this._rememberError(error);
+      }
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return null;
+  }
+
+  async _reconcileHistoricalSettlements() {
+    const rows = this.store.unsettledLiveOrders(500);
+    const concurrency = 4;
+    for (let index = 0; index < rows.length && !this.stopping; index += concurrency) {
+      const batch = rows.slice(index, index + concurrency);
+      await Promise.allSettled(batch.map((row) => this._reconcileOrderSettlement({
+        orderId: row.id,
+        positionId: row.position_id,
+        signature: row.signature,
+        attempts: 1,
+      })));
+    }
   }
 
   health() {
@@ -192,6 +230,9 @@ class LiveTradingManager {
       minWalletReserveSol: this.config.minWalletReserveSol,
       buySlippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
       sellSlippagePct: this.config.sellSlippagePct ?? this.config.slippagePct,
+      computeUnitLimit: this.config.computeUnitLimit,
+      priorityFeeSol: this.config.priorityFeeSol,
+      priorityFeeMicroLamports: this.config.priorityFeeMicroLamports,
       trackedMints: this.tracked.size,
       activePositions: this.positions.size,
       killSwitchActive: this._killSwitchActive(),
@@ -556,7 +597,8 @@ class LiveTradingManager {
       position.highestPrice = position.entryPrice;
       position.lastObservedPrice = null;
       position.openedAt = openedAt;
-      this.store.recordLiveOrder({
+      const settlement = result.execution?.settlement || null;
+      const orderId = this.store.recordLiveOrder({
         positionId: position.id,
         strategyDecisionId: decision.id,
         strategyId: strategy.id,
@@ -568,6 +610,8 @@ class LiveTradingManager {
         requestedTokenRaw: result.tokenAmountRaw,
         status: 'CONFIRMED',
         signature: result.signature,
+        walletSolDelta: settlement?.walletSolDelta,
+        networkFeeSol: settlement?.networkFeeSol,
         execution: orderExecution(result.execution, event, submittedAt, openedAt),
         submittedAt,
         confirmedAt: openedAt,
@@ -581,6 +625,14 @@ class LiveTradingManager {
         highestPrice: position.highestPrice,
         openedAt,
       });
+      this.store.refreshLivePositionSettlement(position.id);
+      if (position.mode === 'LIVE' && !settlement && result.signature) {
+        this._track(this._reconcileOrderSettlement({
+          orderId,
+          positionId: position.id,
+          signature: result.signature,
+        }));
+      }
       this.store.updateLiveStrategyDecision(decision.id, 'OPEN', null);
       this.metrics.entries += 1;
       this.metrics.lastActionAt = openedAt;
@@ -601,9 +653,18 @@ class LiveTradingManager {
         status: confirmationUnknown ? 'CONFIRMATION_UNKNOWN' : 'FAILED',
         signature: error.signature,
         error: errorText(error),
+        walletSolDelta: error.execution?.settlement?.walletSolDelta,
+        networkFeeSol: error.execution?.settlement?.networkFeeSol,
         execution: orderExecution(error.execution, event, submittedAt, failedAt),
         submittedAt,
       });
+      if (position.mode === 'LIVE' && transactionFailed && error.signature) {
+        this._track(this._reconcileOrderSettlement({
+          orderId,
+          positionId: position.id,
+          signature: error.signature,
+        }));
+      }
       if (confirmationUnknown) {
         position.status = 'EXIT_FAILED';
         position.tokenAmountRaw = null;
@@ -704,6 +765,13 @@ class LiveTradingManager {
           error: null,
           confirmedAt: reconciledAt,
         });
+        if (position.mode === 'LIVE' && signature) {
+          this._track(this._reconcileOrderSettlement({
+            orderId,
+            positionId: position.id,
+            signature,
+          }));
+        }
       }
       position.status = 'OPEN';
       position.tokenAmountRaw = result.tokenAmountRaw;
@@ -866,7 +934,8 @@ class LiveTradingManager {
             : residualBalance
               ? 'CONFIRMED_PARTIAL'
               : 'CONFIRMED';
-        this.store.recordLiveOrder({
+        const settlement = result.settlement || null;
+        const orderId = this.store.recordLiveOrder({
           positionId: position.id,
           decisionId: position.decisionId,
           primaryDecisionId: position.primaryDecisionId,
@@ -879,6 +948,9 @@ class LiveTradingManager {
           requestedTokenRaw: result.tokenAmountRaw || position.tokenAmountRaw,
           status: orderStatus,
           signature: result.signature,
+          walletSolDelta: settlement?.walletSolDelta,
+          networkFeeSol: settlement?.networkFeeSol,
+          execution: settlement ? { settlement } : null,
           error: incompleteReason,
           submittedAt,
           confirmedAt: closedAt,
@@ -903,6 +975,14 @@ class LiveTradingManager {
           exitReason: reason,
           closedAt,
         });
+        this.store.refreshLivePositionSettlement(position.id);
+        if (position.mode === 'LIVE' && !settlement && result.signature) {
+          this._track(this._reconcileOrderSettlement({
+            orderId,
+            positionId: position.id,
+            signature: result.signature,
+          }));
+        }
         this._updatePositionDecision(position, 'CLOSED', reason);
         position.status = 'CLOSED';
         this.positions.delete(position.mint);
@@ -914,7 +994,8 @@ class LiveTradingManager {
         return;
       } catch (error) {
         lastError = error;
-        this.store.recordLiveOrder({
+        const settlement = error.execution?.settlement || null;
+        const orderId = this.store.recordLiveOrder({
           positionId: position.id,
           decisionId: position.decisionId,
           primaryDecisionId: position.primaryDecisionId,
@@ -927,8 +1008,18 @@ class LiveTradingManager {
           status: 'FAILED',
           signature: error.signature,
           error: errorText(error),
+          walletSolDelta: settlement?.walletSolDelta,
+          networkFeeSol: settlement?.networkFeeSol,
+          execution: error.execution || null,
           submittedAt,
         });
+        if (position.mode === 'LIVE' && !settlement && error.signature) {
+          this._track(this._reconcileOrderSettlement({
+            orderId,
+            positionId: position.id,
+            signature: error.signature,
+          }));
+        }
         if (attempt < attempts) {
           await new Promise((resolve) => setTimeout(resolve, this.config.exitRetryDelayMs));
         }
