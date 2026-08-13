@@ -152,7 +152,18 @@ class RangeScalperShadowSuite {
     }
     const profiles = new Map();
     for (const profile of this.entryProfiles.values()) {
-      profiles.set(profile.id, { armed: true, candidate: null, swingIndex: 0 });
+      const persistedSwingIndex = this.store.rangeScalperMaxSwingIndex(profile.id, token.mint);
+      const warmupSwingIndex = profile.warmupProfileId
+        ? this.store.rangeScalperMaxSwingIndex(profile.warmupProfileId, token.mint)
+        : 0;
+      profiles.set(profile.id, {
+        armed: true,
+        candidate: null,
+        // A warm-only first opportunity deliberately creates no JW position.
+        // Restore its count from the matching JB reference profile so a restart
+        // cannot turn the true second wave back into another warm-up wave.
+        swingIndex: Math.max(persistedSwingIndex, warmupSwingIndex),
+      });
     }
     this.states.set(token.mint, {
       mint: token.mint,
@@ -468,8 +479,13 @@ class RangeScalperShadowSuite {
           if (replay) this.metrics.replaySignalsSuppressed += 1;
           else if (!this._hasActiveProfile(state.mint, profile.id)) {
             profileState.swingIndex += 1;
-            this._emitSignal(state, profile, profileState.swingIndex, trade, price, features,
-              candidate, reboundPct);
+            const opportunityPass = profileState.swingIndex >= (profile.minOpportunityIndex || 1)
+              && (profile.maxOpportunityIndex == null
+                || profileState.swingIndex <= profile.maxOpportunityIndex);
+            if (opportunityPass) {
+              this._emitSignal(state, profile, profileState.swingIndex, trade, price, features,
+                candidate, reboundPct);
+            }
           }
         }
         continue;
@@ -492,6 +508,8 @@ class RangeScalperShadowSuite {
     const episodeId = `${state.mint}:${profile.id}:${candidate.startedAt}:${trade.timestampMs}`;
     this.metrics.signals += 1;
     for (const exitProfile of this.exitProfiles.values()) {
+      if (Array.isArray(profile.exitProfileIds)
+        && !profile.exitProfileIds.includes(exitProfile.id)) continue;
       const cohortId = `${profile.id}_${exitProfile.id}`;
       const saved = this.store.createRangeScalperShadowPosition({
         cohortId,

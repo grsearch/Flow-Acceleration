@@ -92,6 +92,7 @@ class MigratedDropReboundShadowSuite {
     this.pendingEntries = new Map();
     this.positions = new Map();
     this.rowsByMint = new Map();
+    this.signalCounts = new Map();
     this.ammPriceStates = new Map();
     this.metrics = {
       candidates: 0,
@@ -173,6 +174,10 @@ class MigratedDropReboundShadowSuite {
       if (this._hasActiveMint(mint)) continue;
       this.tracked.delete(mint);
       for (const detector of this.detectors.values()) detector.states.delete(mint);
+      for (const profile of this.entryProfiles.values()) {
+        this.signalCounts.delete(this._signalCountKey('PRE_MIGRATION', profile.id, mint));
+        this.signalCounts.delete(this._signalCountKey('POST_MIGRATION', profile.id, mint));
+      }
       this.ammPriceStates.delete(mint);
     }
     return [...this.tracked.keys()];
@@ -295,6 +300,22 @@ class MigratedDropReboundShadowSuite {
     return state;
   }
 
+  _signalCountKey(lifecycleStage, profileId, mint) {
+    return `${lifecycleStage}:${profileId}:${mint}`;
+  }
+
+  _signalCount(lifecycleStage, profileId, mint) {
+    const key = this._signalCountKey(lifecycleStage, profileId, mint);
+    if (!this.signalCounts.has(key)) {
+      this.signalCounts.set(key, this.store.migratedDropReboundShadowSignalCount(
+        lifecycleStage,
+        profileId,
+        mint,
+      ));
+    }
+    return this.signalCounts.get(key) || 0;
+  }
+
   _acceptAmmPrice(trade, price) {
     if (trade.market !== 'PUMP_AMM') return true;
     const settings = {
@@ -405,16 +426,26 @@ class MigratedDropReboundShadowSuite {
             } else if (replay) {
               this.metrics.replaySignalsSuppressed += 1;
             } else {
-              this._emitSignal({
-                profile,
-                lifecycleStage,
-                trade,
-                price,
-                anchorAt,
-                candidate,
-                dropPct,
-                reboundPct,
-              });
+              const lifecycleAgeMs = Math.max(0, trade.timestampMs - anchorAt);
+              const signalKey = this._signalCountKey(lifecycleStage, profile.id, trade.mint);
+              const signalCount = this._signalCount(lifecycleStage, profile.id, trade.mint);
+              const agePass = profile.maxLifecycleAgeMs == null
+                || lifecycleAgeMs <= profile.maxLifecycleAgeMs;
+              const countPass = profile.maxSignalsPerMint == null
+                || signalCount < profile.maxSignalsPerMint;
+              if (agePass && countPass) {
+                this._emitSignal({
+                  profile,
+                  lifecycleStage,
+                  trade,
+                  price,
+                  anchorAt,
+                  candidate,
+                  dropPct,
+                  reboundPct,
+                });
+                this.signalCounts.set(signalKey, signalCount + 1);
+              }
             }
           }
         }

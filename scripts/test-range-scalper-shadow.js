@@ -36,10 +36,18 @@ function run() {
     exitDelayMs: 200,
     exitTimeoutMs: 2_000,
     maxEntryPriceJumpPct: 3,
-    entryProfiles: [{
-      id: 'JA', label: 'test', deviationSigma: 0.5, reboundPct: 2,
-      reboundTimeoutMs: 2_000,
-    }],
+    entryProfiles: [
+      {
+        id: 'JA', label: 'test', deviationSigma: 0.5, reboundPct: 2,
+        reboundTimeoutMs: 2_000,
+      },
+      {
+        id: 'JW', label: 'warm test', deviationSigma: 0.5, reboundPct: 2,
+        reboundTimeoutMs: 2_000, minOpportunityIndex: 2, maxOpportunityIndex: 3,
+        warmupProfileId: 'JA',
+        exitProfileIds: ['X6'],
+      },
+    ],
     exitProfiles: [
       { id: 'XM', label: 'mid', exitMode: 'MIDLINE', hardStopPct: 8, maxHoldMs: 5_000 },
       {
@@ -90,7 +98,7 @@ function run() {
 
   observe(1_700, 0.85, 'SELL');
   observe(1_850, 0.88, 'BUY');
-  assert.strictEqual(suite.health().signals, 1);
+  assert.strictEqual(suite.health().signals, 1, 'JW first opportunity must only warm up');
   assert.strictEqual(suite.health().pendingEntries, 2);
   observe(2_100, 0.89, 'BUY');
   assert.strictEqual(suite.health().opened, 2);
@@ -105,23 +113,28 @@ function run() {
   observe(3_600, 0.88, 'BUY');
   observe(3_900, 1.04, 'BUY');
   observe(4_150, 1.03, 'SELL');
-  assert.strictEqual(suite.health().signals, 2);
-  assert.strictEqual(suite.health().closed, 4);
+  assert.strictEqual(suite.health().signals, 3, 'second opportunity creates JA and warmed JW');
+  assert.strictEqual(suite.health().closed, 5);
 
   const dashboard = store.rangeScalperShadowDashboard({ positionLimit: 20 });
-  assert.strictEqual(dashboard.cohorts.length, 2);
-  assert.strictEqual(dashboard.positions.length, 4);
+  assert.strictEqual(dashboard.cohorts.length, 3);
+  assert.strictEqual(dashboard.positions.length, 5);
   assert(dashboard.positions.every((row) => row.status === 'CLOSED'));
   assert(dashboard.positions.every((row) => Number.isFinite(row.net_return_pct)));
   assert.deepStrictEqual(
     [...new Set(dashboard.positions.map((row) => row.swing_index))].sort(),
     [1, 2],
   );
-  assert.strictEqual(store.health().rangeScalperShadowPositions.signals, 2);
+  assert.deepStrictEqual(
+    dashboard.positions.filter((row) => row.entry_profile_id === 'JW')
+      .map((row) => [row.cohort_id, row.swing_index]),
+    [['JW_X6', 2]],
+  );
+  assert.strictEqual(store.health().rangeScalperShadowPositions.signals, 3);
   assert.strictEqual(
     store.shadowTimeSessionDashboard('range-scalper').sessions
       .reduce((sum, session) => sum + session.resolved, 0),
-    4,
+    5,
   );
 
   // A persistently one-sided regime is invalidated and dynamically unsubscribed.

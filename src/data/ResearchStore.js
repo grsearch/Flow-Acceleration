@@ -2546,6 +2546,11 @@ class ResearchStore {
         WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY rebound_at, id
       `),
+      countMigratedDropReboundShadowSignals: this.db.prepare(`
+        SELECT COUNT(DISTINCT episode_id) AS count
+        FROM migrated_drop_rebound_shadow_positions
+        WHERE lifecycle_stage = ? AND entry_profile_id = ? AND mint = ?
+      `),
       insertRangeScalperShadowPosition: this.db.prepare(`
         INSERT OR IGNORE INTO range_scalper_shadow_positions (
           cohort_id, entry_profile_id, exit_profile_id, episode_id, swing_index,
@@ -2611,6 +2616,11 @@ class ResearchStore {
         SELECT * FROM range_scalper_shadow_positions
         WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY signal_at, id
+      `),
+      maxRangeScalperSwingIndex: this.db.prepare(`
+        SELECT MAX(swing_index) AS max_swing_index
+        FROM range_scalper_shadow_positions
+        WHERE entry_profile_id = ? AND mint = ?
       `),
       insertCyaEarlyPyramidShadowPosition: this.db.prepare(`
         INSERT OR IGNORE INTO cya_early_pyramid_shadow_positions (
@@ -3933,6 +3943,14 @@ class ResearchStore {
     return this.stmts.activeMigratedDropReboundShadowPositions.all();
   }
 
+  migratedDropReboundShadowSignalCount(lifecycleStage, entryProfileId, mint) {
+    return Number(this.stmts.countMigratedDropReboundShadowSignals.get(
+      lifecycleStage,
+      entryProfileId,
+      mint,
+    )?.count || 0);
+  }
+
   createRangeScalperShadowPosition(position) {
     const now = Date.now();
     const features = position.features || {};
@@ -4022,6 +4040,13 @@ class ResearchStore {
 
   activeRangeScalperShadowPositions() {
     return this.stmts.activeRangeScalperShadowPositions.all();
+  }
+
+  rangeScalperMaxSwingIndex(entryProfileId, mint) {
+    return Number(this.stmts.maxRangeScalperSwingIndex.get(
+      entryProfileId,
+      mint,
+    )?.max_swing_index || 0);
   }
 
   createFlowSmartConfirmShadowPosition(position) {
