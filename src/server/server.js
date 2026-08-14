@@ -335,10 +335,12 @@ class ResearchServer {
           mode: 'SHADOW_N',
           sendsTransactions: false,
           entryProfiles: [],
+          exitProfiles: [],
         },
         timeSessions: this.store.shadowTimeSessionDashboard('holder-growth'),
         ...this.store.holderGrowthShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 100),
+          bigWinnerPct: this.config.holderGrowthShadow?.bigWinnerPct ?? 50,
           cacheStats: true,
         }),
       });
