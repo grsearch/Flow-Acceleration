@@ -1968,6 +1968,85 @@ const config = {
     }),
   },
 
+  // Independent observed-holder-growth research. "Holders" here means wallets
+  // seen buying through the captured Pump curve stream; it is deliberately not
+  // presented as an authoritative on-chain holder count.
+  holderGrowthShadow: {
+    enabled: booleanEnv('FLOW_HOLDER_GROWTH_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
+    snapshotHorizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+      min: 5_000,
+      max: 60_000,
+    }),
+    maxSnapshotLagMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_SNAPSHOT_LAG_MS', 2_000, {
+      min: 0,
+      max: 30_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_HOLDER_GROWTH_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_HOLDER_GROWTH_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_HOLDER_GROWTH_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_HOLDER_GROWTH_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_HOLDER_GROWTH_MAX_ENTRY_JUMP_PCT', 100, {
+      min: 0,
+      max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_HOLDER_GROWTH_MAX_ENTRY_DROP_PCT', 99, {
+      min: 0,
+      max: 100,
+    }),
+    maxPlausibleReturnPct: numberEnv(
+      'FLOW_HOLDER_GROWTH_MAX_PLAUSIBLE_RETURN_PCT',
+      500,
+      { min: 10, max: 100_000 },
+    ),
+    bigWinnerPct: numberEnv('FLOW_HOLDER_GROWTH_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'HG30_BAL',
+        label: 'HG30 Balanced · 新增买家≥1/s + 留存≥50%',
+        minBuyers: 10,
+        minNewBuyers: 10,
+        minRetentionPct: 50,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+      },
+      {
+        id: 'HG30_FAST',
+        label: 'HG30 Fast · 新增买家≥2/s + 留存≥70%',
+        minBuyers: 10,
+        minNewBuyers: 20,
+        minRetentionPct: 70,
+        minNetFlowSol: 10,
+        maxTop3SharePct: 80,
+      },
+    ],
+    exitProfile: {
+      id: 'XT15_H120',
+      label: '+15%激活 / 峰值回撤15% / 硬止损20% / 120秒兜底',
+      hardStopPct: numberEnv('FLOW_HOLDER_GROWTH_HARD_STOP_PCT', 20, {
+        min: 0.1,
+        max: 100,
+      }),
+      trailingActivationPct: numberEnv(
+        'FLOW_HOLDER_GROWTH_TRAILING_ACTIVATION_PCT',
+        15,
+        { min: 0.1, max: 1_000 },
+      ),
+      trailingStopPct: numberEnv('FLOW_HOLDER_GROWTH_TRAILING_STOP_PCT', 15, {
+        min: 0.1,
+        max: 100,
+      }),
+      maxHoldMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_HOLD_MS', 120_000, {
+        min: 1_000,
+        max: 10 * 60_000,
+      }),
+    },
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
+    }),
+  },
+
   // Observer-only Launch Quality research. Reference percentages label market
   // structure for later analysis; they never become an entry or execution rule.
   launchQualityObserver: {
@@ -2062,6 +2141,15 @@ function validateConfig() {
   }
   if (config.launchQualityObserver.snapshotHorizonsMs.length === 0) {
     errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must contain at least one value');
+  }
+  if (config.holderGrowthShadow.enabled && !config.launchQualityObserver.enabled) {
+    errors.push('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED must be true when Holder Growth is enabled');
+  }
+  if (config.holderGrowthShadow.enabled
+    && !config.launchQualityObserver.snapshotHorizonsMs.includes(
+      config.holderGrowthShadow.snapshotHorizonMs,
+    )) {
+    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include the Holder Growth horizon');
   }
   if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
     errors.push('FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS must contain at least one value');
