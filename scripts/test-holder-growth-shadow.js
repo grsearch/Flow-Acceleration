@@ -68,6 +68,15 @@ function curveTrade(mint, timestampMs, price) {
   };
 }
 
+function ammTrade(mint, timestampMs, price) {
+  return {
+    mint,
+    timestampMs,
+    market: 'PUMP_AMM',
+    price,
+  };
+}
+
 function snapshot(mint, observedAt, overrides = {}) {
   return {
     mint,
@@ -201,6 +210,17 @@ function runEntryExitMatrix() {
       trailingActivationPct: 30, trailingStopPct: 20, maxHoldMs: 300_000,
     },
     {
+      id: 'XP30_70_STAIR', label: 'scale adaptive', exitMode: 'SCALE_ADAPTIVE',
+      hardStopPct: 20, scaleOutTriggerPct: 30, scaleOutFractionPct: 70,
+      maxHoldMs: 300_000,
+      trailingTiers: [
+        { activationPct: 30, drawdownPct: 15 },
+        { activationPct: 60, drawdownPct: 15 },
+        { activationPct: 100, drawdownPct: 20 },
+        { activationPct: 200, drawdownPct: 25 },
+      ],
+    },
+    {
       id: 'XFLOW_60', label: 'flow', exitMode: 'FLOW_CHECK', hardStopPct: 20,
       flowCheckHorizonMs: 60_000, minBuyerVelocityRatio: 0.5,
       minNetFlowDeltaSol: 0, trailingActivationPct: 20,
@@ -222,7 +242,7 @@ function runEntryExitMatrix() {
   recordToken(store, fixedMint, base);
   now = base + 10_000;
   suite.onSnapshot(early(fixedMint));
-  assert.strictEqual(suite.health().pendingEntries, 4,
+  assert.strictEqual(suite.health().pendingEntries, 5,
     '10s relaxed entry must create one independent row per exit');
   now += 250;
   suite.observeTrade(curveTrade(fixedMint, now, 1));
@@ -275,6 +295,11 @@ function runEntryExitMatrix() {
     '50% scale at +32% plus 50% runner at +4% must realize +18%');
   assert.ok(Math.abs(scaled.net_return_pct - 17.8) < 0.01,
     'a filled partial exit must include its extra fixed execution cost');
+  const adaptiveScaled = row(scaleMint, 'XP30_70_STAIR');
+  assert.strictEqual(adaptiveScaled.status, 'CLOSED');
+  assert.strictEqual(adaptiveScaled.trailing_tier_index, 0);
+  assert.ok(Math.abs(adaptiveScaled.gross_return_pct - 23.6) < 0.01,
+    '70% scale at +32% plus 30% runner at +4% must realize +23.6%');
 
   const flowMint = 'HolderGrowthEarlyFlow1111111111111111111111';
   recordToken(store, flowMint, base);
@@ -296,10 +321,72 @@ function runEntryExitMatrix() {
   assert.strictEqual(flow.status, 'CLOSED');
   assert.strictEqual(flow.exit_reason, 'FLOW_DECAY_60S');
 
-  assert.strictEqual(suite.health().exitProfiles.length, 4);
+  assert.strictEqual(suite.health().exitProfiles.length, 5);
   assert.deepStrictEqual(suite.health().strategy.snapshotHorizonsMs, [10_000]);
   store.close();
   console.log('test-holder-growth-shadow matrix: ok');
 }
 
 runEntryExitMatrix();
+
+function runForwardEntryBoundsAndMigrationExit() {
+  const base = 1_820_000_000_000;
+  let now = base;
+  const store = makeStore();
+  const config = makeConfig();
+  config.entryProfiles = [{
+    id: 'HG30_FLOW_EDGE', label: 'flow edge', horizonMs: 30_000,
+    minBuyers: 5, minNewBuyers: 3, minRetentionPct: 30,
+    minNetFlowSol: 10, maxTop3SharePct: 90,
+    minEntryJumpPct: 0, maxEntryJumpPct: 2,
+  }];
+  config.exitProfile = {
+    id: 'XT15_H120', label: 'test', exitMode: 'TRAILING',
+    hardStopPct: 20, trailingActivationPct: 15,
+    trailingStopPct: 15, maxHoldMs: 120_000,
+  };
+  const suite = new HolderGrowthShadowSuite({ config, store, now: () => now });
+  suite.start();
+  const rejectedMint = 'HolderGrowthJumpRejected1111111111111111111';
+  recordToken(store, rejectedMint, base);
+  now = base + 30_000;
+  suite.onSnapshot(snapshot(rejectedMint, now, { netFlowSol: 12 }));
+  now += 250;
+  suite.observeTrade(curveTrade(rejectedMint, now, 0.99));
+  const rejected = store.db.prepare(`
+    SELECT * FROM holder_growth_shadow_positions WHERE mint = ?
+  `).get(rejectedMint);
+  assert.strictEqual(rejected.status, 'PRICE_JUMP');
+  assert.match(rejected.rejection_reason, /^ENTRY_PRICE_OUTSIDE_0\.00_2\.00_/);
+
+  const migratedMint = 'HolderGrowthMigratedExit11111111111111111111';
+  recordToken(store, migratedMint, base);
+  now = base + 40_000;
+  suite.onSnapshot(snapshot(migratedMint, now, { netFlowSol: 12 }));
+  now += 250;
+  suite.observeTrade(curveTrade(migratedMint, now, 1.01));
+  now += 500;
+  suite.observeTrade(curveTrade(migratedMint, now, 0.79));
+  let migrated = store.db.prepare(`
+    SELECT * FROM holder_growth_shadow_positions WHERE mint = ?
+  `).get(migratedMint);
+  assert.strictEqual(migrated.status, 'EXIT_PENDING');
+  now += 50;
+  suite.onGraduated({ mint: migratedMint, graduatedAt: now });
+  assert.deepStrictEqual(suite.trackedMints(), [migratedMint]);
+  now += 250;
+  suite.observeTrade(ammTrade(migratedMint, now, 0.8));
+  migrated = store.db.prepare(`
+    SELECT * FROM holder_growth_shadow_positions WHERE mint = ?
+  `).get(migratedMint);
+  assert.strictEqual(migrated.status, 'CLOSED');
+  assert.strictEqual(migrated.exit_market, 'PUMP_AMM');
+  assert.match(migrated.exit_reason, /MIGRATION_REROUTE$/);
+  assert.deepStrictEqual(suite.trackedMints(), []);
+
+  store.close();
+  console.log('test-holder-growth-shadow bounds/migration: ok');
+}
+
+runForwardEntryBoundsAndMigrationExit();
+
