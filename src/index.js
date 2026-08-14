@@ -173,6 +173,7 @@ function createRuntime(runtimeConfig = config) {
       ...cyaEarlyPyramidShadow.trackedMints(),
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
+      ...holderGrowthShadow.trackedMints(),
     ])]);
   };
 
@@ -248,6 +249,7 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
+          observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
           refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
         }
@@ -263,6 +265,7 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
+          observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
           refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
         }
@@ -567,3 +570,4 @@ if (require.main === module) {
 }
 
 module.exports = { createRuntime, main };
+
