@@ -982,6 +982,66 @@ const config = {
         minHoldMs: 1_000,
         maxHoldMs: 60_000,
       },
+      {
+        id: 'F2_8S_NF30',
+        label: 'F2-8S-NF30 | F2 + NetFlow>=30 SOL / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F2_NF30',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'FT_C_NF30',
+        label: 'FT-C-NF30 | F2 + NetFlow>=30 SOL / right-tail trailing',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F2_NF30',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
@@ -1492,6 +1552,98 @@ const config = {
           min: 1_000,
         }),
       },
+      {
+        id: 'XB50',
+        label: '50% XLEG core + 50% fixed-8s runner',
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'BLEND_XLEG_X8',
+        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_50_CORE_WEIGHT_PCT', 50, {
+          min: 0,
+          max: 100,
+        }),
+        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
+          min: 250,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+      },
+      {
+        id: 'XB25',
+        label: '25% XLEG core + 75% fixed-8s runner',
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'BLEND_XLEG_X8',
+        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_25_CORE_WEIGHT_PCT', 25, {
+          min: 0,
+          max: 100,
+        }),
+        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
+          min: 250,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+      },
+      ...[
+        ['XR3_H12', 3_000, 12],
+        ['XR3_H15', 3_000, 15],
+        ['XR4_H12', 4_000, 12],
+        ['XR4_H15', 4_000, 15],
+      ].map(([id, fallbackLossCheckMs, fallbackHardStopPct]) => ({
+        id,
+        label: `${id} | early weak-state exit`,
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        hardStopPct: numberEnv(`FLOW_MIGRATED_REBOUND_RISK_HARD_STOP_${fallbackHardStopPct}_PCT`,
+          fallbackHardStopPct, { min: 0.1, max: 100 }),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv(
+          `FLOW_MIGRATED_REBOUND_RISK_CHECK_${fallbackLossCheckMs / 1_000}S_MS`,
+          fallbackLossCheckMs,
+          { min: 0 },
+        ),
+        lossCheckRecoveryPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_RISK_MAX_RECOVERY_FROM_LOW_PCT', 1, { min: 0, max: 100 },
+        ),
+        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      })),
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
@@ -1634,6 +1786,14 @@ const config = {
     maxEntryPriceJumpPct: numberEnv('FLOW_RANGE_SCALPER_MAX_ENTRY_JUMP_PCT', 3, {
       min: 0, max: 100,
     }),
+    maxEntryPriceDropPct: numberEnv('FLOW_RANGE_SCALPER_MAX_ENTRY_DROP_PCT', 50, {
+      min: 0, max: 100,
+    }),
+    maxObservedPriceScaleRatio: numberEnv(
+      'FLOW_RANGE_SCALPER_MAX_PRICE_SCALE_RATIO',
+      100,
+      { min: 2, max: 1_000_000 },
+    ),
     entryProfiles: [
       {
         id: 'JA',

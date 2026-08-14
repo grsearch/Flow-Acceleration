@@ -22,6 +22,12 @@ function main() {
     CREATE INDEX idx_raw_trades_ts ON raw_trades(timestamp_ms);
     CREATE TABLE flow_signals (signal_id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, mint TEXT);
     CREATE TABLE signal_returns (signal_id INTEGER PRIMARY KEY, updated_at INTEGER NOT NULL, return_5s REAL);
+    CREATE TABLE flow_first_shadow_positions (
+      id INTEGER PRIMARY KEY,
+      signal_id INTEGER REFERENCES flow_signals(signal_id),
+      signal_at INTEGER NOT NULL,
+      mint TEXT
+    );
     CREATE TABLE flow_smart_confirm_shadow_positions (
       id INTEGER PRIMARY KEY, smart_open_at INTEGER NOT NULL, mint TEXT
     );
@@ -35,6 +41,8 @@ function main() {
   db.prepare('INSERT INTO flow_signals VALUES (?, ?, ?)').run(11, startMs - 5, 'old');
   db.prepare('INSERT INTO signal_returns VALUES (?, ?, ?)').run(10, endMs + 10_000, 12.3);
   db.prepare('INSERT INTO signal_returns VALUES (?, ?, ?)').run(11, startMs + 10, -5);
+  db.prepare('INSERT INTO flow_first_shadow_positions VALUES (?, ?, ?, ?)')
+    .run(12, 10, startMs + 15, 'inside');
   db.prepare('INSERT INTO flow_smart_confirm_shadow_positions VALUES (?, ?, ?)')
     .run(20, startMs + 20, 'confirmed-inside');
   db.prepare('INSERT INTO flow_smart_confirm_shadow_positions VALUES (?, ?, ?)')
@@ -48,6 +56,7 @@ function main() {
   assert.strictEqual(result.safety.walCheckpointExecuted, false);
   assert.strictEqual(result.safety.backupApiUsed, false);
   assert.strictEqual(result.safety.sourceWritesExecuted, false);
+  assert.strictEqual(result.safety.destinationForeignKeysDisabledDuringCopy, true);
   assert.strictEqual(fs.statSync(walPath).size, walBytesBefore, 'export must not checkpoint or truncate WAL');
   assert.strictEqual(db.prepare('SELECT COUNT(*) AS count FROM raw_trades').get().count, 4);
   const exported = new Database(destination, { readonly: true });
@@ -64,6 +73,11 @@ function main() {
     exported.prepare('SELECT id FROM flow_smart_confirm_shadow_positions ORDER BY id')
       .all().map((row) => row.id),
     [20],
+  );
+  assert.deepStrictEqual(
+    exported.prepare('SELECT id FROM flow_first_shadow_positions ORDER BY id')
+      .all().map((row) => row.id),
+    [12],
   );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();
@@ -82,6 +96,7 @@ function main() {
   assert.ok(backupScript.includes('last-run.env'));
   assert.ok(backupScript.includes('write_state VERIFYING'));
   assert.match(backupScript, /timeout --foreground "\$UPLOAD_TIMEOUT"/);
+  assert.match(backupScript, /mktemp --suffix=\.yaml/);
   assert.match(backupScript, /--fail-output=false/);
   assert.ok(!/wal_checkpoint|\.backup\b|db\.backup\b/i.test(backupScript));
   assert.match(timer, /OnCalendar=\*-\*-\* 08:00:00 Asia\/Shanghai/);

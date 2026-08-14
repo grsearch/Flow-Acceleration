@@ -34,6 +34,7 @@ function rowPosition(row) {
     mint: row.mint,
     symbol: row.symbol,
     status: row.status,
+    configuredCostPct: finite(value('configured_cost_pct', 'configuredCostPct'), 0),
     reboundAt: value('rebound_at', 'reboundAt'),
     reboundPrice: value('rebound_price', 'reboundPrice'),
     entryTargetAt: value('entry_target_at', 'entryTargetAt'),
@@ -57,7 +58,14 @@ function rowPosition(row) {
     fastTakeProfitPct: value('fast_take_profit_pct', 'fastTakeProfitPct'),
     fastTakeProfitWindowMs: value('fast_take_profit_window_ms', 'fastTakeProfitWindowMs'),
     lossCheckAtMs: value('loss_check_at_ms', 'lossCheckAtMs'),
+    lossCheckRecoveryPct: value('loss_check_recovery_pct', 'lossCheckRecoveryPct'),
     maxHoldMs: value('max_hold_ms', 'maxHoldMs'),
+    coreWeightPct: value('core_weight_pct', 'coreWeightPct'),
+    runnerHoldMs: value('runner_hold_ms', 'runnerHoldMs'),
+    coreExitTargetAt: value('core_exit_target_at', 'coreExitTargetAt'),
+    coreExitAt: value('core_exit_at', 'coreExitAt'),
+    coreExitPrice: value('core_exit_price', 'coreExitPrice'),
+    coreExitReason: value('core_exit_reason', 'coreExitReason'),
     exitTriggerAt: value('exit_trigger_at', 'exitTriggerAt'),
     exitTargetAt: value('exit_target_at', 'exitTargetAt'),
     exitDeadlineAt: value('exit_deadline_at', 'exitDeadlineAt'),
@@ -481,7 +489,11 @@ class MigratedDropReboundShadowSuite {
     const episodeId = `${trade.mint}:${stageCode}:${profile.id}:${candidate.startedAt}:${trade.timestampMs}`;
     this.metrics.signals += 1;
     for (const exitProfile of this.exitProfiles.values()) {
+      if (Array.isArray(exitProfile.entryProfileIds)
+        && !exitProfile.entryProfileIds.includes(profile.id)) continue;
       const cohortId = `${stageCode}_${profile.id}_${exitProfile.id}`;
+      const configuredCostPct = this.costs.deterministicCostPct
+        + (exitProfile.exitMode === 'BLEND_XLEG_X8' ? this.costs.fixedCostPct : 0);
       const saved = this.store.createMigratedDropReboundShadowPosition({
         cohortId,
         lifecycleStage,
@@ -492,7 +504,7 @@ class MigratedDropReboundShadowSuite {
         symbol: trade.symbol || this.store.getToken(trade.mint)?.symbol || null,
         status: STATUS.PENDING_ENTRY,
         positionSol: this.config.positionSizeSol,
-        configuredCostPct: this.costs.deterministicCostPct,
+        configuredCostPct,
         migratedAt: anchorAt,
         migrationAgeMs: Math.max(0, trade.timestampMs - anchorAt),
         windowMs: profile.windowMs,
@@ -522,7 +534,10 @@ class MigratedDropReboundShadowSuite {
         fastTakeProfitPct: exitProfile.fastTakeProfitPct,
         fastTakeProfitWindowMs: exitProfile.fastTakeProfitWindowMs,
         lossCheckAtMs: exitProfile.lossCheckAtMs,
+        lossCheckRecoveryPct: exitProfile.lossCheckRecoveryPct,
         maxHoldMs: exitProfile.maxHoldMs,
+        coreWeightPct: exitProfile.coreWeightPct,
+        runnerHoldMs: exitProfile.runnerHoldMs,
       });
       if (!saved?.inserted) continue;
       const pending = rowPosition(saved);
@@ -588,6 +603,10 @@ class MigratedDropReboundShadowSuite {
       }
       if (position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt
         || !this._eligibleExitTrade(position, trade, price)) continue;
+      if (position.exitMode === 'BLEND_XLEG_X8' && position.coreExitTargetAt
+        && !position.coreExitAt && trade.timestampMs >= position.coreExitTargetAt) {
+        this._fillCoreExit(position, trade.timestampMs, price);
+      }
       this._updateExtrema(position, trade.timestampMs, price);
       this._evaluateExit(position, trade.timestampMs, price);
       if (position.status === STATUS.EXIT_PENDING) {
@@ -658,8 +677,13 @@ class MigratedDropReboundShadowSuite {
     if (position.exitMode === 'FIXED_HOLD' && ageMs >= position.fixedHoldMs) {
       reason = `FIXED_HOLD_${position.fixedHoldMs}MS`;
       triggerAt = position.entryAt + position.fixedHoldMs;
-    } else if (position.exitMode === 'LEGACY') {
-      if (position.fastTakeProfitPct > 0 && ageMs <= position.fastTakeProfitWindowMs
+    } else if (['LEGACY', 'RISK_XLEG', 'BLEND_XLEG_X8'].includes(position.exitMode)) {
+      const riskMode = position.exitMode === 'RISK_XLEG';
+      const blendMode = position.exitMode === 'BLEND_XLEG_X8';
+      if (riskMode && position.hardStopPct > 0
+        && grossReturnPct <= -position.hardStopPct) reason = 'RISK_HARD_STOP';
+      if (!reason && position.fastTakeProfitPct > 0
+        && ageMs <= position.fastTakeProfitWindowMs
         && grossReturnPct >= position.fastTakeProfitPct) reason = 'FAST_TAKE_PROFIT';
       if (!reason && !position.trailingActivatedAt
         && peakReturnPct >= position.trailingActivationPct) {
@@ -673,10 +697,24 @@ class MigratedDropReboundShadowSuite {
       }
       if (!reason && position.lossCheckAtMs > 0 && ageMs >= position.lossCheckAtMs
         && grossReturnPct < 0) {
-        reason = 'LOSS_CHECK';
-        triggerAt = position.entryAt + position.lossCheckAtMs;
+        const recoveryFromLowPct = ((price / position.lowestPrice) - 1) * 100;
+        const recoveryPass = !riskMode || position.lossCheckRecoveryPct == null
+          || recoveryFromLowPct <= position.lossCheckRecoveryPct;
+        if (recoveryPass) {
+          reason = riskMode ? 'RISK_LOSS_CHECK' : 'LOSS_CHECK';
+          triggerAt = position.entryAt + position.lossCheckAtMs;
+        }
       }
-      if (!reason && ageMs >= position.maxHoldMs) {
+      if (blendMode) {
+        if (reason && !position.coreExitTargetAt && !position.coreExitAt) {
+          this._requestCoreExit(position, triggerAt, reason);
+        }
+        reason = null;
+        if (ageMs >= position.runnerHoldMs) {
+          reason = `BLEND_RUNNER_HOLD_${position.runnerHoldMs}MS`;
+          triggerAt = position.entryAt + position.runnerHoldMs;
+        }
+      } else if (!reason && ageMs >= position.maxHoldMs) {
         reason = 'MAX_HOLD';
         triggerAt = position.entryAt + position.maxHoldMs;
       }
@@ -702,6 +740,24 @@ class MigratedDropReboundShadowSuite {
     if (reason) this._requestExit(position, triggerAt, reason);
   }
 
+  _requestCoreExit(position, triggerAt, reason) {
+    position.coreExitTargetAt = triggerAt + this.config.exitDelayMs;
+    position.coreExitReason = reason;
+    this.store.updateMigratedDropReboundShadowPosition(position.id, {
+      coreExitTargetAt: position.coreExitTargetAt,
+      coreExitReason: position.coreExitReason,
+    });
+  }
+
+  _fillCoreExit(position, timestampMs, price) {
+    position.coreExitAt = timestampMs;
+    position.coreExitPrice = price;
+    this.store.updateMigratedDropReboundShadowPosition(position.id, {
+      coreExitAt: position.coreExitAt,
+      coreExitPrice: position.coreExitPrice,
+    });
+  }
+
   _requestExit(position, triggerAt, reason) {
     if (position.status !== STATUS.OPEN) return;
     position.status = STATUS.EXIT_PENDING;
@@ -720,14 +776,30 @@ class MigratedDropReboundShadowSuite {
 
   _close(position, trade, price) {
     this._updateExtrema(position, trade.timestampMs, price);
-    const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const runnerGrossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    let grossReturnPct = runnerGrossReturnPct;
+    let exitPrice = price;
+    let exitReason = position.exitReason;
+    if (position.exitMode === 'BLEND_XLEG_X8') {
+      const coreWeight = Math.min(1, Math.max(0, finite(position.coreWeightPct, 50) / 100));
+      const corePrice = finite(position.coreExitPrice, price);
+      const coreGrossReturnPct = ((corePrice / position.entryPrice) - 1) * 100;
+      grossReturnPct = coreGrossReturnPct * coreWeight
+        + runnerGrossReturnPct * (1 - coreWeight);
+      exitPrice = position.entryPrice * (1 + grossReturnPct / 100);
+      exitReason = `BLEND_${position.coreExitReason || 'CORE_AT_RUNNER'}_X8`;
+    }
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
-      exitPrice: price,
+      exitPrice,
+      exitReason,
       grossReturnPct,
-      netReturnPct: grossReturnPct - this.costs.deterministicCostPct,
+      netReturnPct: grossReturnPct - finite(
+        position.configuredCostPct,
+        this.costs.deterministicCostPct,
+      ),
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
@@ -741,7 +813,10 @@ class MigratedDropReboundShadowSuite {
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
       grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
+      netReturnPct: -100 - finite(
+        position.configuredCostPct,
+        this.costs.deterministicCostPct,
+      ),
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });

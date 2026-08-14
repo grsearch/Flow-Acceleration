@@ -368,4 +368,137 @@ function testEarlyOpportunityProfiles() {
   store.close();
 }
 
+function optimizationConfig(exitProfiles) {
+  return {
+    enabled: true,
+    lifecycleStages: [{ id: 'POST_MIGRATION', label: 'post', market: 'PUMP_AMM' }],
+    stateRetentionMs: 60_000,
+    trackingAgeMs: 120_000,
+    positionSizeSol: 1,
+    entryDelayMs: 200,
+    entryTimeoutMs: 2_000,
+    exitDelayMs: 200,
+    exitTimeoutMs: 5_000,
+    maxEntryPriceJumpPct: 15,
+    entryProfiles: [{
+      id: 'GD25_35', label: 'base', windowMs: 1_000,
+      dropMinPct: 25, dropMaxPct: 35, reboundMinPct: 2, reboundMaxPct: 5,
+      reboundTimeoutMs: 1_000,
+    }],
+    exitProfiles,
+    costModel: {
+      platformFeePct: 0, buySlippagePct: 0, sellSlippagePct: 0,
+      priceImpactPct: 0, baseTxFeeSol: 0, priorityFeeSol: 0,
+      jitoTipSol: 0, fixedCostSol: 0, positionSizeSol: 1,
+    },
+  };
+}
+
+function optimizationStore() {
+  return new ResearchStore({
+    dbPath: ':memory:', rawRetentionHours: 168, archiveDir: './data/archive',
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+}
+
+function seedPostMigrationSignal({ suite, store, mint, base }) {
+  recordCreate(store, mint, base);
+  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(mint));
+  suite.observeTrade(trade(mint, base + 100, 1));
+  suite.observeTrade(trade(mint, base + 200, 0.7));
+  suite.observeTrade(trade(mint, base + 300, 0.721));
+  suite.observeTrade(trade(mint, base + 500, 0.73));
+}
+
+function testSplitRunnerPersistsAcrossRestart() {
+  const base = 2_000_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const legacyShape = {
+    entryProfileIds: ['GD25_35'], exitMode: 'BLEND_XLEG_X8',
+    runnerHoldMs: 8_000, trailingActivationPct: 8, trailingStopPct: 3,
+    fastTakeProfitPct: 18, fastTakeProfitWindowMs: 5_000,
+    lossCheckAtMs: 6_000,
+  };
+  const config = optimizationConfig([
+    { id: 'XB50', label: '50/50', coreWeightPct: 50, ...legacyShape },
+    { id: 'XB25', label: '25/75', coreWeightPct: 25, ...legacyShape },
+  ]);
+  const mint = 'SplitRunner111111111111111111111111111111111';
+  let suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  seedPostMigrationSignal({ suite, store, mint, base });
+
+  suite.observeTrade(trade(mint, base + 1_000, 0.95));
+  suite.observeTrade(trade(mint, base + 1_200, 0.9));
+  let rows = store.db.prepare(`
+    SELECT exit_profile_id, status, core_exit_price
+    FROM migrated_drop_rebound_shadow_positions WHERE mint=? ORDER BY exit_profile_id
+  `).all(mint);
+  assert(rows.every((row) => row.status === 'OPEN' && row.core_exit_price === 0.9));
+
+  suite.stop();
+  now = base + 1_300;
+  suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  suite.observeTrade(trade(mint, base + 8_500, 1.46));
+  suite.observeTrade(trade(mint, base + 8_700, 1.4));
+  rows = store.db.prepare(`
+    SELECT exit_profile_id, status, core_exit_price, gross_return_pct, exit_reason
+    FROM migrated_drop_rebound_shadow_positions WHERE mint=? ORDER BY exit_profile_id
+  `).all(mint);
+  assert(rows.every((row) => row.status === 'CLOSED' && row.core_exit_price === 0.9));
+  assert(rows.every((row) => row.exit_reason.startsWith('BLEND_FAST_TAKE_PROFIT_X8')));
+  assert(rows.find((row) => row.exit_profile_id === 'XB25').gross_return_pct
+    > rows.find((row) => row.exit_profile_id === 'XB50').gross_return_pct,
+  'the 75% runner cohort must retain more of a large late winner');
+  store.close();
+}
+
+function testRiskExitRequiresWeakRecovery() {
+  const base = 2_100_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const makeRisk = (id, lossCheckAtMs, hardStopPct) => ({
+    id, label: id, entryProfileIds: ['GD25_35'], exitMode: 'RISK_XLEG',
+    trailingActivationPct: 8, trailingStopPct: 3, hardStopPct,
+    fastTakeProfitPct: 18, fastTakeProfitWindowMs: 5_000,
+    lossCheckAtMs, lossCheckRecoveryPct: 1, maxHoldMs: 15_000,
+  });
+  const config = optimizationConfig([
+    makeRisk('XR3_H12', 3_000, 12), makeRisk('XR3_H15', 3_000, 15),
+    makeRisk('XR4_H12', 4_000, 12), makeRisk('XR4_H15', 4_000, 15),
+  ]);
+  const mint = 'RiskMatrix11111111111111111111111111111111111';
+  const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  seedPostMigrationSignal({ suite, store, mint, base });
+  suite.observeTrade(trade(mint, base + 2_000, 0.65));
+  suite.observeTrade(trade(mint, base + 3_500, 0.6564));
+  let rows = store.db.prepare(`
+    SELECT exit_profile_id, status, exit_reason
+    FROM migrated_drop_rebound_shadow_positions WHERE mint=? ORDER BY exit_profile_id
+  `).all(mint);
+  assert(rows.filter((row) => row.exit_profile_id.startsWith('XR3'))
+    .every((row) => row.status === 'EXIT_PENDING' && row.exit_reason === 'RISK_LOSS_CHECK'),
+  JSON.stringify(rows));
+  assert(rows.filter((row) => row.exit_profile_id.startsWith('XR4'))
+    .every((row) => row.status === 'OPEN'));
+  suite.observeTrade(trade(mint, base + 3_700, 0.66));
+  suite.observeTrade(trade(mint, base + 4_500, 0.7));
+  rows = store.db.prepare(`
+    SELECT exit_profile_id, status FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=? ORDER BY exit_profile_id
+  `).all(mint);
+  assert(rows.filter((row) => row.exit_profile_id.startsWith('XR3'))
+    .every((row) => row.status === 'CLOSED'));
+  assert(rows.filter((row) => row.exit_profile_id.startsWith('XR4'))
+    .every((row) => row.status === 'OPEN'),
+  'a rebound more than 1% above the running low must survive the four-second check');
+  store.close();
+}
+
 testEarlyOpportunityProfiles();
+testSplitRunnerPersistsAcrossRestart();
+testRiskExitRequiresWeakRecovery();

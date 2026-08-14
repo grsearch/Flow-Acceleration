@@ -45,6 +45,7 @@ function rowPosition(row) {
     entryTargetAt: value('entry_target_at', 'entryTargetAt'),
     entryDeadlineAt: value('entry_deadline_at', 'entryDeadlineAt'),
     entryAt: value('entry_at', 'entryAt'),
+    entryMarket: value('entry_market', 'entryMarket'),
     entryPrice: value('entry_price', 'entryPrice'),
     highestPrice: value('highest_price', 'highestPrice'),
     lowestPrice: value('lowest_price', 'lowestPrice'),
@@ -68,6 +69,8 @@ class RangeScalperShadowSuite {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.maxEntryPriceDropPct = finite(config.maxEntryPriceDropPct, 50);
+    this.maxObservedPriceScaleRatio = finite(config.maxObservedPriceScaleRatio, 100);
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
@@ -226,6 +229,8 @@ class RangeScalperShadowSuite {
         entryDelayMs: this.config.entryDelayMs,
         exitDelayMs: this.config.exitDelayMs,
         maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
+        maxEntryPriceDropPct: this.maxEntryPriceDropPct,
+        maxObservedPriceScaleRatio: this.maxObservedPriceScaleRatio,
         research: {
           isolatedTable: 'range_scalper_shadow_positions',
           simulatedPositionSol: this.config.positionSizeSol,
@@ -579,9 +584,21 @@ class RangeScalperShadowSuite {
           this.metrics.priceJump += 1;
           continue;
         }
+        if (jumpPct < -this.maxEntryPriceDropPct) {
+          this.store.updateRangeScalperShadowPosition(position.id, {
+            status: STATUS.PRICE_JUMP,
+            rejectionReason: `ENTRY_PRICE_DROP_${Math.abs(jumpPct).toFixed(2)}PCT`,
+            entryJumpPct: jumpPct,
+          });
+          this.pendingEntries.delete(position.id);
+          this._unindexRow(position);
+          this.metrics.priceJump += 1;
+          continue;
+        }
         Object.assign(position, {
           status: STATUS.OPEN,
           entryAt: trade.timestampMs,
+          entryMarket: trade.market,
           entryPrice: price,
           highestPrice: price,
           lowestPrice: price,
@@ -607,11 +624,21 @@ class RangeScalperShadowSuite {
         continue;
       }
       if (position.status === STATUS.EXIT_PENDING) {
+        const dataIssue = this._priceDataIssue(position, trade, price);
+        if (dataIssue) {
+          this._markPriceDataIssue(position, dataIssue);
+          continue;
+        }
         if (trade.timestampMs >= position.exitTargetAt
           && trade.timestampMs <= position.exitDeadlineAt) this._close(position, trade, price);
         continue;
       }
       if (position.status !== STATUS.OPEN) continue;
+      const dataIssue = this._priceDataIssue(position, trade, price);
+      if (dataIssue) {
+        this._markPriceDataIssue(position, dataIssue);
+        continue;
+      }
       position.highestPrice = Math.max(position.highestPrice, price);
       position.lowestPrice = Math.min(position.lowestPrice, price);
       position.lastObservedAt = trade.timestampMs;
@@ -664,6 +691,11 @@ class RangeScalperShadowSuite {
   }
 
   _close(position, trade, price) {
+    const dataIssue = this._priceDataIssue(position, trade, price);
+    if (dataIssue) {
+      this._markPriceDataIssue(position, dataIssue);
+      return;
+    }
     const grossReturnPct = (price / position.entryPrice - 1) * 100;
     this.store.updateRangeScalperShadowPosition(position.id, {
       status: STATUS.CLOSED,
@@ -677,6 +709,29 @@ class RangeScalperShadowSuite {
     this.positions.delete(position.id);
     this._unindexRow(position);
     this.metrics.closed += 1;
+    this.metrics.lastActionAt = this.now();
+  }
+
+  _priceDataIssue(position, trade, price) {
+    if (position.entryMarket && trade.market && position.entryMarket !== trade.market) {
+      return `CROSS_MARKET_PRICE_${position.entryMarket}_TO_${trade.market}`;
+    }
+    const referencePrice = finite(position.lastPrice) || finite(position.entryPrice);
+    if (!(referencePrice > 0) || !(price > 0)) return null;
+    const scaleRatio = Math.max(price / referencePrice, referencePrice / price);
+    if (scaleRatio <= this.maxObservedPriceScaleRatio) return null;
+    return `PRICE_SCALE_DISCONTINUITY_${scaleRatio.toFixed(2)}X`;
+  }
+
+  _markPriceDataIssue(position, rejectionReason) {
+    this.store.updateRangeScalperShadowPosition(position.id, {
+      status: STATUS.PRICE_JUMP,
+      rejectionReason,
+    });
+    this.pendingEntries.delete(position.id);
+    this.positions.delete(position.id);
+    this._unindexRow(position);
+    this.metrics.priceJump += 1;
     this.metrics.lastActionAt = this.now();
   }
 

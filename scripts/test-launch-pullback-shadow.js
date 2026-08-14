@@ -85,6 +85,20 @@ function makeConfig({ withTrailing = false, withDeep = false, withOptimization =
         referenceReboundPct: 3, minNetFlowSol: 15, maxCreatorSharePct: 5,
         maxTop3SharePct: 100, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 10_000,
       },
+      {
+        id: 'F2_8S_NF30', label: 'F2-8S-NF30', profileId: 'F2_NF30',
+        referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+        referenceReboundPct: 3, minNetFlowSol: 30, maxCreatorSharePct: 10,
+        maxTop3SharePct: 100, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 8_000,
+      },
+      {
+        id: 'FT_C_NF30', label: 'FT-C-NF30', profileId: 'F2_NF30',
+        referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+        referenceReboundPct: 3, minNetFlowSol: 30, maxCreatorSharePct: 10,
+        maxTop3SharePct: 100, exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 30, trailingDrawdownPct: 20,
+        minHoldMs: 0, maxHoldMs: 120_000, hardStopPct: 30,
+      },
     ] : [],
     costModel: {
       platformFeePct: 1.4,
@@ -248,8 +262,8 @@ function testOptimizationCohortsStayIsolated() {
   suite.onReference(reference('legacy-optimization', now));
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization'").get().n,
-    8,
-    'legacy reference should create six original cohorts plus two matching FO cohorts',
+    10,
+    'legacy reference should preserve six original cohorts and record four matching optimization cohorts',
   );
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_C70_10S'").get().n,
@@ -262,6 +276,42 @@ function testOptimizationCohortsStayIsolated() {
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_D12_R3_10S'").get().n,
     0,
+  );
+  assert.deepStrictEqual(
+    store.db.prepare(`
+      SELECT cohort_id, status FROM launch_pullback_shadow_positions
+      WHERE mint='legacy-optimization' AND cohort_id IN ('F2_8S_NF30', 'FT_C_NF30')
+      ORDER BY cohort_id
+    `).all(),
+    [
+      { cohort_id: 'F2_8S_NF30', status: 'RULE_REJECTED' },
+      { cohort_id: 'FT_C_NF30', status: 'RULE_REJECTED' },
+    ],
+    'NF30 cohorts must retain rejected samples without changing the old F2 cohorts',
+  );
+
+  now += 2_000;
+  suite.onReference(reference('nf30-optimization', now, 30, 4));
+  assert.deepStrictEqual(
+    store.db.prepare(`
+      SELECT cohort_id, status FROM launch_pullback_shadow_positions
+      WHERE mint='nf30-optimization' AND cohort_id IN ('F2_8S_NF30', 'FT_C_NF30')
+      ORDER BY cohort_id
+    `).all(),
+    [
+      { cohort_id: 'F2_8S_NF30', status: 'PENDING_ENTRY' },
+      { cohort_id: 'FT_C_NF30', status: 'PENDING_ENTRY' },
+    ],
+    'NetFlow 30 must arm both independent high-flow cohorts',
+  );
+  suite.observeTrade(trade('nf30-optimization', now + 200, 1));
+  suite.observeTrade(trade('nf30-optimization', now + 500, 1.4));
+  suite.observeTrade(trade('nf30-optimization', now + 700, 1.1));
+  suite.observeTrade(trade('nf30-optimization', now + 900, 1.08));
+  assert.strictEqual(
+    store.db.prepare("SELECT status FROM launch_pullback_shadow_positions WHERE mint='nf30-optimization' AND cohort_id='FT_C_NF30'").get().status,
+    'CLOSED',
+    'the high-flow trailing cohort must use FT-C exit behavior',
   );
 
   now += 5_000;

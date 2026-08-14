@@ -296,6 +296,20 @@ K 原实验把钱包分析结论转成独立的公开订单流实验，不读取
 
 ## Lifecycle Drop/Rebound Shadow G
 
+Forward-only optimization cohorts preserve every historical G cohort unchanged. For the
+post-migration `GD25_35` entry only, `XB50` keeps 50% in the existing XLEG exit and holds
+50% to a fixed 8-second runner; `XB25` keeps 25% in XLEG and 75% in the runner. Their
+weighted return includes the additional simulated sell transaction cost. Four independent
+risk cohorts (`XR3_H12`, `XR3_H15`, `XR4_H12`, `XR4_H15`) combine a 3/4-second weak-state
+check with a -12%/-15% hard stop. A weak-state exit requires the position to remain below
+entry and recover no more than 1% from its running low, so an active rebound is not cut only
+because the clock expired. These cohorts are Shadow-only and never alter the live XLEG rule.
+
+Launch First Pullback also adds two forward-only high-flow cohorts without changing F2 or
+FT-C history: `F2_8S_NF30` uses the existing F2 reference and fixed 8-second exit, while
+`FT_C_NF30` uses the existing FT-C right-tail exit. Both require reference NetFlow >= 30 SOL
+and store results under new cohort IDs.
+
 Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION` 只用毕业前 `PUMP_BONDING_CURVE` 成交触发信号和入场，AGE 从 Token 创建时间计算；`POST_MIGRATION` 只用毕业后的 `PUMP_AMM` 成交触发信号和入场，AGE 从毕业时间计算。两层拥有独立检测状态、Episode 与 cohort，统计时不会把两种市场结构混在一起。此前已经积累的毕业后记录会通过数据库默认值保留为 `POST_MIGRATION`。
 
 完整的毕业前 Curve 成交本来就持续写入 `raw_trades`；新毕业 Mint 另外默认持续订阅5分钟 PumpSwap 并保存逐笔成交。因此样本积累后可以分别离线穷举窗口、跌幅、反弹幅度和确认时限。毕业前建立的模拟仓位如果跨过毕业时点，可以继续使用迁移后的 PumpSwap 成交退出，但不会把该仓位改记成毕业后入场。

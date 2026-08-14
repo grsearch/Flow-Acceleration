@@ -179,7 +179,10 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   config.launchPullbackShadow.optimizationCohorts.map((cohort) => cohort.id),
-  ['FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20', 'FO_D12_R3_10S', 'FO_D12_R3_T15'],
+  [
+    'FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20',
+    'FO_D12_R3_10S', 'FO_D12_R3_T15', 'F2_8S_NF30', 'FT_C_NF30',
+  ],
 );
 assert.strictEqual(
   config.launchPullbackShadow.optimizationCohorts[0].maxEntryPriceJumpPct,
@@ -242,6 +245,13 @@ assert.deepStrictEqual(
     ['GE30_R23_F3', 30_000, 3],
   ],
 );
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.exitProfiles.map((profile) => profile.id),
+  ['X3', 'X8', 'XLEG', 'XB50', 'XB25', 'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15'],
+);
+assert.ok(config.migratedDropReboundShadow.exitProfiles
+  .filter((profile) => profile.id.startsWith('XB') || profile.id.startsWith('XR'))
+  .every((profile) => profile.entryProfileIds.join(',') === 'GD25_35'));
 assert.strictEqual(config.migrationContinuityShadow.enabled, true);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
 assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {

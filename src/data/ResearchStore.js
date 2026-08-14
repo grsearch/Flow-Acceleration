@@ -930,7 +930,14 @@ class ResearchStore {
         fast_take_profit_pct REAL,
         fast_take_profit_window_ms INTEGER,
         loss_check_at_ms INTEGER,
+        loss_check_recovery_pct REAL,
         max_hold_ms INTEGER,
+        core_weight_pct REAL,
+        runner_hold_ms INTEGER,
+        core_exit_target_at INTEGER,
+        core_exit_at INTEGER,
+        core_exit_price REAL,
+        core_exit_reason TEXT,
         exit_trigger_at INTEGER,
         exit_target_at INTEGER,
         exit_deadline_at INTEGER,
@@ -1439,6 +1446,20 @@ class ResearchStore {
         ALTER TABLE migrated_drop_rebound_shadow_positions
         ADD COLUMN lifecycle_stage TEXT NOT NULL DEFAULT 'POST_MIGRATION'
       `);
+    }
+    const reboundMigrations = [
+      ['loss_check_recovery_pct', 'REAL'],
+      ['core_weight_pct', 'REAL'],
+      ['runner_hold_ms', 'INTEGER'],
+      ['core_exit_target_at', 'INTEGER'],
+      ['core_exit_at', 'INTEGER'],
+      ['core_exit_price', 'REAL'],
+      ['core_exit_reason', 'TEXT'],
+    ];
+    for (const [column, definition] of reboundMigrations) {
+      if (!reboundColumns.has(column)) {
+        this.db.exec(`ALTER TABLE migrated_drop_rebound_shadow_positions ADD COLUMN ${column} ${definition}`);
+      }
     }
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_migrated_drop_rebound_lifecycle_profiles
@@ -2551,7 +2572,8 @@ class ResearchStore {
           rebound_from_low_ms, entry_target_at, entry_deadline_at,
           exit_mode, fixed_hold_ms, trailing_activation_pct, trailing_stop_pct,
           hard_stop_pct, fast_take_profit_pct, fast_take_profit_window_ms,
-          loss_check_at_ms, max_hold_ms, created_at, updated_at
+          loss_check_at_ms, loss_check_recovery_pct, max_hold_ms,
+          core_weight_pct, runner_hold_ms, created_at, updated_at
         ) VALUES (
           @cohortId, @lifecycleStage, @entryProfileId, @exitProfileId, @episodeId,
           @mint, @symbol, @status, @rejectionReason, @positionSol, @configuredCostPct,
@@ -2562,7 +2584,8 @@ class ResearchStore {
           @reboundFromLowMs, @entryTargetAt, @entryDeadlineAt,
           @exitMode, @fixedHoldMs, @trailingActivationPct, @trailingStopPct,
           @hardStopPct, @fastTakeProfitPct, @fastTakeProfitWindowMs,
-          @lossCheckAtMs, @maxHoldMs, @createdAt, @updatedAt
+          @lossCheckAtMs, @lossCheckRecoveryPct, @maxHoldMs,
+          @coreWeightPct, @runnerHoldMs, @createdAt, @updatedAt
         )
       `),
       getMigratedDropReboundShadowPosition: this.db.prepare(`
@@ -2590,6 +2613,10 @@ class ResearchStore {
             max_adverse_return_pct
           ),
           trailing_activated_at = COALESCE(@trailingActivatedAt, trailing_activated_at),
+          core_exit_target_at = COALESCE(@coreExitTargetAt, core_exit_target_at),
+          core_exit_at = COALESCE(@coreExitAt, core_exit_at),
+          core_exit_price = COALESCE(@coreExitPrice, core_exit_price),
+          core_exit_reason = COALESCE(@coreExitReason, core_exit_reason),
           exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
           exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
           exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
@@ -4018,7 +4045,10 @@ class ResearchStore {
       fastTakeProfitPct: finiteOrNull(position.fastTakeProfitPct),
       fastTakeProfitWindowMs: nullableInteger(position.fastTakeProfitWindowMs),
       lossCheckAtMs: nullableInteger(position.lossCheckAtMs),
+      lossCheckRecoveryPct: finiteOrNull(position.lossCheckRecoveryPct),
       maxHoldMs: nullableInteger(position.maxHoldMs),
+      coreWeightPct: finiteOrNull(position.coreWeightPct),
+      runnerHoldMs: nullableInteger(position.runnerHoldMs),
       createdAt: now,
       updatedAt: now,
     };
@@ -4050,6 +4080,10 @@ class ResearchStore {
       maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
       maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
       trailingActivatedAt: value('trailingActivatedAt'),
+      coreExitTargetAt: value('coreExitTargetAt'),
+      coreExitAt: value('coreExitAt'),
+      coreExitPrice: finiteOrNull(value('coreExitPrice')),
+      coreExitReason: value('coreExitReason'),
       exitTriggerAt: value('exitTriggerAt'),
       exitTargetAt: value('exitTargetAt'),
       exitDeadlineAt: value('exitDeadlineAt'),
@@ -4881,6 +4915,10 @@ class ResearchStore {
           MIN(trailing_activation_pct) AS trailing_activation_pct,
           MIN(trailing_stop_pct) AS trailing_stop_pct,
           MIN(hard_stop_pct) AS hard_stop_pct,
+          MIN(loss_check_at_ms) AS loss_check_at_ms,
+          MIN(loss_check_recovery_pct) AS loss_check_recovery_pct,
+          MIN(core_weight_pct) AS core_weight_pct,
+          MIN(runner_hold_ms) AS runner_hold_ms,
           MIN(max_hold_ms) AS max_hold_ms,
           COUNT(*) AS signals,
           COUNT(DISTINCT mint) AS independent_mints,

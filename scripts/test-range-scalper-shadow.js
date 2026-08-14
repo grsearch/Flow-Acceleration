@@ -36,6 +36,8 @@ function run() {
     exitDelayMs: 200,
     exitTimeoutMs: 2_000,
     maxEntryPriceJumpPct: 3,
+    maxEntryPriceDropPct: 50,
+    maxObservedPriceScaleRatio: 100,
     entryProfiles: [
       {
         id: 'JA', label: 'test', deviationSigma: 0.5, reboundPct: 2,
@@ -136,6 +138,55 @@ function run() {
       .reduce((sum, session) => sum + session.resolved, 0),
     5,
   );
+
+  const emitGuardSignal = (offset, signalPrice) => {
+    const state = suite.states.get(mint);
+    const timestampMs = base + offset;
+    const trade = {
+      mint, symbol: 'RANGE', market: 'PUMP_AMM', timestampMs,
+      side: 'BUY', solAmount: 1, tokenAmount: 1 / signalPrice,
+      price: signalPrice, reservePrice: signalPrice, wallet: `guard-${offset}`,
+      signature: `${mint}:guard:${offset}`,
+    };
+    suite._emitSignal(
+      state,
+      suite.entryProfiles.get('JA'),
+      10 + offset,
+      trade,
+      signalPrice,
+      state.features,
+      { startedAt: timestampMs - 50, lowAt: timestampMs - 50, lowPrice: signalPrice },
+      2,
+    );
+    return { state, timestampMs };
+  };
+
+  // A 200ms simulated fill that is already down more than 50% is quarantined.
+  let guard = emitGuardSignal(4_500, 1);
+  now = guard.timestampMs + config.entryDelayMs;
+  suite._observeRows(guard.state, {
+    mint, market: 'PUMP_AMM', timestampMs: now,
+  }, 0.4, guard.state.features);
+  let guardRows = store.rangeScalperShadowDashboard({ positionLimit: 20 }).positions
+    .filter((row) => row.rejection_reason?.startsWith('ENTRY_PRICE_DROP_'));
+  assert.strictEqual(guardRows.length, 2);
+  assert(guardRows.every((row) => row.status === 'PRICE_JUMP'));
+
+  // A cross-scale exit quote must never turn into a multi-million-percent winner.
+  guard = emitGuardSignal(5_000, 1);
+  now = guard.timestampMs + config.entryDelayMs;
+  suite._observeRows(guard.state, {
+    mint, market: 'PUMP_AMM', timestampMs: now,
+  }, 1, guard.state.features);
+  now += 100;
+  suite._observeRows(guard.state, {
+    mint, market: 'PUMP_AMM', timestampMs: now,
+  }, 20_000, guard.state.features);
+  guardRows = store.rangeScalperShadowDashboard({ positionLimit: 20 }).positions
+    .filter((row) => row.rejection_reason?.startsWith('PRICE_SCALE_DISCONTINUITY_'));
+  assert.strictEqual(guardRows.length, 2);
+  assert(guardRows.every((row) => row.status === 'PRICE_JUMP'));
+  assert(guardRows.every((row) => row.net_return_pct == null));
 
   // A persistently one-sided regime is invalidated and dynamically unsubscribed.
   for (let index = 0; index < 12; index += 1) {

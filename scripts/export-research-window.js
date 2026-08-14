@@ -153,6 +153,11 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
     db.pragma('busy_timeout = 10000');
     db.pragma('cache_size = -32768');
     db.pragma('temp_store = FILE');
+    // Tables are intentionally copied before indexes and in a deterministic
+    // name order. Some shadow tables reference flow_signals, which may not have
+    // been created in the destination yet. The source remains read-only and the
+    // completed archive is verified with quick_check after the copy.
+    db.pragma('foreign_keys = OFF');
     db.pragma('journal_mode = OFF');
     db.pragma('synchronous = OFF');
     // The connection never executes source schema writes, checkpoints or VACUUM.
@@ -256,6 +261,7 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
       walCheckpointExecuted: false,
       backupApiUsed: false,
       sourceServiceRestarted: false,
+      destinationForeignKeysDisabledDuringCopy: true,
     },
     tables: tableStats,
   };

@@ -50,7 +50,8 @@ BASE_NAME="flow-acceleration-last24h-${STAMP}.tar.gz"
 ARCHIVE="$EXPORT_DIR/$BASE_NAME"
 SHA_FILE="$ARCHIVE.sha256"
 STAGE="$(mktemp -d "$EXPORT_DIR/.stage-XXXXXXXX")"
-COS_CONFIG="$(mktemp)"
+# COSCLI rejects a custom config path without a .yaml/.yml suffix.
+COS_CONFIG="$(mktemp --suffix=.yaml)"
 STATE_FILE="$EXPORT_DIR/last-run.env"
 SUCCESS=0
 

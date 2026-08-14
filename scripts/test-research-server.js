@@ -369,6 +369,8 @@ async function main() {
     assert(launchCohorts.some((row) => row[0] === 'FO_F2_J2_3S' && row[4] === 3_000));
     assert(launchCohorts.some((row) => row[0] === 'FO_RB10_T20' && row[5] === 20 && row[8] === 120_000));
     assert(launchCohorts.some((row) => row[0] === 'FO_D12_R3_T15' && row[5] === 10 && row[6] === 15));
+    assert(launchCohorts.some((row) => row[0] === 'F2_8S_NF30' && row[1] === 30 && row[4] === 8_000));
+    assert(launchCohorts.some((row) => row[0] === 'FT_C_NF30' && row[1] === 30 && row[5] === 30));
     assert.ok(Array.isArray(launchPullback.cohorts));
     assert.ok(Array.isArray(launchPullback.positions));
     const migratedRebound = await (await fetch(
@@ -380,7 +382,10 @@ async function main() {
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
     assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 3);
-    assert.strictEqual(migratedRebound.runtime.exitProfiles.length, 3);
+    assert.deepStrictEqual(
+      migratedRebound.runtime.exitProfiles.map((profile) => profile.id),
+      ['X3', 'X8', 'XLEG', 'XB50', 'XB25', 'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15'],
+    );
     assert.strictEqual(
       migratedRebound.runtime.strategy.scope,
       'PRE_MIGRATION_BONDING_CURVE_AND_POST_MIGRATION_PUMP_AMM',
