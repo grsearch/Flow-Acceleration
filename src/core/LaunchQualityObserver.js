@@ -74,6 +74,7 @@ class LaunchQualityObserver {
     this.now = now;
     this.onReference = typeof onReference === 'function' ? onReference : null;
     this.states = new Map();
+    this.marketRegimeCache = new Map();
     this.metrics = {
       launchesObserved: 0,
       snapshotsWritten: 0,
@@ -177,6 +178,8 @@ class LaunchQualityObserver {
         research: {
           buyerWindowMs: this.config.recentBuyerWindowMs,
           retentionFloorPct: this.config.retentionFloorPct,
+          marketRegimeLookbackMs: this.config.marketRegimeLookbackMs,
+          marketRegimeSettlementLagMs: this.config.marketRegimeSettlementLagMs,
           labelHorizonsMs: [...LABEL_HORIZONS_MS],
           maxObservationLagMs: this.config.maxObservationLagMs,
           isolatedTables: [
@@ -330,7 +333,10 @@ class LaunchQualityObserver {
     if (reboundPct < this.config.reboundReferencePct) return;
     state.reboundAt = timestampMs;
     state.reboundPrice = price;
-    state.referenceFeatures = this._features(state, timestampMs);
+    state.referenceFeatures = {
+      ...this._features(state, timestampMs),
+      ...this._marketRegimeFeatures(timestampMs),
+    };
     this.metrics.referencePullbacks += 1;
     this.metrics.lastActionAt = this.now();
     this.store.updateLaunchQualityObservation(state.mint, {
@@ -468,6 +474,7 @@ class LaunchQualityObserver {
         rejectionReason,
         features: {
           ...this._features(state, timestampMs),
+          ...this._marketRegimeFeatures(timestampMs),
           deepReboundPct: evidence.reboundPct ?? ((price / tracker.lowPrice) - 1) * 100,
           lowStableMs: evidence.lowStableMs ?? timestampMs - tracker.lowAt,
           buyersSincePullbackLow: evidence.buyersSinceLow ?? 0,
@@ -511,6 +518,17 @@ class LaunchQualityObserver {
       && event.timestampMs >= observedAt - 7_000
       && event.timestampMs < observedAt - 2_000
     )).reduce((sum, event) => sum + event.solAmount, 0);
+    const recent1s = state.flowEvents.filter((event) => (
+      event.timestampMs > observedAt - 1_000 && event.timestampMs <= observedAt
+    ));
+    const previous1s = state.flowEvents.filter((event) => (
+      event.timestampMs > observedAt - 2_000 && event.timestampMs <= observedAt - 1_000
+    ));
+    const netFlow = (events) => events.reduce((sum, event) => (
+      sum + (event.side === 'BUY' ? event.solAmount : -event.solAmount)
+    ), 0);
+    const recentNetFlow1s = netFlow(recent1s);
+    const previousNetFlow1s = netFlow(previous1s);
     const depthFractionPct = state.latestVirtualSolReserves > 0
       ? state.sellSolSincePeak / state.latestVirtualSolReserves * 100
       : null;
@@ -548,9 +566,43 @@ class LaunchQualityObserver {
       sellDepthFractionPct: depthFractionPct,
       depthAdjustedSellImpact: depthAdjustedImpact,
       sellDecayRatio: last2sSell / Math.max(prior5sSell, 0.05),
+      recentNetFlow1s,
+      previousNetFlow1s,
+      netFlowAcceleration1s: recentNetFlow1s - previousNetFlow1s,
       curvePct: state.latestCurvePct,
       virtualSolReserves: state.latestVirtualSolReserves,
     };
+  }
+
+  _marketRegimeFeatures(observedAt) {
+    if (typeof this.store.launchMarketRegimeSnapshot !== 'function') return {};
+    const cacheMs = Math.max(1_000, Number(this.config.marketRegimeCacheMs) || 5_000);
+    const cacheKey = Math.floor(observedAt / cacheMs);
+    const cached = this.marketRegimeCache.get(cacheKey);
+    if (cached) return cached;
+
+    const lookbackMs = Math.max(60_000, Number(this.config.marketRegimeLookbackMs) || 1_800_000);
+    const settlementLagMs = Math.max(
+      60_000,
+      Number(this.config.marketRegimeSettlementLagMs) || 60_000,
+    );
+    const cutoffAt = observedAt - settlementLagMs;
+    const row = this.store.launchMarketRegimeSnapshot({
+      startAt: cutoffAt - lookbackMs,
+      cutoffAt,
+      observedAt,
+    }) || {};
+    const features = {
+      marketRegimeObservedAt: observedAt,
+      marketRegimeIndependentMints: finite(row.independent_mints, 0),
+      marketRegimeAverageNetReturn5s: row.average_net_return_5s == null
+        ? null : finite(row.average_net_return_5s),
+      marketRegimeWinRate5s: row.win_rate_5s == null ? null : finite(row.win_rate_5s),
+      marketRegimeBig20Rate5s: row.big20_rate_5s == null ? null : finite(row.big20_rate_5s),
+    };
+    this.marketRegimeCache.clear();
+    this.marketRegimeCache.set(cacheKey, features);
+    return features;
   }
 
   _captureDueSnapshots(state, observedAt) {
