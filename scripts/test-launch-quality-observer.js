@@ -107,6 +107,12 @@ function main() {
   assert.strictEqual(references.length, 1, 'live reference must be emitted exactly once');
   assert.strictEqual(references[0].mint, 'launch-quality-mint');
   assert.ok(references[0].features.netFlowSol > 0);
+  assert.ok(Number.isFinite(references[0].features.sellSolSincePeak));
+  assert.ok(Number.isFinite(references[0].features.buySolSincePeak));
+  assert.ok(Number.isFinite(references[0].features.recentNetFlow1s));
+  assert.ok(Number.isFinite(references[0].features.netFlowAcceleration1s));
+  assert.strictEqual(references[0].features.marketRegimeIndependentMints, 0);
+  assert.strictEqual(references[0].features.marketRegimeAverageNetReturn5s, null);
 
   const completed = store.getLaunchQualityObservation('launch-quality-mint');
   now = 195_000;
@@ -152,6 +158,9 @@ function testDeepPullbackConfirmations() {
       recentBuyerWindowMs: 10_000,
       retentionFloorPct: 10,
       maxObservationLagMs: 2_000,
+      marketRegimeLookbackMs: 30 * 60_000,
+      marketRegimeSettlementLagMs: 60_000,
+      marketRegimeCacheMs: 5_000,
       deepReferenceProfiles: [{
         id: 'DEEP_D12_5_R5', pullbackPct: 12.5, reboundPct: 5,
         lowStableMs: 1_000, minNewBuyers: 2, flowWindowMs: 1_000,
@@ -185,5 +194,61 @@ function testDeepPullbackConfirmations() {
   store.close();
 }
 
+function testSettledMarketRegimeSnapshot() {
+  const store = makeStore();
+  const signal = (mint, timestampMs) => store.recordSignal({
+    timestampMs,
+    slot: timestampMs,
+    signature: `regime-${mint}-${timestampMs}`,
+    mint,
+    symbol: mint,
+    ageMs: 10_000,
+    curvePct: 50,
+    price: 1,
+    buyFlowW1: 1,
+    buyFlowW2: 1,
+    buyFlowW3: 1,
+    sellFlowW1: 0,
+    sellFlowW2: 0,
+    sellFlowW3: 0,
+    netFlowW1: 1,
+    netFlowW2: 1,
+    netFlowW3: 1,
+    deltaNetFlow12: 0,
+    deltaNetFlow23: 0,
+    uniqueBuyersW1: 1,
+    uniqueBuyersW2: 1,
+    uniqueBuyersW3: 1,
+    buyTxW1: 1,
+    buyTxW2: 1,
+    buyTxW3: 1,
+    flowAccel1: null,
+    flowAccel2: null,
+    signalVariant: 'primary_3w',
+    isPrimary: true,
+  });
+  const first = signal('regime-a', 100_000);
+  store.updateSignalReturn(first.signalId, { net_return_5s: 10, finalized_at: 170_000 });
+  const repeat = signal('regime-a', 120_000);
+  store.updateSignalReturn(repeat.signalId, { net_return_5s: 100, finalized_at: 180_000 });
+  const second = signal('regime-b', 200_000);
+  store.updateSignalReturn(second.signalId, { net_return_5s: 25, finalized_at: 260_000 });
+  const unsettled = signal('regime-c', 300_000);
+  store.updateSignalReturn(unsettled.signalId, { net_return_5s: -50, finalized_at: null });
+
+  assert.deepStrictEqual(
+    store.launchMarketRegimeSnapshot({ startAt: 0, cutoffAt: 900_000, observedAt: 1_000_000 }),
+    {
+      independent_mints: 2,
+      average_net_return_5s: 17.5,
+      win_rate_5s: 100,
+      big20_rate_5s: 50,
+    },
+    'breadth must use only independent first Primary signals with settled outcomes',
+  );
+  store.close();
+}
+
 main();
 testDeepPullbackConfirmations();
+testSettledMarketRegimeSnapshot();
