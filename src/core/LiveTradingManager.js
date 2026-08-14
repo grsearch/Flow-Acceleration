@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const LIVE_RULE_VERSION = 'post_migration_gd25_35_xleg_v1';
+const LIVE_RULE_VERSION = 'post_migration_gd25_35_xleg_reentry2_v2';
 
 function errorText(error) {
   return String(error?.message || error || 'Unknown error')
@@ -458,7 +458,16 @@ class LiveTradingManager {
   }
 
   _emitStrategySignal(strategy, trade, graduatedAt, candidate, dropPct, reboundPct) {
-    const episodeId = `${strategy.id}:${trade.mint}:FIRST`;
+    // The timestamp/slot/low tuple makes each fresh causal drop-rebound cycle
+    // durable across restarts. The successful-entry limit is enforced from
+    // live_positions, so rejected or failed buys do not consume an entry.
+    const episodeId = [
+      strategy.id,
+      trade.mint,
+      trade.timestampMs,
+      Number.isSafeInteger(Number(trade.slot)) ? Number(trade.slot) : 'NA',
+      candidate.lowAt,
+    ].join(':');
     this.metrics.evaluated += 1;
     this.metrics.matched += 1;
     this.metrics.signals += 1;
@@ -513,9 +522,22 @@ class LiveTradingManager {
       && this.now() - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
     if (this.positions.has(event.mint)) return 'ACTIVE_MINT';
     if (this.positions.size >= this.config.maxConcurrentPositions) return 'MAX_POSITIONS';
-    const last = this.store.lastLivePositionForMint(event.mint);
-    if (last && this.now() - Number(last.updated_at || last.created_at) < this.config.mintCooldownMs) {
-      return 'MINT_COOLDOWN';
+    const maxEntriesPerMint = Math.max(1, Number(strategy?.maxEntriesPerMint) || 1);
+    const successfulEntries = typeof this.store.successfulLiveEntryCountForMintStrategy === 'function'
+      ? this.store.successfulLiveEntryCountForMintStrategy(event.mint, event.strategyId)
+      : 0;
+    if (successfulEntries >= maxEntriesPerMint) return 'MINT_ENTRY_LIMIT';
+    const lastSuccessful = typeof this.store.lastSuccessfulLivePositionForMintStrategy === 'function'
+      ? this.store.lastSuccessfulLivePositionForMintStrategy(event.mint, event.strategyId)
+      : this.store.lastLivePositionForMint(event.mint);
+    const cooldownMs = Number.isFinite(Number(strategy?.reentryCooldownMs))
+      ? Math.max(0, Number(strategy.reentryCooldownMs))
+      : this.config.mintCooldownMs;
+    if (lastSuccessful
+      && this.now() - Number(
+        lastSuccessful.closed_at || lastSuccessful.updated_at || lastSuccessful.created_at,
+      ) < cooldownMs) {
+      return 'MINT_REENTRY_COOLDOWN';
     }
     return null;
   }
