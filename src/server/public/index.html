@@ -330,7 +330,7 @@
           <div class="strategy-nav-heading">实盘策略</div>
           <div class="strategy-selector" id="live-execution-strategy-selector">
             <button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution" data-live-execution-strategy="post_gd25_35_xleg">
-              <b>毕业后深跌反弹</b><small>PumpSwap · GD25–35 · XLEG · 0.05 SOL</small>
+              <b>毕业后深跌反弹</b><small>PumpSwap · GD25–35 · XLEG · 1 SOL · 每Mint≤2次</small>
             </button>
           </div>
           <div class="strategy-nav-heading">Shadow 策略</div>
@@ -910,7 +910,7 @@
         ['紧急开关', runtime.killSwitchActive ? '<span class="negative">已触发</span>' : '<span class="positive">正常</span>'],
       ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
 
-      document.querySelector('#live-strategy-expression').textContent = `毕业后≤${age(strategy.trackingAgeMs)} + 1秒深跌${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}% + 低点反弹${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}% → XLEG退出`;
+      document.querySelector('#live-strategy-expression').textContent = `毕业后≤${age(strategy.trackingAgeMs)} + 1秒深跌${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}% + 低点反弹${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}% → 每Mint最多成功开仓${number(strategy.maxEntriesPerMint || 1)}次 → XLEG退出`;
       const wallets = data.monitoredWallets || [];
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>该策略只使用 PumpSwap 成交，不再使用旧 Primary 实盘入口</b><br>单笔 ${number(strategy.positionSizeSol,4)} SOL；Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究。`;
 
@@ -932,7 +932,7 @@
         : execution.commitment || '—';
       const cards = [
         ['买入条件', [
-          ['规则版本', strategy.ruleVersion || '—'], ['信号类型', '毕业后首次深跌反弹'], ['市场', strategy.market || 'PUMP_AMM'],
+          ['规则版本', strategy.ruleVersion || '—'], ['信号类型', '毕业后独立深跌反弹周期'], ['市场', strategy.market || 'PUMP_AMM'],
           ['跌幅范围', `${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}%`], ['反弹范围', `${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}%`],
           ['毕业后窗口', age(strategy.trackingAgeMs)], ['最大入场跳价', rate(strategy.maxEntryPriceJumpPct)],
         ]],
@@ -944,7 +944,8 @@
         ['仓位与风控', [
           ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`], ['最大并发', `${number(runtime.maxConcurrentPositions || 3)} 仓`],
           ['每日开仓额度', '不设上限'], ['钱包最低保留', `${number(runtime.minWalletReserveSol,4)} SOL`],
-          ['同 Mint', '永久只做首次机会'], ['当前活动仓位', number(runtime.activePositions)],
+          ['同 Mint', `单仓 / 最多成功${number(strategy.maxEntriesPerMint || 1)}次`], ['重入冷却', age(strategy.reentryCooldownMs || 0)],
+          ['当前活动仓位', number(runtime.activePositions)],
           ['紧急开关', runtime.killSwitchActive ? '已禁止开仓' : '正常'], ['当前模式', mode],
         ]],
         ['链上执行', [
@@ -979,7 +980,7 @@
         const rejection = (row.rejection_reasons || []).join(', ') || row.action_reason || '—';
         const f = row.features || {};
         return `<tr><td>${dateTime(row.timestamp_ms)}</td><td>${statusChip(row.rule_matched ? 'MATCHED' : 'NOT_MATCHED')}</td><td>${statusChip(row.action_status)}</td><td>${mintLink(row.mint)}</td><td>${escapeHtml(row.strategy_id || '—')}<br><span class="table-note">${escapeHtml(row.episode_id || '')}</span></td><td>${pct(f.dropPct)}</td><td>${pct(f.reboundPct)}</td><td>${age(f.migrationAgeMs)}</td><td class="wrap-cell">${escapeHtml(rejection)}</td></tr>`;
-      }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；毕业后首次深跌反弹出现后会自动记录</td></tr>';
+      }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；毕业后独立深跌反弹周期出现后会自动记录</td></tr>';
     }
 
     function renderFlowSmartConfirmShadow(data) {
@@ -1574,7 +1575,7 @@
         ['Bonding Momentum H', [['模式', bondingMomentum.enabled ? 'SHADOW H' : '关闭'], ['订单流信号', number(bondingMomentum.signals)], ['待入场', number(bondingMomentum.pendingEntries)], ['活动仓位', number(bondingMomentum.activePositions)], ['因果快照', number(bondingMomentum.snapshotsWritten)], ['无成交快照', number(bondingMomentum.snapshotsMissed)], ['组合', '四组入场 × 三组退出'], ['链上交易', '永不发送']]],
         ['Graduation Hold I', [['模式', graduationHold.enabled ? 'SHADOW I' : '关闭'], ['早期Primary', number(graduationHold.signalsSeen)], ['合格入场信号', number(graduationHold.eligibleSignals)], ['待入场', number(graduationHold.pendingEntries)], ['活动仓位', number(graduationHold.activePositions)], ['检查点通过 / 失败', `${number(graduationHold.gatesPassed)} / ${number(graduationHold.gatesFailed)}`], ['毕业就绪', number(graduationHold.graduationReady)], ['链上交易', '永不发送']]],
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['旧7.5%参考', number(launchQuality.referencePullbacks)], ['FD深回踩参考 / 过深拒绝', `${number(launchQuality.deepReferences)} / ${number(launchQuality.deepRejected)}`], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
-        ['Scope Guard', [['实盘入场', 'PumpSwap 毕业后首次深跌反弹'], ['实盘出场', 'PumpSwap XLEG'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
+        ['Scope Guard', [['实盘入场', 'PumpSwap 毕业后独立深跌反弹周期'], ['实盘出场', 'PumpSwap XLEG'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓 / 最多成功2次'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const live = data.status === 'streaming';
