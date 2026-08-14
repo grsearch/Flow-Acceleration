@@ -1798,6 +1798,8 @@ class ResearchStore {
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_live_positions_strategy
           ON live_positions(strategy_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_live_positions_strategy_mint
+          ON live_positions(strategy_id, mint, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_live_orders_strategy
           ON live_orders(strategy_id, created_at DESC);
       `);
@@ -1902,6 +1904,8 @@ class ResearchStore {
             ON live_orders(created_at DESC, id DESC);
           CREATE INDEX idx_live_positions_strategy
             ON live_positions(strategy_id, updated_at DESC);
+          CREATE INDEX idx_live_positions_strategy_mint
+            ON live_positions(strategy_id, mint, created_at DESC);
           CREATE INDEX idx_live_orders_strategy
             ON live_orders(strategy_id, created_at DESC);
         `);
@@ -2250,6 +2254,30 @@ class ResearchStore {
       `),
       lastLivePositionForMint: this.db.prepare(`
         SELECT * FROM live_positions WHERE mint = ? ORDER BY created_at DESC LIMIT 1
+      `),
+      successfulLiveEntryCountForMintStrategy: this.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM live_positions
+        WHERE mint = ?
+          AND strategy_id = ?
+          AND status <> 'ENTRY_FAILED'
+          AND (
+            opened_at IS NOT NULL
+            OR status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED')
+          )
+      `),
+      lastSuccessfulLivePositionForMintStrategy: this.db.prepare(`
+        SELECT *
+        FROM live_positions
+        WHERE mint = ?
+          AND strategy_id = ?
+          AND status <> 'ENTRY_FAILED'
+          AND (
+            opened_at IS NOT NULL
+            OR status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED')
+          )
+        ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
+        LIMIT 1
       `),
       insertLiveOrder: this.db.prepare(`
         INSERT INTO live_orders (
@@ -3603,6 +3631,16 @@ class ResearchStore {
 
   lastLivePositionForMint(mint) {
     return this.stmts.lastLivePositionForMint.get(mint) || null;
+  }
+
+  successfulLiveEntryCountForMintStrategy(mint, strategyId) {
+    return Number(
+      this.stmts.successfulLiveEntryCountForMintStrategy.get(mint, strategyId)?.n || 0,
+    );
+  }
+
+  lastSuccessfulLivePositionForMintStrategy(mint, strategyId) {
+    return this.stmts.lastSuccessfulLivePositionForMintStrategy.get(mint, strategyId) || null;
   }
 
   recordLiveOrder(order) {
