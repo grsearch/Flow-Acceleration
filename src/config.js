@@ -2002,8 +2002,47 @@ const config = {
     bigWinnerPct: numberEnv('FLOW_HOLDER_GROWTH_BIG_WINNER_PCT', 50, { min: 1 }),
     entryProfiles: [
       {
+        id: 'HG10_OPEN',
+        label: 'HG10 Open · 10秒早期宽松组',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 5,
+        minNewBuyers: 3,
+        minRetentionPct: 30,
+        minNetFlowSol: 1.5,
+        maxTop3SharePct: 90,
+      },
+      {
+        id: 'HG20_BAL',
+        label: 'HG20 Balanced · 20秒早期均衡组',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 8,
+        minNewBuyers: 5,
+        minRetentionPct: 40,
+        minNetFlowSol: 3,
+        maxTop3SharePct: 85,
+      },
+      {
+        id: 'HG20_FAST',
+        label: 'HG20 Fast · 20秒早期加速组',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 8,
+        minRetentionPct: 50,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+      },
+      {
         id: 'HG30_BAL',
         label: 'HG30 Balanced · 新增买家≥1/s + 留存≥50%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
         minBuyers: 10,
         minNewBuyers: 10,
         minRetentionPct: 50,
@@ -2013,6 +2052,9 @@ const config = {
       {
         id: 'HG30_FAST',
         label: 'HG30 Fast · 新增买家≥2/s + 留存≥70%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
         minBuyers: 10,
         minNewBuyers: 20,
         minRetentionPct: 70,
@@ -2020,27 +2062,94 @@ const config = {
         maxTop3SharePct: 80,
       },
     ],
-    exitProfile: {
-      id: 'XT15_H120',
-      label: '+15%激活 / 峰值回撤15% / 硬止损20% / 120秒兜底',
-      hardStopPct: numberEnv('FLOW_HOLDER_GROWTH_HARD_STOP_PCT', 20, {
-        min: 0.1,
-        max: 100,
-      }),
-      trailingActivationPct: numberEnv(
-        'FLOW_HOLDER_GROWTH_TRAILING_ACTIVATION_PCT',
-        15,
-        { min: 0.1, max: 1_000 },
-      ),
-      trailingStopPct: numberEnv('FLOW_HOLDER_GROWTH_TRAILING_STOP_PCT', 15, {
-        min: 0.1,
-        max: 100,
-      }),
-      maxHoldMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_HOLD_MS', 120_000, {
-        min: 1_000,
-        max: 10 * 60_000,
-      }),
-    },
+    // Every exit is crossed with every entry as an independent cohort. Keep
+    // XT15_H120 unchanged so existing production rows remain comparable.
+    exitProfiles: [
+      {
+        id: 'X5_FIXED', label: '固定5秒', exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 5_000, hardStopPct: 100, maxHoldMs: 5_000,
+      },
+      {
+        id: 'X15_FIXED', label: '固定15秒', exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 15_000, hardStopPct: 100, maxHoldMs: 15_000,
+      },
+      {
+        id: 'XT15_H120',
+        label: '+15%激活 / 峰值回撤15% / 硬止损20% / 120秒兜底',
+        exitMode: 'TRAILING',
+        hardStopPct: numberEnv('FLOW_HOLDER_GROWTH_HARD_STOP_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_HOLDER_GROWTH_TRAILING_ACTIVATION_PCT',
+          15,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_HOLDER_GROWTH_TRAILING_STOP_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+          max: 10 * 60_000,
+        }),
+      },
+      {
+        id: 'XT20_D10_H180', label: '+20%激活 / 回撤10% / 180秒兜底',
+        exitMode: 'TRAILING', hardStopPct: 20,
+        trailingActivationPct: 20, trailingStopPct: 10, maxHoldMs: 180_000,
+      },
+      {
+        id: 'XT30_D15_H300', label: '+30%激活 / 回撤15% / 300秒兜底',
+        exitMode: 'TRAILING', hardStopPct: 20,
+        trailingActivationPct: 30, trailingStopPct: 15, maxHoldMs: 300_000,
+      },
+      {
+        id: 'XSCALE_50_RUNNER', label: '+30%减仓50% / 尾仓回撤20%',
+        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
+        scaleOutTriggerPct: 30, scaleOutFractionPct: 50,
+        trailingActivationPct: 30, trailingStopPct: 20, maxHoldMs: 300_000,
+      },
+      {
+        id: 'XFLOW_60', label: '60秒Holder/资金流转弱退出',
+        exitMode: 'FLOW_CHECK', hardStopPct: 20,
+        flowCheckHorizonMs: 60_000, minBuyerVelocityRatio: 0.5,
+        minNetFlowDeltaSol: 0, trailingActivationPct: 20,
+        trailingStopPct: 15, maxHoldMs: 180_000,
+      },
+      {
+        id: 'XSTAIR_BAL', label: '阶梯均衡 20/40/80/150/300',
+        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 360_000,
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 10 },
+          { activationPct: 40, drawdownPct: 15 },
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+          { activationPct: 300, drawdownPct: 30 },
+        ],
+      },
+      {
+        id: 'XSTAIR_LOCK', label: '阶梯保守 15/30/60/120',
+        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 300_000,
+        trailingTiers: [
+          { activationPct: 15, drawdownPct: 7.5 },
+          { activationPct: 30, drawdownPct: 10 },
+          { activationPct: 60, drawdownPct: 15 },
+          { activationPct: 120, drawdownPct: 20 },
+        ],
+      },
+      {
+        id: 'XSTAIR_TAIL', label: '阶梯尾仓 20/50/100/200',
+        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 360_000,
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 12.5 },
+          { activationPct: 50, drawdownPct: 20 },
+          { activationPct: 100, drawdownPct: 25 },
+          { activationPct: 200, drawdownPct: 30 },
+        ],
+      },
+    ],
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
@@ -2145,11 +2254,18 @@ function validateConfig() {
   if (config.holderGrowthShadow.enabled && !config.launchQualityObserver.enabled) {
     errors.push('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED must be true when Holder Growth is enabled');
   }
+  const holderGrowthHorizons = new Set([
+    ...config.holderGrowthShadow.entryProfiles.map((profile) => (
+      profile.horizonMs || config.holderGrowthShadow.snapshotHorizonMs
+    )),
+    ...config.holderGrowthShadow.exitProfiles
+      .map((profile) => profile.flowCheckHorizonMs).filter(Boolean),
+  ]);
   if (config.holderGrowthShadow.enabled
-    && !config.launchQualityObserver.snapshotHorizonsMs.includes(
-      config.holderGrowthShadow.snapshotHorizonMs,
-    )) {
-    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include the Holder Growth horizon');
+    && [...holderGrowthHorizons].some((horizonMs) => (
+      !config.launchQualityObserver.snapshotHorizonsMs.includes(horizonMs)
+    ))) {
+    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include all Holder Growth horizons');
   }
   if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
     errors.push('FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS must contain at least one value');
