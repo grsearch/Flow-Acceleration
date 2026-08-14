@@ -108,6 +108,10 @@ class LaunchPullbackShadowManager {
           minRecentBuyers: this.config.minRecentBuyers || 0,
           minRetentionPct: this.config.minRetentionPct || 0,
           maxTop3SharePct: this.config.maxTop3SharePct ?? 100,
+          minSellSolSincePeak: this.config.minSellSolSincePeak ?? null,
+          minBuyRefillRatio: this.config.minBuyRefillRatio ?? null,
+          minRecentNetFlow1s: this.config.minRecentNetFlow1s ?? null,
+          minNetFlowAcceleration1s: this.config.minNetFlowAcceleration1s ?? null,
           entryDelayMs: this.config.entryDelayMs,
           entryTimeoutMs: this.config.entryTimeoutMs,
           maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
@@ -154,6 +158,15 @@ class LaunchPullbackShadowManager {
     const features = reference.features || {};
     const netFlowSol = finite(features.netFlowSol);
     const creatorSharePct = finite(features.creatorSharePct, 0);
+    const sellSolSincePeak = Math.max(0, finite(features.sellSolSincePeak, 0));
+    const buySolSincePeak = Math.max(0, finite(features.buySolSincePeak, 0));
+    const buyRefillRatio = buySolSincePeak / Math.max(sellSolSincePeak, 0.05);
+    const recentNetFlow1s = finite(features.recentNetFlow1s, 0);
+    const previousNetFlow1s = finite(features.previousNetFlow1s, 0);
+    const netFlowAcceleration1s = finite(
+      features.netFlowAcceleration1s,
+      recentNetFlow1s - previousNetFlow1s,
+    );
     const reasons = reference.rejectionReason ? [reference.rejectionReason] : [];
     if (!(netFlowSol >= this.config.minNetFlowSol)) reasons.push('NET_FLOW_BELOW_MIN');
     if (creatorSharePct > this.config.maxCreatorSharePct) {
@@ -170,6 +183,22 @@ class LaunchPullbackShadowManager {
     }
     if (finite(features.top3SharePct, 0) > (this.config.maxTop3SharePct ?? 100)) {
       reasons.push('TOP3_SHARE_ABOVE_MAX');
+    }
+    if (this.config.minSellSolSincePeak != null
+      && sellSolSincePeak < this.config.minSellSolSincePeak) {
+      reasons.push('SELL_SINCE_PEAK_BELOW_MIN');
+    }
+    if (this.config.minBuyRefillRatio != null
+      && buyRefillRatio < this.config.minBuyRefillRatio) {
+      reasons.push('BUY_REFILL_BELOW_MIN');
+    }
+    if (this.config.minRecentNetFlow1s != null
+      && recentNetFlow1s < this.config.minRecentNetFlow1s) {
+      reasons.push('RECENT_NET_FLOW_1S_BELOW_MIN');
+    }
+    if (this.config.minNetFlowAcceleration1s != null
+      && netFlowAcceleration1s < this.config.minNetFlowAcceleration1s) {
+      reasons.push('NET_FLOW_ACCEL_1S_BELOW_MIN');
     }
     const matched = reasons.length === 0;
     const saved = this.store.createLaunchPullbackShadowPosition({
@@ -205,6 +234,20 @@ class LaunchPullbackShadowManager {
       retentionPct: finite(features.retentionPct),
       top1SharePct: finite(features.top1SharePct),
       top3SharePct: finite(features.top3SharePct),
+      sellSolSincePeak,
+      buySolSincePeak,
+      buyRefillRatio,
+      recentNetFlow1s,
+      previousNetFlow1s,
+      netFlowAcceleration1s,
+      marketRegimeObservedAt: finite(features.marketRegimeObservedAt),
+      marketRegimeIndependentMints: finite(features.marketRegimeIndependentMints),
+      marketRegimeAverageNetReturn5s: features.marketRegimeAverageNetReturn5s == null
+        ? null : finite(features.marketRegimeAverageNetReturn5s),
+      marketRegimeWinRate5s: features.marketRegimeWinRate5s == null
+        ? null : finite(features.marketRegimeWinRate5s),
+      marketRegimeBig20Rate5s: features.marketRegimeBig20Rate5s == null
+        ? null : finite(features.marketRegimeBig20Rate5s),
       entryTargetAt: matched ? referenceAt + this.config.entryDelayMs : null,
       entryDeadlineAt: matched
         ? referenceAt + this.config.entryDelayMs + this.config.entryTimeoutMs : null,
