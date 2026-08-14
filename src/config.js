@@ -1042,6 +1042,108 @@ const config = {
           max: 100,
         }),
       },
+      {
+        id: 'F_ABSORB3_8S',
+        label: 'F-ABSORB3 | F2 + peak sell>=3 SOL + refill>=50% / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_ABSORB3',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minSellSolSincePeak: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_ABSORB3_MIN_SELL_SOL', 3, { min: 0 },
+        ),
+        minBuyRefillRatio: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
+        ),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'F_ABSORB5_RUNNER',
+        label: 'F-ABSORB5 | F2 + peak sell>=5 SOL + refill>=50% / right-tail trailing',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_ABSORB5',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minSellSolSincePeak: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_ABSORB5_MIN_SELL_SOL', 5, { min: 0 },
+        ),
+        minBuyRefillRatio: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
+        ),
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'F_REACCEL0_8S',
+        label: 'F-REACCEL0 | F2 + current 1s net>=0 + acceleration>=0 / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_REACCEL0',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minRecentNetFlow1s: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_NET_FLOW_1S_SOL', 0,
+        ),
+        minNetFlowAcceleration1s: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_ACCEL_1S_SOL', 0,
+        ),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
@@ -1896,6 +1998,21 @@ const config = {
       'FLOW_LAUNCH_QUALITY_MAX_OBSERVATION_LAG_MS',
       2_000,
       { min: 0, max: 30_000 },
+    ),
+    marketRegimeLookbackMs: integerEnv(
+      'FLOW_LAUNCH_MARKET_REGIME_LOOKBACK_MS',
+      30 * 60_000,
+      { min: 5 * 60_000, max: 6 * 60 * 60_000 },
+    ),
+    marketRegimeSettlementLagMs: integerEnv(
+      'FLOW_LAUNCH_MARKET_REGIME_SETTLEMENT_LAG_MS',
+      60_000,
+      { min: 60_000, max: 10 * 60_000 },
+    ),
+    marketRegimeCacheMs: integerEnv(
+      'FLOW_LAUNCH_MARKET_REGIME_CACHE_MS',
+      5_000,
+      { min: 1_000, max: 60_000 },
     ),
   },
 
