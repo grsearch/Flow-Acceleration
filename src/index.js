@@ -21,6 +21,7 @@ const {
   BondingCurveMomentumShadowSuite,
 } = require('./core/BondingCurveMomentumShadowSuite');
 const { GraduationHoldShadowSuite } = require('./core/GraduationHoldShadowSuite');
+const { HolderGrowthShadowSuite } = require('./core/HolderGrowthShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -77,10 +78,16 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   launchPullbackShadow.start();
+  const holderGrowthShadow = new HolderGrowthShadowSuite({
+    config: runtimeConfig.holderGrowthShadow,
+    store,
+  });
+  holderGrowthShadow.start();
   const launchQualityObserver = new LaunchQualityObserver({
     config: runtimeConfig.launchQualityObserver,
     store,
     onReference: (reference) => launchPullbackShadow.onReference(reference),
+    onSnapshot: (snapshot, options) => holderGrowthShadow.onSnapshot(snapshot, options),
   });
   launchQualityObserver.start();
   const migratedDropReboundShadow = new MigratedDropReboundShadowSuite({
@@ -133,6 +140,7 @@ function createRuntime(runtimeConfig = config) {
     cyaEarlyPyramidShadow,
     bondingCurveMomentumShadow,
     graduationHoldShadow,
+    holderGrowthShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = {
@@ -291,6 +299,7 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('bondingCurveMomentum', () => bondingCurveMomentumShadow.observeTrade(trade));
         observeShadow('graduationHold', () => graduationHoldShadow.observeTrade(trade));
         observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
+        observeShadow('holderGrowth', () => holderGrowthShadow.observeTrade(trade));
         observeShadow('launchPullback', () => launchPullbackShadow.observeTrade(trade));
         observeShadow('primarySignal', () => signalShadow.observeTrade(trade));
         engine.handleTrade(trade, store.getToken(trade.mint));
@@ -373,6 +382,13 @@ function createRuntime(runtimeConfig = config) {
       + 'observer-only, sends transactions=false.',
     );
     console.log(
+      `Observed Holder Growth Shadow N: ${runtimeConfig.holderGrowthShadow.entryProfiles
+        .map((profile) => profile.id).join('/')} at `
+      + `${runtimeConfig.holderGrowthShadow.snapshotHorizonMs / 1_000}s; `
+      + `${runtimeConfig.holderGrowthShadow.exitProfile.id} exit; `
+      + 'isolated table, sends transactions=false.',
+    );
+    console.log(
       `Launch Pullback Shadow F: ${runtimeConfig.launchPullbackShadow.profiles.map((profile) => (
         `${profile.id}=net>=${profile.minNetFlowSol}SOL/creator<=${profile.maxCreatorSharePct}%`
       )).join(', ')}; holds=${runtimeConfig.launchPullbackShadow.holds
@@ -431,6 +447,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('flowSmartConfirmAdvance', () => flowSmartConfirmShadow.advanceTime(now));
       observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
+      observeShadow('holderGrowthAdvance', () => holderGrowthShadow.advanceTime(now));
       observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
       observeShadow('migrationContinuityAdvance', () => migrationContinuityShadow.advanceTime(now));
       observeShadow('rangeScalperAdvance', () => rangeScalperShadow.advanceTime(now));
@@ -472,6 +489,7 @@ function createRuntime(runtimeConfig = config) {
     flowSmartConfirmShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
+    holderGrowthShadow.stop();
     migratedDropReboundShadow.stop();
     migrationContinuityShadow.stop();
     rangeScalperShadow.stop();
@@ -497,6 +515,7 @@ function createRuntime(runtimeConfig = config) {
       flowSmartConfirmShadow: flowSmartConfirmShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
+      holderGrowthShadow: holderGrowthShadow.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
       migrationContinuityShadow: migrationContinuityShadow.health(),
       rangeScalperShadow: rangeScalperShadow.health(),
@@ -510,7 +529,8 @@ function createRuntime(runtimeConfig = config) {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     launchPullbackShadow,
-    launchQualityObserver, migratedDropReboundShadow, rangeScalperShadow, cyaEarlyPyramidShadow,
+    launchQualityObserver, holderGrowthShadow, migratedDropReboundShadow,
+    rangeScalperShadow, cyaEarlyPyramidShadow,
     migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
   };
 }
