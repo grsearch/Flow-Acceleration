@@ -1458,9 +1458,27 @@ class ResearchStore {
         max_favorable_return_pct REAL,
         max_adverse_return_pct REAL,
         trailing_activated_at INTEGER,
+        exit_mode TEXT NOT NULL DEFAULT 'TRAILING',
+        fixed_hold_ms INTEGER,
         hard_stop_pct REAL NOT NULL,
         trailing_activation_pct REAL NOT NULL,
         trailing_stop_pct REAL NOT NULL,
+        trailing_tiers_json TEXT,
+        trailing_tier_index INTEGER NOT NULL DEFAULT -1,
+        stop_price REAL,
+        scale_out_trigger_pct REAL,
+        scale_out_fraction_pct REAL,
+        partial_exit_target_at INTEGER,
+        partial_exit_deadline_at INTEGER,
+        scale_out_at INTEGER,
+        scale_out_price REAL,
+        flow_check_horizon_ms INTEGER,
+        min_buyer_velocity_ratio REAL,
+        min_net_flow_delta_sol REAL,
+        flow_check_at INTEGER,
+        flow_check_status TEXT,
+        flow_buyer_velocity_ratio REAL,
+        flow_net_flow_delta_sol REAL,
         max_hold_ms INTEGER NOT NULL,
         exit_trigger_at INTEGER,
         exit_target_at INTEGER,
@@ -1552,6 +1570,36 @@ class ResearchStore {
         lifecycle_stage, entry_profile_id, exit_profile_id, rebound_at DESC
       )
     `);
+
+    const holderGrowthColumns = new Set(
+      this.db.prepare('PRAGMA table_info(holder_growth_shadow_positions)')
+        .all().map((column) => column.name),
+    );
+    const holderGrowthMigrations = [
+      ['exit_mode', "TEXT NOT NULL DEFAULT 'TRAILING'"],
+      ['fixed_hold_ms', 'INTEGER'],
+      ['trailing_tiers_json', 'TEXT'],
+      ['trailing_tier_index', 'INTEGER NOT NULL DEFAULT -1'],
+      ['stop_price', 'REAL'],
+      ['scale_out_trigger_pct', 'REAL'],
+      ['scale_out_fraction_pct', 'REAL'],
+      ['partial_exit_target_at', 'INTEGER'],
+      ['partial_exit_deadline_at', 'INTEGER'],
+      ['scale_out_at', 'INTEGER'],
+      ['scale_out_price', 'REAL'],
+      ['flow_check_horizon_ms', 'INTEGER'],
+      ['min_buyer_velocity_ratio', 'REAL'],
+      ['min_net_flow_delta_sol', 'REAL'],
+      ['flow_check_at', 'INTEGER'],
+      ['flow_check_status', 'TEXT'],
+      ['flow_buyer_velocity_ratio', 'REAL'],
+      ['flow_net_flow_delta_sol', 'REAL'],
+    ];
+    for (const [column, definition] of holderGrowthMigrations) {
+      if (!holderGrowthColumns.has(column)) {
+        this.db.exec(`ALTER TABLE holder_growth_shadow_positions ADD COLUMN ${column} ${definition}`);
+      }
+    }
 
     const signalColumns = new Set(
       this.db.prepare('PRAGMA table_info(flow_signals)').all().map((column) => column.name),
@@ -3162,8 +3210,15 @@ class ResearchStore {
           horizon_ms, signal_at, signal_price, observation_lag_ms,
           buyers, new_buyers, retention_pct, net_flow_sol, top3_share_pct,
           curve_pct, virtual_sol_reserves, features_json,
-          entry_target_at, entry_deadline_at, hard_stop_pct,
-          trailing_activation_pct, trailing_stop_pct, max_hold_ms,
+          entry_target_at, entry_deadline_at, exit_mode, fixed_hold_ms,
+          hard_stop_pct, trailing_activation_pct, trailing_stop_pct,
+          trailing_tiers_json, trailing_tier_index, stop_price,
+          scale_out_trigger_pct, scale_out_fraction_pct,
+          partial_exit_target_at, partial_exit_deadline_at,
+          scale_out_at, scale_out_price, flow_check_horizon_ms,
+          min_buyer_velocity_ratio, min_net_flow_delta_sol,
+          flow_check_at, flow_check_status, flow_buyer_velocity_ratio,
+          flow_net_flow_delta_sol, max_hold_ms,
           created_at, updated_at
         ) VALUES (
           @cohortId, @entryProfileId, @exitProfileId, @mint, @symbol,
@@ -3171,8 +3226,15 @@ class ResearchStore {
           @horizonMs, @signalAt, @signalPrice, @observationLagMs,
           @buyers, @newBuyers, @retentionPct, @netFlowSol, @top3SharePct,
           @curvePct, @virtualSolReserves, @featuresJson,
-          @entryTargetAt, @entryDeadlineAt, @hardStopPct,
-          @trailingActivationPct, @trailingStopPct, @maxHoldMs,
+          @entryTargetAt, @entryDeadlineAt, @exitMode, @fixedHoldMs,
+          @hardStopPct, @trailingActivationPct, @trailingStopPct,
+          @trailingTiersJson, @trailingTierIndex, @stopPrice,
+          @scaleOutTriggerPct, @scaleOutFractionPct,
+          @partialExitTargetAt, @partialExitDeadlineAt,
+          @scaleOutAt, @scaleOutPrice, @flowCheckHorizonMs,
+          @minBuyerVelocityRatio, @minNetFlowDeltaSol,
+          @flowCheckAt, @flowCheckStatus, @flowBuyerVelocityRatio,
+          @flowNetFlowDeltaSol, @maxHoldMs,
           @createdAt, @updatedAt
         )
       `),
@@ -3199,6 +3261,22 @@ class ResearchStore {
             @maxAdverseReturnPct, max_adverse_return_pct
           ),
           trailing_activated_at = COALESCE(@trailingActivatedAt, trailing_activated_at),
+          trailing_tier_index = COALESCE(@trailingTierIndex, trailing_tier_index),
+          stop_price = COALESCE(@stopPrice, stop_price),
+          partial_exit_target_at = CASE WHEN @clearPartialExitPending = 1
+            THEN NULL ELSE COALESCE(@partialExitTargetAt, partial_exit_target_at) END,
+          partial_exit_deadline_at = CASE WHEN @clearPartialExitPending = 1
+            THEN NULL ELSE COALESCE(@partialExitDeadlineAt, partial_exit_deadline_at) END,
+          scale_out_at = COALESCE(@scaleOutAt, scale_out_at),
+          scale_out_price = COALESCE(@scaleOutPrice, scale_out_price),
+          flow_check_at = COALESCE(@flowCheckAt, flow_check_at),
+          flow_check_status = COALESCE(@flowCheckStatus, flow_check_status),
+          flow_buyer_velocity_ratio = COALESCE(
+            @flowBuyerVelocityRatio, flow_buyer_velocity_ratio
+          ),
+          flow_net_flow_delta_sol = COALESCE(
+            @flowNetFlowDeltaSol, flow_net_flow_delta_sol
+          ),
           exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
           exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
           exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
@@ -4925,6 +5003,7 @@ class ResearchStore {
 
   createHolderGrowthShadowPosition(position) {
     const now = Date.now();
+    const nullableInteger = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
     const row = {
       cohortId: position.cohortId,
       entryProfileId: position.entryProfileId,
@@ -4949,9 +5028,29 @@ class ResearchStore {
       featuresJson: JSON.stringify(position.features || {}),
       entryTargetAt: Math.trunc(position.entryTargetAt),
       entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
+      exitMode: position.exitMode || 'TRAILING',
+      fixedHoldMs: nullableInteger(position.fixedHoldMs),
       hardStopPct: finiteOrNull(position.hardStopPct) ?? 20,
       trailingActivationPct: finiteOrNull(position.trailingActivationPct) ?? 15,
       trailingStopPct: finiteOrNull(position.trailingStopPct) ?? 15,
+      trailingTiersJson: Array.isArray(position.trailingTiers)
+        ? JSON.stringify(position.trailingTiers) : null,
+      trailingTierIndex: Number.isFinite(position.trailingTierIndex)
+        ? Math.trunc(position.trailingTierIndex) : -1,
+      stopPrice: finiteOrNull(position.stopPrice),
+      scaleOutTriggerPct: finiteOrNull(position.scaleOutTriggerPct),
+      scaleOutFractionPct: finiteOrNull(position.scaleOutFractionPct),
+      partialExitTargetAt: nullableInteger(position.partialExitTargetAt),
+      partialExitDeadlineAt: nullableInteger(position.partialExitDeadlineAt),
+      scaleOutAt: nullableInteger(position.scaleOutAt),
+      scaleOutPrice: finiteOrNull(position.scaleOutPrice),
+      flowCheckHorizonMs: nullableInteger(position.flowCheckHorizonMs),
+      minBuyerVelocityRatio: finiteOrNull(position.minBuyerVelocityRatio),
+      minNetFlowDeltaSol: finiteOrNull(position.minNetFlowDeltaSol),
+      flowCheckAt: nullableInteger(position.flowCheckAt),
+      flowCheckStatus: position.flowCheckStatus || null,
+      flowBuyerVelocityRatio: finiteOrNull(position.flowBuyerVelocityRatio),
+      flowNetFlowDeltaSol: finiteOrNull(position.flowNetFlowDeltaSol),
       maxHoldMs: Math.max(1, Math.trunc(position.maxHoldMs || 120_000)),
       createdAt: now,
       updatedAt: now,
@@ -4984,6 +5083,17 @@ class ResearchStore {
       maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
       maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
       trailingActivatedAt: value('trailingActivatedAt'),
+      trailingTierIndex: value('trailingTierIndex'),
+      stopPrice: finiteOrNull(value('stopPrice')),
+      partialExitTargetAt: value('partialExitTargetAt'),
+      partialExitDeadlineAt: value('partialExitDeadlineAt'),
+      clearPartialExitPending: patch.clearPartialExitPending ? 1 : 0,
+      scaleOutAt: value('scaleOutAt'),
+      scaleOutPrice: finiteOrNull(value('scaleOutPrice')),
+      flowCheckAt: value('flowCheckAt'),
+      flowCheckStatus: value('flowCheckStatus'),
+      flowBuyerVelocityRatio: finiteOrNull(value('flowBuyerVelocityRatio')),
+      flowNetFlowDeltaSol: finiteOrNull(value('flowNetFlowDeltaSol')),
       exitTriggerAt: value('exitTriggerAt'),
       exitTargetAt: value('exitTargetAt'),
       exitDeadlineAt: value('exitDeadlineAt'),
@@ -5732,7 +5842,11 @@ class ResearchStore {
     return { cohorts, positions };
   }
 
-  holderGrowthShadowDashboard({ positionLimit = 100, cacheStats = false } = {}) {
+  holderGrowthShadowDashboard({
+    positionLimit = 100,
+    bigWinnerPct = 50,
+    cacheStats = false,
+  } = {}) {
     const limit = Math.min(300, Math.max(1, Math.trunc(Number(positionLimit) || 100)));
     const positions = this.db.prepare(`
       SELECT *,
@@ -5767,14 +5881,16 @@ class ResearchStore {
         ORDER BY entry_profile_id
       `).all();
       const returnsStatement = this.db.prepare(`
-        SELECT net_return_pct FROM holder_growth_shadow_positions
+        SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+        FROM holder_growth_shadow_positions
         WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
           AND net_return_pct IS NOT NULL
         ORDER BY net_return_pct
       `);
       return groups.map((group) => {
-        const returns = returnsStatement.all(group.cohort_id)
-          .map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+        const resolvedRows = returnsStatement.all(group.cohort_id);
+        const returns = resolvedRows.map((row) => Number(row.net_return_pct))
+          .filter(Number.isFinite);
         const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
         const losses = returns.filter((value) => value < 0);
         const totalProfit = wins.reduce((sum, value) => sum + value, 0);
@@ -5783,6 +5899,18 @@ class ResearchStore {
         const median = returns.length
           ? returns.length % 2 ? returns[middle] : (returns[middle - 1] + returns[middle]) / 2
           : null;
+        const exTop5 = [...returns].sort((left, right) => right - left).slice(5);
+        const opportunities = resolvedRows.filter((row) => (
+          Number(row.max_favorable_return_pct) >= bigWinnerPct
+        ));
+        const realizedBigWinners = resolvedRows.filter((row) => (
+          Number(row.gross_return_pct) >= bigWinnerPct
+        ));
+        const captures = resolvedRows.map((row) => {
+          const mfe = Number(row.max_favorable_return_pct);
+          const gross = Number(row.gross_return_pct);
+          return mfe > 0 && Number.isFinite(gross) ? gross / mfe * 100 : null;
+        }).filter(Number.isFinite);
         return {
           ...group,
           resolved: returns.length,
@@ -5791,10 +5919,19 @@ class ResearchStore {
           median_net_return_pct: median,
           win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
           profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          average_net_return_ex_top5_pct: exTop5.length
+            ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length : null,
           max_winner_pct: wins[0] ?? null,
           top_5_winner_contribution_pct: totalProfit > 0
             ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100
             : null,
+          big_winner_threshold_pct: bigWinnerPct,
+          big_winner_opportunities: opportunities.length,
+          big_winners_realized: realizedBigWinners.length,
+          big_winner_realization_rate_pct: opportunities.length
+            ? realizedBigWinners.length / opportunities.length * 100 : null,
+          average_mfe_capture_pct: captures.length
+            ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
         };
       });
     };
