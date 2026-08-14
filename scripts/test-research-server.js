@@ -371,6 +371,17 @@ async function main() {
     assert(launchCohorts.some((row) => row[0] === 'FO_D12_R3_T15' && row[5] === 10 && row[6] === 15));
     assert(launchCohorts.some((row) => row[0] === 'F2_8S_NF30' && row[1] === 30 && row[4] === 8_000));
     assert(launchCohorts.some((row) => row[0] === 'FT_C_NF30' && row[1] === 30 && row[5] === 30));
+    const causalCohorts = Object.fromEntries(
+      launchPullback.runtime.cohorts
+        .filter((cohort) => cohort.cohortId.startsWith('F_ABSORB')
+          || cohort.cohortId.startsWith('F_REACCEL'))
+        .map((cohort) => [cohort.cohortId, cohort.strategy.entry]),
+    );
+    assert.strictEqual(causalCohorts.F_ABSORB3_8S.minSellSolSincePeak, 3);
+    assert.strictEqual(causalCohorts.F_ABSORB3_8S.minBuyRefillRatio, 0.5);
+    assert.strictEqual(causalCohorts.F_ABSORB5_RUNNER.minSellSolSincePeak, 5);
+    assert.strictEqual(causalCohorts.F_REACCEL0_8S.minRecentNetFlow1s, 0);
+    assert.strictEqual(causalCohorts.F_REACCEL0_8S.minNetFlowAcceleration1s, 0);
     assert.ok(Array.isArray(launchPullback.cohorts));
     assert.ok(Array.isArray(launchPullback.positions));
     const migratedRebound = await (await fetch(
