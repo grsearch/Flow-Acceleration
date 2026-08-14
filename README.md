@@ -310,6 +310,20 @@ FT-C history: `F2_8S_NF30` uses the existing F2 reference and fixed 8-second exi
 `FT_C_NF30` uses the existing FT-C right-tail exit. Both require reference NetFlow >= 30 SOL
 and store results under new cohort IDs.
 
+Three additional forward-only causal-quality cohorts preserve every existing F/FT/FD/FO/NF30
+definition and row. `F_ABSORB3_8S` requires the F2 reference, at least 3 SOL of sell pressure
+since the running peak and buy refill of at least 50% of that pressure, then holds for 8 seconds.
+`F_ABSORB5_RUNNER` raises the sell-pressure threshold to 5 SOL and uses the existing FT-C
+right-tail exit (+30% activation, 20% peak drawdown, -30% hard stop, 120-second maximum).
+`F_REACCEL0_8S` requires current one-second net flow and its change from the previous second
+to both be non-negative, then holds for 8 seconds. The signal-time evidence is frozen in
+`launch_pullback_shadow_positions`; none of these cohorts signs or sends a transaction.
+
+Each new Launch pullback row also records an observational 30-minute market-breadth snapshot:
+independent first-Primary mints, average 5-second net return, 5-second win rate and the share
+returning at least 20%. Only already-settled signals older than the configured lag contribute.
+These fields are labels for later segmentation and never participate in entry qualification.
+
 Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION` 只用毕业前 `PUMP_BONDING_CURVE` 成交触发信号和入场，AGE 从 Token 创建时间计算；`POST_MIGRATION` 只用毕业后的 `PUMP_AMM` 成交触发信号和入场，AGE 从毕业时间计算。两层拥有独立检测状态、Episode 与 cohort，统计时不会把两种市场结构混在一起。此前已经积累的毕业后记录会通过数据库默认值保留为 `POST_MIGRATION`。
 
 完整的毕业前 Curve 成交本来就持续写入 `raw_trades`；新毕业 Mint 另外默认持续订阅5分钟 PumpSwap 并保存逐笔成交。因此样本积累后可以分别离线穷举窗口、跌幅、反弹幅度和确认时限。毕业前建立的模拟仓位如果跨过毕业时点，可以继续使用迁移后的 PumpSwap 成交退出，但不会把该仓位改记成毕业后入场。
