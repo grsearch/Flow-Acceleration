@@ -342,7 +342,7 @@
               <b>Flow → Smart 确认 · L</b><small>Primary Rank 1 后 Smart OPEN，再按下一笔成交入场</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback">
-              <b>Launch 回踩 · F / FT / FD / FO</b><small>旧组保留；新增 F2 低跳价固定3秒对照</small>
+              <b>Launch 回踩 · F / FT / FD / FO / FA / FR</b><small>旧组保留；新增吸收卖压与1秒再加速对照</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migrated-rebound">
               <b>生命周期超跌反弹 · G</b><small>新增毕业后30秒内、首1/3次机会分层</small>
@@ -438,7 +438,7 @@
           <div class="strategy-pane" data-live-strategy-pane="launch-pullback" hidden>
             <article class="card record-section">
               <div class="section-title">
-                <h2>Launch First Pullback Shadow F / FT / FD + 优化组 FO</h2>
+                <h2>Launch First Pullback Shadow F / FT / FD / FO / FA / FR</h2>
                 <p>来自 Observer E 的首次回踩参考点；独立表、只做模拟，永不签名或发送交易</p>
               </div>
               <div class="strategy-expression" id="launch-pullback-expression">旧组不变；FO 独立测试 Top3≤70%、最近买家≥10、10～30秒持有及宽移动止盈</div>
@@ -1038,6 +1038,16 @@
       }))].join(' · ');
       const research = runtimeCohorts[0]?.strategy?.research || {};
       document.querySelector('#launch-pullback-expression').textContent = `旧 F/FT/FD/FO（含 FO_F2_J2_3S）保持不变；新增 F2_8S_NF30 / FT_C_NF30：只提高参考点 NetFlow 至30 SOL，分别测试固定8秒和 FT-C 右尾退出。所有组独立计数；${entryRules || '等待过滤配置'}；退出 ${holdRules || '等待配置'}`;
+      const causalRules = runtimeCohorts.filter(cohort => (
+        cohort.cohortId.startsWith('F_ABSORB') || cohort.cohortId.startsWith('F_REACCEL')
+      )).map(cohort => {
+        const entry = cohort.strategy?.entry || {};
+        if (cohort.cohortId.startsWith('F_ABSORB')) {
+          return `${cohort.cohortId}: peak sell >= ${number(entry.minSellSolSincePeak,1)} SOL, buy refill >= ${rate(Number(entry.minBuyRefillRatio || 0) * 100)}`;
+        }
+        return `${cohort.cohortId}: current 1s net >= ${number(entry.minRecentNetFlow1s,2)} SOL, acceleration >= ${number(entry.minNetFlowAcceleration1s,2)} SOL`;
+      }).join(' | ');
+      document.querySelector('#launch-pullback-expression').textContent = `旧 F/FT/FD/FO/NF30 规则和历史保持不变。新增独立因果组：${causalRules || '等待配置'}。最近30分钟市场宽度仅作为样本标签保存，绝不参与开仓。退出：${holdRules || '等待配置'}`;
       const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW F' : '关闭', `独立表 ${research.isolatedTable || 'launch_pullback_shadow_positions'}`],
         ['参考点', number(runtime.referencesSeen), `最宽组合格 ${number(runtime.qualifiedReferences)} · 去重 ${number(runtime.deduplicated)}`],
@@ -1070,7 +1080,11 @@
         const reason = row.exit_reason || row.rejection_reason || '—';
         const deepEvidence = row.reference_profile_id && row.reference_profile_id !== 'LEGACY_7_5_R3'
           ? `<br><span class="table-note">稳定 ${age(row.low_stable_ms)} · 新买家 ${number(row.buyers_since_pullback_low)} · ${age(row.flow_window_ms)}净流 ${number(row.window_net_flow_sol,2)} SOL</span>` : '';
-        return `<tr><td>${dateTime(row.reference_at)}</td><td>${escapeHtml(labels[row.cohort_id] || row.cohort_id)}<br><span class="table-note">${escapeHtml(row.reference_profile_id || 'LEGACY_7_5_R3')}</span></td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">回踩 ${pct(row.max_pullback_pct)} · 反弹 ${pct(row.reference_rebound_pct)}</span>${deepEvidence}</td><td>${number(row.net_flow_sol,2)} SOL / ${rate(row.creator_share_pct)}</td><td>${number(row.buyers)} / ${rate(row.retention_pct)}<br><span class="table-note">近窗 ${number(row.recent_buyers)} · Top3 ${rate(row.top3_share_pct)}</span></td><td>${number(row.reference_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)}</span></td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+        const causalEvidence = row.sell_sol_since_peak != null
+          ? `<br><span class="table-note">峰后卖压 ${number(row.sell_sol_since_peak,2)} SOL · 买盘回补 ${rate(Number(row.buy_refill_ratio || 0) * 100)} · 1秒净流/加速 ${number(row.recent_net_flow_1s,2)} / ${number(row.net_flow_acceleration_1s,2)} SOL</span>` : '';
+        const regimeEvidence = row.market_regime_observed_at
+          ? `<br><span class="table-note">30分钟市场：${number(row.market_regime_independent_mints)} Mint · 5秒均值 ${pct(row.market_regime_average_net_return_5s)} · 胜率 ${rate(row.market_regime_win_rate_5s)} · ≥20% ${rate(row.market_regime_big20_rate_5s)}</span>` : '';
+        return `<tr><td>${dateTime(row.reference_at)}</td><td>${escapeHtml(labels[row.cohort_id] || row.cohort_id)}<br><span class="table-note">${escapeHtml(row.reference_profile_id || 'LEGACY_7_5_R3')}</span></td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">回踩 ${pct(row.max_pullback_pct)} · 反弹 ${pct(row.reference_rebound_pct)}</span>${deepEvidence}${causalEvidence}${regimeEvidence}</td><td>${number(row.net_flow_sol,2)} SOL / ${rate(row.creator_share_pct)}</td><td>${number(row.buyers)} / ${rate(row.retention_pct)}<br><span class="table-note">近窗 ${number(row.recent_buyers)} · Top3 ${rate(row.top3_share_pct)}</span></td><td>${number(row.reference_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)}</span></td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
       }).join('') : '<tr><td colspan="10" class="empty">等待新的首次回踩参考点；旧F/FT与新FD组使用独立cohort和参考ID，不会混合历史</td></tr>';
     }
 
