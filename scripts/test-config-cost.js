@@ -271,8 +271,11 @@ assert.deepStrictEqual(
   config.holderGrowthShadow.entryProfiles.map((profile) => [profile.id, profile.horizonMs]),
   [
     ['HG10_OPEN', 10_000],
+    ['HG10_FLOW10_J2', 10_000],
+    ['HG10_FLOW15_J2', 10_000],
     ['HG20_BAL', 20_000],
     ['HG20_FAST', 20_000],
+    ['HG20_QUALITY_J2', 20_000],
     ['HG30_BAL', 30_000],
     ['HG30_FAST', 30_000],
   ],
@@ -281,11 +284,12 @@ assert.deepStrictEqual(
   config.holderGrowthShadow.exitProfiles.map((profile) => profile.id),
   [
     'X5_FIXED', 'X15_FIXED', 'XT15_H120', 'XT20_D10_H180', 'XT30_D15_H300',
-    'XSCALE_50_RUNNER', 'XFLOW_60', 'XSTAIR_BAL', 'XSTAIR_LOCK', 'XSTAIR_TAIL',
+    'XSCALE_50_RUNNER', 'XP20_50_D15_H120', 'XP20_70_D20_H180',
+    'XP30_70_STAIR', 'XFLOW_60', 'XSTAIR_BAL', 'XSTAIR_LOCK', 'XSTAIR_TAIL',
   ],
 );
 assert.ok(config.holderGrowthShadow.exitProfiles
-  .filter((profile) => profile.exitMode === 'ADAPTIVE_TRAILING')
+  .filter((profile) => ['ADAPTIVE_TRAILING', 'SCALE_ADAPTIVE'].includes(profile.exitMode))
   .every((profile) => profile.trailingTiers.length >= 4));
 assert.ok(
   Math.abs(costBreakdown(config.cyaEarlyPyramidShadow.costModel).deterministicCostPct - 2.251)

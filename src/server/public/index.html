@@ -1397,6 +1397,16 @@
         + `Top3≤${rate(profile.maxTop3SharePct)}`
       )).join(' / ');
       document.querySelector('#holder-growth-expression').textContent = `${profileSummary || '等待阈值配置'} → ${number(strategy.entryDelayMs)}ms后首笔Curve成交 → ${number(exits.length)}组独立退出（固定持有 / 常规Trailing / 分批尾仓 / 60秒流衰减 / 阶梯Trailing）`;
+      const boundedEntries = profiles.filter(profile => (
+        Number.isFinite(Number(profile.minEntryJumpPct))
+        || Number.isFinite(Number(profile.maxEntryJumpPct))
+      ));
+      if (boundedEntries.length) {
+        const bounds = boundedEntries.map(profile => (
+          `${profile.id} 入场跳价 ${pct(profile.minEntryJumpPct)}～${pct(profile.maxEntryJumpPct)}`
+        )).join(' / ');
+        document.querySelector('#holder-growth-expression').textContent += ` / 新前瞻组：${bounds}`;
+      }
       renderMetricGroups('#holder-growth-metrics', [
         ['运行模式', runtime.enabled ? 'SHADOW N' : '关闭', '永不签名或发送交易'],
         ['快照评估 / 命中', `${number(runtime.evaluated)} / ${number(runtime.matched)}`, `回放抑制 ${number(runtime.replayMatchesSuppressed)}`],
@@ -1413,7 +1423,9 @@
 
       const rows = data.positions || [];
       document.querySelector('#holder-growth-position-rows').innerHTML = rows.length ? rows.map(row => {
-        const reason = row.exit_reason || row.rejection_reason || '—';
+        const reason = row.status === 'NO_EXIT' && row.rejection_reason
+          ? `${row.exit_reason || 'NO_EXIT'} · ${row.rejection_reason}`
+          : (row.exit_reason || row.rejection_reason || '—');
         const prices = `${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}`;
         const tierIndex = Number(row.trailing_tier_index);
         const exitDetail = `${exitLabels[row.exit_profile_id] || row.exit_profile_id || ''}${tierIndex >= 0 ? ` · T${number(tierIndex + 1)} · Stop ${number(row.stop_price,10)}` : ''}`;

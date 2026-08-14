@@ -2014,6 +2014,34 @@ const config = {
         maxTop3SharePct: 90,
       },
       {
+        id: 'HG10_FLOW10_J2',
+        label: 'N Flow Edge 10s · NetFlow>=10 · entry jump 0-2%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 5,
+        minNewBuyers: 3,
+        minRetentionPct: 30,
+        minNetFlowSol: 10,
+        maxTop3SharePct: 90,
+        minEntryJumpPct: 0,
+        maxEntryJumpPct: 2,
+      },
+      {
+        id: 'HG10_FLOW15_J2',
+        label: 'N Flow Edge 10s · NetFlow>=15 · entry jump 0-2%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 5,
+        minNewBuyers: 3,
+        minRetentionPct: 30,
+        minNetFlowSol: 15,
+        maxTop3SharePct: 90,
+        minEntryJumpPct: 0,
+        maxEntryJumpPct: 2,
+      },
+      {
         id: 'HG20_BAL',
         label: 'HG20 Balanced · 20秒早期均衡组',
         horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
@@ -2036,6 +2064,20 @@ const config = {
         minRetentionPct: 50,
         minNetFlowSol: 5,
         maxTop3SharePct: 80,
+      },
+      {
+        id: 'HG20_QUALITY_J2',
+        label: 'N Quality 20s · Buyers>=40 · retention>=60% · entry jump 0-2%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 40,
+        minNewBuyers: 5,
+        minRetentionPct: 60,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+        minEntryJumpPct: 0,
+        maxEntryJumpPct: 2,
       },
       {
         id: 'HG30_BAL',
@@ -2110,6 +2152,32 @@ const config = {
         exitMode: 'SCALE_RUNNER', hardStopPct: 20,
         scaleOutTriggerPct: 30, scaleOutFractionPct: 50,
         trailingActivationPct: 30, trailingStopPct: 20, maxHoldMs: 300_000,
+      },
+      {
+        id: 'XP20_50_D15_H120',
+        label: '+20%减仓50% / 尾仓回撤15% / 120秒兜底',
+        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
+        scaleOutTriggerPct: 20, scaleOutFractionPct: 50,
+        trailingActivationPct: 20, trailingStopPct: 15, maxHoldMs: 120_000,
+      },
+      {
+        id: 'XP20_70_D20_H180',
+        label: '+20%减仓70% / 尾仓回撤20% / 180秒兜底',
+        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
+        scaleOutTriggerPct: 20, scaleOutFractionPct: 70,
+        trailingActivationPct: 20, trailingStopPct: 20, maxHoldMs: 180_000,
+      },
+      {
+        id: 'XP30_70_STAIR',
+        label: '+30%减仓70% / 尾仓阶梯回撤',
+        exitMode: 'SCALE_ADAPTIVE', hardStopPct: 20,
+        scaleOutTriggerPct: 30, scaleOutFractionPct: 70, maxHoldMs: 300_000,
+        trailingTiers: [
+          { activationPct: 30, drawdownPct: 15 },
+          { activationPct: 60, drawdownPct: 15 },
+          { activationPct: 100, drawdownPct: 20 },
+          { activationPct: 200, drawdownPct: 25 },
+        ],
       },
       {
         id: 'XFLOW_60', label: '60秒Holder/资金流转弱退出',
