@@ -383,9 +383,9 @@ function createRuntime(runtimeConfig = config) {
     );
     console.log(
       `Observed Holder Growth Shadow N: ${runtimeConfig.holderGrowthShadow.entryProfiles
-        .map((profile) => profile.id).join('/')} at `
-      + `${runtimeConfig.holderGrowthShadow.snapshotHorizonMs / 1_000}s; `
-      + `${runtimeConfig.holderGrowthShadow.exitProfile.id} exit; `
+        .map((profile) => `${profile.id}@${(profile.horizonMs
+          || runtimeConfig.holderGrowthShadow.snapshotHorizonMs) / 1_000}s`).join('/')} x `
+      + `${runtimeConfig.holderGrowthShadow.exitProfiles.length} exits; `
       + 'isolated table, sends transactions=false.',
     );
     console.log(
