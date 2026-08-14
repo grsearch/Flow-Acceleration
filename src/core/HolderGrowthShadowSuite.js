@@ -22,6 +22,15 @@ function shadowPrice(trade) {
   return reservePrice > 0 ? reservePrice : finite(trade?.price);
 }
 
+function jsonArray(value) {
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
 function positionFromRow(row) {
   const value = (snake, camel) => row[snake] ?? row[camel];
   return {
@@ -34,6 +43,10 @@ function positionFromRow(row) {
     status: row.status,
     signalAt: value('signal_at', 'signalAt'),
     signalPrice: value('signal_price', 'signalPrice'),
+    horizonMs: value('horizon_ms', 'horizonMs'),
+    buyers: value('buyers', 'buyers'),
+    newBuyers: value('new_buyers', 'newBuyers'),
+    netFlowSol: value('net_flow_sol', 'netFlowSol'),
     entryTargetAt: value('entry_target_at', 'entryTargetAt'),
     entryDeadlineAt: value('entry_deadline_at', 'entryDeadlineAt'),
     entryAt: value('entry_at', 'entryAt'),
@@ -52,9 +65,28 @@ function positionFromRow(row) {
       0,
     ),
     trailingActivatedAt: value('trailing_activated_at', 'trailingActivatedAt'),
+    exitMode: value('exit_mode', 'exitMode') || 'TRAILING',
+    fixedHoldMs: value('fixed_hold_ms', 'fixedHoldMs'),
     hardStopPct: value('hard_stop_pct', 'hardStopPct'),
     trailingActivationPct: value('trailing_activation_pct', 'trailingActivationPct'),
     trailingStopPct: value('trailing_stop_pct', 'trailingStopPct'),
+    trailingTiers: jsonArray(value('trailing_tiers_json', 'trailingTiersJson')),
+    trailingTierIndex: finite(value('trailing_tier_index', 'trailingTierIndex'), -1),
+    stopPrice: finite(value('stop_price', 'stopPrice')),
+    scaleOutTriggerPct: value('scale_out_trigger_pct', 'scaleOutTriggerPct'),
+    scaleOutFractionPct: value('scale_out_fraction_pct', 'scaleOutFractionPct'),
+    partialExitTargetAt: value('partial_exit_target_at', 'partialExitTargetAt'),
+    partialExitDeadlineAt: value('partial_exit_deadline_at', 'partialExitDeadlineAt'),
+    scaleOutAt: value('scale_out_at', 'scaleOutAt'),
+    scaleOutPrice: value('scale_out_price', 'scaleOutPrice'),
+    flowCheckHorizonMs: value('flow_check_horizon_ms', 'flowCheckHorizonMs'),
+    minBuyerVelocityRatio: value('min_buyer_velocity_ratio', 'minBuyerVelocityRatio'),
+    minNetFlowDeltaSol: value('min_net_flow_delta_sol', 'minNetFlowDeltaSol'),
+    flowCheckAt: value('flow_check_at', 'flowCheckAt'),
+    flowCheckStatus: value('flow_check_status', 'flowCheckStatus'),
+    flowBuyerVelocityRatio: value('flow_buyer_velocity_ratio', 'flowBuyerVelocityRatio'),
+    flowNetFlowDeltaSol: value('flow_net_flow_delta_sol', 'flowNetFlowDeltaSol'),
+    configuredCostPct: finite(value('configured_cost_pct', 'configuredCostPct'), 0),
     maxHoldMs: value('max_hold_ms', 'maxHoldMs'),
     exitTriggerAt: value('exit_trigger_at', 'exitTriggerAt'),
     exitTargetAt: value('exit_target_at', 'exitTargetAt'),
@@ -70,7 +102,8 @@ class HolderGrowthShadowSuite {
     this.now = now;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
-    this.exitProfile = config.exitProfile;
+    const exitProfiles = config.exitProfiles || (config.exitProfile ? [config.exitProfile] : []);
+    this.exitProfiles = new Map(exitProfiles.map((row) => [row.id, row]));
     this.pendingEntries = new Map();
     this.positions = new Map();
     this.rowsByMint = new Map();
@@ -97,7 +130,9 @@ class HolderGrowthShadowSuite {
       this._index(position);
     }
     const now = this.now();
-    const lookbackMs = this.exitProfile.maxHoldMs + this.config.exitTimeoutMs + 5_000;
+    const maxHoldMs = Math.max(0, ...[...this.exitProfiles.values()]
+      .map((profile) => finite(profile.maxHoldMs, 0)));
+    const lookbackMs = maxHoldMs + this.config.exitTimeoutMs + 5_000;
     for (const trade of this.store.recentCurveTrades(now - lookbackMs)) {
       this.observeTrade(trade, { replay: true });
     }
@@ -114,10 +149,12 @@ class HolderGrowthShadowSuite {
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
       entryProfiles: [...this.entryProfiles.values()],
-      exitProfile: this.exitProfile,
+      exitProfiles: [...this.exitProfiles.values()],
       strategy: {
         scope: 'PRE_MIGRATION_OBSERVED_HOLDER_GROWTH',
-        snapshotHorizonMs: this.config.snapshotHorizonMs,
+        snapshotHorizonsMs: [...new Set([...this.entryProfiles.values()]
+          .map((profile) => profile.horizonMs || this.config.snapshotHorizonMs))]
+          .sort((left, right) => left - right),
         entryDelayMs: this.config.entryDelayMs,
         entryTimeoutMs: this.config.entryTimeoutMs,
         maxSnapshotLagMs: this.config.maxSnapshotLagMs,
@@ -135,19 +172,24 @@ class HolderGrowthShadowSuite {
   }
 
   onSnapshot(snapshot, { replay = false } = {}) {
-    if (!this.config.enabled || !snapshot?.mint
-      || snapshot.horizonMs !== this.config.snapshotHorizonMs
-      || !(snapshot.price > 0)
+    if (!this.config.enabled || !snapshot?.mint || !(snapshot.price > 0)
       || snapshot.observationLagMs > this.config.maxSnapshotLagMs) return;
+    const entryProfiles = [...this.entryProfiles.values()].filter((profile) => (
+      snapshot.horizonMs === (profile.horizonMs || this.config.snapshotHorizonMs)
+    ));
+    if (!entryProfiles.length) {
+      this._observeFlowCheckpoint(snapshot, { replay });
+      return;
+    }
     this.metrics.evaluated += 1;
-    for (const profile of this.entryProfiles.values()) {
+    for (const profile of entryProfiles) {
       if (!this._matches(profile, snapshot)) continue;
       this.metrics.matched += 1;
       if (replay) {
         this.metrics.replayMatchesSuppressed += 1;
         continue;
       }
-      this._createPending(profile, snapshot);
+      this._createPendingRows(profile, snapshot);
     }
   }
 
@@ -174,6 +216,18 @@ class HolderGrowthShadowSuite {
         continue;
       }
       if (position.status !== STATUS.OPEN) continue;
+      if (position.partialExitTargetAt && !position.scaleOutAt) {
+        if (timestampMs >= position.partialExitTargetAt
+          && timestampMs <= position.partialExitDeadlineAt) {
+          this._fillScaleOut(position, trade, price);
+        } else if (timestampMs > position.partialExitDeadlineAt) {
+          position.partialExitTargetAt = null;
+          position.partialExitDeadlineAt = null;
+          this.store.updateHolderGrowthShadowPosition(position.id, {
+            clearPartialExitPending: true,
+          });
+        }
+      }
       this._observeOpen(position, trade, price);
     }
   }
@@ -196,7 +250,8 @@ class HolderGrowthShadowSuite {
         continue;
       }
       if (position.status === STATUS.OPEN && now - position.entryAt >= position.maxHoldMs) {
-        this._requestExit(position, position.entryAt + position.maxHoldMs, 'MAX_HOLD_120S');
+        const reason = position.exitMode === 'FIXED_HOLD' ? 'FIXED_HOLD' : 'MAX_HOLD';
+        this._requestExit(position, position.entryAt + position.maxHoldMs, reason);
       }
     }
   }
@@ -209,13 +264,19 @@ class HolderGrowthShadowSuite {
       && finite(snapshot.top3SharePct, 101) <= profile.maxTop3SharePct;
   }
 
-  _createPending(profile, snapshot) {
-    const cohortId = `${profile.id}:${this.exitProfile.id}`;
+  _createPendingRows(profile, snapshot) {
+    for (const exitProfile of this.exitProfiles.values()) {
+      this._createPending(profile, exitProfile, snapshot);
+    }
+  }
+
+  _createPending(profile, exitProfile, snapshot) {
+    const cohortId = `${profile.id}:${exitProfile.id}`;
     const token = this.store.getToken(snapshot.mint) || {};
     const row = this.store.createHolderGrowthShadowPosition({
       cohortId,
       entryProfileId: profile.id,
-      exitProfileId: this.exitProfile.id,
+      exitProfileId: exitProfile.id,
       mint: snapshot.mint,
       symbol: token.symbol || null,
       status: STATUS.PENDING_ENTRY,
@@ -236,10 +297,18 @@ class HolderGrowthShadowSuite {
       entryTargetAt: snapshot.observedAt + this.config.entryDelayMs,
       entryDeadlineAt: snapshot.observedAt + this.config.entryDelayMs
         + this.config.entryTimeoutMs,
-      hardStopPct: this.exitProfile.hardStopPct,
-      trailingActivationPct: this.exitProfile.trailingActivationPct,
-      trailingStopPct: this.exitProfile.trailingStopPct,
-      maxHoldMs: this.exitProfile.maxHoldMs,
+      exitMode: exitProfile.exitMode || 'TRAILING',
+      fixedHoldMs: exitProfile.fixedHoldMs,
+      hardStopPct: exitProfile.hardStopPct,
+      trailingActivationPct: exitProfile.trailingActivationPct,
+      trailingStopPct: exitProfile.trailingStopPct,
+      trailingTiers: exitProfile.trailingTiers,
+      scaleOutTriggerPct: exitProfile.scaleOutTriggerPct,
+      scaleOutFractionPct: exitProfile.scaleOutFractionPct,
+      flowCheckHorizonMs: exitProfile.flowCheckHorizonMs,
+      minBuyerVelocityRatio: exitProfile.minBuyerVelocityRatio,
+      minNetFlowDeltaSol: exitProfile.minNetFlowDeltaSol,
+      maxHoldMs: exitProfile.maxHoldMs,
     });
     if (!row?.inserted) return;
     const position = positionFromRow(row);
@@ -296,20 +365,130 @@ class HolderGrowthShadowSuite {
   _observeOpen(position, trade, price) {
     this._updateExtrema(position, trade.timestampMs, price);
     const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
-    if (!position.trailingActivatedAt
-      && grossReturnPct >= position.trailingActivationPct) {
-      position.trailingActivatedAt = trade.timestampMs;
-      this.store.updateHolderGrowthShadowPosition(position.id, {
-        trailingActivatedAt: trade.timestampMs,
-      });
-    }
     if (grossReturnPct <= -position.hardStopPct) {
       this._requestExit(position, trade.timestampMs, 'HARD_STOP');
       return;
     }
-    const peakDrawdownPct = (1 - price / position.highestPrice) * 100;
-    if (position.trailingActivatedAt && peakDrawdownPct >= position.trailingStopPct) {
-      this._requestExit(position, trade.timestampMs, 'TRAILING_15PCT');
+
+    if (position.exitMode === 'FIXED_HOLD') {
+      if (trade.timestampMs - position.entryAt >= position.fixedHoldMs) {
+        this._requestExit(position, position.entryAt + position.fixedHoldMs, 'FIXED_HOLD');
+      }
+      return;
+    }
+
+    if (position.exitMode === 'ADAPTIVE_TRAILING') {
+      this._observeAdaptiveTrailing(position, trade.timestampMs, price);
+      return;
+    }
+
+    if (position.exitMode === 'SCALE_RUNNER'
+      && !position.scaleOutAt && !position.partialExitTargetAt
+      && grossReturnPct >= position.scaleOutTriggerPct) {
+      position.partialExitTargetAt = trade.timestampMs + this.config.exitDelayMs;
+      position.partialExitDeadlineAt = position.partialExitTargetAt + this.config.exitTimeoutMs;
+      this.store.updateHolderGrowthShadowPosition(position.id, {
+        partialExitTargetAt: position.partialExitTargetAt,
+        partialExitDeadlineAt: position.partialExitDeadlineAt,
+      });
+    }
+
+    if (!position.trailingActivatedAt
+      && grossReturnPct >= position.trailingActivationPct) {
+      position.trailingActivatedAt = trade.timestampMs;
+      position.stopPrice = position.highestPrice * (1 - position.trailingStopPct / 100);
+      this.store.updateHolderGrowthShadowPosition(position.id, {
+        trailingActivatedAt: trade.timestampMs,
+        stopPrice: position.stopPrice,
+      });
+    } else if (position.trailingActivatedAt) {
+      position.stopPrice = Math.max(
+        position.stopPrice || 0,
+        position.highestPrice * (1 - position.trailingStopPct / 100),
+      );
+      this.store.updateHolderGrowthShadowPosition(position.id, {
+        stopPrice: position.stopPrice,
+      });
+    }
+    if (position.trailingActivatedAt && price <= position.stopPrice) {
+      this._requestExit(position, trade.timestampMs, `TRAILING_${position.trailingStopPct}PCT`);
+    }
+  }
+
+  _observeAdaptiveTrailing(position, timestampMs, price) {
+    const peakReturnPct = ((position.highestPrice / position.entryPrice) - 1) * 100;
+    const tiers = [...(position.trailingTiers || [])]
+      .sort((left, right) => left.activationPct - right.activationPct);
+    let reachedIndex = -1;
+    for (let index = 0; index < tiers.length; index += 1) {
+      if (peakReturnPct >= tiers[index].activationPct) reachedIndex = index;
+    }
+    if (reachedIndex > position.trailingTierIndex) {
+      position.trailingTierIndex = reachedIndex;
+      position.trailingActivatedAt ??= timestampMs;
+    }
+    if (position.trailingTierIndex >= 0) {
+      const tier = tiers[position.trailingTierIndex];
+      const candidateStop = position.highestPrice * (1 - tier.drawdownPct / 100);
+      // A wider high-profit tier may never loosen an already-earned stop.
+      position.stopPrice = Math.max(position.stopPrice || 0, candidateStop);
+      this.store.updateHolderGrowthShadowPosition(position.id, {
+        trailingActivatedAt: position.trailingActivatedAt,
+        trailingTierIndex: position.trailingTierIndex,
+        stopPrice: position.stopPrice,
+      });
+      if (price <= position.stopPrice) {
+        this._requestExit(
+          position,
+          timestampMs,
+          `STAIR_T${position.trailingTierIndex + 1}_${tier.drawdownPct}PCT`,
+        );
+      }
+    }
+  }
+
+  _fillScaleOut(position, trade, price) {
+    position.scaleOutAt = trade.timestampMs;
+    position.scaleOutPrice = price;
+    position.partialExitTargetAt = null;
+    position.partialExitDeadlineAt = null;
+    this.store.updateHolderGrowthShadowPosition(position.id, {
+      scaleOutAt: position.scaleOutAt,
+      scaleOutPrice: price,
+      clearPartialExitPending: true,
+    });
+  }
+
+  _observeFlowCheckpoint(snapshot, { replay = false } = {}) {
+    if (replay) return;
+    const ids = [...(this.rowsByMint.get(snapshot.mint) || [])];
+    for (const id of ids) {
+      const position = this.positions.get(id);
+      if (!position || position.status !== STATUS.OPEN
+        || position.exitMode !== 'FLOW_CHECK'
+        || position.flowCheckAt
+        || snapshot.horizonMs !== position.flowCheckHorizonMs) continue;
+      const entryWindowMs = position.horizonMs <= 10_000 ? 5_000 : 10_000;
+      const checkWindowMs = Math.max(1, snapshot.horizonMs - position.horizonMs);
+      const baselineVelocity = finite(position.newBuyers, 0) / entryWindowMs;
+      const currentVelocity = finite(snapshot.newBuyers, 0) / checkWindowMs;
+      const velocityRatio = baselineVelocity > 0 ? currentVelocity / baselineVelocity : 0;
+      const netFlowDeltaSol = finite(snapshot.netFlowSol, 0) - finite(position.netFlowSol, 0);
+      const passed = velocityRatio >= position.minBuyerVelocityRatio
+        && netFlowDeltaSol > position.minNetFlowDeltaSol;
+      Object.assign(position, {
+        flowCheckAt: snapshot.observedAt,
+        flowCheckStatus: passed ? 'PASS' : 'FAIL',
+        flowBuyerVelocityRatio: velocityRatio,
+        flowNetFlowDeltaSol: netFlowDeltaSol,
+      });
+      this.store.updateHolderGrowthShadowPosition(position.id, {
+        flowCheckAt: position.flowCheckAt,
+        flowCheckStatus: position.flowCheckStatus,
+        flowBuyerVelocityRatio: velocityRatio,
+        flowNetFlowDeltaSol: netFlowDeltaSol,
+      });
+      if (!passed) this._requestExit(position, snapshot.observedAt, 'FLOW_DECAY_60S');
     }
   }
 
@@ -353,16 +532,28 @@ class HolderGrowthShadowSuite {
   }
 
   _close(position, trade, price) {
-    const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const runnerGrossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    let grossReturnPct = runnerGrossReturnPct;
+    let effectiveExitPrice = price;
+    if (position.exitMode === 'SCALE_RUNNER' && position.scaleOutAt) {
+      const fraction = Math.min(1, Math.max(0, finite(position.scaleOutFractionPct, 50) / 100));
+      const scaleGrossReturnPct = ((position.scaleOutPrice / position.entryPrice) - 1) * 100;
+      grossReturnPct = scaleGrossReturnPct * fraction + runnerGrossReturnPct * (1 - fraction);
+      effectiveExitPrice = position.entryPrice * (1 + grossReturnPct / 100);
+    }
     if (grossReturnPct > this.config.maxPlausibleReturnPct || grossReturnPct < -100) return;
     this._updateExtrema(position, trade.timestampMs, price);
+    const realizedCostPct = finite(
+      position.configuredCostPct,
+      this.costs.deterministicCostPct,
+    ) + (position.scaleOutAt ? this.costs.fixedCostPct : 0);
     this.store.updateHolderGrowthShadowPosition(position.id, {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
-      exitPrice: price,
+      exitPrice: effectiveExitPrice,
       grossReturnPct,
-      netReturnPct: grossReturnPct - this.costs.deterministicCostPct,
+      netReturnPct: grossReturnPct - realizedCostPct,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
@@ -376,7 +567,10 @@ class HolderGrowthShadowSuite {
     this.store.updateHolderGrowthShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
       grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
+      netReturnPct: -100 - finite(
+        position.configuredCostPct,
+        this.costs.deterministicCostPct,
+      ),
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
