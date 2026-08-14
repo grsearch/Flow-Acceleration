@@ -33,6 +33,7 @@ class ResearchServer {
     cyaEarlyPyramidShadow = null,
     bondingCurveMomentumShadow = null,
     graduationHoldShadow = null,
+    holderGrowthShadow = null,
   }) {
     this.config = config;
     this.store = store;
@@ -53,6 +54,7 @@ class ResearchServer {
     this.cyaEarlyPyramidShadow = cyaEarlyPyramidShadow;
     this.bondingCurveMomentumShadow = bondingCurveMomentumShadow;
     this.graduationHoldShadow = graduationHoldShadow;
+    this.holderGrowthShadow = holderGrowthShadow;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -325,6 +327,23 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/holder-growth-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.holderGrowthShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_N',
+          sendsTransactions: false,
+          entryProfiles: [],
+        },
+        timeSessions: this.store.shadowTimeSessionDashboard('holder-growth'),
+        ...this.store.holderGrowthShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/migration-continuity-shadow', (request, response) => {
       response.json({
         runtime: this.migrationContinuityShadow?.health() || {
@@ -449,6 +468,7 @@ class ResearchServer {
         flowSmartConfirmShadow: this.flowSmartConfirmShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
+        holderGrowthShadow: this.holderGrowthShadow?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
         migrationContinuityShadow: this.migrationContinuityShadow?.health() || null,
         rangeScalperShadow: this.rangeScalperShadow?.health() || null,
