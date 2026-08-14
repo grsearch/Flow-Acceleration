@@ -38,4 +38,12 @@ for (const fixture of fixtures) {
   }
 }
 
+const dashboardHtml = fs.readFileSync(path.join(root, 'src/server/public/index.html'), 'utf8');
+const inlineScript = dashboardHtml.match(/<script>([\s\S]*?)<\/script>/);
+assert.ok(inlineScript, 'dashboard inline script is missing');
+assert.doesNotThrow(
+  () => new Function(inlineScript[1]), // eslint-disable-line no-new-func
+  'dashboard inline script must remain valid JavaScript',
+);
+
 console.log('test-text-encoding: ok');
