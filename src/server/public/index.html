@@ -1389,31 +1389,35 @@
       const research = strategy.research || {};
       const profiles = runtime.entryProfiles || [];
       const profileLabels = Object.fromEntries(profiles.map(profile => [profile.id, profile.label]));
-      const exit = runtime.exitProfile || {};
+      const exits = runtime.exitProfiles || [];
+      const exitLabels = Object.fromEntries(exits.map(exit => [exit.id, exit.label]));
       const profileSummary = profiles.map(profile => (
-        `${profile.id}: Buyers≥${number(profile.minBuyers)} · 新增≥${number(profile.minNewBuyers)} · `
+        `${profile.id}@${age(profile.horizonMs)}: Buyers≥${number(profile.minBuyers)} · 新增≥${number(profile.minNewBuyers)} · `
         + `留存≥${rate(profile.minRetentionPct)} · Net≥${number(profile.minNetFlowSol,1)} SOL · `
         + `Top3≤${rate(profile.maxTop3SharePct)}`
       )).join(' / ');
-      document.querySelector('#holder-growth-expression').textContent = `Launch ${age(strategy.snapshotHorizonMs)}快照 → ${profileSummary || '等待阈值配置'} → ${number(strategy.entryDelayMs)}ms后首笔Curve成交 → +${number(exit.trailingActivationPct,1)}%激活、峰值回撤${number(exit.trailingStopPct,1)}%、硬止损${number(exit.hardStopPct,1)}%、${age(exit.maxHoldMs)}兜底`;
+      document.querySelector('#holder-growth-expression').textContent = `${profileSummary || '等待阈值配置'} → ${number(strategy.entryDelayMs)}ms后首笔Curve成交 → ${number(exits.length)}组独立退出（固定持有 / 常规Trailing / 分批尾仓 / 60秒流衰减 / 阶梯Trailing）`;
       renderMetricGroups('#holder-growth-metrics', [
         ['运行模式', runtime.enabled ? 'SHADOW N' : '关闭', '永不签名或发送交易'],
         ['快照评估 / 命中', `${number(runtime.evaluated)} / ${number(runtime.matched)}`, `回放抑制 ${number(runtime.replayMatchesSuppressed)}`],
         ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
-        ['仓位 / 确定性成本', `${number(research.simulatedPositionSol,3)} SOL / ${rate(research.configuredCostPct)}`, '每个组别和Mint独立计数'],
+        ['入场 × 退出矩阵', `${number(profiles.length)} × ${number(exits.length)}`, '旧 cohort 保留；新组独立计数'],
+        ['仓位 / 确定性成本', `${number(research.simulatedPositionSol,3)} SOL / ${rate(research.configuredCostPct)}`, '分批组另计额外链上执行成本'],
       ], []);
       renderTimeSessions('#holder-growth-time-sessions', data.timeSessions);
 
       const cohorts = data.cohorts || [];
       document.querySelector('#holder-growth-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
-        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id || row.cohort_id)}</b><br><span class="table-note">${escapeHtml(row.exit_profile_id || '')}</span></td><td>${number(row.attempts)} / ${number(row.independent_mints)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">活动 ${number(row.active_positions)} · 待入场 ${number(row.pending_entries)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5盈利贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td><td>${number(row.average_buyers,1)} / +${number(row.average_new_buyers,1)}</td><td>${pct(row.average_retention_pct)} / ${number(row.average_net_flow_sol,2)} SOL / ${pct(row.average_top3_share_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id || row.cohort_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id || '')}</span></td><td>${number(row.attempts)} / ${number(row.independent_mints)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">活动 ${number(row.active_positions)} · 待入场 ${number(row.pending_entries)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}<br><span class="table-note">去Top5 ${pct(row.average_net_return_ex_top5_pct)}</span></td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5贡献 ${rate(row.top_5_winner_contribution_pct)} · 大赢家 ${number(row.big_winners_realized)}/${number(row.big_winner_opportunities)}</span></td><td>${number(row.average_buyers,1)} / +${number(row.average_new_buyers,1)}</td><td>${pct(row.average_retention_pct)} / ${number(row.average_net_flow_sol,2)} SOL / ${pct(row.average_top3_share_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}<br><span class="table-note">MFE兑现 ${rate(row.average_mfe_capture_pct)}</span></td></tr>`
       )).join('') : '<tr><td colspan="8" class="empty">等待30秒 Holder Growth 快照满足 Balanced / Fast 条件</td></tr>';
 
       const rows = data.positions || [];
       document.querySelector('#holder-growth-position-rows').innerHTML = rows.length ? rows.map(row => {
         const reason = row.exit_reason || row.rejection_reason || '—';
         const prices = `${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}`;
-        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${number(row.buyers)} / +${number(row.new_buyers)}</td><td>${pct(row.retention_pct)} / ${number(row.net_flow_sol,2)} SOL / ${pct(row.top3_share_pct)}</td><td>${prices}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+        const tierIndex = Number(row.trailing_tier_index);
+        const exitDetail = `${exitLabels[row.exit_profile_id] || row.exit_profile_id || ''}${tierIndex >= 0 ? ` · T${number(tierIndex + 1)} · Stop ${number(row.stop_price,10)}` : ''}`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitDetail)}</span><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${number(row.buyers)} / +${number(row.new_buyers)}</td><td>${pct(row.retention_pct)} / ${number(row.net_flow_sol,2)} SOL / ${pct(row.top3_share_pct)}</td><td>${prices}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="8" class="empty">暂无 Holder Growth Shadow N 模拟仓位</td></tr>';
     }
 
