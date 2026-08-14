@@ -169,3 +169,137 @@ function run() {
 }
 
 run();
+
+function runEntryExitMatrix() {
+  const base = 1_810_000_000_000;
+  let now = base;
+  const store = makeStore();
+  const config = makeConfig();
+  config.costModel.priorityFeeSol = 0.001;
+  delete config.exitProfile;
+  config.entryProfiles = [{
+    id: 'HG10_OPEN', label: 'Early', horizonMs: 10_000,
+    minBuyers: 5, minNewBuyers: 3, minRetentionPct: 30,
+    minNetFlowSol: 1.5, maxTop3SharePct: 90,
+  }];
+  config.exitProfiles = [
+    {
+      id: 'X5_FIXED', label: '5s', exitMode: 'FIXED_HOLD', fixedHoldMs: 5_000,
+      hardStopPct: 100, maxHoldMs: 5_000,
+    },
+    {
+      id: 'XSTAIR_BAL', label: 'stair', exitMode: 'ADAPTIVE_TRAILING',
+      hardStopPct: 20, maxHoldMs: 360_000,
+      trailingTiers: [
+        { activationPct: 20, drawdownPct: 10 },
+        { activationPct: 40, drawdownPct: 15 },
+      ],
+    },
+    {
+      id: 'XSCALE_50_RUNNER', label: 'scale', exitMode: 'SCALE_RUNNER',
+      hardStopPct: 20, scaleOutTriggerPct: 30, scaleOutFractionPct: 50,
+      trailingActivationPct: 30, trailingStopPct: 20, maxHoldMs: 300_000,
+    },
+    {
+      id: 'XFLOW_60', label: 'flow', exitMode: 'FLOW_CHECK', hardStopPct: 20,
+      flowCheckHorizonMs: 60_000, minBuyerVelocityRatio: 0.5,
+      minNetFlowDeltaSol: 0, trailingActivationPct: 20,
+      trailingStopPct: 15, maxHoldMs: 180_000,
+    },
+  ];
+  const suite = new HolderGrowthShadowSuite({ config, store, now: () => now });
+  suite.start();
+  const early = (mint, overrides = {}) => snapshot(mint, now, {
+    horizonMs: 10_000, buyers: 6, newBuyers: 4, retentionPct: 40,
+    netFlowSol: 2, top3SharePct: 80, ...overrides,
+  });
+  const row = (mint, exitProfileId) => store.db.prepare(`
+    SELECT * FROM holder_growth_shadow_positions
+    WHERE mint = ? AND exit_profile_id = ?
+  `).get(mint, exitProfileId);
+
+  const fixedMint = 'HolderGrowthEarlyFixed1111111111111111111111';
+  recordToken(store, fixedMint, base);
+  now = base + 10_000;
+  suite.onSnapshot(early(fixedMint));
+  assert.strictEqual(suite.health().pendingEntries, 4,
+    '10s relaxed entry must create one independent row per exit');
+  now += 250;
+  suite.observeTrade(curveTrade(fixedMint, now, 1));
+  now += 5_250;
+  suite.observeTrade(curveTrade(fixedMint, now, 1.1));
+  assert.strictEqual(row(fixedMint, 'X5_FIXED').status, 'CLOSED');
+  assert.strictEqual(row(fixedMint, 'X5_FIXED').exit_reason, 'FIXED_HOLD');
+
+  const stairMint = 'HolderGrowthEarlyStair111111111111111111111';
+  recordToken(store, stairMint, base);
+  now = base + 20_000;
+  suite.onSnapshot(early(stairMint));
+  now += 250;
+  suite.observeTrade(curveTrade(stairMint, now, 1));
+  now += 500;
+  suite.observeTrade(curveTrade(stairMint, now, 1.39));
+  const tierOneStop = row(stairMint, 'XSTAIR_BAL').stop_price;
+  assert.ok(tierOneStop > 1.25 && tierOneStop < 1.26);
+  now += 500;
+  suite.observeTrade(curveTrade(stairMint, now, 1.401));
+  const upgraded = row(stairMint, 'XSTAIR_BAL');
+  assert.strictEqual(upgraded.trailing_tier_index, 1);
+  assert.ok(upgraded.stop_price >= tierOneStop,
+    'a wider higher tier must never lower an already earned stop');
+  now += 500;
+  suite.observeTrade(curveTrade(stairMint, now, 1.24));
+  now += 250;
+  suite.observeTrade(curveTrade(stairMint, now, 1.23));
+  assert.strictEqual(row(stairMint, 'XSTAIR_BAL').status, 'CLOSED');
+  assert.match(row(stairMint, 'XSTAIR_BAL').exit_reason, /^STAIR_T2_/);
+
+  const scaleMint = 'HolderGrowthEarlyScale111111111111111111111';
+  recordToken(store, scaleMint, base);
+  now = base + 30_000;
+  suite.onSnapshot(early(scaleMint));
+  now += 250;
+  suite.observeTrade(curveTrade(scaleMint, now, 1));
+  now += 500;
+  suite.observeTrade(curveTrade(scaleMint, now, 1.3));
+  now += 250;
+  suite.observeTrade(curveTrade(scaleMint, now, 1.32));
+  assert.strictEqual(row(scaleMint, 'XSCALE_50_RUNNER').scale_out_price, 1.32);
+  now += 500;
+  suite.observeTrade(curveTrade(scaleMint, now, 1.05));
+  now += 250;
+  suite.observeTrade(curveTrade(scaleMint, now, 1.04));
+  const scaled = row(scaleMint, 'XSCALE_50_RUNNER');
+  assert.strictEqual(scaled.status, 'CLOSED');
+  assert.ok(Math.abs(scaled.gross_return_pct - 18) < 0.01,
+    '50% scale at +32% plus 50% runner at +4% must realize +18%');
+  assert.ok(Math.abs(scaled.net_return_pct - 17.8) < 0.01,
+    'a filled partial exit must include its extra fixed execution cost');
+
+  const flowMint = 'HolderGrowthEarlyFlow1111111111111111111111';
+  recordToken(store, flowMint, base);
+  now = base + 40_000;
+  suite.onSnapshot(early(flowMint));
+  now += 250;
+  suite.observeTrade(curveTrade(flowMint, now, 1));
+  now = base + 90_000;
+  suite.onSnapshot(snapshot(flowMint, now, {
+    horizonMs: 60_000, buyers: 7, newBuyers: 1, retentionPct: 40,
+    netFlowSol: 1.5, top3SharePct: 80,
+  }));
+  let flow = row(flowMint, 'XFLOW_60');
+  assert.strictEqual(flow.flow_check_status, 'FAIL');
+  assert.strictEqual(flow.status, 'EXIT_PENDING');
+  now += 250;
+  suite.observeTrade(curveTrade(flowMint, now, 0.99));
+  flow = row(flowMint, 'XFLOW_60');
+  assert.strictEqual(flow.status, 'CLOSED');
+  assert.strictEqual(flow.exit_reason, 'FLOW_DECAY_60S');
+
+  assert.strictEqual(suite.health().exitProfiles.length, 4);
+  assert.deepStrictEqual(suite.health().strategy.snapshotHorizonsMs, [10_000]);
+  store.close();
+  console.log('test-holder-growth-shadow matrix: ok');
+}
+
+runEntryExitMatrix();
