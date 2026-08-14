@@ -78,6 +78,7 @@ W3 = T-2s ~ T
 - `flow_smart_confirm_shadow_positions`：Primary Rank 1 后 Smart OPEN 确认、再按后续成交入场的严格前向 Shadow L 样本。
 - `launch_quality_observations` / `launch_quality_snapshots`：Launch 前60秒结构、首次回踩参考点和未来收益标签。
 - `launch_pullback_shadow_positions`：独立的 Launch 首次回踩 Shadow F1/F2/F3 仓位；不与 Observer E 或任何旧 Shadow 混表。
+- `holder_growth_shadow_positions`：独立的 Observed Holder Growth Shadow N 仓位；使用成交流中可观测独立买家、新增买家、早期留存、Top3集中度与资金流，不冒充链上权威 Holder 数。
 - `migrated_drop_rebound_shadow_positions`：独立的生命周期超跌反弹 Shadow G 参数组；用 `lifecycle_stage` 严格区分毕业前与毕业后模拟入场、MFE/MAE和退出结果。
 - `graduation_hold_shadow_positions`：独立的毕业概率持仓 Shadow I0/I1/I2；共享早期 Primary 模拟入场，但分别保存移动止盈对照、97%毕业前退出和严格门槛穿越毕业结果。
 - `range_scalper_shadow_positions`：独立的 PumpSwap 区间波段 Shadow J；保存区间质量、重复 Episode、三组回踩入场与四组退出结果。
@@ -265,16 +266,23 @@ F 路径保留三个质量过滤档位，每档分别固定持有3秒和8秒，�
 - FT-D敏感性对照：F1入场；盈利30%激活峰值回撤15%，最短持有3秒，硬止损30%，120秒兜底。
 
 FT-A/B/C/D使用全新的 `cohort_id`，Dashboard 会分别统计，不会把新结果并入原F1/F2/F3固定持仓历史。这些组仍是右尾依赖型研究实验，仅用于前向Shadow验证。
-
-在旧组不变的前提下，另设四个深回踩前向 cohort：`FD10_R3_5S`、`FD12_5_R3_5S`、`FD12_5_R5_5S` 与 `FD15_R5_5S`。它们分别测试10%～15%的首波回踩和3%/5%低点反弹，要求低点至少稳定0.5～1秒、低点之后至少出现2个新买家、最近1秒净流入重新为正；若回踩超过25%则只记录规则拒绝，不模拟接飞刀。四组共用 F1 的 NetFlow/Creator 质量门槛和固定5秒退出，因此统计差异主要来自入场深度与确认强度。深回踩参考点由 Observer E 独立跟踪，具有独立 `reference_profile_id`，不会改写或混入原7.5%参考点。
-
-`FO_F2_J2_3S` 是基于34小时样本新增的前向验证组：复用旧 F2 信号（NetFlow≥20 SOL、Creator≤10%），但把200ms模拟成交相对参考价的最大跳价收紧为2%，并固定持有3秒。旧 F2 仍保留10%跳价上限，两者使用独立 cohort，专门验证“低追价”是否能把去除头部赢家后的期望转正。
+…174 tokens truncated…组：复用旧 F2 信号（NetFlow≥20 SOL、Creator≤10%），但把200ms模拟成交相对参考价的最大跳价收紧为2%，并固定持有3秒。旧 F2 仍保留10%跳价上限，两者使用独立 cohort，专门验证“低追价”是否能把去除头部赢家后的期望转正。
 
 模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。新样本收益扣除默认1 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
 
 ## Migration Continuity Shadow M
 
 Shadow M 把迁移后前5秒质量延续作为独立入场：`Buyers≥20、NetFlow≥5 SOL、价格涨幅≥5%、Sell/Buy≤0.6`，信号后200ms使用下一笔真实 PumpSwap 成交模拟入场。每个 Mint 只评估一次；所有毕业 Mint 最多订阅10秒，只有活动仓位继续保留订阅，避免为长持仓组合无边界消耗 Helius。
+
+## Observed Holder Growth Shadow N
+
+Shadow N 复用 Launch Quality Observer 的30秒因果快照，不增加链上订阅或额外 RPC 请求。这里的“Holder”严格指当前 gRPC 成交流中已经观察到的独立买家及前20名买家的留存，不是 RPC 拉取的全量链上 Holder 数。
+
+- `HG30_BAL`：Buyers≥10、20–30秒新增买家≥10、前20买家留存≥50%、NetFlow≥5 SOL、Top3≤80%。
+- `HG30_FAST`：Buyers≥10、20–30秒新增买家≥20、前20买家留存≥70%、NetFlow≥10 SOL、Top3≤80%。
+- 两组均在快照后200ms的首笔 Bonding Curve 成交模拟入场，使用20%硬止损、+15%激活/峰值回撤15%的移动止盈和120秒兜底。
+
+该策略只写入独立表 `holder_growth_shadow_positions`，默认按1 SOL仓位扣除确定性成本，Dashboard 单独显示 Balanced/Fast 样本；不会修改现有实盘策略，也不会签名或发送交易。每日研究导出会包含该表。
 
 同一入场并行建立六个独立退出 cohort：固定60秒、固定120秒、5秒保护后`+10%激活/峰值回撤10%`、10秒保护后`+15%激活/峰值回撤12.5%`、10秒保护后的3秒订单流转弱，以及最长300秒的分层自适应尾仓。全部组合使用1 SOL成本模型、200ms退出延迟和独立表 `migration_continuity_shadow_positions`；历史策略和实盘规则都不变，该路径永不签名或发送交易。
 
