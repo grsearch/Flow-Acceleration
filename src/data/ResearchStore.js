@@ -852,6 +852,17 @@ class ResearchStore {
         retention_pct REAL,
         top1_share_pct REAL,
         top3_share_pct REAL,
+        sell_sol_since_peak REAL,
+        buy_sol_since_peak REAL,
+        buy_refill_ratio REAL,
+        recent_net_flow_1s REAL,
+        previous_net_flow_1s REAL,
+        net_flow_acceleration_1s REAL,
+        market_regime_observed_at INTEGER,
+        market_regime_independent_mints INTEGER,
+        market_regime_average_net_return_5s REAL,
+        market_regime_win_rate_5s REAL,
+        market_regime_big20_rate_5s REAL,
         entry_target_at INTEGER,
         entry_deadline_at INTEGER,
         entry_at INTEGER,
@@ -1432,6 +1443,17 @@ class ResearchStore {
         'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN window_net_flow_sol REAL',
       ],
       ['flow_window_ms', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN flow_window_ms INTEGER'],
+      ['sell_sol_since_peak', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN sell_sol_since_peak REAL'],
+      ['buy_sol_since_peak', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN buy_sol_since_peak REAL'],
+      ['buy_refill_ratio', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN buy_refill_ratio REAL'],
+      ['recent_net_flow_1s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN recent_net_flow_1s REAL'],
+      ['previous_net_flow_1s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN previous_net_flow_1s REAL'],
+      ['net_flow_acceleration_1s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN net_flow_acceleration_1s REAL'],
+      ['market_regime_observed_at', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_observed_at INTEGER'],
+      ['market_regime_independent_mints', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_independent_mints INTEGER'],
+      ['market_regime_average_net_return_5s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_average_net_return_5s REAL'],
+      ['market_regime_win_rate_5s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_win_rate_5s REAL'],
+      ['market_regime_big20_rate_5s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_big20_rate_5s REAL'],
     ];
     for (const [column, sql] of pullbackMigrations) {
       if (!pullbackColumns.has(column)) this.db.exec(sql);
@@ -2048,6 +2070,22 @@ class ResearchStore {
         WHERE market = 'PUMP_BONDING_CURVE' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
       `),
+      launchMarketRegimeSnapshot: this.db.prepare(`
+        SELECT
+          COUNT(DISTINCT f.mint) AS independent_mints,
+          AVG(r.net_return_5s) AS average_net_return_5s,
+          AVG(CASE WHEN r.net_return_5s > 0 THEN 100.0 ELSE 0.0 END) AS win_rate_5s,
+          AVG(CASE WHEN r.net_return_5s >= 20 THEN 100.0 ELSE 0.0 END) AS big20_rate_5s
+        FROM flow_signals AS f
+        JOIN signal_returns AS r USING(signal_id)
+        WHERE f.is_primary = 1
+          AND f.signal_rank_in_mint = 1
+          AND f.timestamp_ms >= @startAt
+          AND f.timestamp_ms < @cutoffAt
+          AND r.finalized_at IS NOT NULL
+          AND r.finalized_at <= @observedAt
+          AND r.net_return_5s IS NOT NULL
+      `),
       recentAmmTrades: this.db.prepare(`
         SELECT timestamp_ms AS timestampMs, received_at_ms AS receivedAtMs,
           slot, signature, event_index AS eventIndex,
@@ -2513,6 +2551,11 @@ class ResearchStore {
           window_net_flow_sol, flow_window_ms,
           net_flow_sol, creator_share_pct, buyers, recent_buyers,
           retention_pct, top1_share_pct, top3_share_pct,
+          sell_sol_since_peak, buy_sol_since_peak, buy_refill_ratio,
+          recent_net_flow_1s, previous_net_flow_1s, net_flow_acceleration_1s,
+          market_regime_observed_at, market_regime_independent_mints,
+          market_regime_average_net_return_5s, market_regime_win_rate_5s,
+          market_regime_big20_rate_5s,
           entry_target_at, entry_deadline_at, created_at, updated_at
         ) VALUES (
           @cohortId, @mint, @symbol, @status, @rejectionReason,
@@ -2524,6 +2567,11 @@ class ResearchStore {
           @windowNetFlowSol, @flowWindowMs,
           @netFlowSol, @creatorSharePct, @buyers, @recentBuyers,
           @retentionPct, @top1SharePct, @top3SharePct,
+          @sellSolSincePeak, @buySolSincePeak, @buyRefillRatio,
+          @recentNetFlow1s, @previousNetFlow1s, @netFlowAcceleration1s,
+          @marketRegimeObservedAt, @marketRegimeIndependentMints,
+          @marketRegimeAverageNetReturn5s, @marketRegimeWinRate5s,
+          @marketRegimeBig20Rate5s,
           @entryTargetAt, @entryDeadlineAt, @createdAt, @updatedAt
         )
       `),
@@ -3321,6 +3369,10 @@ class ResearchStore {
     return this.stmts.recentCurveTrades.all(sinceMs);
   }
 
+  launchMarketRegimeSnapshot({ startAt, cutoffAt, observedAt }) {
+    return this.stmts.launchMarketRegimeSnapshot.get({ startAt, cutoffAt, observedAt });
+  }
+
   recentAmmTrades(sinceMs) {
     return this.stmts.recentAmmTrades.all(sinceMs);
   }
@@ -3960,6 +4012,19 @@ class ResearchStore {
       retentionPct: finiteOrNull(position.retentionPct),
       top1SharePct: finiteOrNull(position.top1SharePct),
       top3SharePct: finiteOrNull(position.top3SharePct),
+      sellSolSincePeak: finiteOrNull(position.sellSolSincePeak),
+      buySolSincePeak: finiteOrNull(position.buySolSincePeak),
+      buyRefillRatio: finiteOrNull(position.buyRefillRatio),
+      recentNetFlow1s: finiteOrNull(position.recentNetFlow1s),
+      previousNetFlow1s: finiteOrNull(position.previousNetFlow1s),
+      netFlowAcceleration1s: finiteOrNull(position.netFlowAcceleration1s),
+      marketRegimeObservedAt: Number.isFinite(position.marketRegimeObservedAt)
+        ? Math.trunc(position.marketRegimeObservedAt) : null,
+      marketRegimeIndependentMints: Number.isFinite(position.marketRegimeIndependentMints)
+        ? Math.trunc(position.marketRegimeIndependentMints) : null,
+      marketRegimeAverageNetReturn5s: finiteOrNull(position.marketRegimeAverageNetReturn5s),
+      marketRegimeWinRate5s: finiteOrNull(position.marketRegimeWinRate5s),
+      marketRegimeBig20Rate5s: finiteOrNull(position.marketRegimeBig20Rate5s),
       entryTargetAt: position.entryTargetAt || null,
       entryDeadlineAt: position.entryDeadlineAt || null,
       createdAt: now,
