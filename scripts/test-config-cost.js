@@ -62,6 +62,8 @@ assert.strictEqual(config.liveTrading.priorityFeeMicroLamports, 2_000_000);
 assert.strictEqual(config.liveTrading.strategies[0].market, 'PUMP_AMM');
 assert.strictEqual(config.liveTrading.strategies[0].dropMinPct, 25);
 assert.strictEqual(config.liveTrading.strategies[0].dropMaxPct, 35);
+assert.strictEqual(config.liveTrading.strategies[0].maxEntriesPerMint, 2);
+assert.strictEqual(config.liveTrading.strategies[0].reentryCooldownMs, 1_000);
 assert.strictEqual(config.liveTrading.strategies[0].trailingActivationPct, 8);
 assert.strictEqual(config.liveTrading.strategies[0].trailingStopPct, 3);
 assert.strictEqual(config.liveTrading.strategies[0].maxHoldMs, 15_000);
