@@ -99,6 +99,29 @@ function makeConfig({ withTrailing = false, withDeep = false, withOptimization =
         trailingActivationPct: 30, trailingDrawdownPct: 20,
         minHoldMs: 0, maxHoldMs: 120_000, hardStopPct: 30,
       },
+      {
+        id: 'F_ABSORB3_8S', label: 'F-ABSORB3', profileId: 'F_ABSORB3',
+        referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+        referenceReboundPct: 3, minNetFlowSol: 20, maxCreatorSharePct: 10,
+        maxTop3SharePct: 100, minSellSolSincePeak: 3, minBuyRefillRatio: 0.5,
+        exitPolicy: 'FIXED_HOLD', fixedHoldMs: 8_000,
+      },
+      {
+        id: 'F_ABSORB5_RUNNER', label: 'F-ABSORB5', profileId: 'F_ABSORB5',
+        referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+        referenceReboundPct: 3, minNetFlowSol: 20, maxCreatorSharePct: 10,
+        maxTop3SharePct: 100, minSellSolSincePeak: 5, minBuyRefillRatio: 0.5,
+        exitPolicy: 'TRAILING_STOP', trailingActivationPct: 30,
+        trailingDrawdownPct: 20, minHoldMs: 0, maxHoldMs: 120_000,
+        hardStopPct: 30,
+      },
+      {
+        id: 'F_REACCEL0_8S', label: 'F-REACCEL0', profileId: 'F_REACCEL0',
+        referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+        referenceReboundPct: 3, minNetFlowSol: 20, maxCreatorSharePct: 10,
+        maxTop3SharePct: 100, minRecentNetFlow1s: 0,
+        minNetFlowAcceleration1s: 0, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 8_000,
+      },
     ] : [],
     costModel: {
       platformFeePct: 1.4,
@@ -262,8 +285,8 @@ function testOptimizationCohortsStayIsolated() {
   suite.onReference(reference('legacy-optimization', now));
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization'").get().n,
-    10,
-    'legacy reference should preserve six original cohorts and record four matching optimization cohorts',
+    13,
+    'legacy reference should preserve six original cohorts and record seven matching optimization cohorts',
   );
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions WHERE mint='legacy-optimization' AND cohort_id='FO_C70_10S'").get().n,
@@ -289,6 +312,73 @@ function testOptimizationCohortsStayIsolated() {
     ],
     'NF30 cohorts must retain rejected samples without changing the old F2 cohorts',
   );
+  assert.deepStrictEqual(
+    store.db.prepare(`
+      SELECT cohort_id, status FROM launch_pullback_shadow_positions
+      WHERE mint='legacy-optimization'
+        AND cohort_id IN ('F_ABSORB3_8S', 'F_ABSORB5_RUNNER', 'F_REACCEL0_8S')
+      ORDER BY cohort_id
+    `).all(),
+    [
+      { cohort_id: 'F_ABSORB3_8S', status: 'PENDING_ENTRY' },
+      { cohort_id: 'F_ABSORB5_RUNNER', status: 'RULE_REJECTED' },
+      { cohort_id: 'F_REACCEL0_8S', status: 'PENDING_ENTRY' },
+    ],
+    'causal cohorts must use sell absorption and 1-second re-acceleration independently',
+  );
+  const evidence = store.db.prepare(`
+    SELECT sell_sol_since_peak, buy_sol_since_peak, buy_refill_ratio,
+      recent_net_flow_1s, previous_net_flow_1s, net_flow_acceleration_1s,
+      market_regime_independent_mints, market_regime_win_rate_5s
+    FROM launch_pullback_shadow_positions
+    WHERE mint='legacy-optimization' AND cohort_id='F_ABSORB3_8S'
+  `).get();
+  assert.deepStrictEqual(evidence, {
+    sell_sol_since_peak: 4,
+    buy_sol_since_peak: 2.4,
+    buy_refill_ratio: 0.6,
+    recent_net_flow_1s: 0.4,
+    previous_net_flow_1s: 0.1,
+    net_flow_acceleration_1s: 0.3,
+    market_regime_independent_mints: 18,
+    market_regime_win_rate_5s: 56,
+  });
+
+  now += 1_000;
+  const strongAbsorption = reference('strong-absorption', now);
+  strongAbsorption.features.sellSolSincePeak = 6;
+  strongAbsorption.features.buySolSincePeak = 3.6;
+  suite.onReference(strongAbsorption);
+  assert.strictEqual(
+    store.db.prepare(`
+      SELECT status FROM launch_pullback_shadow_positions
+      WHERE mint='strong-absorption' AND cohort_id='F_ABSORB5_RUNNER'
+    `).get().status,
+    'PENDING_ENTRY',
+  );
+
+  now += 1_000;
+  const weakRefill = reference('weak-refill', now);
+  weakRefill.features.sellSolSincePeak = 6;
+  weakRefill.features.buySolSincePeak = 2;
+  suite.onReference(weakRefill);
+  assert.ok(store.db.prepare(`
+    SELECT rejection_reason FROM launch_pullback_shadow_positions
+    WHERE mint='weak-refill' AND cohort_id='F_ABSORB5_RUNNER'
+  `).get().rejection_reason.includes('BUY_REFILL_BELOW_MIN'));
+
+  now += 1_000;
+  const decelerating = reference('decelerating', now);
+  decelerating.features.recentNetFlow1s = -0.1;
+  decelerating.features.previousNetFlow1s = 0.3;
+  decelerating.features.netFlowAcceleration1s = -0.4;
+  suite.onReference(decelerating);
+  const reaccelRejected = store.db.prepare(`
+    SELECT rejection_reason FROM launch_pullback_shadow_positions
+    WHERE mint='decelerating' AND cohort_id='F_REACCEL0_8S'
+  `).get().rejection_reason;
+  assert.ok(reaccelRejected.includes('RECENT_NET_FLOW_1S_BELOW_MIN'));
+  assert.ok(reaccelRejected.includes('NET_FLOW_ACCEL_1S_BELOW_MIN'));
 
   now += 2_000;
   suite.onReference(reference('nf30-optimization', now, 30, 4));
@@ -369,6 +459,16 @@ function reference(mint, at, netFlowSol = 20, creatorSharePct = 4) {
       retentionPct: 70,
       top1SharePct: 12,
       top3SharePct: 28,
+      sellSolSincePeak: 4,
+      buySolSincePeak: 2.4,
+      recentNetFlow1s: 0.4,
+      previousNetFlow1s: 0.1,
+      netFlowAcceleration1s: 0.3,
+      marketRegimeObservedAt: at,
+      marketRegimeIndependentMints: 18,
+      marketRegimeAverageNetReturn5s: 2.5,
+      marketRegimeWinRate5s: 56,
+      marketRegimeBig20Rate5s: 12,
     },
   };
 }
