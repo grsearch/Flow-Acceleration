@@ -325,4 +325,3 @@ assert.deepStrictEqual(liveTradingGuard(true, false, false), {
 });
 
 console.log('test-config-cost: ok');
-
