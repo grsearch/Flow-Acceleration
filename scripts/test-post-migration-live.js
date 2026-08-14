@@ -214,6 +214,8 @@ const config = {
     reboundMinPct: 2,
     reboundMaxPct: 5,
     reboundTimeoutMs: 1_000,
+    maxEntriesPerMint: 2,
+    reentryCooldownMs: 1_000,
     maxEntryPriceJumpPct: 15,
     trailingActivationPct: 8,
     trailingStopPct: 3,
@@ -237,6 +239,25 @@ store.recordComplete({
 const manager = new LiveTradingManager({ config, store, now: () => now });
 manager.start();
 manager.onGraduated(store.getToken('MintLive111111111111111111111111111111111'));
+
+// A rejected/failed buy is not a successful entry and must not consume one of
+// the two durable per-Mint slots.
+const failedMint = 'MintFailedEntry11111111111111111111111111111';
+const failedPosition = store.createLivePosition({
+  strategyId: 'post_gd25_35_xleg', sourceType: 'post_gd25_35_xleg',
+  mint: failedMint, mode: 'LIVE', status: 'OPENING', positionSol: 0.05,
+  entryMarket: 'PUMP_AMM', entryPrice: 1,
+});
+store.updateLivePosition(failedPosition.id, {
+  status: 'ENTRY_FAILED', exitReason: 'ENTRY_REJECTED', entryError: 'test rejection',
+});
+assert.strictEqual(store.successfulLiveEntryCountForMintStrategy(
+  failedMint, 'post_gd25_35_xleg',
+), 0);
+assert.strictEqual(manager._riskReason({
+  strategyId: 'post_gd25_35_xleg', mint: failedMint,
+}), null);
+
 const trade = (price, offset) => {
   now = 1_000_000 + offset;
   manager.observeTrade({
@@ -305,15 +326,48 @@ setImmediate(() => {
   assert.strictEqual(settledDashboard.stats.settled_closed_positions, 1);
   assert.strictEqual(settledDashboard.stats.win_rate_pct, 100);
 
-  // The same mint never creates a second live episode.
+  // A fully closed mint may enter one fresh causal cycle a second time.
   trade(100, 8_000);
   trade(70, 8_300);
   trade(72, 8_600);
   await manager.entryQueue;
+  let repeatDashboard = store.liveTradingDashboard({ strategyId: 'post_gd25_35_xleg' });
+  assert.strictEqual(repeatDashboard.decisions.length, 2);
+  assert.strictEqual(repeatDashboard.positions.filter(
+    (row) => row.mint === 'MintLive111111111111111111111111111111111',
+  ).length, 2);
+  assert.strictEqual(store.successfulLiveEntryCountForMintStrategy(
+    'MintLive111111111111111111111111111111111',
+    'post_gd25_35_xleg',
+  ), 2);
+
+  // Close entry two, then prove a third fresh cycle is recorded but rejected.
+  trade(70, 15_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  trade(100, 16_000);
+  trade(70, 16_300);
+  trade(72, 16_600);
+  await manager.entryQueue;
+  repeatDashboard = store.liveTradingDashboard({ strategyId: 'post_gd25_35_xleg' });
+  assert.strictEqual(repeatDashboard.decisions.length, 3);
+  assert.strictEqual(repeatDashboard.positions.filter(
+    (row) => row.mint === 'MintLive111111111111111111111111111111111',
+  ).length, 2);
+  assert.strictEqual(repeatDashboard.decisions[0].action_status, 'RISK_REJECTED');
+  assert.strictEqual(repeatDashboard.decisions[0].action_reason, 'MINT_ENTRY_LIMIT');
+
+  // The successful count is stored in SQLite, so a process restart cannot
+  // reset the two-entry limit.
+  const restartedManager = new LiveTradingManager({ config, store, now: () => now });
+  restartedManager.start();
   assert.strictEqual(
-    store.liveTradingDashboard({ strategyId: 'post_gd25_35_xleg' }).decisions.length,
-    1,
+    restartedManager._riskReason({
+      strategyId: 'post_gd25_35_xleg',
+      mint: 'MintLive111111111111111111111111111111111',
+    }),
+    'MINT_ENTRY_LIMIT',
   );
+  await restartedManager.stop();
 
   // The safety lock disables execution but must not disable forward observation.
   const disabledMint = 'MintDisabled111111111111111111111111111111';
