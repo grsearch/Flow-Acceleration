@@ -365,6 +365,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-quality">
               <b>Launch Quality · E</b><small>只观察选币、存活与首次回踩</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="holder-growth">
+              <b>Observed Holder Growth · N</b><small>30秒新增买家速度、留存、集中度与资金流</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first">
               <b>Flow-First · C（已停）</b><small>负期望，历史数据保留</small>
             </button>
@@ -624,6 +627,28 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>时间</th><th>Mint</th><th>窗口</th><th>Buyers / 新增</th><th>Top1 / Top3</th><th>Retention / Creator</th><th>Buy / Sell / Net</th><th>回撤 / Sell Impact / 深度标准化</th></tr></thead>
                 <tbody id="launch-quality-snapshot-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="holder-growth" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Observed Holder Growth Shadow N</h2>
+                <p>使用成交流中可观测钱包，不等同于链上权威 Holder 数；独立表、永不发送交易</p>
+              </div>
+              <div class="strategy-expression" id="holder-growth-expression">等待 Holder Growth 配置…</div>
+              <div class="strategy-metric-groups" id="holder-growth-metrics"></div>
+              <div class="strategy-metric-groups" id="holder-growth-time-sessions"></div>
+              <div class="section-title"><h2>Balanced / Fast 表现</h2><p>每个 Mint 每组只建立一个独立模拟仓位</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>组别</th><th>样本 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>买家增长</th><th>留存 / NetFlow / Top3</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="holder-growth-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>200ms 后模拟入场；同一 Bonding Curve 市场计价</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>组别 / 状态</th><th>Mint</th><th>Buyers / 20–30秒新增</th><th>Retention / NetFlow / Top3</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="holder-growth-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1358,6 +1383,40 @@
       )).join('') : '<tr><td colspan="8" class="empty">等待5/10/20/30/60秒 Launch快照</td></tr>';
     }
 
+    function renderHolderGrowthShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const research = strategy.research || {};
+      const profiles = runtime.entryProfiles || [];
+      const profileLabels = Object.fromEntries(profiles.map(profile => [profile.id, profile.label]));
+      const exit = runtime.exitProfile || {};
+      const profileSummary = profiles.map(profile => (
+        `${profile.id}: Buyers≥${number(profile.minBuyers)} · 新增≥${number(profile.minNewBuyers)} · `
+        + `留存≥${rate(profile.minRetentionPct)} · Net≥${number(profile.minNetFlowSol,1)} SOL · `
+        + `Top3≤${rate(profile.maxTop3SharePct)}`
+      )).join(' / ');
+      document.querySelector('#holder-growth-expression').textContent = `Launch ${age(strategy.snapshotHorizonMs)}快照 → ${profileSummary || '等待阈值配置'} → ${number(strategy.entryDelayMs)}ms后首笔Curve成交 → +${number(exit.trailingActivationPct,1)}%激活、峰值回撤${number(exit.trailingStopPct,1)}%、硬止损${number(exit.hardStopPct,1)}%、${age(exit.maxHoldMs)}兜底`;
+      renderMetricGroups('#holder-growth-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW N' : '关闭', '永不签名或发送交易'],
+        ['快照评估 / 命中', `${number(runtime.evaluated)} / ${number(runtime.matched)}`, `回放抑制 ${number(runtime.replayMatchesSuppressed)}`],
+        ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
+        ['仓位 / 确定性成本', `${number(research.simulatedPositionSol,3)} SOL / ${rate(research.configuredCostPct)}`, '每个组别和Mint独立计数'],
+      ], []);
+      renderTimeSessions('#holder-growth-time-sessions', data.timeSessions);
+
+      const cohorts = data.cohorts || [];
+      document.querySelector('#holder-growth-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id || row.cohort_id)}</b><br><span class="table-note">${escapeHtml(row.exit_profile_id || '')}</span></td><td>${number(row.attempts)} / ${number(row.independent_mints)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">活动 ${number(row.active_positions)} · 待入场 ${number(row.pending_entries)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5盈利贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td><td>${number(row.average_buyers,1)} / +${number(row.average_new_buyers,1)}</td><td>${pct(row.average_retention_pct)} / ${number(row.average_net_flow_sol,2)} SOL / ${pct(row.average_top3_share_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待30秒 Holder Growth 快照满足 Balanced / Fast 条件</td></tr>';
+
+      const rows = data.positions || [];
+      document.querySelector('#holder-growth-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const prices = `${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${number(row.buyers)} / +${number(row.new_buyers)}</td><td>${pct(row.retention_pct)} / ${number(row.net_flow_sol,2)} SOL / ${pct(row.top3_share_pct)}</td><td>${prices}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">暂无 Holder Growth Shadow N 模拟仓位</td></tr>';
+    }
+
     function renderFlowFirstShadow(data) {
       const runtime = data.runtime || {};
       const runtimeCohorts = runtime.cohorts || [];
@@ -1549,6 +1608,7 @@
       const flowSmartConfirm = data.flowSmartConfirmShadow || { mode: 'SHADOW_L', enabled: false, activePositions: 0, pendingEntries: 0, confirmed: 0, rejected: 0 };
       const launchPullback = data.launchPullbackShadow || { mode: 'SHADOW_F', enabled: false, activePositions: 0, pendingEntries: 0, referencesSeen: 0, qualifiedReferences: 0 };
       const launchQuality = data.launchQualityObserver || { mode: 'OBSERVER_ONLY', enabled: false, activeLaunches: 0, launchesObserved: 0, snapshotsWritten: 0, referencePullbacks: 0 };
+      const holderGrowth = data.holderGrowthShadow || { mode: 'SHADOW_N', enabled: false, activePositions: 0, pendingEntries: 0, evaluated: 0, matched: 0, opened: 0, closed: 0 };
       const migratedRebound = data.migratedDropReboundShadow || { mode: 'SHADOW_G', enabled: false, trackedMints: 0, activePositions: 0, pendingEntries: 0, candidates: 0, signals: 0 };
       const rangeScalper = data.rangeScalperShadow || { mode: 'SHADOW_J', enabled: false, trackedMints: 0, rangeActive: 0, activePositions: 0, pendingEntries: 0, candidates: 0, signals: 0 };
       const bondingMomentum = data.bondingCurveMomentumShadow || { mode: 'SHADOW_H', enabled: false, activePositions: 0, pendingEntries: 0, signals: 0, snapshotsWritten: 0 };
@@ -1563,7 +1623,7 @@
         ['Range Scalper J', [['模式', rangeScalper.enabled ? 'SHADOW J' : '关闭'], ['订阅 Mint', number(rangeScalper.trackedMints)], ['区间有效', number(rangeScalper.rangeActive)], ['候选 / 信号', `${number(rangeScalper.candidates)} / ${number(rangeScalper.signals)}`], ['待入场', number(rangeScalper.pendingEntries)], ['活动仓位', number(rangeScalper.activePositions)], ['延长订阅', number(rangeScalper.extendedMints)], ['数据库仓位', number(data.database.rangeScalperShadowPositions?.total)], ['链上交易', '永不发送']]],
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Holder Growth N仓位', number(data.database.holderGrowthShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['策略', escapeHtml(activeLiveStrategy.label || '未启用')], ['规则', `毕业后≤${age(liveEntry.trackingAgeMs)} · 1秒跌${number(liveEntry.dropMinPct)}–${number(liveEntry.dropMaxPct)}% · 反弹${number(liveEntry.reboundMinPct)}–${number(liveEntry.reboundMaxPct)}%`], ['单笔', `${number(activeLiveStrategy.positionSizeSol,4)} SOL`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Flow-First C', [['模式', flowFirst.enabled ? 'SHADOW C' : '关闭'], ['Primary信号', number(flowFirst.signalsSeen)], ['独立Episode', number(flowFirst.episodes)], ['重复行去重', number(flowFirst.deduplicated)], ['待入场', number(flowFirst.pendingEntries)], ['活动模拟仓位', number(flowFirst.activePositions)], ['C组退出', '5秒 / 7.5% / 12.5%'], ['链上交易', '永不发送']]],
@@ -1575,6 +1635,7 @@
         ['Bonding Momentum H', [['模式', bondingMomentum.enabled ? 'SHADOW H' : '关闭'], ['订单流信号', number(bondingMomentum.signals)], ['待入场', number(bondingMomentum.pendingEntries)], ['活动仓位', number(bondingMomentum.activePositions)], ['因果快照', number(bondingMomentum.snapshotsWritten)], ['无成交快照', number(bondingMomentum.snapshotsMissed)], ['组合', '四组入场 × 三组退出'], ['链上交易', '永不发送']]],
         ['Graduation Hold I', [['模式', graduationHold.enabled ? 'SHADOW I' : '关闭'], ['早期Primary', number(graduationHold.signalsSeen)], ['合格入场信号', number(graduationHold.eligibleSignals)], ['待入场', number(graduationHold.pendingEntries)], ['活动仓位', number(graduationHold.activePositions)], ['检查点通过 / 失败', `${number(graduationHold.gatesPassed)} / ${number(graduationHold.gatesFailed)}`], ['毕业就绪', number(graduationHold.graduationReady)], ['链上交易', '永不发送']]],
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['旧7.5%参考', number(launchQuality.referencePullbacks)], ['FD深回踩参考 / 过深拒绝', `${number(launchQuality.deepReferences)} / ${number(launchQuality.deepRejected)}`], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
+        ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 早期留存'], ['数据表', '独立，不混入旧策略'], ['链上交易', '永不发送']]],
         ['Scope Guard', [['实盘入场', 'PumpSwap 毕业后独立深跌反弹周期'], ['实盘出场', 'PumpSwap XLEG'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓 / 最多成功2次'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
@@ -1639,6 +1700,9 @@
         ],
         'launch-quality': () => [
           json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60').then(renderLaunchQualityObserver),
+        ],
+        'holder-growth': () => [
+          json('/api/holder-growth-shadow?positionLimit=100').then(renderHolderGrowthShadow),
         ],
         'flow-first': () => [
           json('/api/flow-first-shadow?positionLimit=30').then(renderFlowFirstShadow),
