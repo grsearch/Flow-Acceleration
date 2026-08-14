@@ -39,6 +39,7 @@ function main() {
   const store = makeStore();
   let now = 100_000;
   const references = [];
+  const snapshots = [];
   const observer = new LaunchQualityObserver({
     config: {
       enabled: true,
@@ -54,6 +55,7 @@ function main() {
     store,
     now: () => now,
     onReference: (reference) => references.push(reference),
+    onSnapshot: (snapshot, options) => snapshots.push({ snapshot, options }),
   });
   observer.onCreate({
     mint: 'launch-quality-mint',
@@ -94,6 +96,8 @@ function main() {
     JSON.stringify(dashboard.observations[0].reference_features),
   );
   assert.strictEqual(dashboard.snapshots.length, 4, '60s snapshot must remain pending');
+  assert.strictEqual(snapshots.length, 4, 'each newly inserted causal snapshot must emit once');
+  assert.ok(snapshots.every((row) => row.options.replay === false));
 
   feed({ timestampMs: 160_000, price: 1.42, wallet: 'wallet-m' });
   now = 163_000;
@@ -104,6 +108,8 @@ function main() {
     [5_000, 10_000, 20_000, 30_000, 60_000],
   );
   assert.strictEqual(observer.health().activeLaunches, 0);
+  assert.strictEqual(snapshots.length, 5);
+  assert.ok(snapshots.every((row) => row.snapshot.inserted === true));
   assert.strictEqual(references.length, 1, 'live reference must be emitted exactly once');
   assert.strictEqual(references[0].mint, 'launch-quality-mint');
   assert.ok(references[0].features.netFlowSol > 0);
@@ -121,6 +127,7 @@ function main() {
   assert.strictEqual(afterReplay.label_status, 'COMPLETE');
   assert.strictEqual(afterReplay.rebound_at, completed.rebound_at);
   assert.strictEqual(references.length, 1, 'startup replay must not emit a trading reference');
+  assert.strictEqual(snapshots.length, 5, 'replay must not re-emit an existing snapshot');
   const immutable = store.updateLaunchQualityObservation('launch-quality-mint', {
     status: 'NO_REFERENCE_PULLBACK',
     labelStatus: 'NO_REFERENCE',
