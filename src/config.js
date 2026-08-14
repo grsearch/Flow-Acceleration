@@ -431,7 +431,1390 @@ const config = {
     maxSignalAgeMs: integerEnv('FLOW_FIRST_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     entryDelayMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    ex…12338 tokens truncated…护 / +15%激活 / 回撤12.5%', exitMode: 'TRAILING',
+    exitDelayMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxHoldMs: integerEnv('FLOW_FIRST_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    bigWinnerPct: numberEnv('FLOW_FIRST_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'C5',
+        label: 'C5 固定持有5秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_FIRST_SHADOW_FIXED_HOLD_MS', 5_000, { min: 250 }),
+      },
+      {
+        id: 'C75',
+        label: 'C7.5 峰值回撤7.5%',
+        exitMode: 'TRAILING',
+        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C75_TRAILING_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'C125',
+        label: 'C12.5 峰值回撤12.5%',
+        exitMode: 'TRAILING',
+        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C125_TRAILING_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_FIRST_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Smart Wallet pullback A/B research. This path only records simulated
+  // positions and never owns an executor or signing key.
+  smartPullbackShadow: {
+    enabled: booleanEnv('FLOW_SMART_PULLBACK_SHADOW_ENABLED', true),
+    minSmartBuySol: numberEnv('FLOW_SMART_PULLBACK_MIN_BUY_SOL', 0.1, { min: 0.000001 }),
+    episodeGapMs: integerEnv('FLOW_SMART_PULLBACK_EPISODE_GAP_MS', 30_000, { min: 1_000 }),
+    confirmationWindowMs: integerEnv(
+      'FLOW_SMART_PULLBACK_CONFIRMATION_WINDOW_MS',
+      15_000,
+      { min: 1_000 },
+    ),
+    pullbackPct: numberEnv('FLOW_SMART_PULLBACK_DRAWDOWN_PCT', 2.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    reboundPct: numberEnv('FLOW_SMART_PULLBACK_REBOUND_PCT', 7.5, {
+      min: 0.1,
+      max: 500,
+    }),
+    minReboundBuyers: integerEnv('FLOW_SMART_PULLBACK_MIN_REBOUND_BUYERS', 1, { min: 1 }),
+    maxEntryVsSmartBuyPct: numberEnv('FLOW_SMART_PULLBACK_MAX_ENTRY_VS_SMART_PCT', 2, {
+      min: 0,
+      max: 100,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_PULLBACK_MAX_CONFIRM_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxHoldMs: integerEnv('FLOW_SMART_PULLBACK_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    bigWinnerPct: numberEnv('FLOW_SMART_PULLBACK_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'A',
+        label: 'A · Trailing 7.5%',
+        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_A_TRAILING_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'B',
+        label: 'B · Trailing 12.5%',
+        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_B_TRAILING_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
+    }),
+  },
+
+  // Isolated true Smart Wallet OPEN research. This path has its own table and
+  // never signs or sends a transaction; existing Shadow strategies are unchanged.
+  smartOpenShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_SMART_OPEN_SHADOW_ENABLED', false),
+    minSmartOpenSol: numberEnv('FLOW_SMART_OPEN_SHADOW_MIN_SOL', 1, { min: 0.000001 }),
+    preBuyWindowMs: integerEnv('FLOW_SMART_OPEN_SHADOW_PREBUY_WINDOW_MS', 2_000, {
+      min: 100,
+    }),
+    minPreBuyers: integerEnv('FLOW_SMART_OPEN_SHADOW_MIN_PREBUY_BUYERS', 2, { min: 0 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_OPEN_SHADOW_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    bigWinnerPct: numberEnv('FLOW_SMART_OPEN_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'D0',
+        label: 'D0 · 真OPEN固定5秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D0_HOLD_MS', 5_000, { min: 250 }),
+        followSmartExit: false,
+      },
+      {
+        id: 'D1',
+        label: 'D1 · 延迟激活移动止盈',
+        exitMode: 'DELAYED_TRAILING',
+        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_HARD_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_SMART_OPEN_SHADOW_D1_TRAILING_ACTIVATION_PCT',
+          20,
+          { min: 0, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_TRAILING_STOP_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D1_MAX_HOLD_MS', 60_000, {
+          min: 1_000,
+        }),
+        followSmartExit: false,
+      },
+      {
+        id: 'D2',
+        label: 'D2 · 跟随Smart减仓/清仓',
+        exitMode: 'SMART_FOLLOW',
+        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D2_HARD_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D2_MAX_HOLD_MS', 180_000, {
+          min: 1_000,
+        }),
+        followSmartExit: true,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Forward-only confirmation research. A Primary Flow signal is only eligible
+  // after a monitored wallet opens the same mint; entry is then simulated on
+  // the first later Bonding Curve trade. This intentionally does not reuse the
+  // retrospective smart_signal_confirmations label as an earlier entry price.
+  flowSmartConfirmShadow: {
+    enabled: booleanEnv('FLOW_SMART_CONFIRM_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_CONFIRM_SHADOW_POSITION_SOL'),
+    minSmartOpenSol: numberEnv('FLOW_SMART_CONFIRM_SHADOW_MIN_OPEN_SOL', 0.1, { min: 0 }),
+    entryDelayMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv(
+      'FLOW_SMART_CONFIRM_SHADOW_MAX_ENTRY_JUMP_PCT',
+      10,
+      { min: 0, max: 100 },
+    ),
+    bigWinnerPct: numberEnv('FLOW_SMART_CONFIRM_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'L5_F5',
+        label: 'L5-F5 · Smart OPEN within 5s / fixed 5s',
+        maxConfirmationDelayMs: 5_000,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 5_000,
+      },
+      {
+        id: 'L15_F5',
+        label: 'L15-F5 · Smart OPEN within 15s / fixed 5s',
+        maxConfirmationDelayMs: 15_000,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 5_000,
+      },
+      {
+        id: 'L5_T15',
+        label: 'L5-T15 · Smart OPEN within 5s / trailing 15%',
+        maxConfirmationDelayMs: 5_000,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 15,
+        hardStopPct: 25,
+        minHoldMs: 1_000,
+        maxHoldMs: 60_000,
+      },
+      {
+        id: 'L15_T20',
+        label: 'L15-T20 · Smart OPEN within 15s / trailing 20%',
+        maxConfirmationDelayMs: 15_000,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 20,
+        trailingDrawdownPct: 20,
+        hardStopPct: 30,
+        minHoldMs: 2_000,
+        maxHoldMs: 120_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_CONFIRM_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Independent first-pullback execution research. References are emitted by
+  // LaunchQualityObserver, but every simulated position lives in its own table.
+  launchPullbackShadow: {
+    enabled: booleanEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv(
+      'FLOW_LAUNCH_PULLBACK_SHADOW_MAX_ENTRY_JUMP_PCT',
+      10,
+      { min: 0, max: 100 },
+    ),
+    bigWinnerPct: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_BIG_WINNER_PCT', 50, {
+      min: 1,
+    }),
+    profiles: [
+      {
+        id: 'F1',
+        label: 'F1 · NetFlow≥15 / Creator≤5%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F1_MIN_NET_FLOW_SOL', 15, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F1_MAX_CREATOR_SHARE_PCT',
+          5,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'F2',
+        label: 'F2 · NetFlow≥20 / Creator≤10%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'F3',
+        label: 'F3 对照 · NetFlow≥20 / Creator≤20%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F3_MIN_NET_FLOW_SOL', 20, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F3_MAX_CREATOR_SHARE_PCT',
+          20,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'FQ1',
+        label: 'FQ1 前向 · F1 + Buyers≥10 / Recent≥3 / Retention≥50% / Top3≤70%',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 10,
+        minRecentBuyers: 3,
+        minRetentionPct: 50,
+        maxTop3SharePct: 70,
+      },
+      {
+        id: 'FQ2',
+        label: 'FQ2 前向 · F1 + Buyers≥15 / Recent≥3 / Retention≥50% / Top3≤70%',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 15,
+        minRecentBuyers: 3,
+        minRetentionPct: 50,
+        maxTop3SharePct: 70,
+      },
+    ],
+    holds: [
+      {
+        id: '3S',
+        label: '固定持有3秒',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_3S_MS', 3_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: '8S',
+        label: '固定持有8秒',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+    ],
+    // These cohorts retain the exact F1/F2 entry filters above and only vary exits.
+    // Their IDs are intentionally independent from the historical fixed-hold cohorts.
+    trailingCohorts: [
+      {
+        id: 'FT_A',
+        label: 'FT-A · F2立即激活/回撤20%/无硬止损',
+        profileId: 'F2',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_ACTIVATION_PCT', 0, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: null,
+      },
+      {
+        id: 'FT_B',
+        label: 'FT-B · F1盈利10%激活/回撤20%/止损30%',
+        profileId: 'F1',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_ACTIVATION_PCT', 10, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FT_C',
+        label: 'FT-C · F2盈利30%激活/回撤20%/止损30%',
+        profileId: 'F2',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FT_D',
+        label: 'FT-D对照 · F1盈利30%激活/回撤15%/止损30%',
+        profileId: 'F1',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_DRAWDOWN_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FQ_X15',
+        label: 'FQ-X15 · FQ1盈利8%激活/回撤5%/15秒兜底',
+        profileId: 'FQ1',
+        trailingActivationPct: 8,
+        trailingDrawdownPct: 5,
+        minHoldMs: 1_000,
+        maxHoldMs: 15_000,
+        hardStopPct: 12.5,
+      },
+      {
+        id: 'FQ_X30',
+        label: 'FQ-X30 · FQ2盈利10%激活/回撤7.5%/30秒兜底',
+        profileId: 'FQ2',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 7.5,
+        minHoldMs: 2_000,
+        maxHoldMs: 30_000,
+        hardStopPct: 15,
+      },
+    ],
+    // New entry cohorts intentionally do not reuse F1/F2/F3/FT IDs. All four
+    // share the same quality/exit gates so their entry depth is comparable.
+    deepCohorts: launchDeepPullbackProfiles.map((profile) => ({
+      ...profile,
+      profileId: profile.id,
+      minNetFlowSol: numberEnv('FLOW_LAUNCH_DEEP_MIN_NET_FLOW_SOL', 15, { min: 0 }),
+      maxCreatorSharePct: numberEnv('FLOW_LAUNCH_DEEP_MAX_CREATOR_SHARE_PCT', 5, {
+        min: 0, max: 100,
+      }),
+      minBuyers: 0,
+      minRecentBuyers: 0,
+      minRetentionPct: 0,
+      maxTop3SharePct: 100,
+      fixedHoldMs: integerEnv('FLOW_LAUNCH_DEEP_FIXED_HOLD_MS', 5_000, { min: 250 }),
+    })),
+    // New independent cohorts preserve all historical F/FT/FD definitions.
+    // They are based on the chronological 70/30 screen from the latest export:
+    // low holder concentration was stable at 10s, while creator<=5% with
+    // continuing buyers retained a useful 30s right tail.
+    optimizationCohorts: [
+      {
+        id: 'FO_F2_J2_3S',
+        label: 'FO-F2-J2 · F2 + 入场跳价<=2% / fixed 3s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_F2_J2',
+        minNetFlowSol: 20,
+        maxCreatorSharePct: 10,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        maxEntryPriceJumpPct: 2,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 3_000,
+      },
+      {
+        id: 'FO_C70_10S',
+        label: 'FO-C70 · Top3<=70% / fixed 10s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_C70',
+        minNetFlowSol: 0,
+        maxCreatorSharePct: 100,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 70,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 10_000,
+      },
+      {
+        id: 'FO_C70_T15',
+        label: 'FO-C70-T15 · Top3<=70% / trailing 15%',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_C70',
+        minNetFlowSol: 0,
+        maxCreatorSharePct: 100,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 70,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 15,
+        hardStopPct: 25,
+        minHoldMs: 1_000,
+        maxHoldMs: 60_000,
+      },
+      {
+        id: 'FO_RB10_30S',
+        label: 'FO-RB10 · Creator<=5% / recent buyers>=10 / fixed 30s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_RB10',
+        minNetFlowSol: 5,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 10,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 30_000,
+      },
+      {
+        id: 'FO_RB10_T20',
+        label: 'FO-RB10-T20 · Creator<=5% / recent buyers>=10 / trailing 20%',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_RB10',
+        minNetFlowSol: 5,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 10,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 20,
+        trailingDrawdownPct: 20,
+        hardStopPct: 30,
+        minHoldMs: 2_000,
+        maxHoldMs: 120_000,
+      },
+      {
+        id: 'FO_D12_R3_10S',
+        label: 'FO-D12-R3 · deep pullback / fixed 10s',
+        referenceProfileId: 'DEEP_D12_5_R3',
+        referencePullbackPct: 12.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_D12_R3',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 10_000,
+      },
+      {
+        id: 'FO_D12_R3_T15',
+        label: 'FO-D12-R3-T15 · deep pullback / trailing 15%',
+        referenceProfileId: 'DEEP_D12_5_R3',
+        referencePullbackPct: 12.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_D12_R3',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 15,
+        hardStopPct: 25,
+        minHoldMs: 1_000,
+        maxHoldMs: 60_000,
+      },
+      {
+        id: 'F2_8S_NF30',
+        label: 'F2-8S-NF30 | F2 + NetFlow>=30 SOL / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F2_NF30',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'FT_C_NF30',
+        label: 'FT-C-NF30 | F2 + NetFlow>=30 SOL / right-tail trailing',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F2_NF30',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'F_ABSORB3_8S',
+        label: 'F-ABSORB3 | F2 + peak sell>=3 SOL + refill>=50% / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_ABSORB3',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minSellSolSincePeak: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_ABSORB3_MIN_SELL_SOL', 3, { min: 0 },
+        ),
+        minBuyRefillRatio: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
+        ),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'F_ABSORB5_RUNNER',
+        label: 'F-ABSORB5 | F2 + peak sell>=5 SOL + refill>=50% / right-tail trailing',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_ABSORB5',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minSellSolSincePeak: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_ABSORB5_MIN_SELL_SOL', 5, { min: 0 },
+        ),
+        minBuyRefillRatio: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
+        ),
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'F_REACCEL0_8S',
+        label: 'F-REACCEL0 | F2 + current 1s net>=0 + acceleration>=0 / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_REACCEL0',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minRecentNetFlow1s: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_NET_FLOW_1S_SOL', 0,
+        ),
+        minNetFlowAcceleration1s: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_ACCEL_1S_SOL', 0,
+        ),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Independent early Bonding Curve research derived from the observed CYA
+  // wallet pattern. It uses public order flow only and never follows, signs,
+  // or sends the monitored wallet's transactions.
+  cyaEarlyPyramidShadow: {
+    enabled: provenNegativeShadowsEnabled
+      && booleanEnv('FLOW_CYA_EARLY_PYRAMID_SHADOW_ENABLED', false),
+    positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
+    stateWindowMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_WINDOW_MS', 5_000, {
+      min: 2_000,
+      max: 30_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_RETENTION_MS', 240_000, {
+      min: 30_000,
+      max: 15 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0,
+      max: 100,
+    }),
+    addStepPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_STEP_PCT', 15, {
+      min: 0.1,
+      max: 500,
+    }),
+    addFraction: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_FRACTION', 1 / 12, {
+      min: 0.001,
+      max: 1,
+    }),
+    addCooldownMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ADD_COOLDOWN_MS', 250, {
+      min: 0,
+      max: 30_000,
+    }),
+    maxAdds: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ADDS', 6, { min: 0, max: 20 }),
+    firstTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP1_PCT', 50, { min: 1 }),
+    secondTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP2_PCT', 100, { min: 1 }),
+    hardStopPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_HARD_STOP_PCT', 30, {
+      min: 0.1,
+      max: 100,
+    }),
+    noStrengthMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MS', 25_000, {
+      min: 1_000,
+    }),
+    noStrengthMfePct: numberEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MFE_PCT', 20, {
+      min: 0,
+    }),
+    maxHoldMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_HOLD_MS', 180_000, {
+      min: 1_000,
+    }),
+    entryProfiles: [
+      {
+        id: 'K5_30',
+        label: 'K5-30 · AGE 5–30s / Curve 20–60%',
+        minAgeMs: 5_000,
+        maxAgeMs: 30_000,
+        minCurvePct: 20,
+        maxCurvePct: 60,
+        minBuyers5s: 3,
+        maxBuyers5s: 14,
+        minNetFlow5s: 0.1,
+        maxNetFlow5s: 15,
+        maxReturn2sPct: 15,
+      },
+      {
+        id: 'K3_30',
+        label: 'K3-30 · AGE 3–30s / Curve 20–60%',
+        minAgeMs: 3_000,
+        maxAgeMs: 30_000,
+        minCurvePct: 20,
+        maxCurvePct: 60,
+        minBuyers5s: 2,
+        maxBuyers5s: 18,
+        minNetFlow5s: 0,
+        maxNetFlow5s: 20,
+        maxReturn2sPct: 25,
+      },
+    ],
+    exitProfiles: [
+      { id: 'T20', label: 'Runner peak drawdown 20%', trailingStopPct: 20 },
+      { id: 'T30', label: 'Runner peak drawdown 30%', trailingStopPct: 30 },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
+    }),
+  },
+
+  // Independent pre-migration Bonding Curve momentum research. It evaluates
+  // causal order-flow edges and simulated exits only; no execution path exists.
+  bondingCurveMomentumShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_BONDING_MOMENTUM_SHADOW_ENABLED', false),
+    positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
+    stateWindowMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_WINDOW_MS', 5_000, {
+      min: 5_000,
+      max: 30_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_RETENTION_MS', 60_000, {
+      min: 5_000,
+      max: 10 * 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_BONDING_MOMENTUM_EPISODE_COOLDOWN_MS', 5_000, {
+      min: 0,
+      max: 10 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_BONDING_MOMENTUM_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    snapshotHorizonsMs: millisecondListEnv(
+      'FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS',
+      [1, 2, 3, 5, 8, 10, 20, 30],
+    ),
+    maxSnapshotLagMs: integerEnv('FLOW_BONDING_MOMENTUM_MAX_SNAPSHOT_LAG_MS', 2_000, {
+      min: 0,
+      max: 30_000,
+    }),
+    flowExitNetFlowSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_NET_SOL', 0),
+    flowExitMaxBuyTxAccel: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_BUY_TX_ACCEL', 0),
+    flowExitMinSellSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_MIN_SELL_SOL', 0.5, {
+      min: 0,
+    }),
+    bigWinnerPct: numberEnv('FLOW_BONDING_MOMENTUM_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'H0',
+        label: 'H0 · Lifecycle订单流基线',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+      },
+      {
+        id: 'H1',
+        label: 'H1 · 买单速度加速',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+        minBuyTxAccel1s: 6,
+        maxTop1SharePct: 50,
+      },
+      {
+        id: 'H2',
+        label: 'H2 · 新买家资金分散',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minNewBuyers1s: 4,
+        minBuyTx1s: 5,
+        maxTop1SharePct: 30,
+      },
+      {
+        id: 'H3',
+        label: 'H3 · 卖压衰减转换',
+        minAgeMs: 10_000,
+        maxAgeMs: 180_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 3,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+        minPriorSellSol1s: 0.5,
+        maxSellDecayRatio: 0.25,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X3',
+        label: 'X3 · 固定持有3秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FIXED_HOLD_MS', 3_000, {
+          min: 250,
+        }),
+        maxHoldMs: 3_000,
+      },
+      {
+        id: 'XF',
+        label: 'XF · 订单流反转 / 10秒兜底',
+        exitMode: 'FLOW_REVERSAL',
+        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MIN_HOLD_MS', 500, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MAX_HOLD_MS', 10_000, {
+          min: 1_000,
+        }),
+      },
+      {
+        id: 'XT',
+        label: 'XT · +10%激活 / 回撤7.5% / 30秒兜底',
+        exitMode: 'WINNER_TRAIL',
+        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MIN_HOLD_MS', 500, { min: 0 }),
+        trailingActivationPct: numberEnv(
+          'FLOW_BONDING_MOMENTUM_TRAIL_ACTIVATION_PCT',
+          10,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_BONDING_MOMENTUM_TRAIL_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MAX_HOLD_MS', 30_000, {
+          min: 1_000,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
+    }),
+  },
+
+  // Graduation probability is used only as a hold/exit overlay on an earlier
+  // Primary Flow entry. It never opens a fresh position above the configured
+  // Curve ceiling and never owns a signer or transaction executor.
+  graduationHoldShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_GRADUATION_HOLD_SHADOW_ENABLED', false),
+    signalVariant: 'primary_3w',
+    positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
+    maxSignalLatencyMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_SIGNAL_LATENCY_MS', 1_500, {
+      min: 100,
+    }),
+    maxSignalCurvePct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_CURVE_PCT', 70, {
+      min: 0,
+      max: 100,
+    }),
+    maxTokenAgeMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_TOKEN_AGE_MS', 10 * 60_000, {
+      min: 1_000,
+      max: 60 * 60_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_GRADUATION_HOLD_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 5_000,
+      max: 60 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    hardStopPct: numberEnv('FLOW_GRADUATION_HOLD_HARD_STOP_PCT', 30, {
+      min: 0.1,
+      max: 100,
+    }),
+    controlTrailingStopPct: numberEnv('FLOW_GRADUATION_HOLD_I0_TRAILING_STOP_PCT', 7.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    controlMaxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_I0_MAX_HOLD_MS', 60_000, {
+      min: 1_000,
+    }),
+    maxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_HOLD_MS', 120_000, {
+      min: 1_000,
+    }),
+    firstCheckpointTimeoutMs: integerEnv(
+      'FLOW_GRADUATION_HOLD_FIRST_CHECKPOINT_TIMEOUT_MS',
+      20_000,
+      { min: 1_000 },
+    ),
+    stepTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_STEP_TIMEOUT_MS', 3_000, {
+      min: 250,
+    }),
+    graduationTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_GRADUATION_TIMEOUT_MS', 15_000, {
+      min: 1_000,
+    }),
+    ammExitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_I2_AMM_EXIT_DELAY_MS', 5_000, {
+      min: 0,
+    }),
+    bridgeMinBuyers5: integerEnv('FLOW_GRADUATION_HOLD_I2_MIN_BUYERS_5S', 12, {
+      min: 1,
+    }),
+    bridgeMaxCumulativeTrades: integerEnv(
+      'FLOW_GRADUATION_HOLD_I2_MAX_CUMULATIVE_TRADES',
+      20,
+      { min: 1 },
+    ),
+    checkpoints: [70, 80, 85, 90, 95, 97],
+    checkpointRules: [
+      {
+        thresholdPct: 70,
+        minNetFlow5Sol: 0,
+        minBuyers5: 3,
+        maxSellSol5: 1,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 80,
+        minNetFlow5Sol: 0,
+        minBuyers5: 1,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 85,
+        minNetFlow5Sol: 0,
+        minBuyers5: 1,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 90,
+        minNetFlow5Sol: 0,
+        minBuyers5: 4,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 95,
+        minNetFlow5Sol: 0,
+        minBuyers5: 4,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+    ],
+    cohorts: [
+      {
+        id: 'I0',
+        label: 'I0 · Early Entry移动止盈对照',
+        exitMode: 'CONTROL_TRAILING',
+      },
+      {
+        id: 'I1',
+        label: 'I1 · 概率检查点 / 97%毕业前退出',
+        exitMode: 'PRE_GRAD_CHECKPOINTS',
+      },
+      {
+        id: 'I2',
+        label: 'I2 · 严格概率检查点 / 穿越毕业',
+        exitMode: 'THROUGH_GRADUATION',
+      },
+    ],
+    bigWinnerPct: numberEnv('FLOW_GRADUATION_HOLD_BIG_WINNER_PCT', 50, { min: 1 }),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
+    }),
+  },
+
+  // Lifecycle oversold-rebound research. Pre-migration curve trades and the
+  // post-migration PumpSwap subscription use separate cohorts; profiles below
+  // are orthogonal online experiments and never create or sign a transaction.
+  migratedDropReboundShadow: {
+    enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
+    lifecycleStages: [
+      { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
+    ],
+    stateRetentionMs: integerEnv('FLOW_REBOUND_DETECTOR_STATE_RETENTION_MS', 60_000, {
+      min: 5_000,
+      max: 10 * 60_000,
+    }),
+    trackingAgeMs: Math.min(120_000, integerEnv('FLOW_MIGRATED_REBOUND_TRACKING_MS', 120_000, {
+      min: 30_000,
+      max: 30 * 60_000,
+    })),
+    positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATED_REBOUND_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0,
+      max: 100,
+    }),
+    ammPriceContinuity: {
+      minRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MIN_RATIO', 0.2, {
+        min: 0.0001,
+        max: 1,
+      }),
+      maxRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MAX_RATIO', 5, {
+        min: 1,
+      }),
+      resetAfterMs: integerEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_RESET_MS', 15_000, {
+        min: 1_000,
+      }),
+      confirmationTrades: integerEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TRADES',
+        2,
+        { min: 2, max: 10 },
+      ),
+      confirmationWindowMs: integerEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_WINDOW_MS',
+        2_000,
+        { min: 100, max: 30_000 },
+      ),
+      confirmationTolerancePct: numberEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TOLERANCE_PCT',
+        20,
+        { min: 0.1, max: 100 },
+      ),
+    },
+    bigWinnerPct: numberEnv('FLOW_MIGRATED_REBOUND_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'GD25_35',
+        label: '深跌25–35%',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GE30_R23_F1',
+        label: '毕业后30秒内 · 反弹2%–3% · 每Mint首次',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+      },
+      {
+        id: 'GE30_R23_F3',
+        label: '毕业后30秒内 · 反弹2%–3% · 每Mint前三次',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 3,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X3',
+        label: '固定持有3秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_3S_MS', 3_000, { min: 250 }),
+      },
+      {
+        id: 'X8',
+        label: '固定持有8秒',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_8S_MS', 8_000, { min: 250 }),
+      },
+      {
+        id: 'XLEG',
+        label: '旧版 +8%激活 / 回撤3% / 15秒兜底',
+        exitMode: 'LEGACY',
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT',
+          8,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, {
+          min: 0.1,
+          max: 100,
+        }),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+          max: 1_000,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS',
+          5_000,
+          { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      },
+      {
+        id: 'XB50',
+        label: '50% XLEG core + 50% fixed-8s runner',
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'BLEND_XLEG_X8',
+        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_50_CORE_WEIGHT_PCT', 50, {
+          min: 0,
+          max: 100,
+        }),
+        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
+          min: 250,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+      },
+      {
+        id: 'XB25',
+        label: '25% XLEG core + 75% fixed-8s runner',
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'BLEND_XLEG_X8',
+        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_25_CORE_WEIGHT_PCT', 25, {
+          min: 0,
+          max: 100,
+        }),
+        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
+          min: 250,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+      },
+      ...[
+        ['XR3_H12', 3_000, 12],
+        ['XR3_H15', 3_000, 15],
+        ['XR4_H12', 4_000, 12],
+        ['XR4_H15', 4_000, 15],
+      ].map(([id, fallbackLossCheckMs, fallbackHardStopPct]) => ({
+        id,
+        label: `${id} | early weak-state exit`,
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        hardStopPct: numberEnv(`FLOW_MIGRATED_REBOUND_RISK_HARD_STOP_${fallbackHardStopPct}_PCT`,
+          fallbackHardStopPct, { min: 0.1, max: 100 }),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv(
+          `FLOW_MIGRATED_REBOUND_RISK_CHECK_${fallbackLossCheckMs / 1_000}S_MS`,
+          fallbackLossCheckMs,
+          { min: 0 },
+        ),
+        lossCheckRecoveryPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_RISK_MAX_RECOVERY_FROM_LOW_PCT', 1, { min: 0, max: 100 },
+        ),
+        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      })),
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
+    }),
+  },
+
+  // Independent post-migration continuation study. The entry thresholds were
+  // selected from the chronological migration-cohort backtest; every exit is
+  // stored as a separate cohort so long-hold winner capture stays auditable.
+  migrationContinuityShadow: {
+    enabled: booleanEnv('FLOW_MIGRATION_CONTINUITY_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
+    confirmWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_CONFIRM_MS', 5_000, {
+      min: 1_000, max: 15_000,
+    }),
+    detectionDeadlineMs: integerEnv('FLOW_MIGRATION_CONTINUITY_DETECTION_MS', 10_000, {
+      min: 5_000, max: 30_000,
+    }),
+    flowWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_FLOW_WINDOW_MS', 3_000, {
+      min: 1_000, max: 10_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0, max: 100,
+    }),
+    entryProfile: {
+      id: 'MC_C5',
+      label: 'MC-C · 毕业后5秒质量延续',
+      minBuyers: integerEnv('FLOW_MIGRATION_CONTINUITY_MIN_BUYERS', 20, { min: 1 }),
+      minNetFlowSol: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_NET_FLOW_SOL', 5, { min: 0 }),
+      minReturnPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_RETURN_PCT', 5, { min: -100 }),
+      maxSellBuyRatio: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_SELL_BUY_RATIO', 0.6, {
+        min: 0, max: 10,
+      }),
+    },
+    exitProfiles: [
+      {
+        id: 'E60', label: '固定60秒', exitMode: 'FIXED_HOLD', fixedHoldMs: 60_000,
+        hardStopPct: 20, maxHoldMs: 60_000,
+      },
+      {
+        id: 'E120', label: '固定120秒', exitMode: 'FIXED_HOLD', fixedHoldMs: 120_000,
+        hardStopPct: 20, maxHoldMs: 120_000,
+      },
+      {
+        id: 'T10', label: '5秒保护 / +10%激活 / 回撤10%', exitMode: 'TRAILING',
+        minHoldMs: 5_000, trailingActivationPct: 10, trailingStopPct: 10,
+        hardStopPct: 20, maxHoldMs: 120_000,
+      },
+      {
+        id: 'T12_5', label: '10秒保护 / +15%激活 / 回撤12.5%', exitMode: 'TRAILING',
         minHoldMs: 10_000, trailingActivationPct: 15, trailingStopPct: 12.5,
         hardStopPct: 20, maxHoldMs: 180_000,
       },
@@ -977,4 +2360,3 @@ module.exports = {
   validateConfig,
   streamTokenFor,
 };
-
