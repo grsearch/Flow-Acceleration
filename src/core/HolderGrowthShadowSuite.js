@@ -673,4 +673,3 @@ class HolderGrowthShadowSuite {
 }
 
 module.exports = { HolderGrowthShadowSuite, STATUS, shadowPrice };
-
