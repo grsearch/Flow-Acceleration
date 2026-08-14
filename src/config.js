@@ -363,6 +363,16 @@ const config = {
         reboundTimeoutMs: integerEnv('FLOW_LIVE_POST_GD25_35_REBOUND_TIMEOUT_MS', 1_000, {
           min: 100,
         }),
+        maxEntriesPerMint: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_MAX_ENTRIES_PER_MINT',
+          2,
+          { min: 1, max: 10 },
+        ),
+        reentryCooldownMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_REENTRY_COOLDOWN_MS',
+          1_000,
+          { min: 0, max: 10 * 60_000 },
+        ),
         maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_POST_GD25_35_MAX_ENTRY_JUMP_PCT', 15, {
           min: 0,
           max: 100,
