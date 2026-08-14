@@ -68,11 +68,14 @@ function newState(token) {
 }
 
 class LaunchQualityObserver {
-  constructor({ config, store, now = () => Date.now(), onReference = null }) {
+  constructor({
+    config, store, now = () => Date.now(), onReference = null, onSnapshot = null,
+  }) {
     this.config = config;
     this.store = store;
     this.now = now;
     this.onReference = typeof onReference === 'function' ? onReference : null;
+    this.onSnapshot = typeof onSnapshot === 'function' ? onSnapshot : null;
     this.states = new Map();
     this.marketRegimeCache = new Map();
     this.metrics = {
@@ -104,7 +107,7 @@ class LaunchQualityObserver {
     for (const trade of this.store.recentCurveTrades(now - restoreWindowMs)) {
       this.observeTrade(trade, { replay: true });
     }
-    this.advanceTime(now);
+    this.advanceTime(now, { replay: true });
   }
 
   stop() {}
@@ -136,15 +139,15 @@ class LaunchQualityObserver {
     if (!state || timestampMs < state.createdAt - 5_000) return;
 
     this._applyTrade(state, trade, timestampMs, price, replay);
-    this._captureDueSnapshots(state, timestampMs);
+    this._captureDueSnapshots(state, timestampMs, { replay });
     this._captureDueReturns(state, trade, timestampMs, price);
     this._finishIfDue(state, timestampMs);
   }
 
-  advanceTime(now = this.now()) {
+  advanceTime(now = this.now(), { replay = false } = {}) {
     if (!this.config.enabled) return;
     for (const state of [...this.states.values()]) {
-      this._captureDueSnapshots(state, now);
+      this._captureDueSnapshots(state, now, { replay });
       this._finishIfDue(state, now);
     }
   }
@@ -605,7 +608,7 @@ class LaunchQualityObserver {
     return features;
   }
 
-  _captureDueSnapshots(state, observedAt) {
+  _captureDueSnapshots(state, observedAt, { replay = false } = {}) {
     for (const horizonMs of this.config.snapshotHorizonsMs) {
       if (state.capturedHorizons.has(horizonMs)) continue;
       if (observedAt < state.createdAt + horizonMs) continue;
@@ -629,6 +632,13 @@ class LaunchQualityObserver {
       if (result?.inserted) {
         this.metrics.snapshotsWritten += 1;
         this.metrics.lastActionAt = this.now();
+        if (this.onSnapshot) {
+          try {
+            this.onSnapshot(result, { replay });
+          } catch (error) {
+            this.metrics.lastError = error?.message || String(error);
+          }
+        }
       }
     }
   }
