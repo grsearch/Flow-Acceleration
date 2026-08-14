@@ -182,6 +182,7 @@ assert.deepStrictEqual(
   [
     'FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20',
     'FO_D12_R3_10S', 'FO_D12_R3_T15', 'F2_8S_NF30', 'FT_C_NF30',
+    'F_ABSORB3_8S', 'F_ABSORB5_RUNNER', 'F_REACCEL0_8S',
   ],
 );
 assert.strictEqual(
@@ -200,6 +201,8 @@ assert.deepStrictEqual(
 assert.strictEqual(config.launchQualityObserver.pumpReferencePct, 25);
 assert.strictEqual(config.launchQualityObserver.pullbackReferencePct, 7.5);
 assert.strictEqual(config.launchQualityObserver.reboundReferencePct, 3);
+assert.strictEqual(config.launchQualityObserver.marketRegimeLookbackMs, 30 * 60_000);
+assert.strictEqual(config.launchQualityObserver.marketRegimeSettlementLagMs, 60_000);
 assert.strictEqual(config.rangeScalperShadow.enabled, true);
 assert.strictEqual(config.rangeScalperShadow.initialObservationMs, 120_000);
 assert.strictEqual(config.rangeScalperShadow.maxTrackingMs, 1_200_000);
