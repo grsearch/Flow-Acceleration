@@ -12,7 +12,7 @@ WorkingDirectory=/opt/flow-acceleration
 EnvironmentFile=/opt/flow-acceleration/.env
 Environment=NODE_ENV=production
 ExecStartPre=/usr/bin/test -s /opt/flow-acceleration/.env
-ExecStart=/usr/bin/node /opt/flow-acceleration/src/index-flow.js
+ExecStart=/usr/bin/node /opt/flow-acceleration/src/index.js
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=60
@@ -33,3 +33,4 @@ ProtectControlGroups=true
 
 [Install]
 WantedBy=multi-user.target
+
