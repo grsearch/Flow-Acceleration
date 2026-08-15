@@ -288,7 +288,41 @@ async function main() {
       ],
     );
     assert.ok(Array.isArray(flowFirst.cohorts));
-ã¿-¢G§²ÚîÆ­yÑrray(smartOpen.positions));
+    assert.ok(Array.isArray(flowFirst.positions));
+    const smartPullback = await (await fetch(
+      `http://127.0.0.1:${port}/api/smart-pullback-shadow`,
+    )).json();
+    assert.strictEqual(smartPullback.runtime.mode, 'SHADOW_AB');
+    assert.strictEqual(smartPullback.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      smartPullback.runtime.cohorts.map((cohort) => [
+        cohort.cohortId,
+        cohort.strategy.exit.trailingStopPct,
+      ]),
+      [['A', 7.5], ['B', 12.5]],
+    );
+    assert.ok(Array.isArray(smartPullback.cohorts));
+    assert.ok(Array.isArray(smartPullback.positions));
+    const smartOpen = await (await fetch(
+      `http://127.0.0.1:${port}/api/smart-open-shadow`,
+    )).json();
+    assert.strictEqual(smartOpen.runtime.mode, 'SHADOW_SMART_OPEN');
+    assert.strictEqual(smartOpen.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      smartOpen.runtime.cohorts.map((cohort) => [
+        cohort.cohortId,
+        cohort.strategy.entry.positionPhase,
+        cohort.strategy.exit.policy,
+        cohort.strategy.research.isolatedTable,
+      ]),
+      [
+        ['D0', 'OPEN', 'FIXED_HOLD', 'smart_open_shadow_positions'],
+        ['D1', 'OPEN', 'DELAYED_TRAILING', 'smart_open_shadow_positions'],
+        ['D2', 'OPEN', 'SMART_REDUCE_OR_CLOSE', 'smart_open_shadow_positions'],
+      ],
+    );
+    assert.ok(Array.isArray(smartOpen.cohorts));
+    assert.ok(Array.isArray(smartOpen.positions));
     const flowSmartConfirm = await (await fetch(
       `http://127.0.0.1:${port}/api/flow-smart-confirm-shadow`,
     )).json();
