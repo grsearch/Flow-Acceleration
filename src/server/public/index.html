@@ -983,7 +983,8 @@
         ['买入条件', [
           ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止（历史/存量退出）' : '启用'], ['信号类型', '毕业后独立深跌反弹周期'], ['市场', strategy.market || 'PUMP_AMM'],
           ['跌幅范围', `${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}%`], ['反弹范围', `${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}%`],
-          ['毕业后窗口', age(strategy.trackingAgeMs)], ['报价冲击上限', rate(strategy.maxEntryPriceJumpPct)],
+          ['毕业后窗口', age(strategy.trackingAgeMs)], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)],
+          ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
         ]],
         ['卖出策略', [
           ['策略模式', 'XLEG 自适应'], ['移动止盈激活', `盈利 ${rate(strategy.trailingActivationPct)}`],
