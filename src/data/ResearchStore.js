@@ -1524,6 +1524,64 @@ class ResearchStore {
         ON holder_growth_shadow_positions(status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_holder_growth_shadow_signal
         ON holder_growth_shadow_positions(signal_at DESC, entry_profile_id);
+
+      CREATE TABLE IF NOT EXISTS graduation_acceleration_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        entry_profile_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        creator TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        signal_curve_pct REAL,
+        features_json TEXT NOT NULL,
+        entry_target_at INTEGER NOT NULL,
+        entry_deadline_at INTEGER NOT NULL,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        entry_impact_pct REAL,
+        token_units REAL,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        graduated_at INTEGER,
+        core_weight_pct REAL NOT NULL,
+        core_exit_at INTEGER,
+        core_exit_price REAL,
+        runner_highest_price REAL,
+        runner_tier_index INTEGER NOT NULL DEFAULT -1,
+        runner_stop_price REAL,
+        exit_target_market TEXT,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_graduation_accel_status
+        ON graduation_acceleration_shadow_positions(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_graduation_accel_profile
+        ON graduation_acceleration_shadow_positions(entry_profile_id, signal_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_graduation_accel_mint
+        ON graduation_acceleration_shadow_positions(mint, signal_at DESC);
     `);
 
     this._migrateLiveTradingSchema();
@@ -3319,6 +3377,75 @@ class ResearchStore {
       activeHolderGrowthShadowPositions: this.db.prepare(`
         SELECT * FROM holder_growth_shadow_positions
         WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY signal_at, id
+      `),
+      insertGraduationAccelerationShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO graduation_acceleration_shadow_positions (
+          cohort_id, episode_id, entry_profile_id, mint, symbol, creator,
+          status, rejection_reason, position_sol, configured_cost_pct,
+          signal_at, signal_price, signal_curve_pct, features_json,
+          entry_target_at, entry_deadline_at, core_weight_pct,
+          created_at, updated_at
+        ) VALUES (
+          @cohortId, @episodeId, @entryProfileId, @mint, @symbol, @creator,
+          @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @signalAt, @signalPrice, @signalCurvePct, @featuresJson,
+          @entryTargetAt, @entryDeadlineAt, @coreWeightPct,
+          @createdAt, @updatedAt
+        )
+      `),
+      getGraduationAccelerationShadowPosition: this.db.prepare(`
+        SELECT * FROM graduation_acceleration_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      updateGraduationAccelerationShadowPosition: this.db.prepare(`
+        UPDATE graduation_acceleration_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_market = COALESCE(@entryMarket, entry_market),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          entry_impact_pct = COALESCE(@entryImpactPct, entry_impact_pct),
+          token_units = COALESCE(@tokenUnits, token_units),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          lowest_price = COALESCE(@lowestPrice, lowest_price),
+          last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct, max_favorable_return_pct
+          ),
+          max_adverse_return_pct = COALESCE(
+            @maxAdverseReturnPct, max_adverse_return_pct
+          ),
+          graduated_at = COALESCE(@graduatedAt, graduated_at),
+          core_exit_at = COALESCE(@coreExitAt, core_exit_at),
+          core_exit_price = COALESCE(@coreExitPrice, core_exit_price),
+          runner_highest_price = COALESCE(@runnerHighestPrice, runner_highest_price),
+          runner_tier_index = COALESCE(@runnerTierIndex, runner_tier_index),
+          runner_stop_price = COALESCE(@runnerStopPrice, runner_stop_price),
+          exit_target_market = CASE WHEN @clearExitPending = 1
+            THEN NULL ELSE COALESCE(@exitTargetMarket, exit_target_market) END,
+          exit_trigger_at = CASE WHEN @clearExitPending = 1
+            THEN NULL ELSE COALESCE(@exitTriggerAt, exit_trigger_at) END,
+          exit_target_at = CASE WHEN @clearExitPending = 1
+            THEN NULL ELSE COALESCE(@exitTargetAt, exit_target_at) END,
+          exit_deadline_at = CASE WHEN @clearExitPending = 1
+            THEN NULL ELSE COALESCE(@exitDeadlineAt, exit_deadline_at) END,
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_market = COALESCE(@exitMarket, exit_market),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      activeGraduationAccelerationShadowPositions: this.db.prepare(`
+        SELECT * FROM graduation_acceleration_shadow_positions
+        WHERE status IN (
+          'PENDING_ENTRY', 'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
+        )
         ORDER BY signal_at, id
       `),
       insertLaunchQualityObservation: this.db.prepare(`
@@ -5138,6 +5265,84 @@ class ResearchStore {
     return this.stmts.activeHolderGrowthShadowPositions.all();
   }
 
+  createGraduationAccelerationShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      cohortId: position.cohortId,
+      episodeId: position.episodeId,
+      entryProfileId: position.entryProfileId,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      creator: position.creator || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: finiteOrNull(position.positionSol) ?? 1,
+      configuredCostPct: finiteOrNull(position.configuredCostPct) ?? 0,
+      signalAt: Math.trunc(position.signalAt),
+      signalPrice: finiteOrNull(position.signalPrice),
+      signalCurvePct: finiteOrNull(position.signalCurvePct),
+      featuresJson: JSON.stringify(position.features || {}),
+      entryTargetAt: Math.trunc(position.entryTargetAt),
+      entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
+      coreWeightPct: finiteOrNull(position.coreWeightPct) ?? 50,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertGraduationAccelerationShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getGraduationAccelerationShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateGraduationAccelerationShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key)
+      ? patch[key] : null);
+    return this.stmts.updateGraduationAccelerationShadowPosition.run({
+      id,
+      status: value('status'),
+      rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'),
+      entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      entryImpactPct: finiteOrNull(value('entryImpactPct')),
+      tokenUnits: finiteOrNull(value('tokenUnits')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      lowestPrice: finiteOrNull(value('lowestPrice')),
+      lastObservedAt: value('lastObservedAt'),
+      lastPrice: finiteOrNull(value('lastPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
+      graduatedAt: value('graduatedAt'),
+      coreExitAt: value('coreExitAt'),
+      coreExitPrice: finiteOrNull(value('coreExitPrice')),
+      runnerHighestPrice: finiteOrNull(value('runnerHighestPrice')),
+      runnerTierIndex: value('runnerTierIndex'),
+      runnerStopPrice: finiteOrNull(value('runnerStopPrice')),
+      exitTargetMarket: value('exitTargetMarket'),
+      exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'),
+      exitDeadlineAt: value('exitDeadlineAt'),
+      clearExitPending: patch.clearExitPending ? 1 : 0,
+      exitAt: value('exitAt'),
+      exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')),
+      exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')),
+      updatedAt: Date.now(),
+    });
+  }
+
+  activeGraduationAccelerationShadowPositions() {
+    return this.stmts.activeGraduationAccelerationShadowPositions.all();
+  }
+
   createLaunchQualityObservation(token) {
     const now = Date.now();
     const createdAt = Number(token.createdAt ?? token.created_at);
@@ -5866,6 +6071,90 @@ class ResearchStore {
           ? realized.length / opportunities.length * 100 : null,
       };
     });
+    return { cohorts, positions };
+  }
+
+  graduationAccelerationShadowDashboard({
+    positionLimit = 100,
+    bigWinnerPct = 50,
+    cacheStats = false,
+  } = {}) {
+    const limit = Math.min(300, Math.max(1, Math.trunc(Number(positionLimit) || 100)));
+    const positions = this.db.prepare(`
+      SELECT *, CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+        THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM graduation_acceleration_shadow_positions
+      ORDER BY CASE WHEN status IN (
+        'PENDING_ENTRY', 'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
+      ) THEN 0 ELSE 1 END, updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const threshold = Math.max(1, Number(bigWinnerPct) || 50);
+    const computeCohorts = () => {
+      const groups = this.db.prepare(`
+        SELECT cohort_id, entry_profile_id, position_sol,
+          COUNT(*) AS signals,
+          COUNT(DISTINCT mint) AS independent_mints,
+          COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+          COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+          COALESCE(SUM(status IN (
+            'PENDING_ENTRY', 'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
+          )), 0) AS active,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+          COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          COALESCE(SUM(graduated_at IS NOT NULL), 0) AS graduated,
+          AVG(entry_jump_pct) AS average_entry_jump_pct,
+          AVG(entry_impact_pct) AS average_entry_impact_pct,
+          AVG(max_favorable_return_pct) AS average_mfe_pct,
+          AVG(max_adverse_return_pct) AS average_mae_pct
+        FROM graduation_acceleration_shadow_positions
+        GROUP BY cohort_id, entry_profile_id, position_sol
+        ORDER BY entry_profile_id, position_sol
+      `).all();
+      const resolved = this.db.prepare(`
+        SELECT net_return_pct, max_favorable_return_pct
+        FROM graduation_acceleration_shadow_positions
+        WHERE cohort_id = ? AND status = 'CLOSED' AND net_return_pct IS NOT NULL
+        ORDER BY net_return_pct
+      `);
+      return groups.map((group) => {
+        const rows = resolved.all(group.cohort_id);
+        const returns = rows.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+        const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
+        const losses = returns.filter((value) => value < 0);
+        const sorted = [...returns].sort((a, b) => a - b);
+        const middle = Math.floor(sorted.length / 2);
+        const median = sorted.length
+          ? sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+          : null;
+        const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+        const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+        const bigWinners = rows.filter((row) => Number(row.net_return_pct) >= threshold);
+        const exTop1 = wins.length ? [...wins.slice(1), ...losses] : losses;
+        return {
+          ...group,
+          resolved: returns.length,
+          exit_coverage_pct: group.closed + group.no_exit > 0
+            ? group.closed / (group.closed + group.no_exit) * 100 : null,
+          migration_rate_pct: group.signals > 0 ? group.graduated / group.signals * 100 : null,
+          average_net_return_pct: returns.length
+            ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+          median_net_return_pct: median,
+          win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          max_winner_pct: wins[0] ?? null,
+          average_net_return_ex_top1_pct: exTop1.length
+            ? exTop1.reduce((sum, value) => sum + value, 0) / exTop1.length : null,
+          big_winners: bigWinners.length,
+          top_3_winner_contribution_pct: totalProfit > 0
+            ? wins.slice(0, 3).reduce((sum, value) => sum + value, 0) / totalProfit * 100
+            : null,
+        };
+      });
+    };
+    const cohorts = cacheStats
+      ? this._cachedDashboardStats(`graduation-accel:${threshold}`, 15_000, computeCohorts)
+      : computeCohorts();
     return { cohorts, positions };
   }
 
@@ -6911,6 +7200,19 @@ class ResearchStore {
         COALESCE(SUM(graduation_ready = 1), 0) AS graduation_ready
       FROM graduation_hold_shadow_positions
     `).get();
+    const graduationAccelerationShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COUNT(DISTINCT episode_id) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status IN (
+          'PENDING_ENTRY', 'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
+        )), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(graduated_at IS NOT NULL), 0) AS graduated
+      FROM graduation_acceleration_shadow_positions
+    `).get();
     const holderGrowthShadowPositions = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COUNT(DISTINCT mint) AS mints,
@@ -6966,6 +7268,7 @@ class ResearchStore {
       bondingCurveMomentumShadowPositions,
       bondingCurveMomentumShadowSnapshots,
       graduationHoldShadowPositions,
+      graduationAccelerationShadowPositions,
       holderGrowthShadowPositions,
       launchQualityObservations,
       labels: labelRows,

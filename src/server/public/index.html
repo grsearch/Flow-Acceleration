@@ -362,6 +362,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="graduation-hold">
               <b>毕业概率持仓 · I（已停）</b><small>负期望，历史数据保留</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="graduation-acceleration">
+              <b>毕业加速 · O</b><small>10秒快速推进 + Curve80订单流；三档容量与毕业后尾仓</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-quality">
               <b>Launch Quality · E</b><small>只观察选币、存活与首次回踩</small>
             </button>
@@ -605,6 +608,27 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>组别 / 状态</th><th>Mint</th><th>信号Curve / 入场</th><th>当前 / 下一检查点</th><th>Net5 / Buyers / Sell5</th><th>入场 / 最高 / 最低 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓</th><th>退出 / 拒绝原因</th></tr></thead>
                 <tbody id="graduation-hold-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="graduation-acceleration" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Graduation Acceleration Shadow O</h2>
+                <p>独立前向研究；三档容量模拟 Bonding Curve 冲击，毕业后先退出核心仓，再追踪大赢家尾仓</p>
+              </div>
+              <div class="strategy-expression" id="graduation-acceleration-expression">等待 Graduation Acceleration 配置…</div>
+              <div class="strategy-metric-groups" id="graduation-acceleration-metrics"></div>
+              <div class="section-title"><h2>入场 × 容量表现</h2><p>NO_EXIT 单独统计，不强制按 -100% 污染真实盈亏</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 容量</th><th>信号 / Mint</th><th>迁移 / 可退出</th><th>完成 / 胜率</th><th>平均 / 中位净收益</th><th>去Top1 / PF</th><th>Top3贡献 / 大赢家</th><th>入场冲击 / MFE / MAE</th></tr></thead>
+                <tbody id="graduation-acceleration-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>显示 0.05 / 0.5 / 1 SOL 容量、毕业状态、Core 退出和 Runner 退出</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>入场 / 容量 / 状态</th><th>Mint</th><th>Curve / Flow / Buyers</th><th>信号 / 入场 / Core / 出场</th><th>冲击 / 跳价</th><th>净收益 / MFE / MAE</th><th>迁移 / 持仓</th><th>退出 / 拒绝原因</th></tr></thead>
+                <tbody id="graduation-acceleration-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1342,6 +1366,38 @@
       }).join('') : '<tr><td colspan="10" class="empty">暂无 Shadow I 模拟仓位；高Curve信号只记录拒绝，绝不追买</td></tr>';
     }
 
+    function renderGraduationAccelerationShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const profiles = runtime.entryProfiles || [];
+      const profileLabels = Object.fromEntries(profiles.map(profile => [profile.id, profile.label]));
+      const capacities = (runtime.capacitySols || []).map(value => `${number(value, 2)} SOL`).join(' / ');
+      const tiers = (strategy.trailingTiers || []).map(tier => (
+        `+${number(tier.activationPct, 0)}% / 回撤${number(tier.drawdownPct, 0)}%`
+      )).join(' · ');
+      document.querySelector('#graduation-acceleration-expression').textContent = `${profiles.map(profile => profile.label).join('；')} → ${capacities || '0.05 / 0.5 / 1 SOL'} 容量冲击 → 毕业后 ${number(strategy.coreExitPct, 0)}% Core → ${tiers || '阶梯尾仓'}；毕业前/后最长 ${age(strategy.maxPreGraduationHoldMs)} / ${age(strategy.maxPostGraduationHoldMs)}`;
+      renderMetricGroups('#graduation-acceleration-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW O' : '关闭', '独立表，永不签名或发送交易'],
+        ['评估 / 信号', `${number(runtime.evaluated)} / ${number(runtime.signals)}`, `去重 ${number(runtime.deduplicated)} · 重启回放抑制 ${number(runtime.replayEvaluationsSuppressed)}`],
+        ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
+        ['毕业 / Core / Runner', `${number(runtime.graduated)} / ${number(runtime.coreExits)} / ${number(runtime.runnerExits)}`, `NO_EXIT ${number(runtime.noExit)} · 跳价 ${number(runtime.priceJump)}`],
+      ]);
+
+      const cohorts = data.cohorts || [];
+      document.querySelector('#graduation-acceleration-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${number(row.position_sol, 2)} SOL</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)} · 活动 ${number(row.active)}</span></td><td>${rate(row.migration_rate_pct)} / ${rate(row.exit_coverage_pct)}<br><span class="table-note">毕业 ${number(row.graduated)} · NO_EXIT ${number(row.no_exit)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${pct(row.average_net_return_ex_top1_pct)} / ${number(row.profit_factor, 2)}</td><td>${rate(row.top_3_winner_contribution_pct)} / ${number(row.big_winners)}<br><span class="table-note">最大 ${pct(row.max_winner_pct)}</span></td><td>${pct(row.average_entry_impact_pct)} / ${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}<br><span class="table-note">平均跳价 ${pct(row.average_entry_jump_pct)}</span></td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待新的毕业加速信号；旧 I 组数据不会混入这里</td></tr>';
+
+      const rows = data.positions || [];
+      document.querySelector('#graduation-acceleration-position-rows').innerHTML = rows.length ? rows.map(row => {
+        let features = {};
+        try { features = JSON.parse(row.features_json || '{}'); } catch (_) { features = {}; }
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const prices = `${number(row.signal_price, 10)} / ${number(row.entry_price, 10)} / ${number(row.core_exit_price, 10)} / ${number(row.exit_price, 10)}`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${number(row.position_sol, 2)} SOL · ${statusChip(row.status)}</span></td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${pct(row.signal_curve_pct)} / ${number(features.netFlowSol, 2)} SOL / ${number(features.buyers)}<br><span class="table-note">ΔCurve ${pct(features.curveDeltaPct)} · Sell ${number(features.sellTx)}</span></td><td>${prices}</td><td>${pct(row.entry_impact_pct)} / ${pct(row.entry_jump_pct)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${row.graduated_at ? dateTime(row.graduated_at) : '未毕业'} / ${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无 Shadow O 模拟仓位</td></tr>';
+    }
+
     function renderLaunchQualityObserver(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -1725,6 +1781,9 @@
         ],
         'graduation-hold': () => [
           json('/api/graduation-hold-shadow?positionLimit=30').then(renderGraduationHoldShadow),
+        ],
+        'graduation-acceleration': () => [
+          json('/api/graduation-acceleration-shadow?positionLimit=100').then(renderGraduationAccelerationShadow),
         ],
         'launch-quality': () => [
           json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60').then(renderLaunchQualityObserver),

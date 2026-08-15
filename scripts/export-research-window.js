@@ -71,6 +71,9 @@ const EXPLICIT_FILTERS = Object.freeze({
   },
   launch_quality_snapshots: { where: 'observed_at >= ? AND observed_at < ?', anchor: 'observed_at' },
   holder_growth_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
+  graduation_acceleration_shadow_positions: {
+    where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at',
+  },
 });
 
 const GENERIC_TIME_COLUMNS = [

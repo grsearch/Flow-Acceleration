@@ -2580,6 +2580,72 @@ const config = {
     }),
   },
 
+  // Graduation Acceleration Shadow O. This is an independent forward-only
+  // experiment derived from the non-overlapping historical graduation study.
+  // It never signs or submits a transaction and does not reuse old I cohorts.
+  graduationAccelerationShadow: {
+    enabled: booleanEnv('FLOW_GRADUATION_ACCEL_SHADOW_ENABLED', true),
+    entryDelayMs: integerEnv('FLOW_GRADUATION_ACCEL_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_GRADUATION_ACCEL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_GRADUATION_ACCEL_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_GRADUATION_ACCEL_EXIT_TIMEOUT_MS', 15_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_GRADUATION_ACCEL_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0, max: 1_000,
+    }),
+    hardStopPct: numberEnv('FLOW_GRADUATION_ACCEL_HARD_STOP_PCT', 30, {
+      min: 0.1, max: 100,
+    }),
+    maxPreGraduationHoldMs: integerEnv(
+      'FLOW_GRADUATION_ACCEL_MAX_PRE_GRAD_HOLD_MS',
+      5 * 60_000,
+      { min: 10_000, max: 30 * 60_000 },
+    ),
+    maxPostGraduationHoldMs: integerEnv(
+      'FLOW_GRADUATION_ACCEL_MAX_POST_GRAD_HOLD_MS',
+      5 * 60_000,
+      { min: 10_000, max: 30 * 60_000 },
+    ),
+    coreExitPct: numberEnv('FLOW_GRADUATION_ACCEL_CORE_EXIT_PCT', 50, {
+      min: 1, max: 99,
+    }),
+    capacitySols: listEnv('FLOW_GRADUATION_ACCEL_CAPACITY_SOLS', ['0.05', '0.5', '1'])
+      .map(Number).filter((value) => Number.isFinite(value) && value > 0),
+    entryProfiles: [
+      {
+        id: 'O_FAST10_C80_B20_R07',
+        label: '10秒 Curve≥80 / Buyers≥20 / Sell-Buy≤0.7',
+        mode: 'FIXED_10S',
+        horizonMs: 10_000,
+        minCurvePct: 80,
+        minBuyers: 20,
+        maxSellBuyRatio: 0.7,
+      },
+      {
+        id: 'O_C80_D5_B2_S0_NC',
+        label: '首次Curve80 / ΔCurve5≥5 / Buyers5≥2 / 0卖单 / Creator未卖',
+        mode: 'CURVE_MILESTONE',
+        thresholdPct: 80,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 2,
+        maxSellTx: 0,
+        requireNoCreatorSell: true,
+      },
+    ],
+    trailingTiers: [
+      { activationPct: 20, drawdownPct: 10 },
+      { activationPct: 40, drawdownPct: 15 },
+      { activationPct: 80, drawdownPct: 20 },
+      { activationPct: 150, drawdownPct: 25 },
+      { activationPct: 300, drawdownPct: 30 },
+    ],
+    bigWinnerPct: numberEnv('FLOW_GRADUATION_ACCEL_BIG_WINNER_PCT', 50, { min: 1 }),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: 1,
+    }),
+  },
+
   // Observer-only Launch Quality research. Reference percentages label market
   // structure for later analysis; they never become an entry or execution rule.
   launchQualityObserver: {
@@ -2690,6 +2756,16 @@ function validateConfig() {
       !config.launchQualityObserver.snapshotHorizonsMs.includes(horizonMs)
     ))) {
     errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include all Holder Growth horizons');
+  }
+  const holderGrowthExitIds = new Set(
+    config.holderGrowthShadow.exitProfiles.map((profile) => profile.id),
+  );
+  for (const profile of config.holderGrowthShadow.entryProfiles) {
+    for (const exitProfileId of profile.exitProfileIds || []) {
+      if (!holderGrowthExitIds.has(exitProfileId)) {
+        errors.push(`Holder Growth entry ${profile.id} references missing exit ${exitProfileId}`);
+      }
+    }
   }
   if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
     errors.push('FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS must contain at least one value');

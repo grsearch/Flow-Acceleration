@@ -104,6 +104,12 @@ async function main() {
   assert.ok(dashboard.includes('id="graduation-hold-time-sessions"'));
   assert.ok(dashboard.includes('毕业概率持仓 · I'));
   assert.ok(dashboard.includes("json('/api/graduation-hold-shadow?positionLimit=30')"));
+  assert.ok(dashboard.includes('data-live-strategy="graduation-acceleration"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="graduation-acceleration"'));
+  assert.ok(dashboard.includes('id="graduation-acceleration-cohort-rows"'));
+  assert.ok(dashboard.includes('id="graduation-acceleration-position-rows"'));
+  assert.ok(dashboard.includes('毕业加速 · O'));
+  assert.ok(dashboard.includes("json('/api/graduation-acceleration-shadow?positionLimit=100')"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -213,6 +219,7 @@ async function main() {
       '/api/range-scalper-shadow',
       '/api/bonding-curve-momentum-shadow',
       '/api/graduation-hold-shadow',
+      '/api/graduation-acceleration-shadow',
       '/api/launch-quality-observer',
       '/api/health',
     ];
@@ -529,6 +536,22 @@ async function main() {
     );
     assert.ok(Array.isArray(graduationHold.cohorts));
     assert.ok(Array.isArray(graduationHold.positions));
+    const graduationAcceleration = await (await fetch(
+      `http://127.0.0.1:${port}/api/graduation-acceleration-shadow`,
+    )).json();
+    assert.strictEqual(graduationAcceleration.runtime.mode, 'SHADOW_O');
+    assert.strictEqual(graduationAcceleration.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(graduationAcceleration.runtime.capacitySols, [0.05, 0.5, 1]);
+    assert.strictEqual(
+      graduationAcceleration.runtime.strategy.research.isolatedTable,
+      'graduation_acceleration_shadow_positions',
+    );
+    assert.strictEqual(
+      graduationAcceleration.runtime.strategy.research.noExitPricedAsLoss,
+      false,
+    );
+    assert.ok(Array.isArray(graduationAcceleration.cohorts));
+    assert.ok(Array.isArray(graduationAcceleration.positions));
     const migrationContinuity = await (await fetch(
       `http://127.0.0.1:${port}/api/migration-continuity-shadow`,
     )).json();
@@ -611,4 +634,3 @@ main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
-

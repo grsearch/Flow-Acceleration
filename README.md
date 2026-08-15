@@ -81,6 +81,7 @@ W3 = T-2s ~ T
 - `holder_growth_shadow_positions`：独立的 Observed Holder Growth Shadow N 仓位；使用成交流中可观测独立买家、新增买家、早期留存、Top3集中度与资金流，不冒充链上权威 Holder 数。
 - `migrated_drop_rebound_shadow_positions`：独立的生命周期超跌反弹 Shadow G 参数组；用 `lifecycle_stage` 严格区分毕业前与毕业后模拟入场、MFE/MAE和退出结果。
 - `graduation_hold_shadow_positions`：独立的毕业概率持仓 Shadow I0/I1/I2；共享早期 Primary 模拟入场，但分别保存移动止盈对照、97%毕业前退出和严格门槛穿越毕业结果。
+- `graduation_acceleration_shadow_positions`：独立的毕业加速 Shadow O；分别记录 FAST10 与 Curve80 订单流入场、0.05/0.5/1 SOL 容量冲击、毕业后 50% Core 退出和阶梯尾仓。`NO_EXIT` 不按 -100% 计入真实盈亏。
 - `range_scalper_shadow_positions`：独立的 PumpSwap 区间波段 Shadow J；保存区间质量、重复 Episode、三组回踩入场与四组退出结果。
 - `cya_early_pyramid_shadow_positions`：独立的 CYA Early Pyramid Shadow K；保存早期 Curve 订单流入场、分批加仓、两次减仓、尾仓退出及逐仓估算成本。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
@@ -115,6 +116,8 @@ Dashboard 默认地址：<http://127.0.0.1:3001>
 Live Trading 中的 **Bonding Curve 动量 · H** 是完全独立的毕业前订单流实验：H0 生命周期基线、H1 买单速度、H2 新买家分散、H3 卖压衰减，分别配合固定3秒、订单流反转和大赢家移动止盈三种退出。它只写入 `bonding_curve_momentum_shadow_positions` 与 `bonding_curve_momentum_shadow_snapshots`，不会签名或发送交易，也不会修改旧 Shadow 的历史数据。
 
 **毕业概率持仓 · I** 不把高 Curve 概率当成追涨信号。它只复用 Curve≤70% 的早期 `primary_3w` Episode：I0 保留7.5%移动止盈作为对照，I1 要求 Curve 连续通过70/80/85/90/95/97%因果检查点并在毕业前退出，I2 在90/95%使用更严格的买家和成交数门槛，通过后才等待迁移并模拟 PumpSwap 退出。三组只写独立表，永不签名或发送交易。
+
+**毕业加速 · O** 是全新的前向 Shadow，不修改 I 组。主组在 Token 第10秒检查 `Curve≥80%、Buyers≥20、SellSol/BuySol≤0.7`；补充组只观察首次 Curve80 前5秒 `ΔCurve≥5、Buyers≥2、无卖单、Creator未卖`。每个信号同时模拟0.05/0.5/1 SOL并估算自己的 Bonding Curve 买入冲击；毕业后首笔可执行 PumpSwap 成交退出50%，余仓按20/40/80/150/300%分层移动止盈，毕业前后最长各持有5分钟。`NO_EXIT` 单列且收益保持空值，接口为 `GET /api/graduation-acceleration-shadow`。
 
 ## 回测
 
@@ -269,7 +272,34 @@ FT-A/B/C/D使用全新的 `cohort_id`，Dashboard 会分别统计，不会把新
 
 在旧组不变的前提下，另设四个深回踩前向 cohort：`FD10_R3_5S`、`FD12_5_R3_5S`、`FD12_5_R5_5S` 与 `FD15_R5_5S`。它们分别测试10%～15%的首波回踩和3%/5%低点反弹，要求低点至少稳定0.5～1秒、低点之后至少出现2个新买家、最近1秒净流入重新为正；若回踩超过25%则只记录规则拒绝，不模拟接飞刀。四组共用 F1 的 NetFlow/Creator 质量门槛和固定5秒退出，因此统计差异主要来自入场深度与确认强度。深回踩参考点由 Observer E 独立跟踪，具有独立 `reference_profile_id`，不会改写或混入原7.5%参考点。
 
-`FO_F2_J2_3S`…1060 tokens truncated…apply`。脚本会在卖出目标时间后30秒内寻找同生命周期市场的首笔合理成交，能够恢复的记录改为 `CLOSED` 并写入真实模拟出场价；其余记录保留为未定价 `NO_EXIT`。每次应用都会写入 `holder_growth_no_exit_recovery_audit` 审计表，不删除原始成交、不执行 WAL checkpoint。只有数据库或 COS 归档仍保留相应时间段 `raw_trades` 的记录才能恢复。
+`FO_F2_J2_3S` 是基于34小时样本新增的前向验证组：复用旧 F2 信号（NetFlow≥20 SOL、Creator≤10%），但把200ms模拟成交相对参考价的最大跳价收紧为2%，并固定持有3秒。旧 F2 仍保留10%跳价上限，两者使用独立 cohort，专门验证“低追价”是否能把去除头部赢家后的期望转正。
+
+模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。新样本收益扣除默认1 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
+
+## Migration Continuity Shadow M
+
+Shadow M 把迁移后前5秒质量延续作为独立入场：`Buyers≥20、NetFlow≥5 SOL、价格涨幅≥5%、Sell/Buy≤0.6`，信号后200ms使用下一笔真实 PumpSwap 成交模拟入场。每个 Mint 只评估一次；所有毕业 Mint 最多订阅10秒，只有活动仓位继续保留订阅，避免为长持仓组合无边界消耗 Helius。
+
+## Observed Holder Growth Shadow N
+
+Shadow N 复用 Launch Quality Observer 已有的10/20/30/60秒因果快照，不增加链上订阅或额外 RPC 请求。这里的“Holder”严格指当前 gRPC 成交流中已经观察到的独立买家及前20名买家的留存，不是 RPC 拉取的全量链上 Holder 数。
+
+- `HG10_OPEN`：10秒早期开放组，Buyers≥5、5–10秒新增买家≥3、留存≥30%、NetFlow≥1.5 SOL、Top3≤90%。
+- `HG10_FLOW10_J2` / `HG10_FLOW15_J2`：保留10秒早期结构，但分别要求 NetFlow≥10/15 SOL，并只接受信号后200ms真实成交跳价在0%～2%的前瞻样本。
+- `HG20_BAL`：20秒早期均衡组，Buyers≥8、10–20秒新增买家≥5、留存≥40%、NetFlow≥3 SOL、Top3≤85%。
+- `HG20_FAST`：20秒早期加速组，Buyers≥10、10–20秒新增买家≥8、留存≥50%、NetFlow≥5 SOL、Top3≤80%。
+- `HG20_QUALITY_J2`：20秒质量组，Buyers≥40、留存≥60%、NetFlow≥5 SOL、Top3≤80%，并只接受0%～2%的入场跳价。
+- `HG30_BAL`：Buyers≥10、20–30秒新增买家≥10、前20买家留存≥50%、NetFlow≥5 SOL、Top3≤80%。
+- `HG30_FAST`：Buyers≥10、20–30秒新增买家≥20、前20买家留存≥70%、NetFlow≥10 SOL、Top3≤80%。
+- 八组均在各自快照后200ms的首笔 Bonding Curve 成交模拟入场；旧组和旧 `XT15_H120` cohort 保持原ID，不重算历史。
+
+每个入场与十三种独立卖出规则交叉建仓：原十组保持不变；新增 `XP20_50_D15_H120`（+20%减仓50%，尾仓回撤15%）、`XP20_70_D20_H180`（+20%减仓70%，尾仓回撤20%）及 `XP30_70_STAIR`（+30%减仓70%，余仓使用30/60/100/200%阶梯移动止盈）。这些分批组用于验证高MFE后RUG样本是否能先兑现利润，而不是事后挑选赢家。
+
+阶梯组会随着峰值从20%/40%/80%/150%/300%等档位逐步放宽允许回撤，以争取保留大赢家；但实际止损价使用 `max(旧止损价, 新档位候选止损价)`，只能上移、绝不因切换到更宽档位而下移。Dashboard 同时比较平均/中位净收益、去Top5收益、PF、大赢家兑现率与MFE兑现率，避免只靠胜率或单个极端赢家判断。
+
+该策略只写入独立表 `holder_growth_shadow_positions`，默认按1 SOL仓位扣除确定性成本；分批减仓组额外扣除一次链上执行的固定成本。仓位在毕业前触发退出但尚未取得成交时会自动改到 PumpSwap 等待下一笔真实成交。退出观察窗口默认30秒；窗口内仍没有可定价成交时保留 `NO_EXIT`，但不再把它直接当作已经确认的 `-100%`。Dashboard 的主收益、胜率和 PF 只统计真正取得出场价格的 `CLOSED`，同时单列 `NO_EXIT` 数量、比例以及把它们全部视为归零的“最坏均值”。不会修改现有实盘策略，也不会签名或发送交易。
+
+历史 `NO_EXIT` 可以使用原始逐笔成交重新定价。先运行 `npm run reprice:holder-growth -- --db=/path/to/flow-research.db` 做只读预演；确认结果后追加 `--apply`。脚本会在卖出目标时间后30秒内寻找同生命周期市场的首笔合理成交，能够恢复的记录改为 `CLOSED` 并写入真实模拟出场价；其余记录保留为未定价 `NO_EXIT`。每次应用都会写入 `holder_growth_no_exit_recovery_audit` 审计表，不删除原始成交、不执行 WAL checkpoint。只有数据库或 COS 归档仍保留相应时间段 `raw_trades` 的记录才能恢复。
 
 专项导出使用 `npm run export:holder-growth -- --db=... --out=...`。它会实际复制 Shadow N 仓位、相关 Mint、Launch Quality 观察/快照及每笔仓位信号前5秒至退出后至少30秒的原始成交，并逐表核对源行数与导出行数；不执行 WAL checkpoint，也不重启采集服务。
 
@@ -459,4 +489,3 @@ systemctl list-timers flow-acceleration-backup.timer --all
 Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，即使服务器位于硅谷也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予该 Bucket 前缀所需的上传和查询权限。
 
 安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传和验证均有独立超时与重试，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`DONE` 或 `FAILED`），COSCLI 卡住时不会无限占用下一次任务。
-

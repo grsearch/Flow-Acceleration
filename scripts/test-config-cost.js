@@ -317,6 +317,19 @@ assert.strictEqual(config.holderGrowthShadow.exitTimeoutMs, 30_000);
 assert.ok(config.holderGrowthShadow.exitProfiles
   .filter((profile) => ['ADAPTIVE_TRAILING', 'SCALE_ADAPTIVE'].includes(profile.exitMode))
   .every((profile) => profile.trailingTiers.length >= 4));
+assert.strictEqual(config.graduationAccelerationShadow.enabled, true);
+assert.deepStrictEqual(config.graduationAccelerationShadow.capacitySols, [0.05, 0.5, 1]);
+assert.deepStrictEqual(
+  config.graduationAccelerationShadow.entryProfiles.map((profile) => profile.id),
+  ['O_FAST10_C80_B20_R07', 'O_C80_D5_B2_S0_NC'],
+);
+assert.deepStrictEqual(
+  config.graduationAccelerationShadow.trailingTiers.map((tier) => [
+    tier.activationPct, tier.drawdownPct,
+  ]),
+  [[20, 10], [40, 15], [80, 20], [150, 25], [300, 30]],
+);
+assert.strictEqual(config.graduationAccelerationShadow.coreExitPct, 50);
 assert.ok(
   Math.abs(costBreakdown(config.cyaEarlyPyramidShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
@@ -351,4 +364,3 @@ assert.deepStrictEqual(liveTradingGuard(true, false, false), {
 });
 
 console.log('test-config-cost: ok');
-
