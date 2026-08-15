@@ -82,6 +82,94 @@ function minimumTokensOut(quotedAmount, slippagePct) {
   return amount.muln(10_000 - bps).divn(10_000);
 }
 
+function rawNumber(value) {
+  const number = Number(value?.toString?.() ?? value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function ammReservePrice({
+  baseReserveRaw,
+  quoteReserveRaw,
+  virtualQuoteReservesRaw = 0,
+  baseDecimals = 6,
+}) {
+  const baseReserve = rawNumber(baseReserveRaw);
+  const quoteReserve = rawNumber(quoteReserveRaw);
+  const virtualQuoteReserves = rawNumber(virtualQuoteReservesRaw);
+  const decimals = Number(baseDecimals);
+  if (!(baseReserve > 0) || !(quoteReserve >= 0) || !(virtualQuoteReserves >= 0)
+    || !Number.isInteger(decimals) || decimals < 0) return null;
+  const baseTokens = baseReserve / (10 ** decimals);
+  const effectiveQuoteSol = (quoteReserve + virtualQuoteReserves) / LAMPORTS_PER_SOL;
+  const price = effectiveQuoteSol / baseTokens;
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function ammQuotePriceDiagnostics({
+  signalBaseReserveRaw,
+  signalQuoteReserveRaw,
+  freshBaseReserveRaw,
+  freshQuoteReserveRaw,
+  virtualQuoteReservesRaw,
+  signalVirtualQuoteReservesRaw = null,
+  freshVirtualQuoteReservesRaw = null,
+  baseDecimals,
+  positionSol,
+  quotedBaseRaw,
+  internalQuoteWithoutFeesRaw,
+  legacyReferencePrice = null,
+}) {
+  const signalReservePrice = ammReservePrice({
+    baseReserveRaw: signalBaseReserveRaw,
+    quoteReserveRaw: signalQuoteReserveRaw,
+    virtualQuoteReservesRaw: signalVirtualQuoteReservesRaw ?? virtualQuoteReservesRaw,
+    baseDecimals,
+  });
+  const freshReservePrice = ammReservePrice({
+    baseReserveRaw: freshBaseReserveRaw,
+    quoteReserveRaw: freshQuoteReserveRaw,
+    virtualQuoteReservesRaw: freshVirtualQuoteReservesRaw ?? virtualQuoteReservesRaw,
+    baseDecimals,
+  });
+  const fallbackReference = Number(legacyReferencePrice);
+  const marketReferencePrice = signalReservePrice
+    || (Number.isFinite(fallbackReference) && fallbackReference > 0 ? fallbackReference : null);
+  const quotedBase = rawNumber(quotedBaseRaw);
+  const effectiveQuoteRaw = rawNumber(internalQuoteWithoutFeesRaw);
+  const decimals = Number(baseDecimals);
+  const quotedTokens = quotedBase > 0 && Number.isInteger(decimals)
+    ? quotedBase / (10 ** decimals)
+    : null;
+  const quotedPrice = quotedTokens > 0 ? Number(positionSol) / quotedTokens : null;
+  const curveAveragePrice = quotedTokens > 0 && effectiveQuoteRaw > 0
+    ? (effectiveQuoteRaw / LAMPORTS_PER_SOL) / quotedTokens
+    : null;
+  const marketMovePct = marketReferencePrice > 0 && freshReservePrice > 0
+    ? ((freshReservePrice / marketReferencePrice) - 1) * 100
+    : null;
+  const selfImpactPct = freshReservePrice > 0 && curveAveragePrice > 0
+    ? ((curveAveragePrice / freshReservePrice) - 1) * 100
+    : null;
+  const feeImpactPct = curveAveragePrice > 0 && quotedPrice > 0
+    ? ((quotedPrice / curveAveragePrice) - 1) * 100
+    : null;
+  const totalQuotePremiumPct = marketReferencePrice > 0 && quotedPrice > 0
+    ? ((quotedPrice / marketReferencePrice) - 1) * 100
+    : null;
+  return {
+    referencePriceMode: signalReservePrice ? 'EFFECTIVE_POOL_RESERVES' : 'LEGACY_REFERENCE',
+    marketReferencePrice,
+    signalReservePrice,
+    freshReservePrice,
+    quotedPrice,
+    curveAveragePrice,
+    marketMovePct,
+    selfImpactPct,
+    feeImpactPct,
+    totalQuotePremiumPct,
+  };
+}
+
 function exactQuoteInInstructionData(spendableQuoteIn, minTokensOut) {
   const data = Buffer.alloc(24);
   EXACT_QUOTE_IN_V2_DISCRIMINATOR.copy(data, 0);
@@ -698,10 +786,14 @@ class PumpTradeExecutor {
     solAmount,
     referencePrice,
     maxPriceJumpPct,
+    maxSelfImpactPct = Number.POSITIVE_INFINITY,
+    signalPoolBaseReservesRaw = null,
+    signalPoolQuoteReservesRaw = null,
+    signalVirtualQuoteReservesRaw = null,
   }) {
     const startedAt = Date.now();
     const execution = {
-      version: 1,
+      version: 2,
       buyMode: 'PUMP_AMM_FIXED_SOL_HARD_CAP',
       hardSpendCap: true,
       positionSol: solAmount,
@@ -767,22 +859,72 @@ class PumpTradeExecutor {
       const decimals = Number(state.baseMintAccount.decimals ?? 6);
       const quotedTokens = Number(quoted.base.toString()) / (10 ** decimals);
       const expectedPrice = quotedTokens > 0 ? solAmount / quotedTokens : null;
+      const priceDiagnostics = ammQuotePriceDiagnostics({
+        signalBaseReserveRaw: signalPoolBaseReservesRaw,
+        signalQuoteReserveRaw: signalPoolQuoteReservesRaw,
+        freshBaseReserveRaw: state.poolBaseAmount,
+        freshQuoteReserveRaw: state.poolQuoteAmount,
+        virtualQuoteReservesRaw: state.pool.virtualQuoteReserves,
+        signalVirtualQuoteReservesRaw,
+        freshVirtualQuoteReservesRaw: state.pool.virtualQuoteReserves,
+        baseDecimals: decimals,
+        positionSol: solAmount,
+        quotedBaseRaw: quoted.base,
+        internalQuoteWithoutFeesRaw: quoted.internalQuoteWithoutFees,
+        legacyReferencePrice: referencePrice,
+      });
       execution.spendableQuoteRaw = spendLamports.toString();
       execution.quotedTokenRaw = quoted.base.toString();
       execution.minimumTokenRaw = minBaseOut.toString();
       execution.quotedPrice = expectedPrice;
+      execution.signalPoolBaseReservesRaw = signalPoolBaseReservesRaw == null
+        ? null
+        : signalPoolBaseReservesRaw.toString();
+      execution.signalPoolQuoteReservesRaw = signalPoolQuoteReservesRaw == null
+        ? null
+        : signalPoolQuoteReservesRaw.toString();
+      execution.signalVirtualQuoteReservesRaw = signalVirtualQuoteReservesRaw == null
+        ? null
+        : signalVirtualQuoteReservesRaw.toString();
+      execution.freshPoolBaseReservesRaw = state.poolBaseAmount.toString();
+      execution.freshPoolQuoteReservesRaw = state.poolQuoteAmount.toString();
+      execution.virtualQuoteReservesRaw = state.pool.virtualQuoteReserves.toString();
+      execution.referencePriceMode = priceDiagnostics.referencePriceMode;
+      execution.legacyReferencePrice = Number.isFinite(Number(referencePrice))
+        ? Number(referencePrice)
+        : null;
+      execution.referencePrice = priceDiagnostics.marketReferencePrice;
+      execution.signalReservePrice = priceDiagnostics.signalReservePrice;
+      execution.freshReservePrice = priceDiagnostics.freshReservePrice;
+      execution.curveAveragePrice = priceDiagnostics.curveAveragePrice;
+      execution.marketMovePct = priceDiagnostics.marketMovePct;
+      execution.priceJumpPct = priceDiagnostics.marketMovePct;
+      execution.selfImpactPct = priceDiagnostics.selfImpactPct;
+      execution.feeImpactPct = priceDiagnostics.feeImpactPct;
+      execution.totalQuotePremiumPct = priceDiagnostics.totalQuotePremiumPct;
+      execution.maxMarketMovePct = maxPriceJumpPct;
+      execution.maxSelfImpactPct = Number.isFinite(Number(maxSelfImpactPct))
+        ? Number(maxSelfImpactPct)
+        : null;
       mark('quote_ready_ms');
-      if (Number.isFinite(referencePrice) && referencePrice > 0
-        && Number.isFinite(expectedPrice) && maxPriceJumpPct >= 0) {
-        const jumpPct = ((expectedPrice / referencePrice) - 1) * 100;
-        execution.referencePrice = referencePrice;
-        execution.priceJumpPct = jumpPct;
-        if (jumpPct > maxPriceJumpPct) {
+      if (Number.isFinite(priceDiagnostics.marketMovePct) && maxPriceJumpPct >= 0) {
+        if (priceDiagnostics.marketMovePct > maxPriceJumpPct) {
           throw errorWithCode(
-            `Entry price moved ${jumpPct.toFixed(2)}%, above ${maxPriceJumpPct}%`,
-            'PRICE_JUMP',
+            `Market price moved ${priceDiagnostics.marketMovePct.toFixed(2)}%, `
+              + `above ${maxPriceJumpPct}%`,
+            'MARKET_PRICE_MOVED',
           );
         }
+      }
+      if (Number.isFinite(priceDiagnostics.selfImpactPct)
+        && Number.isFinite(Number(maxSelfImpactPct))
+        && Number(maxSelfImpactPct) >= 0
+        && priceDiagnostics.selfImpactPct > Number(maxSelfImpactPct)) {
+        throw errorWithCode(
+          `Order self-impact ${priceDiagnostics.selfImpactPct.toFixed(2)}%, `
+            + `above ${Number(maxSelfImpactPct)}%`,
+          'SELF_IMPACT_REJECTED',
+        );
       }
 
       // Build the canonical account list, then switch only the instruction payload
@@ -969,6 +1111,8 @@ class PumpTradeExecutor {
 
 module.exports = {
   PumpTradeExecutor,
+  ammQuotePriceDiagnostics,
+  ammReservePrice,
   classifyBuyReconciliation,
   confirmedTransactionFailure,
   exactQuoteInInstructionData,
