@@ -851,7 +851,37 @@ class LiveTradingManager {
       return 'CONFIRMED';
     }
 
-    const unresolved = errorText(lastError || initialError || 'Transaction status is still unknown');
+    const unresolved = errorText(lastError || initialError || position.entryError
+      || 'Transaction status is still unknown');
+    const unknownAgeMs = reconciledAt - Number(position.createdAt || reconciledAt);
+    const expiredReleaseMs = Math.max(
+      60_000,
+      Number(this.config.expiredEntryReleaseMs) || 10 * 60_000,
+    );
+    const signatureExpired = /(?:signature .* expired|block height exceeded)/i.test(unresolved);
+    const safelyAbsent = !result.confirmationStatus
+      && result.transactionObserved !== true
+      && String(result.tokenAmountRaw || '0') === '0';
+    if (signature && signatureExpired && safelyAbsent && unknownAgeMs >= expiredReleaseMs) {
+      const failure = `Expired entry was not found on chain after ${Math.round(unknownAgeMs / 1_000)}s`;
+      if (orderId) this.store.updateLiveOrder(orderId, { status: 'FAILED', error: failure });
+      position.status = 'ENTRY_FAILED';
+      position.entryError = failure;
+      position.exitReason = 'ENTRY_EXPIRED_UNOBSERVED';
+      this.store.updateLivePosition(position.id, {
+        status: 'ENTRY_FAILED',
+        entrySignature: signature,
+        entryError: failure,
+        exitReason: 'ENTRY_EXPIRED_UNOBSERVED',
+        exitError: null,
+      });
+      this._updatePositionDecision(position, 'ENTRY_FAILED', 'ENTRY_EXPIRED_UNOBSERVED');
+      this.positions.delete(position.mint);
+      this.metrics.entryFailures += 1;
+      this.metrics.lastActionAt = reconciledAt;
+      return 'FAILED';
+    }
+
     if (orderId) {
       this.store.updateLiveOrder(orderId, {
         status: 'CONFIRMATION_UNKNOWN',
@@ -876,7 +906,24 @@ class LiveTradingManager {
     this.metrics.entryUnknown += 1;
     this.metrics.lastActionAt = reconciledAt;
     this.metrics.lastError = unresolved;
+    if (signature && signatureExpired && unknownAgeMs < expiredReleaseMs) {
+      this._scheduleUnknownEntryRecovery(position, orderId, expiredReleaseMs - unknownAgeMs);
+    }
     return 'UNKNOWN';
+  }
+
+  _scheduleUnknownEntryRecovery(position, orderId, delayMs) {
+    if (this.timers.has(position.id)) clearTimeout(this.timers.get(position.id));
+    const timer = setTimeout(() => {
+      this.timers.delete(position.id);
+      if (this.stopping || !this.positions.has(position.mint)) return;
+      this._track(this._recoverUnknownEntry(position, {
+        orderId,
+        initialError: position.entryError,
+      }));
+    }, Math.max(100, delayMs));
+    if (timer.unref) timer.unref();
+    this.timers.set(position.id, timer);
   }
 
   _armPositionExit(position) {

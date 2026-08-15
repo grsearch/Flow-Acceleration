@@ -859,4 +859,3 @@ class MigratedDropReboundShadowSuite {
 }
 
 module.exports = { MigratedDropReboundShadowSuite, STATUS, shadowPrice };
-

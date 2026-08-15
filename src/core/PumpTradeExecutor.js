@@ -342,6 +342,8 @@ function classifyBuyReconciliation(status, tokenBalanceRaw, {
     state: 'UNKNOWN',
     tokenAmountRaw: '0',
     confirmationStatus: status?.confirmationStatus || null,
+    transactionObserved,
+    balanceObserved,
   };
 }
 
