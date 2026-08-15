@@ -133,6 +133,16 @@ const provenNegativeShadowsEnabled = booleanEnv(
   'FLOW_PROVEN_NEGATIVE_SHADOWS_ENABLED',
   false,
 );
+// Holder Growth produced a large, consistently negative entry/exit cross-product.
+// Keep the complete historical matrix queryable, but only create new rows for the
+// two short fixed-hold controls unless an operator explicitly re-enables the full
+// experiment. A new flag is used so an older server .env cannot silently restore
+// the 8 x 13 matrix after a normal code upgrade.
+const holderGrowthFullMatrixEnabled = booleanEnv(
+  'FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED',
+  false,
+);
+
 // One shared fallback keeps every research-only strategy on the same economic
 // scale. A strategy-specific environment variable may still override it.
 const defaultShadowPositionSol = numberEnv('FLOW_SHADOW_DEFAULT_POSITION_SOL', 1, {
@@ -993,6 +1003,110 @@ const config = {
         maxHoldMs: 60_000,
       },
       {
+        id: 'FO_D12_R3_Q_10S',
+        label: 'FO-D12-R3-Q | retention>=70 / Top3<50 / NetFlow 15-50 / fixed 10s',
+        referenceProfileId: 'DEEP_D12_5_R3',
+        referencePullbackPct: 12.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_D12_R3_Q',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_NET_FLOW_SOL', 15, {
+          min: 0,
+        }),
+        maxNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_NET_FLOW_SOL', 50, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_D12_QUALITY_MAX_CREATOR_SHARE_PCT',
+          5,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_RETENTION_PCT', 70, {
+          min: 0, max: 100,
+        }),
+        maxTop3SharePct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_TOP3_SHARE_PCT', 50, {
+          min: 0, max: 100,
+        }),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_D12_QUALITY_FIXED_HOLD_MS', 10_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'FO_D12_R3_QC_10S',
+        label: 'FO-D12-R3-QC | Q + Creator<=3 / fixed 10s',
+        referenceProfileId: 'DEEP_D12_5_R3',
+        referencePullbackPct: 12.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_D12_R3_QC',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_NET_FLOW_SOL', 15, {
+          min: 0,
+        }),
+        maxNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_NET_FLOW_SOL', 50, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_D12_STRICT_MAX_CREATOR_SHARE_PCT',
+          3,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_RETENTION_PCT', 70, {
+          min: 0, max: 100,
+        }),
+        maxTop3SharePct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_TOP3_SHARE_PCT', 50, {
+          min: 0, max: 100,
+        }),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_D12_QUALITY_FIXED_HOLD_MS', 10_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'FO_D12_R3_Q_T10_H30',
+        label: 'FO-D12-R3-Q-T10 | +20 activation / drawdown 10 / max 30s',
+        referenceProfileId: 'DEEP_D12_5_R3',
+        referencePullbackPct: 12.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_D12_R3_Q',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_NET_FLOW_SOL', 15, {
+          min: 0,
+        }),
+        maxNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_NET_FLOW_SOL', 50, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_D12_QUALITY_MAX_CREATOR_SHARE_PCT',
+          5,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_RETENTION_PCT', 70, {
+          min: 0, max: 100,
+        }),
+        maxTop3SharePct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_TOP3_SHARE_PCT', 50, {
+          min: 0, max: 100,
+        }),
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: numberEnv(
+          'FLOW_LAUNCH_D12_QUALITY_TRAILING_ACTIVATION_PCT', 20, { min: 0 },
+        ),
+        trailingDrawdownPct: numberEnv(
+          'FLOW_LAUNCH_D12_QUALITY_TRAILING_DRAWDOWN_PCT', 10, { min: 0.1, max: 100 },
+        ),
+        hardStopPct: numberEnv(
+          'FLOW_LAUNCH_D12_QUALITY_HARD_STOP_PCT', 20, { min: 0.1, max: 100 },
+        ),
+        minHoldMs: 0,
+        maxHoldMs: integerEnv('FLOW_LAUNCH_D12_QUALITY_TRAILING_MAX_HOLD_MS', 30_000, {
+          min: 1_000,
+        }),
+      },
+
+      {
         id: 'F2_8S_NF30',
         label: 'F2-8S-NF30 | F2 + NetFlow>=30 SOL / fixed 8s',
         referenceProfileId: 'LEGACY_7_5_R3',
@@ -1844,7 +1958,8 @@ const config = {
   // a short PumpSwap observation window; only qualified oscillating markets keep
   // the extended subscription. This suite never owns a signer or executor.
   rangeScalperShadow: {
-    enabled: booleanEnv('FLOW_RANGE_SCALPER_SHADOW_ENABLED', true),
+    enabled: provenNegativeShadowsEnabled
+      && booleanEnv('FLOW_RANGE_SCALPER_SHADOW_ENABLED', true),
     positionSizeSol: shadowPositionEnv('FLOW_RANGE_SCALPER_POSITION_SOL'),
     initialObservationMs: integerEnv('FLOW_RANGE_SCALPER_INITIAL_OBSERVATION_MS', 120_000, {
       min: 30_000,
@@ -2103,7 +2218,7 @@ const config = {
         minNetFlowSol: 10,
         maxTop3SharePct: 80,
       },
-    ],
+    ].filter((profile) => holderGrowthFullMatrixEnabled || profile.id === 'HG30_BAL'),
     // Every exit is crossed with every entry as an independent cohort. Keep
     // XT15_H120 unchanged so existing production rows remain comparable.
     exitProfiles: [
@@ -2217,7 +2332,8 @@ const config = {
           { activationPct: 200, drawdownPct: 30 },
         ],
       },
-    ],
+    ].filter((profile) => holderGrowthFullMatrixEnabled
+      || ['X5_FIXED', 'X15_FIXED'].includes(profile.id)),
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),

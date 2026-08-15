@@ -346,6 +346,22 @@ independent first-Primary mints, average 5-second net return, 5-second win rate 
 returning at least 20%. Only already-settled signals older than the configured lag contribute.
 These fields are labels for later segmentation and never participate in entry qualification.
 
+The 2026-08-15 forward screen adds three isolated deep-pullback quality cohorts without
+changing `FO_D12_R3_10S`. `FO_D12_R3_Q_10S` requires the D12.5/R3 reference, NetFlow
+between 15 and 50 SOL, first-20 buyer retention at least 70%, Top3 share below 50%, and
+Creator share at most 5%, then holds for 10 seconds. `FO_D12_R3_QC_10S` tightens only the
+Creator ceiling to 3%. `FO_D12_R3_Q_T10_H30` reuses Q entry and independently tests +20%
+activation, 10% peak drawdown, -20% hard stop and a 30-second maximum. All three use new
+cohort IDs, the 1 SOL cost model and 200ms causal fills; none signs or sends a transaction.
+
+Range Scalper J is now behind the proven-negative override and therefore stops creating new
+positions by default while all historical rows remain queryable. Holder Growth N similarly
+keeps its complete history but defaults new forward evaluation to `HG30_BAL` crossed only
+with `X5_FIXED` and `X15_FIXED`. Set `FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED=true` only
+when intentionally resuming the old 8 x 13 research matrix. Smart Pullback A/B, lifecycle G,
+migration continuity M and the live strategy are unchanged.
+
+
 Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION` 只用毕业前 `PUMP_BONDING_CURVE` 成交触发信号和入场，AGE 从 Token 创建时间计算；`POST_MIGRATION` 只用毕业后的 `PUMP_AMM` 成交触发信号和入场，AGE 从毕业时间计算。两层拥有独立检测状态、Episode 与 cohort，统计时不会把两种市场结构混在一起。此前已经积累的毕业后记录会通过数据库默认值保留为 `POST_MIGRATION`。
 
 完整的毕业前 Curve 成交本来就持续写入 `raw_trades`；新毕业 Mint 另外默认持续订阅5分钟 PumpSwap 并保存逐笔成交。因此样本积累后可以分别离线穷举窗口、跌幅、反弹幅度和确认时限。毕业前建立的模拟仓位如果跨过毕业时点，可以继续使用迁移后的 PumpSwap 成交退出，但不会把该仓位改记成毕业后入场。
