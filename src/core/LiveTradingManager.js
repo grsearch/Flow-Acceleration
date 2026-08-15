@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const LIVE_RULE_VERSION = 'post_migration_gd25_35_xleg_reentry2_v2';
+const LIVE_RULE_VERSION = 'post_migration_drop_rebound_xleg';
 
 function errorText(error) {
   return String(error?.message || error || 'Unknown error')
@@ -83,8 +83,10 @@ class LiveTradingManager {
     this.strategies = new Map((config.strategies || [])
       .filter((strategy) => strategy.enabled !== false)
       .map((strategy) => [strategy.id, strategy]));
+    this.entryStrategies = new Map([...this.strategies]
+      .filter(([, strategy]) => strategy.entryEnabled !== false));
     this.tracked = new Map();
-    this.detectors = new Map([...this.strategies.keys()].map((id) => [id, new Map()]));
+    this.detectors = new Map([...this.entryStrategies.keys()].map((id) => [id, new Map()]));
     this.ammPriceStates = new Map();
     this.positions = new Map();
     this.timers = new Map();
@@ -222,7 +224,7 @@ class LiveTradingManager {
       strategies: [...this.strategies.values()].map((strategy) => ({
         ...strategy,
         mode: this.mode,
-        ruleVersion: LIVE_RULE_VERSION,
+        ruleVersion: strategy.ruleVersion || LIVE_RULE_VERSION,
         activePositions: [...this.positions.values()]
           .filter((position) => position.strategyId === strategy.id).length,
       })),
@@ -285,7 +287,7 @@ class LiveTradingManager {
         ?? this.tracked.get(observedTrade.mint)?.graduatedAt);
       if (graduatedAt > 0 && !this.tracked.has(observedTrade.mint)) this.onGraduated(token);
       if (this.tracked.has(observedTrade.mint) && this._acceptAmmPrice(observedTrade)) {
-        for (const strategy of this.strategies.values()) {
+        for (const strategy of this.entryStrategies.values()) {
           this._observeStrategy(strategy, observedTrade, graduatedAt);
         }
       }
@@ -373,11 +375,11 @@ class LiveTradingManager {
   _trackingEnabled() {
     // DISABLED is execution-disabled, not observation-disabled. Keep recording
     // strategy matches so a safety-locked deployment still produces evidence.
-    return this.strategies.size > 0;
+    return this.entryStrategies.size > 0;
   }
 
   _maxTrackingAgeMs() {
-    return Math.max(0, ...[...this.strategies.values()]
+    return Math.max(0, ...[...this.entryStrategies.values()]
       .map((strategy) => Number(strategy.trackingAgeMs) || 0));
   }
 
@@ -478,7 +480,7 @@ class LiveTradingManager {
       receivedAtMs: trade.receivedAtMs || trade.timestampMs,
       mint: trade.mint,
       symbol: this.tracked.get(trade.mint)?.symbol || null,
-      ruleVersion: LIVE_RULE_VERSION,
+      ruleVersion: strategy.ruleVersion || LIVE_RULE_VERSION,
       market: 'PUMP_AMM',
       referencePrice: trade.price,
       features: {
@@ -489,6 +491,10 @@ class LiveTradingManager {
         dropPct,
         reboundPct,
         windowMs: strategy.windowMs,
+        referencePriceSource: Number(trade.reservePrice) > 0 ? 'POOL_RESERVES' : 'TRADE_AVERAGE',
+        poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+        poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+        maxEntryPriceJumpPct: strategy.maxEntryPriceJumpPct,
       },
       ruleMatched: true,
       rejectionReasons: [],
@@ -517,6 +523,7 @@ class LiveTradingManager {
     if (this._killSwitchActive()) return 'KILL_SWITCH';
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
+    if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
     const maxSignalAgeMs = strategy?.maxSignalAgeMs || this.config.maxSignalAgeMs;
     if (Number.isFinite(receivedAt)
       && this.now() - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
