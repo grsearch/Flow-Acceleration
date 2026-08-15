@@ -259,49 +259,7 @@ F 路径保留三个质量过滤档位，每档分别固定持有3秒和8秒，�
 
 - F1：参考点 NetFlow ≥15 SOL，Creator 买入占比 ≤5%。
 - F2：参考点 NetFlow ≥20 SOL，Creator 买入占比 ≤10%。
-- F3 对照：参考点 NetFlow ≥20 SOL，Creator 买入占比 ≤20%。
-
-在不修改上述六组及其历史的前提下，额外运行四个独立的延长持仓 cohort。它们复用相应F档位的原入场点，只改变退出：
-
-- FT-A：F2入场；最短持有3秒，入场即激活峰值回撤20%，120秒兜底，无硬止损。
-- FT-B：F1入场；盈利10%激活峰值回撤20%，最短持有3秒，硬止损30%，120秒兜底。
-- FT-C：F2入场；盈利30%激活峰值回撤20%，硬止损30%，120秒兜底。
-- FT-D敏感性对照：F1入场；盈利30%激活峰值回撤15%，最短持有3秒，硬止损30%，120秒兜底。
-
-FT-A/B/C/D使用全新的 `cohort_id`，Dashboard 会分别统计，不会把新结果并入原F1/F2/F3固定持仓历史。这些组仍是右尾依赖型研究实验，仅用于前向Shadow验证。
-
-在旧组不变的前提下，另设四个深回踩前向 cohort：`FD10_R3_5S`、`FD12_5_R3_5S`、`FD12_5_R5_5S` 与 `FD15_R5_5S`。它们分别测试10%～15%的首波回踩和3%/5%低点反弹，要求低点至少稳定0.5～1秒、低点之后至少出现2个新买家、最近1秒净流入重新为正；若回踩超过25%则只记录规则拒绝，不模拟接飞刀。四组共用 F1 的 NetFlow/Creator 质量门槛和固定5秒退出，因此统计差异主要来自入场深度与确认强度。深回踩参考点由 Observer E 独立跟踪，具有独立 `reference_profile_id`，不会改写或混入原7.5%参考点。
-
-`FO_F2_J2_3S` 是基于34小时样本新增的前向验证组：复用旧 F2 信号（NetFlow≥20 SOL、Creator≤10%），但把200ms模拟成交相对参考价的最大跳价收紧为2%，并固定持有3秒。旧 F2 仍保留10%跳价上限，两者使用独立 cohort，专门验证“低追价”是否能把去除头部赢家后的期望转正。
-
-模拟入场使用参考点后200ms的首个 Bonding Curve 价格，2秒内无成交记为 `NO_ENTRY`，入场跳价超过10%记为 `PRICE_JUMP`；退出触发后同样加入200ms执行延迟和5秒超时。新样本收益扣除默认1 SOL仓位对应的完整确定性成本模型。所有样本只写入 `launch_pullback_shadow_positions`，接口为 `GET /api/launch-pullback-shadow`；该路径没有执行器、不读取私钥，永不签名或发送交易。
-
-## Migration Continuity Shadow M
-
-Shadow M 把迁移后前5秒质量延续作为独立入场：`Buyers≥20、NetFlow≥5 SOL、价格涨幅≥5%、Sell/Buy≤0.6`，信号后200ms使用下一笔真实 PumpSwap 成交模拟入场。每个 Mint 只评估一次；所有毕业 Mint 最多订阅10秒，只有活动仓位继续保留订阅，避免为长持仓组合无边界消耗 Helius。
-
-## Observed Holder Growth Shadow N
-
-Shadow N 复用 Launch Quality Observer 已有的10/20/30/60秒因果快照，不增加链上订阅或额外 RPC 请求。这里的“Holder”严格指当前 gRPC 成交流中已经观察到的独立买家及前20名买家的留存，不是 RPC 拉取的全量链上 Holder 数。
-
-- `HG10_OPEN`：10秒早期开放组，Buyers≥5、5–10秒新增买家≥3、留存≥30%、NetFlow≥1.5 SOL、Top3≤90%。
-- `HG10_FLOW10_J2` / `HG10_FLOW15_J2`：保留10秒早期结构，但分别要求 NetFlow≥10/15 SOL，并只接受信号后200ms真实成交跳价在0%～2%的前瞻样本。
-- `HG20_BAL`：20秒早期均衡组，Buyers≥8、10–20秒新增买家≥5、留存≥40%、NetFlow≥3 SOL、Top3≤85%。
-- `HG20_FAST`：20秒早期加速组，Buyers≥10、10–20秒新增买家≥8、留存≥50%、NetFlow≥5 SOL、Top3≤80%。
-- `HG20_QUALITY_J2`：20秒质量组，Buyers≥40、留存≥60%、NetFlow≥5 SOL、Top3≤80%，并只接受0%～2%的入场跳价。
-- `HG30_BAL`：Buyers≥10、20–30秒新增买家≥10、前20买家留存≥50%、NetFlow≥5 SOL、Top3≤80%。
-- `HG30_FAST`：Buyers≥10、20–30秒新增买家≥20、前20买家留存≥70%、NetFlow≥10 SOL、Top3≤80%。
-- 八组均在各自快照后200ms的首笔 Bonding Curve 成交模拟入场；旧组和旧 `XT15_H120` cohort 保持原ID，不重算历史。
-
-每个入场与十三种独立卖出规则交叉建仓：原十组保持不变；新增 `XP20_50_D15_H120`（+20%减仓50%，尾仓回撤15%）、`XP20_70_D20_H180`（+20%减仓70%，尾仓回撤20%）及 `XP30_70_STAIR`（+30%减仓70%，余仓使用30/60/100/200%阶梯移动止盈）。这些分批组用于验证高MFE后RUG样本是否能先兑现利润，而不是事后挑选赢家。
-
-阶梯组会随着峰值从20%/40%/80%/150%/300%等档位逐步放宽允许回撤，以争取保留大赢家；但实际止损价使用 `max(旧止损价, 新档位候选止损价)`，只能上移、绝不因切换到更宽档位而下移。Dashboard 同时比较平均/中位净收益、去Top5收益、PF、大赢家兑现率与MFE兑现率，避免只靠胜率或单个极端赢家判断。
-
-该策略只写入独立表 `holder_growth_shadow_positions`，默认按1 SOL仓位扣除确定性成本；分批减仓组额外扣除一次链上执行的固定成本。仓位在毕业前触发退出但尚未取得成交时会自动改到 PumpSwap 等待下一笔真实成交。退出观察窗口默认30秒；窗口内仍没有可定价成交时保留 `NO_EXIT`，但不再把它直接当作已经确认的 `-100%`。Dashboard 的主收益、胜率和 PF 只统计真正取得出场价格的 `CLOSED`，同时单列 `NO_EXIT` 数量、比例以及把它们全部视为归零的“最坏均值”。不会修改现有实盘策略，也不会签名或发送交易。
-
-历史 `NO_EXIT` 可以使用原始逐笔成交重新定价。先运行 `npm run reprice:holder-growth -- --db=/path/to/flow-research.db` 做只读预演；确认结果后追加 `--apply`。脚本会在卖出目标时间后30秒内寻找同生命周期市场的首笔合理成交，能够恢复的记录改为 `CLOSED` 并写入真实模拟出场价；其余记录保留为未定价 `NO_EXIT`。每次应用都会写入 `holder_growth_no_exit_recovery_audit` 审计表，不删除原始成交、不执行 WAL checkpoint。只有数据库或 COS 归档仍保留相应时间段 `raw_trades` 的记录才能恢复。
-
-专项导出使用 `npm run export:holder-growth -- --db=... --out=...`。它会实际复制 Shadow N 仓位、相关 Mint、Launch Quality 观察/快照及每笔仓位信号前5秒至退出后至少30秒的原始成交，并逐表核对源行数与导出行数；不执行 WAL checkpoint，也不重启采集服务。
+- F3 对照：参考点 NetFlow ≥20 SOL，Creator 买入占比 …1559 tokens truncated…..`。它会实际复制 Shadow N 仓位、相关 Mint、Launch Quality 观察/快照及每笔仓位信号前5秒至退出后至少30秒的原始成交，并逐表核对源行数与导出行数；不执行 WAL checkpoint，也不重启采集服务。
 
 同一入场并行建立六个独立退出 cohort：固定60秒、固定120秒、5秒保护后`+10%激活/峰值回撤10%`、10秒保护后`+15%激活/峰值回撤12.5%`、10秒保护后的3秒订单流转弱，以及最长300秒的分层自适应尾仓。全部组合使用1 SOL成本模型、200ms退出延迟和独立表 `migration_continuity_shadow_positions`；历史策略和实盘规则都不变，该路径永不签名或发送交易。
 
@@ -420,7 +378,7 @@ AND 最新 1 SOL PumpSwap 报价相对信号储备价格上跳不超过 3%
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-当前实盘策略直接使用官方 PumpSwap SDK 买卖。买入使用固定 SOL 输入，`1 SOL` 是硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序在发单前读取最新池状态并生成完整1 SOL报价，以报价平均成交价与信号时池储备价比较；超过3%即记录 `PRICE_JUMP` 并拒绝，不把滑点容忍误当成可接受追高幅度。程序同时限制单 Mint 单仓/单次成功买入、并发仓位、钱包 SOL 保留额与信号新鲜度。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制。买入和卖出的总优先费目标都由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`，程序会根据 Compute Unit 上限自动换算成链上要求的 micro-lamports/CU。
+当前实盘策略直接使用官方 PumpSwap SDK 买卖。买入使用固定 SOL 输入，`1 SOL` 是硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序在发单前读取最新池状态，并按 `真实 Quote 储备 + virtualQuoteReserves` 统一计算信号时与发单时的边际池价。真实市场涨价超过3%记录 `MARKET_PRICE_MOVED`；完整1 SOL报价相对最新边际池价的自身冲击超过10%记录 `SELF_IMPACT_REJECTED`。手续费、市场移动和自身冲击分别保存，不再把三者合并成“价格移动”。程序同时限制单 Mint 单仓/单次成功买入、并发仓位、钱包 SOL 保留额与信号新鲜度。买入和卖出滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制。买入和卖出的总优先费目标都由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`，程序会根据 Compute Unit 上限自动换算成链上要求的 micro-lamports/CU。
 
 当前卖出策略为 `XLEG`：前5秒达到 `+18%` 立即止盈；否则在盈利 `+8%` 后激活移动止盈，峰值回撤 `3%` 卖出；持有6秒仍为亏损则退出，15秒强制兜底。退出失败会按配置重试并保留 `EXIT_FAILED` 仓位，防止同 Mint 再次开仓。创建 `FLOW_LIVE_KILL_SWITCH_FILE` 指定的文件会立即禁止新开仓，但不会阻止已有仓位退出。
 
