@@ -133,15 +133,6 @@ const provenNegativeShadowsEnabled = booleanEnv(
   'FLOW_PROVEN_NEGATIVE_SHADOWS_ENABLED',
   false,
 );
-// Holder Growth produced a large, consistently negative entry/exit cross-product.
-// Keep the complete historical matrix queryable, but only create new rows for the
-// two short fixed-hold controls unless an operator explicitly re-enables the full
-// experiment. A new flag is used so an older server .env cannot silently restore
-// the 8 x 13 matrix after a normal code upgrade.
-const holderGrowthFullMatrixEnabled = booleanEnv(
-  'FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED',
-  false,
-);
 // One shared fallback keeps every research-only strategy on the same economic
 // scale. A strategy-specific environment variable may still override it.
 const defaultShadowPositionSol = numberEnv('FLOW_SHADOW_DEFAULT_POSITION_SOL', 1, {
@@ -325,4 +316,2047 @@ const config = {
     }),
     contextSlotRetryDelayMs: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRY_DELAY_MS', 25, {
       min: 0,
-   Û]ºÞÚ$z{-®éÜj×ÖöFS¢uD´Uõ$ôd•BrÀÐ¢F¶U&öf—E7C¢bÂ†&E7F÷7C¢‚ÂÖ„†öÆD×3¢#óÀÐ¢ÒÀÐ¢°Ð¢–C¢u„"rÂÆ&VÃ¢u„"+rKˆ®‹ÚŽ˜X{¢rÂW†—DÖöFS¢uUU%ô$äBrÀÐ¢†&E7F÷7C¢‚ÂÖ„†öÆD×3¢3óÀÐ¢ÒÀÐ¢°Ð¢–C¢u„brÂÆ&VÃ¢u„b+rKŠÞ‹ÛNK‰N‹XN˜yXøÞ‹ÚÂrÂW†—DÖöFS¢tdÄõuõ$UdU%4ÂrÀÐ¢†&E7F÷7C¢‚ÂÖ„†öÆD×3¢3óÀÐ¢ÒÀÐ¢ÒÀÐ¢6÷7DÖöFVÃ¢æ÷&ÖÆ—¦T6÷7DÖöFVÂ‡°Ð¢ââæÆ&VÄ6÷7DÖöFVÂÀÐ¢÷6—F–öå6—¦U6öÃ¢6†F÷u÷6—F–öäVçb‚tdÄõuõ$ätUõ44ÅU%õõ4•D”ôåõ4ôÂr’ÀÐ¢Ò’ÀÐ¢ÒÀÐ Ð¢òò–æFWVæFVçBö'6W'fVBÖ†öÆFW"Öw&÷wF‚&W6V&6‚â$†öÆFW'2"†W&RÖVç2vÆÆWG0¢òò6VVâ'W––ærF‡&÷Vv‚F†R6GW&VBV×7W'fR7G&VÓ²—B—2FVÆ–&W&FVÇ’æ÷@¢òò&W6VçFVB2âWF†÷&—FF—fRöâÖ6†–â†öÆFW"6÷VçBà¢†öÆFW$w&÷wF…6†F÷s¢°¢Væ&ÆVC¢&ööÆVäVçb‚tdÄõuô„ôÄDU%ôu$õuD…õ4„DõuôTä$ÄTBrÂG'VR’À¢÷6—F–öå6—¦U6öÃ¢6†F÷u÷6—F–öäVçb‚tdÄõuô„ôÄDU%ôu$õuD…õõ4•D”ôåõ4ôÂr’À¢6æ6†÷D†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…õ4ä4„õEôÕ2rÂ3óÂ°¢Ö–ã¢UóÀ¢Öƒ¢cóÀ¢Ò’À¢Ö…6æ6†÷DÆt×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôÔ…õ4ä4„õEôÄuôÕ2rÂ%óÂ°¢Ö–ã¢À¢Öƒ¢3óÀ¢Ò’À¢VçG'”FVÆ”×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôTåE%•ôDTÄ•ôÕ2rÂ#Â²Ö–ã¢Ò’À¢VçG'•F–ÖV÷WD×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôTåE%•õD”ÔTõUEôÕ2rÂ%óÂ²Ö–ã¢Ò’À¢W†—DFVÆ”×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôU„•EôDTÄ•ôÕ2rÂ#Â²Ö–ã¢Ò’À¢W†—EF–ÖV÷WD×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôU„•EõD”ÔTõUEôÕ2rÂUóÂ²Ö–ã¢Ò’À¢Ö„VçG'•&–6T§V×7C¢çVÖ&W$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôÔ…ôTåE%•ô¥TÕõ5BrÂÂ°¢Ö–ã¢À¢Öƒ¢óÀ¢Ò’À¢Ö„VçG'•&–6TG&÷7C¢çVÖ&W$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôÔ…ôTåE%•ôE$õõ5BrÂ“’Â°¢Ö–ã¢À¢Öƒ¢À¢Ò’À¢Ö…ÆW6–&ÆU&WGW&å7C¢çVÖ&W$Vçb€¢tdÄõuô„ôÄDU%ôu$õuD…ôÔ…õÄU4”$ÄUõ$UEU$åõ5BrÀ¢SÀ¢²Ö–ã¢ÂÖƒ¢óÒÀ¢’À¢&–uv–ææW%7C¢çVÖ&W$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ô$”uõt”ääU%õ5BrÂSÂ²Ö–ã¢Ò’À¢VçG'•&öf–ÆW3¢°¢°¢–C¢t„sôõTârÀ¢Æ&VÃ¢t„s÷Vâ+rzy.izžiÉþZëÞiÛî{¸BrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôõTåô„õ$•¤ôåôÕ2rÂóÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢RÀ¢Ö–äæWt'W–W'3¢2À¢Ö–å&WFVçF–öå7C¢3À¢Ö–äæWDfÆ÷u6öÃ¢ãRÀ¢Ö…F÷56†&U7C¢“À¢ÒÀ¢°¢–C¢t„sôdÄõsô£"rÀ¢Æ&VÃ¢tâfÆ÷rVFvR2+ræWDfÆ÷sãÓ+rVçG'’§V×Ó"RrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôõTåô„õ$•¤ôåôÕ2rÂóÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢RÀ¢Ö–äæWt'W–W'3¢2À¢Ö–å&WFVçF–öå7C¢3À¢Ö–äæWDfÆ÷u6öÃ¢À¢Ö…F÷56†&U7C¢“À¢Ö–äVçG'”§V×7C¢À¢Ö„VçG'”§V×7C¢"À¢ÒÀ¢°¢–C¢t„sôdÄõsUô£"rÀ¢Æ&VÃ¢tâfÆ÷rVFvR2+ræWDfÆ÷sãÓR+rVçG'’§V×Ó"RrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôõTåô„õ$•¤ôåôÕ2rÂóÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢RÀ¢Ö–äæWt'W–W'3¢2À¢Ö–å&WFVçF–öå7C¢3À¢Ö–äæWDfÆ÷u6öÃ¢RÀ¢Ö…F÷56†&U7C¢“À¢Ö–äVçG'”§V×7C¢À¢Ö„VçG'”§V×7C¢"À¢ÒÀ¢°¢–C¢t„s#ô$ÂrÀ¢Æ&VÃ¢t„s#&Ææ6VB+r#zy.izžiÉþYØ~Š{¸BrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôT$Å•ô„õ$•¤ôåôÕ2rÂ#óÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢‚À¢Ö–äæWt'W–W'3¢RÀ¢Ö–å&WFVçF–öå7C¢CÀ¢Ö–äæWDfÆ÷u6öÃ¢2À¢Ö…F÷56†&U7C¢ƒRÀ¢ÒÀ¢°¢–C¢t„s#ôd5BrÀ¢Æ&VÃ¢t„s#f7B+r#zy.izžiÉþXª˜	þ{¸BrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôT$Å•ô„õ$•¤ôåôÕ2rÂ#óÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢À¢Ö–äæWt'W–W'3¢‚À¢Ö–å&WFVçF–öå7C¢SÀ¢Ö–äæWDfÆ÷u6öÃ¢RÀ¢Ö…F÷56†&U7C¢ƒÀ¢ÒÀ¢°¢–C¢t„s#õTÄ•E•ô£"rÀ¢Æ&VÃ¢tâVÆ—G’#2+r'W–W'3ãÓC+r&WFVçF–öããÓcR+rVçG'’§V×Ó"RrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôT$Å•ô„õ$•¤ôåôÕ2rÂ#óÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢CÀ¢Ö–äæWt'W–W'3¢RÀ¢Ö–å&WFVçF–öå7C¢cÀ¢Ö–äæWDfÆ÷u6öÃ¢RÀ¢Ö…F÷56†&U7C¢ƒÀ¢Ö–äVçG'”§V×7C¢À¢Ö„VçG'”§V×7C¢"À¢ÒÀ¢°¢–C¢t„s3ô$ÂrÀ¢Æ&VÃ¢t„s3&Ææ6VB+rikZ)îK›Zën(šS÷2²yYžZÙŽ(šSSRrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…õ4ä4„õEôÕ2rÂ3óÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢À¢Ö–äæWt'W–W'3¢À¢Ö–å&WFVçF–öå7C¢SÀ¢Ö–äæWDfÆ÷u6öÃ¢RÀ¢Ö…F÷56†&U7C¢ƒÀ¢ÒÀ¢°¢–C¢t„s3ôd5BrÀ¢Æ&VÃ¢t„s3f7B+rikZ)îK›Zën(šS"÷2²yYžZÙŽ(šSsRrÀ¢†÷&—¦öä×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…õ4ä4„õEôÕ2rÂ3óÂ°¢Ö–ã¢UóÂÖƒ¢cóÀ¢Ò’À¢Ö–ä'W–W'3¢À¢Ö–äæWt'W–W'3¢#À¢Ö–å&WFVçF–öå7C¢sÀ¢Ö–äæWDfÆ÷u6öÃ¢À¢Ö…F÷56†&U7C¢ƒÀ¢ÒÀ¢Òæf–ÇFW"‚‡&öf–ÆR’Óâ†öÆFW$w&÷wF„gVÆÄÖG&—„Væ&ÆVBÇÂ&öf–ÆRæ–BÓÓÒt„s3ô$Âr’À¢òòWfW'’W†—B—27&÷76VBv—F‚WfW'’VçG'’2â–æFWVæFVçB6ö†÷'Bâ¶VW ¢òò…CUôƒ#Væ6†ævVB6òW†—7F–ær&öGV7F–öâ&÷w2&VÖ–â6ö×&&ÆRà¢W†—E&öf–ÆW3¢°¢°¢–C¢uƒUôd•„TBrÂÆ&VÃ¢~Y»®Zé£^zy"rÂW†—DÖöFS¢td•„TEô„ôÄBrÀ¢f—†VD†öÆD×3¢UóÂ†&E7F÷7C¢ÂÖ„†öÆD×3¢UóÀ¢ÒÀ¢°¢–C¢uƒUôd•„TBrÂÆ&VÃ¢~Y»®Zé£^zy"rÂW†—DÖöFS¢td•„TEô„ôÄBrÀ¢f—†VD†öÆD×3¢UóÂ†&E7F÷7C¢ÂÖ„†öÆD×3¢UóÀ¢ÒÀ¢°¢–C¢u…CUôƒ#rÀ¢Æ&VÃ¢r³R^køkK²ò[;XÎY¹îi*CRRòzÎjÚ.hÙó#Rò#zy.XYÎ[©RrÀ¢W†—DÖöFS¢uE$”Ä”ärrÀ¢†&E7F÷7C¢çVÖ&W$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ô„$Eõ5Dõõ5BrÂ#Â°¢Ö–ã¢ãÀ¢Öƒ¢À¢Ò’À¢G&–Æ–æt7F—fF–öå7C¢çVÖ&W$Vçb€¢tdÄõuô„ôÄDU%ôu$õuD…õE$”Ä”äuô5D•dD”ôåõ5BrÀ¢RÀ¢²Ö–ã¢ãÂÖƒ¢óÒÀ¢’À¢G&–Æ–æu7F÷7C¢çVÖ&W$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…õE$”Ä”äuõ5Dõõ5BrÂRÂ°¢Ö–ã¢ãÀ¢Öƒ¢À¢Ò’À¢Ö„†öÆD×3¢–çFVvW$Vçb‚tdÄõuô„ôÄDU%ôu$õuD…ôÔ…ô„ôÄEôÕ2rÂ#óÂ°¢Ö–ã¢óÀ¢Öƒ¢¢cóÀ¢Ò’À¢ÒÀ¢°¢–C¢u…C#ôCôƒƒrÂÆ&VÃ¢r³#^køkK²òY¹îi*CRòƒzy.XYÎ[©RrÀ¢W†—DÖöFS¢uE$”Ä”ärrÂ†&E7F÷7C¢#À¢G&–Æ–æt7F—fF–öå7C¢#ÂG&–Æ–æu7F÷7C¢ÂÖ„†öÆD×3¢ƒóÀ¢ÒÀ¢°¢–C¢u…C3ôCUôƒ3rÂÆ&VÃ¢r³3^køkK²òY¹îi*CRRò3zy.XYÎ[©RrÀ¢W†—DÖöFS¢uE$”Ä”ärrÂ†&E7F÷7C¢#À¢G&–Æ–æt7F—fF–öå7C¢3ÂG&–Æ–æu7F÷7C¢RÂÖ„†öÆD×3¢3óÀ¢ÒÀ¢°¢–C¢u…44ÄUóSõ%TääU"rÂÆ&VÃ¢r³3^XxþK¹3SRò[îK¹>Y¹îi*C#RrÀ¢W†—DÖöFS¢u44ÄUõ%TääU"rÂ†&E7F÷7C¢#À¢66ÆT÷WEG&–vvW%7C¢3Â66ÆT÷WDg&7F–öå7C¢SÀ¢G&–Æ–æt7F—fF–öå7C¢3ÂG&–Æ–æu7F÷7C¢#ÂÖ„†öÆD×3¢3óÀ¢ÒÀ¢°¢–C¢u…#óSôCUôƒ#rÀ¢Æ&VÃ¢r³#^XxþK¹3SRò[îK¹>Y¹îi*CRRò#zy.XYÎ[©RrÀ¢W†—DÖöFS¢u44ÄUõ%TääU"rÂ†&E7F÷7C¢#À¢66ÆT÷WEG&–vvW%7C¢#Â66ÆT÷WDg&7F–öå7C¢SÀ¢G&–Æ–æt7F—fF–öå7C¢#ÂG&–Æ–æu7F÷7C¢RÂÖ„†öÆD×3¢#óÀ¢ÒÀ¢°¢–C¢u…#ósôC#ôƒƒrÀ¢Æ&VÃ¢r³#^XxþK¹3sRò[îK¹>Y¹îi*C#Ròƒzy.XYÎ[©RrÀ¢W†—DÖöFS¢u44ÄUõ%TääU"rÂ†&E7F÷7C¢#À¢66ÆT÷WEG&–vvW%7C¢#Â66ÆT÷WDg&7F–öå7C¢sÀ¢G&–Æ–æt7F—fF–öå7C¢#ÂG&–Æ–æu7F÷7C¢#ÂÖ„†öÆD×3¢ƒóÀ¢ÒÀ¢°¢–C¢u…3ósõ5D•"rÀ¢Æ&VÃ¢r³3^XxþK¹3sRò[îK¹>™‹nj*þY¹îi*BrÀ¢W†—DÖöFS¢u44ÄUôDD•dRrÂ†&E7F÷7C¢#À¢66ÆT÷WEG&–vvW%7C¢3Â66ÆT÷WDg&7F–öå7C¢sÂÖ„†öÆD×3¢3óÀ¢G&–Æ–æuF–W'3¢°¢²7F—fF–öå7C¢3ÂG&vF÷vå7C¢RÒÀ¢²7F—fF–öå7C¢cÂG&vF÷vå7C¢RÒÀ¢²7F—fF–öå7C¢ÂG&vF÷vå7C¢#ÒÀ¢²7F—fF–öå7C¢#ÂG&vF÷vå7C¢#RÒÀ¢ÒÀ¢ÒÀ¢°¢–C¢u„dÄõuócrÂÆ&VÃ¢sczy$†öÆFW"þ‹XN˜ykX‹ÚÎ[Ë˜X{¢rÀ¢W†—DÖöFS¢tdÄõuô4„T4²rÂ†&E7F÷7C¢#À¢fÆ÷t6†V6´†÷&—¦öä×3¢cóÂÖ–ä'W–W%fVÆö6—G•&F–ó¢ãRÀ¢Ö–äæWDfÆ÷tFVÇF6öÃ¢ÂG&–Æ–æt7F—fF–öå7C¢#À¢G&–Æ–æu7F÷7C¢RÂÖ„†öÆD×3¢ƒóÀ¢ÒÀ¢°¢–C¢u…5D•%ô$ÂrÂÆ&VÃ¢~™‹nj*þYØ~Š#óCóƒóSó3rÀ¢W†—DÖöFS¢tDD•dUõE$”Ä”ärrÂ†&E7F÷7C¢#ÂÖ„†öÆD×3¢3cóÀ¢G&–Æ–æuF–W'3¢°¢²7F—fF–öå7C¢#ÂG&vF÷vå7C¢ÒÀ¢²7F—fF–öå7C¢CÂG&vF÷vå7C¢RÒÀ¢²7F—fF–öå7C¢ƒÂG&vF÷vå7C¢#ÒÀ¢²7F—fF–öå7C¢SÂG&vF÷vå7C¢#RÒÀ¢²7F—fF–öå7C¢3ÂG&vF÷vå7C¢3ÒÀ¢ÒÀ¢ÒÀ¢°¢–C¢u…5D•%ôÄô4²rÂÆ&VÃ¢~™‹nj*þKùÞZè‚Ró3ócó#rÀ¢W†—DÖöFS¢tDD•dUõE$”Ä”ärrÂ†&E7F÷7C¢#ÂÖ„†öÆD×3¢3óÀ¢G&–Æ–æuF–W'3¢°¢²7F—fF–öå7C¢RÂG&vF÷vå7C¢rãRÒÀ¢²7F—fF–öå7C¢3ÂG&vF÷vå7C¢ÒÀ¢²7F—fF–öå7C¢cÂG&vF÷vå7C¢RÒÀ¢²7F—fF–öå7C¢#ÂG&vF÷vå7C¢#ÒÀ¢ÒÀ¢ÒÀ¢°¢–C¢u…5D•%õD”ÂrÂÆ&VÃ¢~™‹nj*þ[îK¹2#óSóó#rÀ¢W†—DÖöFS¢tDD•dUõE$”Ä”ärrÂ†&E7F÷7C¢#ÂÖ„†öÆD×3¢3cóÀ¢G&–Æ–æuF–W'3¢°¢²7F—fF–öå7C¢#ÂG&vF÷vå7C¢"ãRÒÀ¢²7F—fF–öå7C¢SÂG&vF÷vå7C¢#ÒÀ¢²7F—fF–öå7C¢ÂG&vF÷vå7C¢#RÒÀ¢²7F—fF–öå7C¢#ÂG&vF÷vå7C¢3ÒÀ¢ÒÀ¢ÒÀ¢Òæf–ÇFW"‚‡&öf–ÆR’Óâ†öÆFW$w&÷wF„gVÆÄÖG&—„Væ&ÆV@¢ÇÂ²uƒUôd•„TBrÂuƒUôd•„TBuÒæ–æ6ÇVFW2‡&öf–ÆRæ–B’’À¢6÷7DÖöFVÃ¢æ÷&ÖÆ—¦T6÷7DÖöFVÂ‡°¢ââæÆ&VÄ6÷7DÖöFVÂÀ¢÷6—F–öå6—¦U6öÃ¢6†F÷u÷6—F–öäVçb‚tdÄõuô„ôÄDU%ôu$õuD…õõ4•D”ôåõ4ôÂr’À¢Ò’À¢ÒÀ ¢òòö'6W'fW"ÖöæÇ’ÆVæ6‚VÆ—G’&W6V&6‚â&VfW&Væ6RW&6VçFvW2Æ&VÂÖ&¶W@¢òò7G'V7GW&Rf÷"ÆFW"æÇ—6—3²F†W’æWfW"&V6öÖRâVçG'’÷"W†V7WF–öâ'VÆRàÐ¢ÆVæ6…VÆ—G”ö'6W'fW#¢°Ð¢Væ&ÆVC¢&ööÆVäVçb‚tdÄõuôÄTä4…õTÄ•E•ôô%4U%dU%ôTä$ÄTBrÂG'VR’ÀÐ¢6æ6†÷D†÷&—¦öç4×3¢Ö–ÆÆ—6V6öæDÆ—7DVçb€Ð¢tdÄõuôÄTä4…õTÄ•E•õ4ä4„õEõ4T4ôäE2rÀÐ¢³RÂÂ#Â3ÂcÒÀÐ¢’ÀÐ¢Ö„ÆVæ6„vT×3¢–çFVvW$Vçb‚tdÄõuôÄTä4…õTÄ•E•ôÔ…ôtUôÕ2rÂ“óÂ°Ð¢Ö–ã¢3óÀÐ¢Öƒ¢¢cóÀÐ¢Ò’ÀÐ¢V×&VfW&Væ6U7C¢çVÖ&W$Vçb‚tdÄõuôÄTä4…õTÄ•E•õTÕõ$TdU$Tä4Uõ5BrÂ#RÂ°Ð¢Ö–ã¢ãÀÐ¢Öƒ¢óÀÐ¢Ò’ÀÐ¢VÆÆ&6µ&VfW&Væ6U7C¢çVÖ&W$Vçb€Ð¢tdÄõuôÄTä4…õTÄ•E•õTÄÄ$4µõ$TdU$Tä4Uõ5BrÀÐ¢rãRÀÐ¢²Ö–ã¢ãÂÖƒ¢ÒÀÐ¢’ÀÐ¢&V&÷VæE&VfW&Væ6U7C¢çVÖ&W$Vçb€Ð¢tdÄõuôÄTä4…õTÄ•E•õ$T$õTäEõ$TdU$Tä4Uõ5BrÀÐ¢2ÀÐ¢²Ö–ã¢ÂÖƒ¢óÒÀÐ¢’ÀÐ¢FVW&VfW&Væ6U&öf–ÆW3¢ÆVæ6„FVWVÆÆ&6µ&öf–ÆW2æÖ‚‡&öf–ÆR’Óâ‡²ââç&öf–ÆRÒ’’ÀÐ¢&V6VçD'W–W%v–æF÷t×3¢–çFVvW$Vçb€Ð¢tdÄõuôÄTä4…õTÄ•E•õ$T4TåEô%U”U%õt”äDõuôÕ2rÀÐ¢óÀÐ¢²Ö–ã¢SÂÖƒ¢cóÒÀÐ¢’ÀÐ¢&WFVçF–öäfÆö÷%7C¢çVÖ&W$Vçb‚tdÄõuôÄTä4…õTÄ•E•õ$UDTåD”ôåôdÄôõ%õ5BrÂÂ°Ð¢Ö–ã¢ÀÐ¢Öƒ¢ÀÐ¢Ò’ÀÐ¢Ö„ö'6W'fF–öäÆt×3¢–çFVvW$Vçb€¢tdÄõuôÄTä4…õTÄ•E•ôÔ…ôô%4U%dD”ôåôÄuôÕ2rÀ¢%óÀ¢²Ö–ã¢ÂÖƒ¢3óÒÀ¢’À¢Ö&¶WE&Vv–ÖTÆöö¶&6´×3¢–çFVvW$Vçb€¢tdÄõuôÄTä4…ôÔ$´UEõ$Tt”ÔUôÄôô´$4µôÕ2rÀ¢3¢cóÀ¢²Ö–ã¢R¢cóÂÖƒ¢b¢c¢cóÒÀ¢’À¢Ö&¶WE&Vv–ÖU6WGFÆVÖVçDÆt×3¢–çFVvW$Vçb€¢tdÄõuôÄTä4…ôÔ$´UEõ$Tt”ÔUõ4UEDÄTÔTåEôÄuôÕ2rÀ¢cóÀ¢²Ö–ã¢cóÂÖƒ¢¢cóÒÀ¢’À¢Ö&¶WE&Vv–ÖT66†T×3¢–çFVvW$Vçb€¢tdÄõuôÄTä4…ôÔ$´UEõ$Tt”ÔUô44„UôÕ2rÀ¢UóÀ¢²Ö–ã¢óÂÖƒ¢cóÒÀ¢’À¢ÒÀ Ð¢7F÷&vS¢°Ð¢F%Fƒ¢&ö6W72æVçbädÄõuôD%õD‚ÇÂrâöFFöfÆ÷r×&W6V&6‚æF"rÀÐ¢&u&WFVçF–öä†÷W'3¢çVÖ&W$Vçb‚tdÄõuõ$uõ$UDTåD”ôåô„õU%2rÂc‚Â²Ö–ã¢Ò’ÀÐ¢&6†—fTF—#¢&ö6W72æVçbädÄõuô$4„•dUôD•"ÇÂrâöFFö&6†—fRrÀÐ¢fÇW6„×3¢–çFVvW$Vçb‚tdÄõuôD%ôdÅU4…ôÕ2rÂ#SÂ²Ö–ã¢#RÒ’ÀÐ¢fÇW6„Öƒ¢–çFVvW$Vçb‚tdÄõuôD%ôdÅU4…ôÔ‚rÂóÂ²Ö–ã¢Ò’ÀÐ¢ÒÀÐ Ð¢6W'fW#¢°Ð¢÷'C¢–çFVvW$Vçb‚tdÄõuôD4„$ô$Eõõ%BrÂ3Â²Ö–ã¢ÂÖƒ¢cUóS3RÒ’ÀÐ¢†÷7C¢&ö6W72æVçbädÄõuô$”äEô„õ5BÇÂsãããrÀÐ¢ÒÀÐ§Ó°Ð Ð¢òò6öÆæ&WVW7G2&–÷&—G’&–6RW"5RÂv†–ÆR÷W&F÷'2&V6öâ&÷WBF†RF÷FÀÐ¢òòfVRW"G&ç67F–öââFW&—fRöæR6†&VB'W’÷6VÆÂ5R&–6Rg&öÒF†R4ôÂF&vWBàÐ¦6öæf–ræÆ—fUG&F–ærç&–÷&—G”fVTÖ–7&ôÆ×÷'G2Ò&–÷&—G”fVTÖ–7&ôÆ×÷'G2€Ð¢6öæf–ræÆ—fUG&F–ærç&–÷&—G”fVU6öÂÀÐ¢6öæf–ræÆ—fUG&F–æræ6ö×WFUVæ—DÆ–Ö—BÀÐ¢“°Ð Ð¦gVæ7F–öâ7G&VÕFö¶Väf÷"†VæGö–çB’°Ð¢–b†6öæf–rç7G&VÒæÆÆVä†&´VæGö–çG2æ†2†VæGö–çB’’&WGW&â6öæf–rç7G&VÒæÆÆVä†&µFö¶VâÇÂVæFVf–æVC°Ð¢&WGW&â6öæf–rç7G&VÒæ†VÆ—W5Fö¶VâÇÂVæFVf–æVC°Ð§ÐÐ Ð¦gVæ7F–öâfÆ–FFT6öæf–r‚’°Ð¢6öç7BW'&÷'2ÒµÓ°Ð¢–b†6öæf–rç7G&VÒæVæGö–çG2æÆVæwF‚ÓÓÒ’°Ð¢W'&÷'2çW6‚‚tÖ—76–ærdÄõuôu%5ôTäEô”åE2÷"„TÄ•U5ôÄ4U%5E$TÕôTäEô”åB…2’r“°Ð¢ÐÐ¢–b†6öæf–rç7G&FVw’ç6–væÅv–æF÷t×2¢2â6öæf–rç7G&FVw’æ'VffW$×2’°Ð¢W'&÷'2çW6‚‚tdÄõuô%TddU%ôÕ2×W7B6÷fW"ÆÂF‡&VR6–væÂv–æF÷w2r“°Ð¢ÐÐ¢–b†6öæf–ræÆVæ6…VÆ—G”ö'6W'fW"ç6æ6†÷D†÷&—¦öç4×2æÆVæwF‚ÓÓÒ’°¢W'&÷'2çW6‚‚tdÄõuôÄTä4…õTÄ•E•õ4ä4„õEõ4T4ôäE2×W7B6öçF–âBÆV7BöæRfÇVRr“°¢Ð¢–b†6öæf–ræ†öÆFW$w&÷wF…6†F÷ræVæ&ÆVBbb6öæf–ræÆVæ6…VÆ—G”ö'6W'fW"æVæ&ÆVB’°¢W'&÷'2çW6‚‚tdÄõuôÄTä4…õTÄ•E•ôô%4U%dU%ôTä$ÄTB×W7B&RG'VRv†Vâ†öÆFW"w&÷wF‚—2Væ&ÆVBr“°¢Ð¢6öç7B†öÆFW$w&÷wF„†÷&—¦öç2ÒæWr6WB…°¢ââæ6öæf–ræ†öÆFW$w&÷wF…6†F÷ræVçG'•&öf–ÆW2æÖ‚‡&öf–ÆR’Óâ€¢&öf–ÆRæ†÷&—¦öä×2ÇÂ6öæf–ræ†öÆFW$w&÷wF…6†F÷rç6æ6†÷D†÷&—¦öä×0¢’’À¢ââæ6öæf–ræ†öÆFW$w&÷wF…6†F÷ræW†—E&öf–ÆW0¢æÖ‚‡&öf–ÆR’Óâ&öf–ÆRæfÆ÷t6†V6´†÷&—¦öä×2’æf–ÇFW"„&ööÆVâ’À¢Ò“°¢–b†6öæf–ræ†öÆFW$w&÷wF…6†F÷ræVæ&ÆV@¢bb²ââæ†öÆFW$w&÷wF„†÷&—¦öç5Òç6öÖR‚††÷&—¦öä×2’Óâ€¢6öæf–ræÆVæ6…VÆ—G”ö'6W'fW"ç6æ6†÷D†÷&—¦öç4×2æ–æ6ÇVFW2††÷&—¦öä×2¢’’’°¢W'&÷'2çW6‚‚tdÄõuôÄTä4…õTÄ•E•õ4ä4„õEõ4T4ôäE2×W7B–æ6ÇVFRÆÂ†öÆFW"w&÷wF‚†÷&—¦öç2r“°¢Ð¢–b†6öæf–ræ&öæF–æt7W'fTÖöÖVçGVÕ6†F÷rç6æ6†÷D†÷&—¦öç4×2æÆVæwF‚ÓÓÒ’°Ð¢W'&÷'2çW6‚‚tdÄõuô$ôäD”äuôÔôÔTåETÕõ4ä4„õEõ4T4ôäE2×W7B6öçF–âBÆV7BöæRfÇVRr“°Ð¢ÐÐ¢–b†6öæf–ræÆ—fUG&F–æræVæ&ÆVBbb6öæf–ræÆ—fUG&F–æræG'•'Vâ’°Ð¢–b‚6öæf–ræÆ—fUG&F–ærç'5W&Â’W'&÷'2çW6‚‚tdÄõuõ%5õU$Â—2&WV—&VBf÷"Æ—fRG&F–ærr“°Ð¢–b‚6öæf–ræÆ—fUG&F–ærç&—fFT¶W’’°Ð¢W'&÷'2çW6‚‚tdÄõuôÄ•dUõ$•dDUô´U’—2&WV—&VBf÷"Æ—fRG&F–ærr“°Ð¢ÐÐ¢–b‚&ö6W72æVçbädÄõuôÄ•dUõõ5EôtC#Uó3Uõ„ÄTuõõ4•D”ôåõ4ôÂ’°Ð¢W'&÷'2çW6‚‚tdÄõuôÄ•dUõõ5EôtC#Uó3Uõ„ÄTuõõ4•D”ôåõ4ôÂ×W7B&RW‡Æ–6—FÇ’6WBf÷"Æ—fRG&F–ærr“°Ð¢ÐÐ¢ÐÐ¢&WGW&âW'&÷'3°Ð§ÐÐ Ð¦ÖöGVÆRæW‡÷'G2Ò°Ð¢6öæf–rÀÐ¢æ÷&ÖÆ—¦TVæGö–çBÀÐ¢Æ—fUG&F–ætwV&BÀÐ¢6†F÷u÷6—F–öäVçbÀÐ¢Æ—fU÷6—F–öäVçbÀÐ¢&–÷&—G”fVTÖ–7&ôÆ×÷'G2ÀÐ¢fÆ–FFT6öæf–rÀÐ¢7G&VÕFö¶Väf÷"ÀÐ§Ó°Ð
+      max: 500,
+    }),
+    // Backward-compatible alias consumed by older dashboard/export code.
+    commitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
+      || process.env.FLOW_LIVE_COMMITMENT
+      || 'confirmed',
+    maxHoldMs: 15_000,
+    exitRetryCount: integerEnv('FLOW_LIVE_EXIT_RETRY_COUNT', 10, { min: 0, max: 60 }),
+    exitRetryDelayMs: integerEnv('FLOW_LIVE_EXIT_RETRY_DELAY_MS', 1_000, { min: 100 }),
+    entryReconcileCount: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_COUNT', 5, {
+      min: 1,
+      max: 30,
+    }),
+    entryReconcileDelayMs: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_DELAY_MS', 1_000, {
+      min: 100,
+      max: 30_000,
+    }),
+    killSwitchFile: process.env.FLOW_LIVE_KILL_SWITCH_FILE || './data/LIVE_TRADING_DISABLED',
+    ammPriceContinuity: {
+      minRatio: numberEnv('FLOW_LIVE_AMM_PRICE_MIN_RATIO', 0.2, { min: 0.0001, max: 1 }),
+      maxRatio: numberEnv('FLOW_LIVE_AMM_PRICE_MAX_RATIO', 5, { min: 1 }),
+      resetAfterMs: integerEnv('FLOW_LIVE_AMM_PRICE_RESET_MS', 15_000, { min: 1_000 }),
+    },
+    // Multiple live strategies can coexist here. Each one owns its own SOL size
+    // and independent decision history; the retired Primary live rule is not listed.
+    strategies: [
+      {
+        id: 'post_gd25_35_xleg',
+        label: 'æ¯•ä¸šåŽæ·±è·Œåå¼¹ Â· XLEG',
+        enabled: booleanEnv('FLOW_LIVE_POST_GD25_35_XLEG_ENABLED', true),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 1),
+        trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_TRACKING_MS', 120_000, {
+          min: 30_000,
+          max: 10 * 60_000,
+        }),
+        maxSignalAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_MAX_SIGNAL_AGE_MS', 1_500, {
+          min: 100,
+        }),
+        windowMs: integerEnv('FLOW_LIVE_POST_GD25_35_WINDOW_MS', 1_000, { min: 250 }),
+        dropMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_DROP_MIN_PCT', 25, { min: 0.1 }),
+        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_DROP_MAX_PCT', 35, { min: 0.1 }),
+        reboundMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_REBOUND_MIN_PCT', 2, { min: 0.1 }),
+        reboundMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_REBOUND_MAX_PCT', 5, { min: 0.1 }),
+        reboundTimeoutMs: integerEnv('FLOW_LIVE_POST_GD25_35_REBOUND_TIMEOUT_MS', 1_000, {
+          min: 100,
+        }),
+        maxEntriesPerMint: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_MAX_ENTRIES_PER_MINT',
+          2,
+          { min: 1, max: 10 },
+        ),
+        reentryCooldownMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_REENTRY_COOLDOWN_MS',
+          1_000,
+          { min: 0, max: 10 * 60_000 },
+        ),
+        maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_POST_GD25_35_MAX_ENTRY_JUMP_PCT', 15, {
+          min: 0,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv('FLOW_LIVE_POST_GD25_35_TRAILING_ACTIVATION_PCT', 8, {
+          min: 0.1,
+        }),
+        trailingStopPct: numberEnv('FLOW_LIVE_POST_GD25_35_TRAILING_STOP_PCT', 3, {
+          min: 0.1,
+          max: 100,
+        }),
+        fastTakeProfitPct: numberEnv('FLOW_LIVE_POST_GD25_35_FAST_TP_PCT', 18, { min: 0 }),
+        fastTakeProfitWindowMs: integerEnv('FLOW_LIVE_POST_GD25_35_FAST_TP_WINDOW_MS', 5_000, {
+          min: 0,
+        }),
+        lossCheckAtMs: integerEnv('FLOW_LIVE_POST_GD25_35_LOSS_CHECK_MS', 6_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD25_35_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      },
+    ],
+  },
+
+  // Research-only execution path. It never creates or signs a transaction.
+  signalShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_SIGNAL_SHADOW_ENABLED', false),
+    profiles: primaryThresholdProfiles,
+    positionSizeSol: shadowPositionEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL'),
+    maxSignalAgeMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
+    entryDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SIGNAL_SHADOW_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    trailingStopPct: numberEnv('FLOW_SIGNAL_SHADOW_TRAILING_STOP_PCT', 7.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    maxHoldMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Direct Primary Flow research. Each 30-second signal episode is simulated once
+  // per exit cohort; all cohorts share the same 200ms-delayed market fill.
+  flowFirstShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_FIRST_SHADOW_ENABLED', false),
+    signalVariant: 'primary_3w',
+    episodeGapMs: 30_000,
+    positionSizeSol: shadowPositionEnv('FLOW_FIRST_SHADOW_POSITION_SOL'),
+    maxSignalAgeMs: integerEnv('FLOW_FIRST_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
+    entryDelayMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxHoldMs: integerEnv('FLOW_FIRST_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    bigWinnerPct: numberEnv('FLOW_FIRST_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'C5',
+        label: 'C5 å›ºå®šæŒæœ‰5ç§’',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_FIRST_SHADOW_FIXED_HOLD_MS', 5_000, { min: 250 }),
+      },
+      {
+        id: 'C75',
+        label: 'C7.5 å³°å€¼å›žæ’¤7.5%',
+        exitMode: 'TRAILING',
+        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C75_TRAILING_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'C125',
+        label: 'C12.5 å³°å€¼å›žæ’¤12.5%',
+        exitMode: 'TRAILING',
+        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C125_TRAILING_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_FIRST_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Smart Wallet pullback A/B research. This path only records simulated
+  // positions and never owns an executor or signing key.
+  smartPullbackShadow: {
+    enabled: booleanEnv('FLOW_SMART_PULLBACK_SHADOW_ENABLED', true),
+    minSmartBuySol: numberEnv('FLOW_SMART_PULLBACK_MIN_BUY_SOL', 0.1, { min: 0.000001 }),
+    episodeGapMs: integerEnv('FLOW_SMART_PULLBACK_EPISODE_GAP_MS', 30_000, { min: 1_000 }),
+    confirmationWindowMs: integerEnv(
+      'FLOW_SMART_PULLBACK_CONFIRMATION_WINDOW_MS',
+      15_000,
+      { min: 1_000 },
+    ),
+    pullbackPct: numberEnv('FLOW_SMART_PULLBACK_DRAWDOWN_PCT', 2.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    reboundPct: numberEnv('FLOW_SMART_PULLBACK_REBOUND_PCT', 7.5, {
+      min: 0.1,
+      max: 500,
+    }),
+    minReboundBuyers: integerEnv('FLOW_SMART_PULLBACK_MIN_REBOUND_BUYERS', 1, { min: 1 }),
+    maxEntryVsSmartBuyPct: numberEnv('FLOW_SMART_PULLBACK_MAX_ENTRY_VS_SMART_PCT', 2, {
+      min: 0,
+      max: 100,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_PULLBACK_MAX_CONFIRM_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxHoldMs: integerEnv('FLOW_SMART_PULLBACK_MAX_HOLD_MS', 60_000, { min: 1_000 }),
+    bigWinnerPct: numberEnv('FLOW_SMART_PULLBACK_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'A',
+        label: 'A Â· Trailing 7.5%',
+        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_A_TRAILING_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'B',
+        label: 'B Â· Trailing 12.5%',
+        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_B_TRAILING_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
+    }),
+  },
+
+  // Isolated true Smart Wallet OPEN research. This path has its own table and
+  // never signs or sends a transaction; existing Shadow strategies are unchanged.
+  smartOpenShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_SMART_OPEN_SHADOW_ENABLED', false),
+    minSmartOpenSol: numberEnv('FLOW_SMART_OPEN_SHADOW_MIN_SOL', 1, { min: 0.000001 }),
+    preBuyWindowMs: integerEnv('FLOW_SMART_OPEN_SHADOW_PREBUY_WINDOW_MS', 2_000, {
+      min: 100,
+    }),
+    minPreBuyers: integerEnv('FLOW_SMART_OPEN_SHADOW_MIN_PREBUY_BUYERS', 2, { min: 0 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_OPEN_SHADOW_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    bigWinnerPct: numberEnv('FLOW_SMART_OPEN_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'D0',
+        label: 'D0 Â· çœŸOPENå›ºå®š5ç§’',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D0_HOLD_MS', 5_000, { min: 250 }),
+        followSmartExit: false,
+      },
+      {
+        id: 'D1',
+        label: 'D1 Â· å»¶è¿Ÿæ¿€æ´»ç§»åŠ¨æ­¢ç›ˆ',
+        exitMode: 'DELAYED_TRAILING',
+        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_HARD_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_SMART_OPEN_SHADOW_D1_TRAILING_ACTIVATION_PCT',
+          20,
+          { min: 0, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_TRAILING_STOP_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D1_MAX_HOLD_MS', 60_000, {
+          min: 1_000,
+        }),
+        followSmartExit: false,
+      },
+      {
+        id: 'D2',
+        label: 'D2 Â· è·ŸéšSmartå‡ä»“/æ¸…ä»“',
+        exitMode: 'SMART_FOLLOW',
+        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D2_HARD_STOP_PCT', 12.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D2_MAX_HOLD_MS', 180_000, {
+          min: 1_000,
+        }),
+        followSmartExit: true,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Forward-only confirmation research. A Primary Flow signal is only eligible
+  // after a monitored wallet opens the same mint; entry is then simulated on
+  // the first later Bonding Curve trade. This intentionally does not reuse the
+  // retrospective smart_signal_confirmations label as an earlier entry price.
+  flowSmartConfirmShadow: {
+    enabled: booleanEnv('FLOW_SMART_CONFIRM_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_CONFIRM_SHADOW_POSITION_SOL'),
+    minSmartOpenSol: numberEnv('FLOW_SMART_CONFIRM_SHADOW_MIN_OPEN_SOL', 0.1, { min: 0 }),
+    entryDelayMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv(
+      'FLOW_SMART_CONFIRM_SHADOW_MAX_ENTRY_JUMP_PCT',
+      10,
+      { min: 0, max: 100 },
+    ),
+    bigWinnerPct: numberEnv('FLOW_SMART_CONFIRM_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
+    cohorts: [
+      {
+        id: 'L5_F5',
+        label: 'L5-F5 Â· Smart OPEN within 5s / fixed 5s',
+        maxConfirmationDelayMs: 5_000,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 5_000,
+      },
+      {
+        id: 'L15_F5',
+        label: 'L15-F5 Â· Smart OPEN within 15s / fixed 5s',
+        maxConfirmationDelayMs: 15_000,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 5_000,
+      },
+      {
+        id: 'L5_T15',
+        label: 'L5-T15 Â· Smart OPEN within 5s / trailing 15%',
+        maxConfirmationDelayMs: 5_000,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 15,
+        hardStopPct: 25,
+        minHoldMs: 1_000,
+        maxHoldMs: 60_000,
+      },
+      {
+        id: 'L15_T20',
+        label: 'L15-T20 Â· Smart OPEN within 15s / trailing 20%',
+        maxConfirmationDelayMs: 15_000,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 20,
+        trailingDrawdownPct: 20,
+        hardStopPct: 30,
+        minHoldMs: 2_000,
+        maxHoldMs: 120_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_CONFIRM_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Independent first-pullback execution research. References are emitted by
+  // LaunchQualityObserver, but every simulated position lives in its own table.
+  launchPullbackShadow: {
+    enabled: booleanEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv(
+      'FLOW_LAUNCH_PULLBACK_SHADOW_MAX_ENTRY_JUMP_PCT',
+      10,
+      { min: 0, max: 100 },
+    ),
+    bigWinnerPct: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_BIG_WINNER_PCT', 50, {
+      min: 1,
+    }),
+    profiles: [
+      {
+        id: 'F1',
+        label: 'F1 Â· NetFlowâ‰¥15 / Creatorâ‰¤5%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F1_MIN_NET_FLOW_SOL', 15, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F1_MAX_CREATOR_SHARE_PCT',
+          5,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'F2',
+        label: 'F2 Â· NetFlowâ‰¥20 / Creatorâ‰¤10%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'F3',
+        label: 'F3 å¯¹ç…§ Â· NetFlowâ‰¥20 / Creatorâ‰¤20%',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F3_MIN_NET_FLOW_SOL', 20, { min: 0 }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F3_MAX_CREATOR_SHARE_PCT',
+          20,
+          { min: 0, max: 100 },
+        ),
+      },
+      {
+        id: 'FQ1',
+        label: 'FQ1 å‰å‘ Â· F1 + Buyersâ‰¥10 / Recentâ‰¥3 / Retentionâ‰¥50% / Top3â‰¤70%',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 10,
+        minRecentBuyers: 3,
+        minRetentionPct: 50,
+        maxTop3SharePct: 70,
+      },
+      {
+        id: 'FQ2',
+        label: 'FQ2 å‰å‘ Â· F1 + Buyersâ‰¥15 / Recentâ‰¥3 / Retentionâ‰¥50% / Top3â‰¤70%',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 15,
+        minRecentBuyers: 3,
+        minRetentionPct: 50,
+        maxTop3SharePct: 70,
+      },
+    ],
+    holds: [
+      {
+        id: '3S',
+        label: 'å›ºå®šæŒæœ‰3ç§’',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_3S_MS', 3_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: '8S',
+        label: 'å›ºå®šæŒæœ‰8ç§’',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+    ],
+    // These cohorts retain the exact F1/F2 entry filters above and only vary exits.
+    // Their IDs are intentionally independent from the historical fixed-hold cohorts.
+    trailingCohorts: [
+      {
+        id: 'FT_A',
+        label: 'FT-A Â· F2ç«‹å³æ¿€æ´»/å›žæ’¤20%/æ— ç¡¬æ­¢æŸ',
+        profileId: 'F2',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_ACTIVATION_PCT', 0, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: null,
+      },
+      {
+        id: 'FT_B',
+        label: 'FT-B Â· F1ç›ˆåˆ©10%æ¿€æ´»/å›žæ’¤20%/æ­¢æŸ30%',
+        profileId: 'F1',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_ACTIVATION_PCT', 10, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FT_C',
+        label: 'FT-C Â· F2ç›ˆåˆ©30%æ¿€æ´»/å›žæ’¤20%/æ­¢æŸ30%',
+        profileId: 'F2',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FT_D',
+        label: 'FT-Då¯¹ç…§ Â· F1ç›ˆåˆ©30%æ¿€æ´»/å›žæ’¤15%/æ­¢æŸ30%',
+        profileId: 'F1',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_DRAWDOWN_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MIN_HOLD_MS', 3_000, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'FQ_X15',
+        label: 'FQ-X15 Â· FQ1ç›ˆåˆ©8%æ¿€æ´»/å›žæ’¤5%/15ç§’å…œåº•',
+        profileId: 'FQ1',
+        trailingActivationPct: 8,
+        trailingDrawdownPct: 5,
+        minHoldMs: 1_000,
+        maxHoldMs: 15_000,
+        hardStopPct: 12.5,
+      },
+      {
+        id: 'FQ_X30',
+        label: 'FQ-X30 Â· FQ2ç›ˆåˆ©10%æ¿€æ´»/å›žæ’¤7.5%/30ç§’å…œåº•',
+        profileId: 'FQ2',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 7.5,
+        minHoldMs: 2_000,
+        maxHoldMs: 30_000,
+        hardStopPct: 15,
+      },
+    ],
+    // New entry cohorts intentionally do not reuse F1/F2/F3/FT IDs. All four
+    // share the same quality/exit gates so their entry depth is comparable.
+    deepCohorts: launchDeepPullbackProfiles.map((profile) => ({
+      ...profile,
+      profileId: profile.id,
+      minNetFlowSol: numberEnv('FLOW_LAUNCH_DEEP_MIN_NET_FLOW_SOL', 15, { min: 0 }),
+      maxCreatorSharePct: numberEnv('FLOW_LAUNCH_DEEP_MAX_CREATOR_SHARE_PCT', 5, {
+        min: 0, max: 100,
+      }),
+      minBuyers: 0,
+      minRecentBuyers: 0,
+      minRetentionPct: 0,
+      maxTop3SharePct: 100,
+      fixedHoldMs: integerEnv('FLOW_LAUNCH_DEEP_FIXED_HOLD_MS', 5_000, { min: 250 }),
+    })),
+    // New independent cohorts preserve all historical F/FT/FD definitions.
+    // They are based on the chronological 70/30 screen from the latest export:
+    // low holder concentration was stable at 10s, while creator<=5% with
+    // continuing buyers retained a useful 30s right tail.
+    optimizationCohorts: [
+      {
+        id: 'FO_F2_J2_3S',
+        label: 'FO-F2-J2 Â· F2 + å…¥åœºè·³ä»·<=2% / fixed 3s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_F2_J2',
+        minNetFlowSol: 20,
+        maxCreatorSharePct: 10,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        maxEntryPriceJumpPct: 2,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 3_000,
+      },
+      {
+        id: 'FO_C70_10S',
+        label: 'FO-C70 Â· Top3<=70% / fixed 10s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_C70',
+        minNetFlowSol: 0,
+        maxCreatorSharePct: 100,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 70,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 10_000,
+      },
+      {
+        id: 'FO_C70_T15',
+        label: 'FO-C70-T15 Â· Top3<=70% / trailing 15%',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_C70',
+        minNetFlowSol: 0,
+        maxCreatorSharePct: 100,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 70,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 15,
+        hardStopPct: 25,
+        minHoldMs: 1_000,
+        maxHoldMs: 60_000,
+      },
+      {
+        id: 'FO_RB10_30S',
+        label: 'FO-RB10 Â· Creator<=5% / recent buyers>=10 / fixed 30s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_RB10',
+        minNetFlowSol: 5,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 10,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 30_000,
+      },
+      {
+        id: 'FO_RB10_T20',
+        label: 'FO-RB10-T20 Â· Creator<=5% / recent buyers>=10 / trailing 20%',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_RB10',
+        minNetFlowSol: 5,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 10,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 20,
+        trailingDrawdownPct: 20,
+        hardStopPct: 30,
+        minHoldMs: 2_000,
+        maxHoldMs: 120_000,
+      },
+      {
+        id: 'FO_D12_R3_10S',
+        label: 'FO-D12-R3 Â· deep pullback / fixed 10s',
+        referenceProfileId: 'DEEP_D12_5_R3',
+        referencePullbackPct: 12.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_D12_R3',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 10_000,
+      },
+      {
+        id: 'FO_D12_R3_T15',
+        label: 'FO-D12-R3-T15 Â· deep pullback / trailing 15%',
+        referenceProfileId: 'DEEP_D12_5_R3',
+        referencePullbackPct: 12.5,
+        referenceReboundPct: 3,
+        profileId: 'FO_D12_R3',
+        minNetFlowSol: 15,
+        maxCreatorSharePct: 5,
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: 10,
+        trailingDrawdownPct: 15,
+        hardStopPct: 25,
+        minHoldMs: 1_000,
+        maxHoldMs: 60_000,
+      },
+      {
+        id: 'F2_8S_NF30',
+        label: 'F2-8S-NF30 | F2 + NetFlow>=30 SOL / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F2_NF30',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'FT_C_NF30',
+        label: 'FT-C-NF30 | F2 + NetFlow>=30 SOL / right-tail trailing',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F2_NF30',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'F_ABSORB3_8S',
+        label: 'F-ABSORB3 | F2 + peak sell>=3 SOL + refill>=50% / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_ABSORB3',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minSellSolSincePeak: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_ABSORB3_MIN_SELL_SOL', 3, { min: 0 },
+        ),
+        minBuyRefillRatio: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
+        ),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+      {
+        id: 'F_ABSORB5_RUNNER',
+        label: 'F-ABSORB5 | F2 + peak sell>=5 SOL + refill>=50% / right-tail trailing',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_ABSORB5',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minSellSolSincePeak: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_ABSORB5_MIN_SELL_SOL', 5, { min: 0 },
+        ),
+        minBuyRefillRatio: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
+        ),
+        exitPolicy: 'TRAILING_STOP',
+        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
+          min: 0,
+        }),
+        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+        }),
+        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
+          min: 0.1,
+          max: 100,
+        }),
+      },
+      {
+        id: 'F_REACCEL0_8S',
+        label: 'F-REACCEL0 | F2 + current 1s net>=0 + acceleration>=0 / fixed 8s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F_REACCEL0',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        minRecentNetFlow1s: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_NET_FLOW_1S_SOL', 0,
+        ),
+        minNetFlowAcceleration1s: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_ACCEL_1S_SOL', 0,
+        ),
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
+          min: 250,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
+    }),
+  },
+
+  // Independent early Bonding Curve research derived from the observed CYA
+  // wallet pattern. It uses public order flow only and never follows, signs,
+  // or sends the monitored wallet's transactions.
+  cyaEarlyPyramidShadow: {
+    enabled: provenNegativeShadowsEnabled
+      && booleanEnv('FLOW_CYA_EARLY_PYRAMID_SHADOW_ENABLED', false),
+    positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
+    stateWindowMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_WINDOW_MS', 5_000, {
+      min: 2_000,
+      max: 30_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_RETENTION_MS', 240_000, {
+      min: 30_000,
+      max: 15 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0,
+      max: 100,
+    }),
+    addStepPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_STEP_PCT', 15, {
+      min: 0.1,
+      max: 500,
+    }),
+    addFraction: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_FRACTION', 1 / 12, {
+      min: 0.001,
+      max: 1,
+    }),
+    addCooldownMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ADD_COOLDOWN_MS', 250, {
+      min: 0,
+      max: 30_000,
+    }),
+    maxAdds: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ADDS', 6, { min: 0, max: 20 }),
+    firstTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP1_PCT', 50, { min: 1 }),
+    secondTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP2_PCT', 100, { min: 1 }),
+    hardStopPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_HARD_STOP_PCT', 30, {
+      min: 0.1,
+      max: 100,
+    }),
+    noStrengthMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MS', 25_000, {
+      min: 1_000,
+    }),
+    noStrengthMfePct: numberEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MFE_PCT', 20, {
+      min: 0,
+    }),
+    maxHoldMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_HOLD_MS', 180_000, {
+      min: 1_000,
+    }),
+    entryProfiles: [
+      {
+        id: 'K5_30',
+        label: 'K5-30 Â· AGE 5â€“30s / Curve 20â€“60%',
+        minAgeMs: 5_000,
+        maxAgeMs: 30_000,
+        minCurvePct: 20,
+        maxCurvePct: 60,
+        minBuyers5s: 3,
+        maxBuyers5s: 14,
+        minNetFlow5s: 0.1,
+        maxNetFlow5s: 15,
+        maxReturn2sPct: 15,
+      },
+      {
+        id: 'K3_30',
+        label: 'K3-30 Â· AGE 3â€“30s / Curve 20â€“60%',
+        minAgeMs: 3_000,
+        maxAgeMs: 30_000,
+        minCurvePct: 20,
+        maxCurvePct: 60,
+        minBuyers5s: 2,
+        maxBuyers5s: 18,
+        minNetFlow5s: 0,
+        maxNetFlow5s: 20,
+        maxReturn2sPct: 25,
+      },
+    ],
+    exitProfiles: [
+      { id: 'T20', label: 'Runner peak drawdown 20%', trailingStopPct: 20 },
+      { id: 'T30', label: 'Runner peak drawdown 30%', trailingStopPct: 30 },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
+    }),
+  },
+
+  // Independent pre-migration Bonding Curve momentum research. It evaluates
+  // causal order-flow edges and simulated exits only; no execution path exists.
+  bondingCurveMomentumShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_BONDING_MOMENTUM_SHADOW_ENABLED', false),
+    positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
+    stateWindowMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_WINDOW_MS', 5_000, {
+      min: 5_000,
+      max: 30_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_RETENTION_MS', 60_000, {
+      min: 5_000,
+      max: 10 * 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_BONDING_MOMENTUM_EPISODE_COOLDOWN_MS', 5_000, {
+      min: 0,
+      max: 10 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_BONDING_MOMENTUM_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    snapshotHorizonsMs: millisecondListEnv(
+      'FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS',
+      [1, 2, 3, 5, 8, 10, 20, 30],
+    ),
+    maxSnapshotLagMs: integerEnv('FLOW_BONDING_MOMENTUM_MAX_SNAPSHOT_LAG_MS', 2_000, {
+      min: 0,
+      max: 30_000,
+    }),
+    flowExitNetFlowSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_NET_SOL', 0),
+    flowExitMaxBuyTxAccel: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_BUY_TX_ACCEL', 0),
+    flowExitMinSellSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_MIN_SELL_SOL', 0.5, {
+      min: 0,
+    }),
+    bigWinnerPct: numberEnv('FLOW_BONDING_MOMENTUM_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'H0',
+        label: 'H0 Â· Lifecycleè®¢å•æµåŸºçº¿',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+      },
+      {
+        id: 'H1',
+        label: 'H1 Â· ä¹°å•é€Ÿåº¦åŠ é€Ÿ',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+        minBuyTxAccel1s: 6,
+        maxTop1SharePct: 50,
+      },
+      {
+        id: 'H2',
+        label: 'H2 Â· æ–°ä¹°å®¶èµ„é‡‘åˆ†æ•£',
+        minAgeMs: 10_000,
+        maxAgeMs: 60_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 5,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minNewBuyers1s: 4,
+        minBuyTx1s: 5,
+        maxTop1SharePct: 30,
+      },
+      {
+        id: 'H3',
+        label: 'H3 Â· å–åŽ‹è¡°å‡è½¬æ¢',
+        minAgeMs: 10_000,
+        maxAgeMs: 180_000,
+        minCurvePct: 40,
+        maxCurvePct: 100,
+        minNetFlow1s: 3,
+        minFlowAccel1s: 1.5,
+        minBuyers1s: 5,
+        minBuyTx1s: 5,
+        minPriorSellSol1s: 0.5,
+        maxSellDecayRatio: 0.25,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X3',
+        label: 'X3 Â· å›ºå®šæŒæœ‰3ç§’',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FIXED_HOLD_MS', 3_000, {
+          min: 250,
+        }),
+        maxHoldMs: 3_000,
+      },
+      {
+        id: 'XF',
+        label: 'XF Â· è®¢å•æµåè½¬ / 10ç§’å…œåº•',
+        exitMode: 'FLOW_REVERSAL',
+        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MIN_HOLD_MS', 500, { min: 0 }),
+        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MAX_HOLD_MS', 10_000, {
+          min: 1_000,
+        }),
+      },
+      {
+        id: 'XT',
+        label: 'XT Â· +10%æ¿€æ´» / å›žæ’¤7.5% / 30ç§’å…œåº•',
+        exitMode: 'WINNER_TRAIL',
+        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MIN_HOLD_MS', 500, { min: 0 }),
+        trailingActivationPct: numberEnv(
+          'FLOW_BONDING_MOMENTUM_TRAIL_ACTIVATION_PCT',
+          10,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_BONDING_MOMENTUM_TRAIL_STOP_PCT', 7.5, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MAX_HOLD_MS', 30_000, {
+          min: 1_000,
+        }),
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
+    }),
+  },
+
+  // Graduation probability is used only as a hold/exit overlay on an earlier
+  // Primary Flow entry. It never opens a fresh position above the configured
+  // Curve ceiling and never owns a signer or transaction executor.
+  graduationHoldShadow: {
+    enabled: retiredShadowsEnabled && booleanEnv('FLOW_GRADUATION_HOLD_SHADOW_ENABLED', false),
+    signalVariant: 'primary_3w',
+    positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
+    maxSignalLatencyMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_SIGNAL_LATENCY_MS', 1_500, {
+      min: 100,
+    }),
+    maxSignalCurvePct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_CURVE_PCT', 70, {
+      min: 0,
+      max: 100,
+    }),
+    maxTokenAgeMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_TOKEN_AGE_MS', 10 * 60_000, {
+      min: 1_000,
+      max: 60 * 60_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_GRADUATION_HOLD_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 5_000,
+      max: 60 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    hardStopPct: numberEnv('FLOW_GRADUATION_HOLD_HARD_STOP_PCT', 30, {
+      min: 0.1,
+      max: 100,
+    }),
+    controlTrailingStopPct: numberEnv('FLOW_GRADUATION_HOLD_I0_TRAILING_STOP_PCT', 7.5, {
+      min: 0.1,
+      max: 100,
+    }),
+    controlMaxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_I0_MAX_HOLD_MS', 60_000, {
+      min: 1_000,
+    }),
+    maxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_HOLD_MS', 120_000, {
+      min: 1_000,
+    }),
+    firstCheckpointTimeoutMs: integerEnv(
+      'FLOW_GRADUATION_HOLD_FIRST_CHECKPOINT_TIMEOUT_MS',
+      20_000,
+      { min: 1_000 },
+    ),
+    stepTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_STEP_TIMEOUT_MS', 3_000, {
+      min: 250,
+    }),
+    graduationTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_GRADUATION_TIMEOUT_MS', 15_000, {
+      min: 1_000,
+    }),
+    ammExitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_I2_AMM_EXIT_DELAY_MS', 5_000, {
+      min: 0,
+    }),
+    bridgeMinBuyers5: integerEnv('FLOW_GRADUATION_HOLD_I2_MIN_BUYERS_5S', 12, {
+      min: 1,
+    }),
+    bridgeMaxCumulativeTrades: integerEnv(
+      'FLOW_GRADUATION_HOLD_I2_MAX_CUMULATIVE_TRADES',
+      20,
+      { min: 1 },
+    ),
+    checkpoints: [70, 80, 85, 90, 95, 97],
+    checkpointRules: [
+      {
+        thresholdPct: 70,
+        minNetFlow5Sol: 0,
+        minBuyers5: 3,
+        maxSellSol5: 1,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 80,
+        minNetFlow5Sol: 0,
+        minBuyers5: 1,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 85,
+        minNetFlow5Sol: 0,
+        minBuyers5: 1,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 90,
+        minNetFlow5Sol: 0,
+        minBuyers5: 4,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+      {
+        thresholdPct: 95,
+        minNetFlow5Sol: 0,
+        minBuyers5: 4,
+        maxSellSol5: null,
+        minCurveDelta5: 5,
+      },
+    ],
+    cohorts: [
+      {
+        id: 'I0',
+        label: 'I0 Â· Early Entryç§»åŠ¨æ­¢ç›ˆå¯¹ç…§',
+        exitMode: 'CONTROL_TRAILING',
+      },
+      {
+        id: 'I1',
+        label: 'I1 Â· æ¦‚çŽ‡æ£€æŸ¥ç‚¹ / 97%æ¯•ä¸šå‰é€€å‡º',
+        exitMode: 'PRE_GRAD_CHECKPOINTS',
+      },
+      {
+        id: 'I2',
+        label: 'I2 Â· ä¸¥æ ¼æ¦‚çŽ‡æ£€æŸ¥ç‚¹ / ç©¿è¶Šæ¯•ä¸š',
+        exitMode: 'THROUGH_GRADUATION',
+      },
+    ],
+    bigWinnerPct: numberEnv('FLOW_GRADUATION_HOLD_BIG_WINNER_PCT', 50, { min: 1 }),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
+    }),
+  },
+
+  // Lifecycle oversold-rebound research. Pre-migration curve trades and the
+  // post-migration PumpSwap subscription use separate cohorts; profiles below
+  // are orthogonal online experiments and never create or sign a transaction.
+  migratedDropReboundShadow: {
+    enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
+    lifecycleStages: [
+      { id: 'POST_MIGRATION', label: 'æ¯•ä¸šåŽ', market: 'PUMP_AMM' },
+    ],
+    stateRetentionMs: integerEnv('FLOW_REBOUND_DETECTOR_STATE_RETENTION_MS', 60_000, {
+      min: 5_000,
+      max: 10 * 60_000,
+    }),
+    trackingAgeMs: Math.min(120_000, integerEnv('FLOW_MIGRATED_REBOUND_TRACKING_MS', 120_000, {
+      min: 30_000,
+      max: 30 * 60_000,
+    })),
+    positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATED_REBOUND_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0,
+      max: 100,
+    }),
+    ammPriceContinuity: {
+      minRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MIN_RATIO', 0.2, {
+        min: 0.0001,
+        max: 1,
+      }),
+      maxRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MAX_RATIO', 5, {
+        min: 1,
+      }),
+      resetAfterMs: integerEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_RESET_MS', 15_000, {
+        min: 1_000,
+      }),
+      confirmationTrades: integerEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TRADES',
+        2,
+        { min: 2, max: 10 },
+      ),
+      confirmationWindowMs: integerEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_WINDOW_MS',
+        2_000,
+        { min: 100, max: 30_000 },
+      ),
+      confirmationTolerancePct: numberEnv(
+        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TOLERANCE_PCT',
+        20,
+        { min: 0.1, max: 100 },
+      ),
+    },
+    bigWinnerPct: numberEnv('FLOW_MIGRATED_REBOUND_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'GD25_35',
+        label: 'æ·±è·Œ25â€“35%',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+      },
+      {
+        id: 'GE30_R23_F1',
+        label: 'æ¯•ä¸šåŽ30ç§’å†… Â· åå¼¹2%â€“3% Â· æ¯Minté¦–æ¬¡',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+      },
+      {
+        id: 'GE30_R23_F3',
+        label: 'æ¯•ä¸šåŽ30ç§’å†… Â· åå¼¹2%â€“3% Â· æ¯Mintå‰ä¸‰æ¬¡',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 3,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X3',
+        label: 'å›ºå®šæŒæœ‰3ç§’',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_3S_MS', 3_000, { min: 250 }),
+      },
+      {
+        id: 'X8',
+        label: 'å›ºå®šæŒæœ‰8ç§’',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_8S_MS', 8_000, { min: 250 }),
+      },
+      {
+        id: 'XLEG',
+        label: 'æ—§ç‰ˆ +8%æ¿€æ´» / å›žæ’¤3% / 15ç§’å…œåº•',
+        exitMode: 'LEGACY',
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT',
+          8,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, {
+          min: 0.1,
+          max: 100,
+        }),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+          max: 1_000,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS',
+          5_000,
+          { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      },
+      {
+        id: 'XB50',
+        label: '50% XLEG core + 50% fixed-8s runner',
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'BLEND_XLEG_X8',
+        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_50_CORE_WEIGHT_PCT', 50, {
+          min: 0,
+          max: 100,
+        }),
+        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
+          min: 250,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+      },
+      {
+        id: 'XB25',
+        label: '25% XLEG core + 75% fixed-8s runner',
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'BLEND_XLEG_X8',
+        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_25_CORE_WEIGHT_PCT', 25, {
+          min: 0,
+          max: 100,
+        }),
+        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
+          min: 250,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
+          min: 0,
+        }),
+      },
+      ...[
+        ['XR3_H12', 3_000, 12],
+        ['XR3_H15', 3_000, 15],
+        ['XR4_H12', 4_000, 12],
+        ['XR4_H15', 4_000, 15],
+      ].map(([id, fallbackLossCheckMs, fallbackHardStopPct]) => ({
+        id,
+        label: `${id} | early weak-state exit`,
+        entryProfileIds: ['GD25_35'],
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
+        ),
+        hardStopPct: numberEnv(`FLOW_MIGRATED_REBOUND_RISK_HARD_STOP_${fallbackHardStopPct}_PCT`,
+          fallbackHardStopPct, { min: 0.1, max: 100 }),
+        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
+          min: 0,
+        }),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv(
+          `FLOW_MIGRATED_REBOUND_RISK_CHECK_${fallbackLossCheckMs / 1_000}S_MS`,
+          fallbackLossCheckMs,
+          { min: 0 },
+        ),
+        lossCheckRecoveryPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_RISK_MAX_RECOVERY_FROM_LOW_PCT', 1, { min: 0, max: 100 },
+        ),
+        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      })),
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
+    }),
+  },
+
+  // Independent post-migration continuation study. The entry thresholds were
+  // selected from the chronological migration-cohort backtest; every exit is
+  // stored as a separate cohort so long-hold winner capture stays auditable.
+  migrationContinuityShadow: {
+    enabled: booleanEnv('FLOW_MIGRATION_CONTINUITY_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
+    confirmWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_CONFIRM_MS', 5_000, {
+      min: 1_000, max: 15_000,
+    }),
+    detectionDeadlineMs: integerEnv('FLOW_MIGRATION_CONTINUITY_DETECTION_MS', 10_000, {
+      min: 5_000, max: 30_000,
+    }),
+    flowWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_FLOW_WINDOW_MS', 3_000, {
+      min: 1_000, max: 10_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 1,
+    }),
+    exitDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_TIMEOUT_MS', 5_000, {
+      min: 1,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_ENTRY_JUMP_PCT', 10, {
+      min: 0, max: 100,
+    }),
+    entryProfile: {
+      id: 'MC_C5',
+      label: 'MC-C Â· æ¯•ä¸šåŽ5ç§’è´¨é‡å»¶ç»­',
+      minBuyers: integerEnv('FLOW_MIGRATION_CONTINUITY_MIN_BUYERS', 20, { min: 1 }),
+      minNetFlowSol: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_NET_FLOW_SOL', 5, { min: 0 }),
+      minReturnPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_RETURN_PCT', 5, { min: -100 }),
+      maxSellBuyRatio: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_SELL_BUY_RATIO', 0.6, {
+        min: 0, max: 10,
+      }),
+    },
+    exitProfiles: [
+      {
+        id: 'E60', label: 'å›ºå®š60ç§’', exitMode: 'FIXED_HOLD', fixedHoldMs: 60_000,
+        hardStopPct: 20, maxHoldMs: 60_000,
+      },
+      {
+        id: 'E120', label: 'å›ºå®š120ç§’', exitMode: 'FIXED_HOLD', fixedHoldMs: 120_000,
+        hardStopPct: 20, maxHoldMs: 120_000,
+      },
+      {
+        id: 'T10', label: '5ç§’ä¿æŠ¤ / +10%æ¿€æ´» / å›žæ’¤10%', exitMode: 'TRAILING',
+        minHoldMs: 5_000, trailingActivationPct: 10, trailingStopPct: 10,
+        hardStopPct: 20, maxHoldMs: 120_000,
+      },
+      {
+        id: 'T12_5', label: '10ç§’ä¿æŠ¤ / +15%æ¿€æ´» / å›žæ’¤12.5%', exitMode: 'TRAILING',
+        minHoldMs: 10_000, trailingActivationPct: 15, trailingStopPct: 12.5,
+        hardStopPct: 20, maxHoldMs: 180_000,
+      },
+      {
+        id: 'FLOW', label: '10ç§’ä¿æŠ¤ / 3ç§’è®¢å•æµè½¬å¼±', exitMode: 'FLOW_FADE',
+        minHoldMs: 10_000, minSellBuyRatio: 1.2, maxNetFlowSol: -2,
+        hardStopPct: 20, maxHoldMs: 180_000,
+      },
+      {
+        id: 'RUNNER', label: '15ç§’ä¿æŠ¤ / +20%æ¿€æ´» / è‡ªé€‚åº”å°¾ä»“',
+        exitMode: 'ADAPTIVE_TRAILING', minHoldMs: 15_000, trailingActivationPct: 20,
+        hardStopPct: 25, maxHoldMs: 300_000,
+        trailingTiers: [
+          { belowPct: 50, stopPct: 12.5 },
+          { belowPct: 100, stopPct: 20 },
+          { belowPct: Infinity, stopPct: 25 },
+        ],
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
+    }),
+  },
+
+  // Independent post-migration range-regime research. Every graduation receives
+  // a short PumpSwap observation window; only qualified oscillating markets keep
+  // the extended subscription. This suite never owns a signer or executor.
+  rangeScalperShadow: {
+    enabled: booleanEnv('FLOW_RANGE_SCALPER_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_RANGE_SCALPER_POSITION_SOL'),
+    initialObservationMs: integerEnv('FLOW_RANGE_SCALPER_INITIAL_OBSERVATION_MS', 120_000, {
+      min: 30_000,
+      max: 10 * 60_000,
+    }),
+    maxTrackingMs: integerEnv('FLOW_RANGE_SCALPER_MAX_TRACKING_MS', 20 * 60_000, {
+      min: 120_000,
+      max: 60 * 60_000,
+    }),
+    windowMs: integerEnv('FLOW_RANGE_SCALPER_WINDOW_MS', 60_000, {
+      min: 10_000,
+      max: 5 * 60_000,
+    }),
+    recentFlowWindowMs: integerEnv('FLOW_RANGE_SCALPER_RECENT_FLOW_MS', 1_000, {
+      min: 250,
+      max: 10_000,
+    }),
+    rangeLossConfirmMs: integerEnv('FLOW_RANGE_SCALPER_RANGE_LOSS_CONFIRM_MS', 30_000, {
+      min: 1_000,
+      max: 5 * 60_000,
+    }),
+    unsubscribeGraceMs: integerEnv('FLOW_RANGE_SCALPER_UNSUBSCRIBE_GRACE_MS', 5_000, {
+      min: 0,
+      max: 60_000,
+    }),
+    minTrades: integerEnv('FLOW_RANGE_SCALPER_MIN_TRADES', 60, { min: 5 }),
+    minVolumeSol: numberEnv('FLOW_RANGE_SCALPER_MIN_VOLUME_SOL', 20, { min: 0 }),
+    minUniqueWallets: integerEnv('FLOW_RANGE_SCALPER_MIN_UNIQUE_WALLETS', 20, { min: 2 }),
+    minBuySharePct: numberEnv('FLOW_RANGE_SCALPER_MIN_BUY_SHARE_PCT', 35, {
+      min: 0, max: 100,
+    }),
+    maxBuySharePct: numberEnv('FLOW_RANGE_SCALPER_MAX_BUY_SHARE_PCT', 65, {
+      min: 0, max: 100,
+    }),
+    minRangePct: numberEnv('FLOW_RANGE_SCALPER_MIN_RANGE_PCT', 12, { min: 0.1 }),
+    maxEfficiencyRatio: numberEnv('FLOW_RANGE_SCALPER_MAX_EFFICIENCY_RATIO', 0.35, {
+      min: 0.01, max: 1,
+    }),
+    minMeanCrosses: integerEnv('FLOW_RANGE_SCALPER_MIN_MEAN_CROSSES', 4, { min: 1 }),
+    maxTopWalletSharePct: numberEnv('FLOW_RANGE_SCALPER_MAX_TOP_WALLET_SHARE_PCT', 25, {
+      min: 0.1, max: 100,
+    }),
+    maxTrendPct: numberEnv('FLOW_RANGE_SCALPER_MAX_TREND_PCT', 12, { min: 0.1 }),
+    minRangeScore: numberEnv('FLOW_RANGE_SCALPER_MIN_RANGE_SCORE', 65, {
+      min: 0, max: 100,
+    }),
+    entryDelayMs: integerEnv('FLOW_RANGE_SCALPER_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_RANGE_SCALPER_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_RANGE_SCALPER_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_RANGE_SCALPER_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_RANGE_SCALPER_MAX_ENTRY_JUMP_PCT', 3, {
+      min: 0, max: 100,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_RANGE_SCALPER_MAX_ENTRY_DROP_PCT', 50, {
+      min: 0, max: 100,
+    }),
+    maxObservedPriceScaleRatio: numberEnv(
+      'FLOW_RANGE_SCALPER_MAX_PRICE_SCALE_RATIO',
+      100,
+      { min: 2, max: 1_000_000 },
+    ),
+    entryProfiles: [
+      {
+        id: 'JA',
+        label: 'JA Â· 1Ïƒ åç¦» + 2% åå¼¹',
+        deviationSigma: 1,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+      },
+      {
+        id: 'JB',
+        label: 'JB Â· 1.5Ïƒ åç¦» + æ­£å‡€æµå…¥',
+        deviationSigma: 1.5,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+        minRecentNetFlowSol: 0.1,
+      },
+      {
+        id: 'JC',
+        label: 'JC Â· ä¸‹è½¨åå¼¹ + å–åŽ‹è¡°å‡',
+        deviationSigma: 1,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+        minRecentBuyers: 2,
+        maxSellDecayRatio: 0.5,
+      },
+      {
+        id: 'JW',
+        label: 'JW Â· JBæ¡ä»¶é¢„çƒ­åŽä»…äº¤æ˜“ç¬¬2/3æ³¢',
+        warmupProfileId: 'JB',
+        deviationSigma: 1.5,
+        reboundPct: 2,
+        reboundTimeoutMs: 5_000,
+        minRecentNetFlowSol: 0.1,
+        minOpportunityIndex: 2,
+        maxOpportunityIndex: 3,
+        exitProfileIds: ['X6'],
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'XM', label: 'XM Â· å›žå½’ä¸­è½´', exitMode: 'MIDLINE',
+        hardStopPct: 8, maxHoldMs: 20_000,
+      },
+      {
+        id: 'X6', label: 'X6 Â· å›ºå®š +6%', exitMode: 'TAKE_PROFIT',
+        takeProfitPct: 6, hardStopPct: 8, maxHoldMs: 20_000,
+      },
+      {
+        id: 'XB', label: 'XB Â· ä¸Šè½¨é€€å‡º', exitMode: 'UPPER_BAND',
+        hardStopPct: 8, maxHoldMs: 30_000,
+      },
+      {
+        id: 'XF', label: 'XF Â· ä¸­è½´ä¸”èµ„é‡‘åè½¬', exitMode: 'FLOW_REVERSAL',
+        hardStopPct: 8, maxHoldMs: 30_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_RANGE_SCALPER_POSITION_SOL'),
+    }),
+  },
+
+  // Independent observed-holder-growth research. "Holders" here means wallets
+  // seen buying through the captured Pump curve stream; it is deliberately not
+  // presented as an authoritative on-chain holder count.
+  holderGrowthShadow: {
+    enabled: booleanEnv('FLOW_HOLDER_GROWTH_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
+    snapshotHorizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+      min: 5_000,
+      max: 60_000,
+    }),
+    maxSnapshotLagMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_SNAPSHOT_LAG_MS', 2_000, {
+      min: 0,
+      max: 30_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_HOLDER_GROWTH_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_HOLDER_GROWTH_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_HOLDER_GROWTH_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_HOLDER_GROWTH_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_HOLDER_GROWTH_MAX_ENTRY_JUMP_PCT', 100, {
+      min: 0,
+      max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_HOLDER_GROWTH_MAX_ENTRY_DROP_PCT', 99, {
+      min: 0,
+      max: 100,
+    }),
+    maxPlausibleReturnPct: numberEnv(
+      'FLOW_HOLDER_GROWTH_MAX_PLAUSIBLE_RETURN_PCT',
+      500,
+      { min: 10, max: 100_000 },
+    ),
+    bigWinnerPct: numberEnv('FLOW_HOLDER_GROWTH_BIG_WINNER_PCT', 50, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'HG10_OPEN',
+        label: 'HG10 Open Â· 10ç§’æ—©æœŸå®½æ¾ç»„',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 5,
+        minNewBuyers: 3,
+        minRetentionPct: 30,
+        minNetFlowSol: 1.5,
+        maxTop3SharePct: 90,
+      },
+      {
+        id: 'HG10_FLOW10_J2',
+        label: 'N Flow Edge 10s Â· NetFlow>=10 Â· entry jump 0-2%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 5,
+        minNewBuyers: 3,
+        minRetentionPct: 30,
+        minNetFlowSol: 10,
+        maxTop3SharePct: 90,
+        minEntryJumpPct: 0,
+        maxEntryJumpPct: 2,
+      },
+      {
+        id: 'HG10_FLOW15_J2',
+        label: 'N Flow Edge 10s Â· NetFlow>=15 Â· entry jump 0-2%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 5,
+        minNewBuyers: 3,
+        minRetentionPct: 30,
+        minNetFlowSol: 15,
+        maxTop3SharePct: 90,
+        minEntryJumpPct: 0,
+        maxEntryJumpPct: 2,
+      },
+      {
+        id: 'HG20_BAL',
+        label: 'HG20 Balanced Â· 20ç§’æ—©æœŸå‡è¡¡ç»„',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 8,
+        minNewBuyers: 5,
+        minRetentionPct: 40,
+        minNetFlowSol: 3,
+        maxTop3SharePct: 85,
+      },
+      {
+        id: 'HG20_FAST',
+        label: 'HG20 Fast Â· 20ç§’æ—©æœŸåŠ é€Ÿç»„',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 8,
+        minRetentionPct: 50,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+      },
+      {
+        id: 'HG20_QUALITY_J2',
+        label: 'N Quality 20s Â· Buyers>=40 Â· retention>=60% Â· entry jump 0-2%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 40,
+        minNewBuyers: 5,
+        minRetentionPct: 60,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+        minEntryJumpPct: 0,
+        maxEntryJumpPct: 2,
+      },
+      {
+        id: 'HG30_BAL',
+        label: 'HG30 Balanced Â· æ–°å¢žä¹°å®¶â‰¥1/s + ç•™å­˜â‰¥50%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 10,
+        minRetentionPct: 50,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+      },
+      {
+        id: 'HG30_FAST',
+        label: 'HG30 Fast Â· æ–°å¢žä¹°å®¶â‰¥2/s + ç•™å­˜â‰¥70%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 20,
+        minRetentionPct: 70,
+        minNetFlowSol: 10,
+        maxTop3SharePct: 80,
+      },
+    ],
+    // Every exit is crossed with every entry as an independent cohort. Keep
+    // XT15_H120 unchanged so existing production rows remain comparable.
+    exitProfiles: [
+      {
+        id: 'X5_FIXED', label: 'å›ºå®š5ç§’', exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 5_000, hardStopPct: 100, maxHoldMs: 5_000,
+      },
+      {
+        id: 'X15_FIXED', label: 'å›ºå®š15ç§’', exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 15_000, hardStopPct: 100, maxHoldMs: 15_000,
+      },
+      {
+        id: 'XT15_H120',
+        label: '+15%æ¿€æ´» / å³°å€¼å›žæ’¤15% / ç¡¬æ­¢æŸ20% / 120ç§’å…œåº•',
+        exitMode: 'TRAILING',
+        hardStopPct: numberEnv('FLOW_HOLDER_GROWTH_HARD_STOP_PCT', 20, {
+          min: 0.1,
+          max: 100,
+        }),
+        trailingActivationPct: numberEnv(
+          'FLOW_HOLDER_GROWTH_TRAILING_ACTIVATION_PCT',
+          15,
+          { min: 0.1, max: 1_000 },
+        ),
+        trailingStopPct: numberEnv('FLOW_HOLDER_GROWTH_TRAILING_STOP_PCT', 15, {
+          min: 0.1,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_HOLD_MS', 120_000, {
+          min: 1_000,
+          max: 10 * 60_000,
+        }),
+      },
+      {
+        id: 'XT20_D10_H180', label: '+20%æ¿€æ´» / å›žæ’¤10% / 180ç§’å…œåº•',
+        exitMode: 'TRAILING', hardStopPct: 20,
+        trailingActivationPct: 20, trailingStopPct: 10, maxHoldMs: 180_000,
+      },
+      {
+        id: 'XT30_D15_H300', label: '+30%æ¿€æ´» / å›žæ’¤15% / 300ç§’å…œåº•',
+        exitMode: 'TRAILING', hardStopPct: 20,
+        trailingActivationPct: 30, trailingStopPct: 15, maxHoldMs: 300_000,
+      },
+      {
+        id: 'XSCALE_50_RUNNER', label: '+30%å‡ä»“50% / å°¾ä»“å›žæ’¤20%',
+        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
+        scaleOutTriggerPct: 30, scaleOutFractionPct: 50,
+        trailingActivationPct: 30, trailingStopPct: 20, maxHoldMs: 300_000,
+      },
+      {
+        id: 'XP20_50_D15_H120',
+        label: '+20%å‡ä»“50% / å°¾ä»“å›žæ’¤15% / 120ç§’å…œåº•',
+        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
+        scaleOutTriggerPct: 20, scaleOutFractionPct: 50,
+        trailingActivationPct: 20, trailingStopPct: 15, maxHoldMs: 120_000,
+      },
+      {
+        id: 'XP20_70_D20_H180',
+        label: '+20%å‡ä»“70% / å°¾ä»“å›žæ’¤20% / 180ç§’å…œåº•',
+        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
+        scaleOutTriggerPct: 20, scaleOutFractionPct: 70,
+        trailingActivationPct: 20, trailingStopPct: 20, maxHoldMs: 180_000,
+      },
+      {
+        id: 'XP30_70_STAIR',
+        label: '+30%å‡ä»“70% / å°¾ä»“é˜¶æ¢¯å›žæ’¤',
+        exitMode: 'SCALE_ADAPTIVE', hardStopPct: 20,
+        scaleOutTriggerPct: 30, scaleOutFractionPct: 70, maxHoldMs: 300_000,
+        trailingTiers: [
+          { activationPct: 30, drawdownPct: 15 },
+          { activationPct: 60, drawdownPct: 15 },
+          { activationPct: 100, drawdownPct: 20 },
+          { activationPct: 200, drawdownPct: 25 },
+        ],
+      },
+      {
+        id: 'XFLOW_60', label: '60ç§’Holder/èµ„é‡‘æµè½¬å¼±é€€å‡º',
+        exitMode: 'FLOW_CHECK', hardStopPct: 20,
+        flowCheckHorizonMs: 60_000, minBuyerVelocityRatio: 0.5,
+        minNetFlowDeltaSol: 0, trailingActivationPct: 20,
+        trailingStopPct: 15, maxHoldMs: 180_000,
+      },
+      {
+        id: 'XSTAIR_BAL', label: 'é˜¶æ¢¯å‡è¡¡ 20/40/80/150/300',
+        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 360_000,
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 10 },
+          { activationPct: 40, drawdownPct: 15 },
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+          { activationPct: 300, drawdownPct: 30 },
+        ],
+      },
+      {
+        id: 'XSTAIR_LOCK', label: 'é˜¶æ¢¯ä¿å®ˆ 15/30/60/120',
+        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 300_000,
+        trailingTiers: [
+          { activationPct: 15, drawdownPct: 7.5 },
+          { activationPct: 30, drawdownPct: 10 },
+          { activationPct: 60, drawdownPct: 15 },
+          { activationPct: 120, drawdownPct: 20 },
+        ],
+      },
+      {
+        id: 'XSTAIR_TAIL', label: 'é˜¶æ¢¯å°¾ä»“ 20/50/100/200',
+        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 360_000,
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 12.5 },
+          { activationPct: 50, drawdownPct: 20 },
+          { activationPct: 100, drawdownPct: 25 },
+          { activationPct: 200, drawdownPct: 30 },
+        ],
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
+    }),
+  },
+
+  // Observer-only Launch Quality research. Reference percentages label market
+  // structure for later analysis; they never become an entry or execution rule.
+  launchQualityObserver: {
+    enabled: booleanEnv('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED', true),
+    snapshotHorizonsMs: millisecondListEnv(
+      'FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS',
+      [5, 10, 20, 30, 60],
+    ),
+    maxLaunchAgeMs: integerEnv('FLOW_LAUNCH_QUALITY_MAX_AGE_MS', 90_000, {
+      min: 30_000,
+      max: 10 * 60_000,
+    }),
+    pumpReferencePct: numberEnv('FLOW_LAUNCH_QUALITY_PUMP_REFERENCE_PCT', 25, {
+      min: 0.1,
+      max: 10_000,
+    }),
+    pullbackReferencePct: numberEnv(
+      'FLOW_LAUNCH_QUALITY_PULLBACK_REFERENCE_PCT',
+      7.5,
+      { min: 0.1, max: 100 },
+    ),
+    reboundReferencePct: numberEnv(
+      'FLOW_LAUNCH_QUALITY_REBOUND_REFERENCE_PCT',
+      3,
+      { min: 0, max: 1_000 },
+    ),
+    deepReferenceProfiles: launchDeepPullbackProfiles.map((profile) => ({ ...profile })),
+    recentBuyerWindowMs: integerEnv(
+      'FLOW_LAUNCH_QUALITY_RECENT_BUYER_WINDOW_MS',
+      10_000,
+      { min: 500, max: 60_000 },
+    ),
+    retentionFloorPct: numberEnv('FLOW_LAUNCH_QUALITY_RETENTION_FLOOR_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
+    maxObservationLagMs: integerEnv(
+      'FLOW_LAUNCH_QUALITY_MAX_OBSERVATION_LAG_MS',
+      2_000,
+      { min: 0, max: 30_000 },
+    ),
+    marketRegimeLookbackMs: integerEnv(
+      'FLOW_LAUNCH_MARKET_REGIME_LOOKBACK_MS',
+      30 * 60_000,
+      { min: 5 * 60_000, max: 6 * 60 * 60_000 },
+    ),
+    marketRegimeSettlementLagMs: integerEnv(
+      'FLOW_LAUNCH_MARKET_REGIME_SETTLEMENT_LAG_MS',
+      60_000,
+      { min: 60_000, max: 10 * 60_000 },
+    ),
+    marketRegimeCacheMs: integerEnv(
+      'FLOW_LAUNCH_MARKET_REGIME_CACHE_MS',
+      5_000,
+      { min: 1_000, max: 60_000 },
+    ),
+  },
+
+  storage: {
+    dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
+    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),
+    archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
+    flushMs: integerEnv('FLOW_DB_FLUSH_MS', 250, { min: 25 }),
+    flushMax: integerEnv('FLOW_DB_FLUSH_MAX', 1_000, { min: 10 }),
+  },
+
+  server: {
+    port: integerEnv('FLOW_DASHBOARD_PORT', 3001, { min: 1, max: 65_535 }),
+    host: process.env.FLOW_BIND_HOST || '0.0.0.0',
+  },
+};
+
+// Solana requests priority price per CU, while operators reason about the total
+// fee per transaction. Derive one shared buy/sell CU price from the SOL target.
+config.liveTrading.priorityFeeMicroLamports = priorityFeeMicroLamports(
+  config.liveTrading.priorityFeeSol,
+  config.liveTrading.computeUnitLimit,
+);
+
+function streamTokenFor(endpoint) {
+  if (config.stream.allenHarkEndpoints.has(endpoint)) return config.stream.allenHarkToken || undefined;
+  return config.stream.heliusToken || undefined;
+}
+
+function validateConfig() {
+  const errors = [];
+  if (config.stream.endpoints.length === 0) {
+    errors.push('Missing FLOW_GRPC_ENDPOINTS or HELIUS_LASERSTREAM_ENDPOINT(S)');
+  }
+  if (config.strategy.signalWindowMs * 3 > config.strategy.bufferMs) {
+    errors.push('FLOW_BUFFER_MS must cover all three signal windows');
+  }
+  if (config.launchQualityObserver.snapshotHorizonsMs.length === 0) {
+    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must contain at least one value');
+  }
+  if (config.holderGrowthShadow.enabled && !config.launchQualityObserver.enabled) {
+    errors.push('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED must be true when Holder Growth is enabled');
+  }
+  const holderGrowthHorizons = new Set([
+    ...config.holderGrowthShadow.entryProfiles.map((profile) => (
+      profile.horizonMs || config.holderGrowthShadow.snapshotHorizonMs
+    )),
+    ...config.holderGrowthShadow.exitProfiles
+      .map((profile) => profile.flowCheckHorizonMs).filter(Boolean),
+  ]);
+  if (config.holderGrowthShadow.enabled
+    && [...holderGrowthHorizons].some((horizonMs) => (
+      !config.launchQualityObserver.snapshotHorizonsMs.includes(horizonMs)
+    ))) {
+    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include all Holder Growth horizons');
+  }
+  if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
+    errors.push('FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS must contain at least one value');
+  }
+  if (config.liveTrading.enabled && !config.liveTrading.dryRun) {
+    if (!config.liveTrading.rpcUrl) errors.push('FLOW_RPC_URL is required for live trading');
+    if (!config.liveTrading.privateKey) {
+      errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
+    }
+    if (!process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL) {
+      errors.push('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL must be explicitly set for live trading');
+    }
+  }
+  return errors;
+}
+
+module.exports = {
+  config,
+  normalizeEndpoint,
+  liveTradingGuard,
+  shadowPositionEnv,
+  livePositionEnv,
+  priorityFeeMicroLamports,
+  validateConfig,
+  streamTokenFor,
+};

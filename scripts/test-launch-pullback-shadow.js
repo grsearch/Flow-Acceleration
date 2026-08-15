@@ -86,29 +86,6 @@ function makeConfig({ withTrailing = false, withDeep = false, withOptimization =
         maxTop3SharePct: 100, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 10_000,
       },
       {
-        id: 'FO_D12_R3_Q_10S', label: 'FO-D12-R3-Q', profileId: 'FO_D12_R3_Q',
-        referenceProfileId: 'DEEP_D12_5_R3', referencePullbackPct: 12.5,
-        referenceReboundPct: 3, minNetFlowSol: 15, maxNetFlowSol: 50,
-        maxCreatorSharePct: 5, minRetentionPct: 70, maxTop3SharePct: 50,
-        exitPolicy: 'FIXED_HOLD', fixedHoldMs: 10_000,
-      },
-      {
-        id: 'FO_D12_R3_QC_10S', label: 'FO-D12-R3-QC', profileId: 'FO_D12_R3_QC',
-        referenceProfileId: 'DEEP_D12_5_R3', referencePullbackPct: 12.5,
-        referenceReboundPct: 3, minNetFlowSol: 15, maxNetFlowSol: 50,
-        maxCreatorSharePct: 3, minRetentionPct: 70, maxTop3SharePct: 50,
-        exitPolicy: 'FIXED_HOLD', fixedHoldMs: 10_000,
-      },
-      {
-        id: 'FO_D12_R3_Q_T10_H30', label: 'FO-D12-R3-Q-T10',
-        profileId: 'FO_D12_R3_Q', referenceProfileId: 'DEEP_D12_5_R3',
-        referencePullbackPct: 12.5, referenceReboundPct: 3,
-        minNetFlowSol: 15, maxNetFlowSol: 50, maxCreatorSharePct: 5,
-        minRetentionPct: 70, maxTop3SharePct: 50, exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: 20, trailingDrawdownPct: 10,
-        minHoldMs: 0, maxHoldMs: 30_000, hardStopPct: 20,
-      },
-      {
         id: 'F2_8S_NF30', label: 'F2-8S-NF30', profileId: 'F2_NF30',
         referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
         referenceReboundPct: 3, minNetFlowSol: 30, maxCreatorSharePct: 10,
@@ -452,47 +429,9 @@ function testOptimizationCohortsStayIsolated() {
   deep.referenceProfileId = 'DEEP_D12_5_R3';
   suite.onReference(deep);
   assert.deepStrictEqual(
-    store.db.prepare(`
-      SELECT cohort_id, status FROM launch_pullback_shadow_positions
-      WHERE mint='deep-optimization' ORDER BY cohort_id
-    `).all(),
-    [
-      { cohort_id: 'FO_D12_R3_10S', status: 'PENDING_ENTRY' },
-      { cohort_id: 'FO_D12_R3_QC_10S', status: 'RULE_REJECTED' },
-      { cohort_id: 'FO_D12_R3_Q_10S', status: 'PENDING_ENTRY' },
-      { cohort_id: 'FO_D12_R3_Q_T10_H30', status: 'PENDING_ENTRY' },
-    ],
-    'deep quality cohorts must stay isolated and apply the strict Creator ceiling',
-  );
-  assert.ok(store.db.prepare(`
-    SELECT rejection_reason FROM launch_pullback_shadow_positions
-    WHERE mint='deep-optimization' AND cohort_id='FO_D12_R3_QC_10S'
-  `).get().rejection_reason.includes('CREATOR_SHARE_ABOVE_MAX'));
-
-  now += 1_000;
-  const strictQuality = reference('deep-strict-quality', now, 20, 2);
-  strictQuality.referenceProfileId = 'DEEP_D12_5_R3';
-  suite.onReference(strictQuality);
-  assert.strictEqual(
-    store.db.prepare(`
-      SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions
-      WHERE mint='deep-strict-quality' AND status='PENDING_ENTRY'
-    `).get().n,
-    4,
-    'Creator<=3 must arm both quality entries and their independent exits',
-  );
-
-  now += 1_000;
-  const excessiveFlow = reference('deep-excessive-flow', now, 60, 2);
-  excessiveFlow.referenceProfileId = 'DEEP_D12_5_R3';
-  suite.onReference(excessiveFlow);
-  assert.strictEqual(
-    store.db.prepare(`
-      SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions
-      WHERE mint='deep-excessive-flow' AND rejection_reason LIKE '%NET_FLOW_ABOVE_MAX%'
-    `).get().n,
-    3,
-    'the new quality cohorts must reject NetFlow above their causal upper bound',
+    store.db.prepare("SELECT cohort_id, status FROM launch_pullback_shadow_positions WHERE mint='deep-optimization'").all(),
+    [{ cohort_id: 'FO_D12_R3_10S', status: 'PENDING_ENTRY' }],
+    'deep reference should create only the matching deep FO cohort',
   );
   assert.strictEqual(suite.health().referenceGroups.length, 2);
   assert.strictEqual(suite.health().sendsTransactions, false);

@@ -103,7 +103,6 @@ class LaunchPullbackShadowManager {
             maxPullbackPct: this.config.maxPullbackPct ?? null,
           },
           minNetFlowSol: this.config.minNetFlowSol,
-          maxNetFlowSol: this.config.maxNetFlowSol ?? null,
           maxCreatorSharePct: this.config.maxCreatorSharePct,
           minBuyers: this.config.minBuyers || 0,
           minRecentBuyers: this.config.minRecentBuyers || 0,
@@ -170,9 +169,6 @@ class LaunchPullbackShadowManager {
     );
     const reasons = reference.rejectionReason ? [reference.rejectionReason] : [];
     if (!(netFlowSol >= this.config.minNetFlowSol)) reasons.push('NET_FLOW_BELOW_MIN');
-    if (this.config.maxNetFlowSol != null && netFlowSol > this.config.maxNetFlowSol) {
-      reasons.push('NET_FLOW_ABOVE_MAX');
-    }
     if (creatorSharePct > this.config.maxCreatorSharePct) {
       reasons.push('CREATOR_SHARE_ABOVE_MAX');
     }

@@ -183,16 +183,9 @@ assert.deepStrictEqual(
   config.launchPullbackShadow.optimizationCohorts.map((cohort) => cohort.id),
   [
     'FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20',
-    'FO_D12_R3_10S', 'FO_D12_R3_T15',
-    'FO_D12_R3_Q_10S', 'FO_D12_R3_QC_10S', 'FO_D12_R3_Q_T10_H30',
-    'F2_8S_NF30', 'FT_C_NF30',
+    'FO_D12_R3_10S', 'FO_D12_R3_T15', 'F2_8S_NF30', 'FT_C_NF30',
     'F_ABSORB3_8S', 'F_ABSORB5_RUNNER', 'F_REACCEL0_8S',
   ],
-);
-assert.strictEqual(
-  config.launchPullbackShadow.optimizationCohorts
-    .find((cohort) => cohort.id === 'FO_D12_R3_Q_10S').maxNetFlowSol,
-  50,
 );
 assert.strictEqual(
   config.launchPullbackShadow.optimizationCohorts[0].maxEntryPriceJumpPct,
@@ -212,7 +205,7 @@ assert.strictEqual(config.launchQualityObserver.pullbackReferencePct, 7.5);
 assert.strictEqual(config.launchQualityObserver.reboundReferencePct, 3);
 assert.strictEqual(config.launchQualityObserver.marketRegimeLookbackMs, 30 * 60_000);
 assert.strictEqual(config.launchQualityObserver.marketRegimeSettlementLagMs, 60_000);
-assert.strictEqual(config.rangeScalperShadow.enabled, false);
+assert.strictEqual(config.rangeScalperShadow.enabled, true);
 assert.strictEqual(config.rangeScalperShadow.initialObservationMs, 120_000);
 assert.strictEqual(config.rangeScalperShadow.maxTrackingMs, 1_200_000);
 assert.strictEqual(config.rangeScalperShadow.windowMs, 60_000);
@@ -276,11 +269,24 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   config.holderGrowthShadow.entryProfiles.map((profile) => [profile.id, profile.horizonMs]),
-  [['HG30_BAL', 30_000]],
+  [
+    ['HG10_OPEN', 10_000],
+    ['HG10_FLOW10_J2', 10_000],
+    ['HG10_FLOW15_J2', 10_000],
+    ['HG20_BAL', 20_000],
+    ['HG20_FAST', 20_000],
+    ['HG20_QUALITY_J2', 20_000],
+    ['HG30_BAL', 30_000],
+    ['HG30_FAST', 30_000],
+  ],
 );
 assert.deepStrictEqual(
   config.holderGrowthShadow.exitProfiles.map((profile) => profile.id),
-  ['X5_FIXED', 'X15_FIXED'],
+  [
+    'X5_FIXED', 'X15_FIXED', 'XT15_H120', 'XT20_D10_H180', 'XT30_D15_H300',
+    'XSCALE_50_RUNNER', 'XP20_50_D15_H120', 'XP20_70_D20_H180',
+    'XP30_70_STAIR', 'XFLOW_60', 'XSTAIR_BAL', 'XSTAIR_LOCK', 'XSTAIR_TAIL',
+  ],
 );
 assert.ok(config.holderGrowthShadow.exitProfiles
   .filter((profile) => ['ADAPTIVE_TRAILING', 'SCALE_ADAPTIVE'].includes(profile.exitMode))
