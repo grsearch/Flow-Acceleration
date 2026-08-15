@@ -34,6 +34,7 @@ class ResearchServer {
     bondingCurveMomentumShadow = null,
     graduationHoldShadow = null,
     holderGrowthShadow = null,
+    graduationAccelerationShadow = null,
   }) {
     this.config = config;
     this.store = store;
@@ -55,6 +56,7 @@ class ResearchServer {
     this.bondingCurveMomentumShadow = bondingCurveMomentumShadow;
     this.graduationHoldShadow = graduationHoldShadow;
     this.holderGrowthShadow = holderGrowthShadow;
+    this.graduationAccelerationShadow = graduationAccelerationShadow;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -449,6 +451,24 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/graduation-acceleration-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.graduationAccelerationShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_O',
+          sendsTransactions: false,
+          entryProfiles: [],
+          capacitySols: [],
+        },
+        ...this.store.graduationAccelerationShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          bigWinnerPct: this.config.graduationAccelerationShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
@@ -477,6 +497,7 @@ class ResearchServer {
         cyaEarlyPyramidShadow: this.cyaEarlyPyramidShadow?.health() || null,
         bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,
         graduationHoldShadow: this.graduationHoldShadow?.health() || null,
+        graduationAccelerationShadow: this.graduationAccelerationShadow?.health() || null,
       });
     });
 

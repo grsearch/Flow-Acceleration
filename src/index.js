@@ -22,6 +22,9 @@ const {
 } = require('./core/BondingCurveMomentumShadowSuite');
 const { GraduationHoldShadowSuite } = require('./core/GraduationHoldShadowSuite');
 const { HolderGrowthShadowSuite } = require('./core/HolderGrowthShadowSuite');
+const {
+  GraduationAccelerationShadowSuite,
+} = require('./core/GraduationAccelerationShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
@@ -120,6 +123,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   graduationHoldShadow.start();
+  const graduationAccelerationShadow = new GraduationAccelerationShadowSuite({
+    config: runtimeConfig.graduationAccelerationShadow,
+    store,
+  });
+  graduationAccelerationShadow.start();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
@@ -141,6 +149,7 @@ function createRuntime(runtimeConfig = config) {
     bondingCurveMomentumShadow,
     graduationHoldShadow,
     holderGrowthShadow,
+    graduationAccelerationShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
   const runtimeMetrics = {
@@ -174,6 +183,7 @@ function createRuntime(runtimeConfig = config) {
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
       ...holderGrowthShadow.trackedMints(),
+      ...graduationAccelerationShadow.trackedMints(),
     ])]);
   };
 
@@ -235,6 +245,9 @@ function createRuntime(runtimeConfig = config) {
           const token = store.recordCreate(event);
           engine.handleCreate(token || event);
           observeShadow('launchQualityCreate', () => launchQualityObserver.onCreate(token || event));
+          observeShadow('graduationAccelerationCreate', () => (
+            graduationAccelerationShadow.onCreate(token || event)
+          ));
           continue;
         }
         if (event.type === 'complete') {
@@ -250,6 +263,9 @@ function createRuntime(runtimeConfig = config) {
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
+          observeShadow('graduationAccelerationGraduate', () => (
+            graduationAccelerationShadow.onGraduated(token || event)
+          ));
           refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
         }
@@ -266,6 +282,9 @@ function createRuntime(runtimeConfig = config) {
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
+          observeShadow('graduationAccelerationGraduate', () => (
+            graduationAccelerationShadow.onGraduated(token || event)
+          ));
           refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
         }
@@ -303,6 +322,9 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('graduationHold', () => graduationHoldShadow.observeTrade(trade));
         observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
         observeShadow('holderGrowth', () => holderGrowthShadow.observeTrade(trade));
+        observeShadow('graduationAcceleration', () => (
+          graduationAccelerationShadow.observeTrade(trade)
+        ));
         observeShadow('launchPullback', () => launchPullbackShadow.observeTrade(trade));
         observeShadow('primarySignal', () => signalShadow.observeTrade(trade));
         engine.handleTrade(trade, store.getToken(trade.mint));
@@ -388,7 +410,10 @@ function createRuntime(runtimeConfig = config) {
       `Observed Holder Growth Shadow N: ${runtimeConfig.holderGrowthShadow.entryProfiles
         .map((profile) => `${profile.id}@${(profile.horizonMs
           || runtimeConfig.holderGrowthShadow.snapshotHorizonMs) / 1_000}s`).join('/')} x `
-      + `${runtimeConfig.holderGrowthShadow.exitProfiles.length} exits; `
+      + `${runtimeConfig.holderGrowthShadow.entryProfiles.reduce((total, profile) => (
+        total + (profile.exitProfileIds?.length
+          || runtimeConfig.holderGrowthShadow.exitProfiles.length)
+      ), 0)} independent cohorts; `
       + 'isolated table, sends transactions=false.',
     );
     console.log(
@@ -429,6 +454,12 @@ function createRuntime(runtimeConfig = config) {
       + 'hold overlays; isolated table; sends transactions=false.',
     );
     console.log(
+      `Graduation Acceleration Shadow O: ${runtimeConfig.graduationAccelerationShadow
+        .entryProfiles.map((profile) => profile.id).join('/')} x `
+      + `${runtimeConfig.graduationAccelerationShadow.capacitySols.join('/')} SOL; `
+      + 'graduation core 50% + adaptive runner; isolated table; sends transactions=false.',
+    );
+    console.log(
       `Wake-up 5s: volume>=${runtimeConfig.strategy.activityMinVolumeSol}SOL OR `
       + `tx>=${runtimeConfig.strategy.activityMinTxCount} OR `
       + `wallets>=${runtimeConfig.strategy.activityMinUniqueWallets}`,
@@ -457,6 +488,9 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('cyaEarlyPyramidAdvance', () => cyaEarlyPyramidShadow.advanceTime(now));
       observeShadow('bondingCurveMomentumAdvance', () => bondingCurveMomentumShadow.advanceTime(now));
       observeShadow('graduationHoldAdvance', () => graduationHoldShadow.advanceTime(now));
+      observeShadow('graduationAccelerationAdvance', () => (
+        graduationAccelerationShadow.advanceTime(now)
+      ));
       trader.advanceTime(now);
       refreshAmmSubscriptions(now);
     }, 1_000);
@@ -499,6 +533,7 @@ function createRuntime(runtimeConfig = config) {
     cyaEarlyPyramidShadow.stop();
     bondingCurveMomentumShadow.stop();
     graduationHoldShadow.stop();
+    graduationAccelerationShadow.stop();
     await server.stop();
     store.close();
   }
@@ -525,6 +560,7 @@ function createRuntime(runtimeConfig = config) {
       cyaEarlyPyramidShadow: cyaEarlyPyramidShadow.health(),
       bondingCurveMomentumShadow: bondingCurveMomentumShadow.health(),
       graduationHoldShadow: graduationHoldShadow.health(),
+      graduationAccelerationShadow: graduationAccelerationShadow.health(),
     };
   }
 
@@ -535,6 +571,7 @@ function createRuntime(runtimeConfig = config) {
     launchQualityObserver, holderGrowthShadow, migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
     migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
+    graduationAccelerationShadow,
   };
 }
 
