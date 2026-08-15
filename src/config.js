@@ -142,6 +142,13 @@ const holderGrowthFullMatrixEnabled = booleanEnv(
   'FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED',
   false,
 );
+// Forward-only optimization discovered after repricing historical NO_EXIT rows.
+// Keep it independently switchable so old HG30_BAL controls and every
+// historical cohort ID remain unchanged.
+const holderGrowthStrongFlowEnabled = booleanEnv(
+  'FLOW_HOLDER_GROWTH_STRONG_FLOW_ENABLED',
+  true,
+);
 
 // One shared fallback keeps every research-only strategy on the same economic
 // scale. A strategy-specific environment variable may still override it.
@@ -2205,6 +2212,7 @@ const config = {
         minRetentionPct: 50,
         minNetFlowSol: 5,
         maxTop3SharePct: 80,
+        exitProfileIds: holderGrowthFullMatrixEnabled ? null : ['X5_FIXED', 'X15_FIXED'],
       },
       {
         id: 'HG30_FAST',
@@ -2218,7 +2226,56 @@ const config = {
         minNetFlowSol: 10,
         maxTop3SharePct: 80,
       },
-    ].filter((profile) => holderGrowthFullMatrixEnabled || profile.id === 'HG30_BAL'),
+      {
+        id: 'HG30_NB20_NF25',
+        label: 'HG30 Strong A · 新增买家≥20 + NetFlow≥25',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 20,
+        minRetentionPct: 50,
+        minNetFlowSol: 25,
+        maxTop3SharePct: 80,
+        exitProfileIds: holderGrowthFullMatrixEnabled
+          ? null : ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
+      },
+      {
+        id: 'HG30_RB15_NF25',
+        label: 'HG30 Strong B · 近窗买家≥15 + NetFlow≥25',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 10,
+        minRecentBuyers: 15,
+        minRetentionPct: 50,
+        minNetFlowSol: 25,
+        maxTop3SharePct: 80,
+        exitProfileIds: holderGrowthFullMatrixEnabled
+          ? null : ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
+      },
+      {
+        id: 'HG30_B80_NF25',
+        label: 'HG30 Strong C · Buyers≥80 + NetFlow≥25',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 80,
+        minNewBuyers: 10,
+        minRetentionPct: 50,
+        minNetFlowSol: 25,
+        maxTop3SharePct: 80,
+        exitProfileIds: holderGrowthFullMatrixEnabled
+          ? null : ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
+      },
+    ].filter((profile) => holderGrowthFullMatrixEnabled
+      || profile.id === 'HG30_BAL'
+      || (holderGrowthStrongFlowEnabled && [
+        'HG30_NB20_NF25',
+        'HG30_RB15_NF25',
+        'HG30_B80_NF25',
+      ].includes(profile.id))),
     // Every exit is crossed with every entry as an independent cohort. Keep
     // XT15_H120 unchanged so existing production rows remain comparable.
     exitProfiles: [
@@ -2229,6 +2286,26 @@ const config = {
       {
         id: 'X15_FIXED', label: '固定15秒', exitMode: 'FIXED_HOLD',
         fixedHoldMs: 15_000, hardStopPct: 100, maxHoldMs: 15_000,
+      },
+      {
+        id: 'X12_FIXED', label: '固定12秒', exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 12_000, hardStopPct: 100, maxHoldMs: 12_000,
+      },
+      {
+        id: 'X18_FIXED', label: '固定18秒', exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 18_000, hardStopPct: 100, maxHoldMs: 18_000,
+      },
+      {
+        id: 'X15_R20',
+        label: '15秒强势减仓80% / 20%尾仓',
+        exitMode: 'FIXED_SCALE_RUNNER',
+        fixedHoldMs: 15_000,
+        hardStopPct: 100,
+        scaleOutTriggerPct: 20,
+        scaleOutFractionPct: 80,
+        trailingActivationPct: 20,
+        trailingStopPct: 15,
+        maxHoldMs: 120_000,
       },
       {
         id: 'XT15_H120',
@@ -2333,7 +2410,9 @@ const config = {
         ],
       },
     ].filter((profile) => holderGrowthFullMatrixEnabled
-      || ['X5_FIXED', 'X15_FIXED'].includes(profile.id)),
+      || ['X5_FIXED', 'X15_FIXED'].includes(profile.id)
+      || (holderGrowthStrongFlowEnabled
+        && ['X12_FIXED', 'X18_FIXED', 'X15_R20'].includes(profile.id))),
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
