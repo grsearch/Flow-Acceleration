@@ -329,8 +329,8 @@
           <p>每次只加载右侧选中的策略，历史数据与新实验彼此独立。</p>
           <div class="strategy-nav-heading">实盘策略</div>
           <div class="strategy-selector" id="live-execution-strategy-selector">
-            <button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution" data-live-execution-strategy="post_gd25_35_xleg">
-              <b>毕业后深跌反弹</b><small>PumpSwap · GD25–35 · XLEG · 1 SOL · 每Mint≤2次</small>
+            <button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution" data-live-execution-strategy="post_gd25_32_r2_4_age30_xleg_v2">
+              <b>毕业后精选深跌反弹 · XLEG-V2</b><small>PumpSwap · AGE≤30s · 跌25–32% · 反弹2–4% · 每Mint 1次</small>
             </button>
           </div>
           <div class="strategy-nav-heading">Shadow 策略</div>
@@ -900,7 +900,7 @@
         activeExecutionStrategyId = data.strategyId || liveStrategies[0]?.id || null;
       }
       document.querySelector('#live-execution-strategy-selector').innerHTML = liveStrategies.length
-        ? liveStrategies.map(item => `<button class="strategy-nav-item" type="button" aria-current="${activeLiveStrategyId === 'execution' && item.id === activeExecutionStrategyId}" data-live-strategy="execution" data-live-execution-strategy="${escapeHtml(item.id)}"><b>${escapeHtml(item.label || item.id)}</b><small>${escapeHtml(item.market || '—')} · ${number(item.positionSizeSol,4)} SOL</small></button>`).join('')
+        ? liveStrategies.map(item => `<button class="strategy-nav-item" type="button" aria-current="${activeLiveStrategyId === 'execution' && item.id === activeExecutionStrategyId}" data-live-strategy="execution" data-live-execution-strategy="${escapeHtml(item.id)}"><b>${escapeHtml(item.label || item.id)}</b><small>${escapeHtml(item.market || '—')} · ${number(item.positionSizeSol,4)} SOL${item.entryEnabled === false ? ' · 停止新开仓' : ''}</small></button>`).join('')
         : '<button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution"><b>未配置实盘策略</b><small>完整研究采集不受影响</small></button>';
       const strategy = (runtime.strategies || []).find(item => item.id === data.strategyId)
         || (runtime.strategies || [])[0] || {};
@@ -957,9 +957,9 @@
         : execution.commitment || '—';
       const cards = [
         ['买入条件', [
-          ['规则版本', strategy.ruleVersion || '—'], ['信号类型', '毕业后独立深跌反弹周期'], ['市场', strategy.market || 'PUMP_AMM'],
+          ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止（历史/存量退出）' : '启用'], ['信号类型', '毕业后独立深跌反弹周期'], ['市场', strategy.market || 'PUMP_AMM'],
           ['跌幅范围', `${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}%`], ['反弹范围', `${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}%`],
-          ['毕业后窗口', age(strategy.trackingAgeMs)], ['最大入场跳价', rate(strategy.maxEntryPriceJumpPct)],
+          ['毕业后窗口', age(strategy.trackingAgeMs)], ['报价冲击上限', rate(strategy.maxEntryPriceJumpPct)],
         ]],
         ['卖出策略', [
           ['策略模式', 'XLEG 自适应'], ['移动止盈激活', `盈利 ${rate(strategy.trailingActivationPct)}`],
