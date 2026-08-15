@@ -6,7 +6,7 @@ module.exports = {
   apps: [{
     name: 'flow-acceleration-research',
     cwd: path.resolve(__dirname, '..'),
-    script: 'src/index-flow.js',
+    script: 'src/index.js',
     watch: false,
     autorestart: true,
     restart_delay: 5_000,
@@ -17,3 +17,4 @@ module.exports = {
     env: { NODE_ENV: 'production' },
   }],
 };
+
