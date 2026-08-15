@@ -72,6 +72,18 @@ class BorshReader {
     return value;
   }
 
+  i128() {
+    this.require(16);
+    const low = this.buffer.readBigUInt64LE(this.offset);
+    const high = this.buffer.readBigInt64LE(this.offset + 8);
+    this.offset += 16;
+    return (high << 64n) + BigInt(low);
+  }
+
+  remaining() {
+    return this.buffer.length - this.offset;
+  }
+
   pubkey() {
     this.require(32);
     const value = bs58.encode(this.buffer.subarray(this.offset, this.offset + 32));
@@ -269,10 +281,33 @@ function decodeAmmBuy(data, context) {
   reader.u64(); // user_quote_amount_in
   const pool = reader.pubkey();
   const wallet = reader.pubkey();
+  let virtualQuoteReservesRaw = 0n;
+  if (reader.remaining() > 0) {
+    reader.pubkey(); // user_base_token_account
+    reader.pubkey(); // user_quote_token_account
+    reader.pubkey(); // protocol_fee_recipient
+    reader.pubkey(); // protocol_fee_recipient_token_account
+    reader.pubkey(); // coin_creator
+    reader.u64(); // coin_creator_fee_basis_points
+    reader.u64(); // coin_creator_fee
+    reader.bool(); // track_volume
+    reader.u64(); // total_unclaimed_tokens
+    reader.u64(); // total_claimed_tokens
+    reader.u64(); // current_sol_volume
+    reader.i64(); // last_update_timestamp
+    reader.u64(); // min_base_amount_out
+    reader.string(); // ix_name
+    reader.u64(); // cashback_fee_basis_points
+    reader.u64(); // cashback
+    reader.u64(); // buyback_fee_basis_points
+    reader.u64(); // buyback_fee
+    virtualQuoteReservesRaw = reader.i128();
+    reader.bool(); // can_boost
+  }
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
   const poolBaseTokens = numberOf(poolBaseReservesRaw) / 1e6;
-  const poolQuoteSol = numberOf(poolQuoteReservesRaw) / 1e9;
+  const poolQuoteSol = (numberOf(poolQuoteReservesRaw) + numberOf(virtualQuoteReservesRaw)) / 1e9;
   const reservePrice = poolBaseTokens > 0 ? poolQuoteSol / poolBaseTokens : null;
 
   return {
@@ -289,6 +324,7 @@ function decodeAmmBuy(data, context) {
     chainTimestampMs,
     poolBaseReservesRaw: poolBaseReservesRaw.toString(),
     poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
+    virtualQuoteReservesRaw: virtualQuoteReservesRaw.toString(),
   };
 }
 
@@ -310,10 +346,26 @@ function decodeAmmSell(data, context) {
   reader.u64(); // user_quote_amount_out
   const pool = reader.pubkey();
   const wallet = reader.pubkey();
+  let virtualQuoteReservesRaw = 0n;
+  if (reader.remaining() > 0) {
+    reader.pubkey(); // user_base_token_account
+    reader.pubkey(); // user_quote_token_account
+    reader.pubkey(); // protocol_fee_recipient
+    reader.pubkey(); // protocol_fee_recipient_token_account
+    reader.pubkey(); // coin_creator
+    reader.u64(); // coin_creator_fee_basis_points
+    reader.u64(); // coin_creator_fee
+    reader.u64(); // cashback_fee_basis_points
+    reader.u64(); // cashback
+    reader.u64(); // buyback_fee_basis_points
+    reader.u64(); // buyback_fee
+    virtualQuoteReservesRaw = reader.i128();
+    reader.bool(); // can_boost
+  }
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
   const poolBaseTokens = numberOf(poolBaseReservesRaw) / 1e6;
-  const poolQuoteSol = numberOf(poolQuoteReservesRaw) / 1e9;
+  const poolQuoteSol = (numberOf(poolQuoteReservesRaw) + numberOf(virtualQuoteReservesRaw)) / 1e9;
   const reservePrice = poolBaseTokens > 0 ? poolQuoteSol / poolBaseTokens : null;
 
   return {
@@ -330,6 +382,7 @@ function decodeAmmSell(data, context) {
     chainTimestampMs,
     poolBaseReservesRaw: poolBaseReservesRaw.toString(),
     poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
+    virtualQuoteReservesRaw: virtualQuoteReservesRaw.toString(),
   };
 }
 
@@ -418,4 +471,3 @@ module.exports = {
   extractSignature,
   extractProgramData,
 };
-
