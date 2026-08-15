@@ -163,13 +163,17 @@ class HolderGrowthShadowSuite {
   stop() {}
 
   health() {
+    const entryProfiles = [...this.entryProfiles.values()];
+    const cohortCount = entryProfiles.reduce((total, profile) => (
+      total + this._exitProfilesFor(profile).length
+    ), 0);
     return {
       enabled: this.config.enabled,
       mode: 'SHADOW_N',
       sendsTransactions: false,
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
-      entryProfiles: [...this.entryProfiles.values()],
+      entryProfiles,
       exitProfiles: [...this.exitProfiles.values()],
       strategy: {
         scope: 'PRE_MIGRATION_OBSERVED_HOLDER_GROWTH',
@@ -180,6 +184,7 @@ class HolderGrowthShadowSuite {
         entryTimeoutMs: this.config.entryTimeoutMs,
         maxSnapshotLagMs: this.config.maxSnapshotLagMs,
         maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
+        cohortCount,
         research: {
           simulatedPositionSol: this.config.positionSizeSol,
           configuredCostPct: this.costs.deterministicCostPct,
@@ -320,15 +325,26 @@ class HolderGrowthShadowSuite {
   _matches(profile, snapshot) {
     return snapshot.buyers >= profile.minBuyers
       && snapshot.newBuyers >= profile.minNewBuyers
+      && (profile.minRecentBuyers == null
+        || finite(snapshot.recentBuyers, -1) >= profile.minRecentBuyers)
       && finite(snapshot.retentionPct, -1) >= profile.minRetentionPct
       && snapshot.netFlowSol >= profile.minNetFlowSol
       && finite(snapshot.top3SharePct, 101) <= profile.maxTop3SharePct;
   }
 
   _createPendingRows(profile, snapshot) {
-    for (const exitProfile of this.exitProfiles.values()) {
+    for (const exitProfile of this._exitProfilesFor(profile)) {
       this._createPending(profile, exitProfile, snapshot);
     }
+  }
+
+  _exitProfilesFor(profile) {
+    const allowed = Array.isArray(profile?.exitProfileIds) && profile.exitProfileIds.length
+      ? new Set(profile.exitProfileIds)
+      : null;
+    return [...this.exitProfiles.values()].filter((exitProfile) => (
+      !allowed || allowed.has(exitProfile.id)
+    ));
   }
 
   _createPending(profile, exitProfile, snapshot) {
@@ -437,6 +453,22 @@ class HolderGrowthShadowSuite {
       if (trade.timestampMs - position.entryAt >= position.fixedHoldMs) {
         this._requestExit(position, position.entryAt + position.fixedHoldMs, 'FIXED_HOLD');
       }
+      return;
+    }
+
+    if (position.exitMode === 'FIXED_SCALE_RUNNER' && !position.scaleOutAt) {
+      if (position.partialExitTargetAt) return;
+      if (trade.timestampMs - position.entryAt < position.fixedHoldMs) return;
+      if (grossReturnPct < position.scaleOutTriggerPct) {
+        this._requestExit(position, position.entryAt + position.fixedHoldMs, 'FIXED_HOLD_WEAK');
+        return;
+      }
+      position.partialExitTargetAt = trade.timestampMs + this.config.exitDelayMs;
+      position.partialExitDeadlineAt = position.partialExitTargetAt + this.config.exitTimeoutMs;
+      this.store.updateHolderGrowthShadowPosition(position.id, {
+        partialExitTargetAt: position.partialExitTargetAt,
+        partialExitDeadlineAt: position.partialExitDeadlineAt,
+      });
       return;
     }
 
@@ -605,7 +637,7 @@ class HolderGrowthShadowSuite {
     const runnerGrossReturnPct = ((price / position.entryPrice) - 1) * 100;
     let grossReturnPct = runnerGrossReturnPct;
     let effectiveExitPrice = price;
-    if (['SCALE_RUNNER', 'SCALE_ADAPTIVE'].includes(position.exitMode)
+    if (['SCALE_RUNNER', 'SCALE_ADAPTIVE', 'FIXED_SCALE_RUNNER'].includes(position.exitMode)
       && position.scaleOutAt) {
       const fraction = Math.min(1, Math.max(0, finite(position.scaleOutFractionPct, 50) / 100));
       const scaleGrossReturnPct = ((position.scaleOutPrice / position.entryPrice) - 1) * 100;
