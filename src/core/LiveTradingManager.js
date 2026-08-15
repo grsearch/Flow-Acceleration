@@ -491,10 +491,15 @@ class LiveTradingManager {
         dropPct,
         reboundPct,
         windowMs: strategy.windowMs,
-        referencePriceSource: Number(trade.reservePrice) > 0 ? 'POOL_RESERVES' : 'TRADE_AVERAGE',
+        referencePriceSource: Number(trade.reservePrice) > 0
+          ? 'EFFECTIVE_POOL_RESERVES'
+          : 'TRADE_AVERAGE',
         poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
         poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+        virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
         maxEntryPriceJumpPct: strategy.maxEntryPriceJumpPct,
+        maxEntrySelfImpactPct: strategy.maxEntrySelfImpactPct
+          ?? this.config.maxEntrySelfImpactPct,
       },
       ruleMatched: true,
       rejectionReasons: [],
@@ -512,6 +517,9 @@ class LiveTradingManager {
       timestampMs: trade.timestampMs,
       receivedAtMs: trade.receivedAtMs || trade.timestampMs,
       market: 'PUMP_AMM',
+      poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+      poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+      virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
     };
     this.entryQueue = this.entryQueue
       .then(() => this._enter(decision, event))
@@ -617,6 +625,11 @@ class LiveTradingManager {
           solAmount: strategy.positionSizeSol,
           referencePrice: event.price,
           maxPriceJumpPct: strategy.maxEntryPriceJumpPct,
+          maxSelfImpactPct: strategy.maxEntrySelfImpactPct
+            ?? this.config.maxEntrySelfImpactPct,
+          signalPoolBaseReservesRaw: event.poolBaseReservesRaw,
+          signalPoolQuoteReservesRaw: event.poolQuoteReservesRaw,
+          signalVirtualQuoteReservesRaw: event.virtualQuoteReservesRaw,
         });
       }
       const openedAt = this.now();
@@ -716,11 +729,18 @@ class LiveTradingManager {
         await this._recoverUnknownEntry(position, { orderId, initialError: error });
         return;
       }
+      const rejectionReason = transactionFailed
+        ? 'ENTRY_TRANSACTION_FAILED'
+        : error.code === 'MARKET_PRICE_MOVED'
+          ? 'ENTRY_MARKET_PRICE_MOVED'
+          : error.code === 'SELF_IMPACT_REJECTED'
+            ? 'ENTRY_SELF_IMPACT_REJECTED'
+            : 'ENTRY_REJECTED';
       this.store.updateLivePosition(position.id, {
         status: 'ENTRY_FAILED',
         entrySignature: error.signature,
         entryError: errorText(error),
-        exitReason: transactionFailed ? 'ENTRY_TRANSACTION_FAILED' : 'ENTRY_REJECTED',
+        exitReason: rejectionReason,
       });
       this.store.updateLiveStrategyDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
       this.positions.delete(position.mint);
