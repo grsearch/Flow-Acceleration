@@ -55,18 +55,24 @@ assert.strictEqual(config.liveTrading.maxDailySpendSol, undefined);
 assert.strictEqual(config.liveTrading.maxDailyTrades, undefined);
 assert.strictEqual(config.liveTrading.maxDailyLossSol, undefined);
 assert.strictEqual(config.liveTrading.maxConcurrentPositions, 3);
-assert.strictEqual(config.liveTrading.strategies[0].id, 'post_gd25_35_xleg');
+assert.strictEqual(config.liveTrading.strategies[0].id, 'post_gd25_32_r2_4_age30_xleg_v2');
 assert.strictEqual(config.liveTrading.strategies[0].positionSizeSol, 1);
+assert.strictEqual(config.liveTrading.strategies[0].entryEnabled, true);
 assert.strictEqual(config.liveTrading.priorityFeeSol, 0.0005);
 assert.strictEqual(config.liveTrading.priorityFeeMicroLamports, 2_000_000);
 assert.strictEqual(config.liveTrading.strategies[0].market, 'PUMP_AMM');
 assert.strictEqual(config.liveTrading.strategies[0].dropMinPct, 25);
-assert.strictEqual(config.liveTrading.strategies[0].dropMaxPct, 35);
-assert.strictEqual(config.liveTrading.strategies[0].maxEntriesPerMint, 2);
+assert.strictEqual(config.liveTrading.strategies[0].dropMaxPct, 32);
+assert.strictEqual(config.liveTrading.strategies[0].reboundMaxPct, 4);
+assert.strictEqual(config.liveTrading.strategies[0].trackingAgeMs, 30_000);
+assert.strictEqual(config.liveTrading.strategies[0].maxEntryPriceJumpPct, 3);
+assert.strictEqual(config.liveTrading.strategies[0].maxEntriesPerMint, 1);
 assert.strictEqual(config.liveTrading.strategies[0].reentryCooldownMs, 1_000);
 assert.strictEqual(config.liveTrading.strategies[0].trailingActivationPct, 8);
 assert.strictEqual(config.liveTrading.strategies[0].trailingStopPct, 3);
 assert.strictEqual(config.liveTrading.strategies[0].maxHoldMs, 15_000);
+assert.strictEqual(config.liveTrading.strategies[1].id, 'post_gd25_35_xleg');
+assert.strictEqual(config.liveTrading.strategies[1].entryEnabled, false);
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);
 assert.strictEqual(config.liveTrading.sellSlippagePct, 15);
 assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
@@ -255,15 +261,23 @@ assert.deepStrictEqual(
     ['GD25_35', null, null],
     ['GE30_R23_F1', 30_000, 1],
     ['GE30_R23_F3', 30_000, 3],
+    ['GE30_D25_32_R24_F1', 30_000, 1],
   ],
 );
 assert.deepStrictEqual(
   config.migratedDropReboundShadow.exitProfiles.map((profile) => profile.id),
-  ['X3', 'X8', 'XLEG', 'XB50', 'XB25', 'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15'],
+  [
+    'X3', 'X8', 'XLEG', 'XB50', 'XB25',
+    'V2_R2_H10', 'V2_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
+    'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15',
+  ],
 );
 assert.ok(config.migratedDropReboundShadow.exitProfiles
   .filter((profile) => profile.id.startsWith('XB') || profile.id.startsWith('XR'))
   .every((profile) => profile.entryProfileIds.join(',') === 'GD25_35'));
+assert.ok(config.migratedDropReboundShadow.exitProfiles
+  .filter((profile) => profile.id.startsWith('V2_'))
+  .every((profile) => profile.entryProfileIds.join(',') === 'GE30_D25_32_R24_F1'));
 assert.strictEqual(config.migrationContinuityShadow.enabled, true);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
 assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
@@ -337,3 +351,4 @@ assert.deepStrictEqual(liveTradingGuard(true, false, false), {
 });
 
 console.log('test-config-cost: ok');
+
