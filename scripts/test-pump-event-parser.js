@@ -10,6 +10,13 @@ const WSOL = 'So11111111111111111111111111111111111111112';
 const pk = (seed) => Buffer.alloc(32, seed);
 const u64 = (value) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(value)); return b; };
 const i64 = (value) => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(value)); return b; };
+const i128 = (value) => {
+  const b = Buffer.alloc(16);
+  const raw = BigInt(value);
+  b.writeBigUInt64LE(raw & ((1n << 64n) - 1n), 0);
+  b.writeBigInt64LE(raw >> 64n, 8);
+  return b;
+};
 const str = (value) => { const body = Buffer.from(value); const size = Buffer.alloc(4); size.writeUInt32LE(body.length); return Buffer.concat([size, body]); };
 const logData = (program, data) => [
   `Program ${program} invoke [1]`,
@@ -85,5 +92,49 @@ assert.strictEqual(ammBuy.side, 'BUY');
 assert.strictEqual(ammBuy.mint, trade.mint);
 assert.strictEqual(ammBuy.solAmount, 1);
 assert.strictEqual(ammBuy.tokenAmount, 50);
+assert.strictEqual(ammBuy.virtualQuoteReservesRaw, '0');
+
+const boostedAmmBuyData = Buffer.concat([
+  DISCRIMINATORS.ammBuy, i64(1_800_000_021), u64(50_000_000), u64(2_000_000_000),
+  u64(0), u64(0), u64(500_000_000_000), u64(50_000_000_000), u64(1_000_000_000),
+  u64(100), u64(10_000_000), u64(25), u64(2_500_000), u64(990_000_000),
+  u64(1_002_500_000), pk(6), pk(2),
+  pk(10), pk(11), pk(12), pk(13), pk(14), u64(50), u64(5_000_000),
+  Buffer.from([1]), u64(0), u64(0), u64(1_000_000_000), i64(1_800_000_021),
+  u64(45_000_000), str('buy_exact_quote_in'), u64(0), u64(0), u64(0), u64(0),
+  i128(20_000_000_000), Buffer.from([1]),
+]);
+const boostedAmmBuy = parser.parseTransaction({
+  slot: 46,
+  transaction: { signature: Buffer.alloc(64, 5) },
+  meta: {
+    err: null,
+    preTokenBalances: [{ mint: trade.mint }, { mint: WSOL }],
+    logMessages: logData(AMM, boostedAmmBuyData),
+  },
+}, 126000)[0];
+assert.strictEqual(boostedAmmBuy.virtualQuoteReservesRaw, '20000000000');
+assert.ok(Math.abs(boostedAmmBuy.reservePrice - 0.00014) < 1e-15);
+
+const boostedAmmSellData = Buffer.concat([
+  DISCRIMINATORS.ammSell, i64(1_800_000_022), u64(50_000_000), u64(500_000_000),
+  u64(0), u64(0), u64(500_000_000_000), u64(50_000_000_000), u64(400_000_000),
+  u64(100), u64(4_000_000), u64(25), u64(1_000_000), u64(405_000_000),
+  u64(400_000_000), pk(6), pk(2),
+  pk(10), pk(11), pk(12), pk(13), pk(14), u64(50), u64(2_000_000),
+  u64(0), u64(0), u64(0), u64(0), i128(20_000_000_000), Buffer.from([1]),
+]);
+const boostedAmmSell = parser.parseTransaction({
+  slot: 47,
+  transaction: { signature: Buffer.alloc(64, 4) },
+  meta: {
+    err: null,
+    preTokenBalances: [{ mint: trade.mint }, { mint: WSOL }],
+    logMessages: logData(AMM, boostedAmmSellData),
+  },
+}, 127000)[0];
+assert.strictEqual(boostedAmmSell.side, 'SELL');
+assert.strictEqual(boostedAmmSell.virtualQuoteReservesRaw, '20000000000');
+assert.ok(Math.abs(boostedAmmSell.reservePrice - 0.00014) < 1e-15);
 
 console.log('test-pump-event-parser: ok');
