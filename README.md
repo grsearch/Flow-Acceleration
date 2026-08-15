@@ -294,9 +294,11 @@ Shadow N 复用 Launch Quality Observer 已有的10/20/30/60秒因果快照，�
 
 阶梯组会随着峰值从20%/40%/80%/150%/300%等档位逐步放宽允许回撤，以争取保留大赢家；但实际止损价使用 `max(旧止损价, 新档位候选止损价)`，只能上移、绝不因切换到更宽档位而下移。Dashboard 同时比较平均/中位净收益、去Top5收益、PF、大赢家兑现率与MFE兑现率，避免只靠胜率或单个极端赢家判断。
 
-该策略只写入独立表 `holder_growth_shadow_positions`，默认按1 SOL仓位扣除确定性成本；分批减仓组额外扣除一次链上执行的固定成本。仓位在毕业前触发退出但尚未取得成交时会自动改到 PumpSwap 等待下一笔真实成交，避免把迁移造成的市场切换误记为 -100%；超时仍保留 `NO_EXIT_AFTER_MIGRATION_AMM_TIMEOUT` 分类。不会修改现有实盘策略，也不会签名或发送交易。
+该策略只写入独立表 `holder_growth_shadow_positions`，默认按1 SOL仓位扣除确定性成本；分批减仓组额外扣除一次链上执行的固定成本。仓位在毕业前触发退出但尚未取得成交时会自动改到 PumpSwap 等待下一笔真实成交。退出观察窗口默认30秒；窗口内仍没有可定价成交时保留 `NO_EXIT`，但不再把它直接当作已经确认的 `-100%`。Dashboard 的主收益、胜率和 PF 只统计真正取得出场价格的 `CLOSED`，同时单列 `NO_EXIT` 数量、比例以及把它们全部视为归零的“最坏均值”。不会修改现有实盘策略，也不会签名或发送交易。
 
-专项导出使用 `npm run export:holder-growth -- --db=... --out=...`。它会实际复制 Shadow N 仓位、相关 Mint、Launch Quality 观察/快照及每笔仓位信号前5秒至退出后5秒的原始成交，并逐表核对源行数与导出行数；不执行 WAL checkpoint，也不重启采集服务。
+历史 `NO_EXIT` 可以使用原始逐笔成交重新定价。先运行 `npm run reprice:holder-growth -- --db=/path/to/flow-research.db` 做只读预演；确认结果后追加 `--apply`。脚本会在卖出目标时间后30秒内寻找同生命周期市场的首笔合理成交，能够恢复的记录改为 `CLOSED` 并写入真实模拟出场价；其余记录保留为未定价 `NO_EXIT`。每次应用都会写入 `holder_growth_no_exit_recovery_audit` 审计表，不删除原始成交、不执行 WAL checkpoint。只有数据库或 COS 归档仍保留相应时间段 `raw_trades` 的记录才能恢复。
+
+专项导出使用 `npm run export:holder-growth -- --db=... --out=...`。它会实际复制 Shadow N 仓位、相关 Mint、Launch Quality 观察/快照及每笔仓位信号前5秒至退出后至少30秒的原始成交，并逐表核对源行数与导出行数；不执行 WAL checkpoint，也不重启采集服务。
 
 同一入场并行建立六个独立退出 cohort：固定60秒、固定120秒、5秒保护后`+10%激活/峰值回撤10%`、10秒保护后`+15%激活/峰值回撤12.5%`、10秒保护后的3秒订单流转弱，以及最长300秒的分层自适应尾仓。全部组合使用1 SOL成本模型、200ms退出延迟和独立表 `migration_continuity_shadow_positions`；历史策略和实盘规则都不变，该路径永不签名或发送交易。
 

@@ -5,6 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 
 const POSITION_TABLE = 'holder_growth_shadow_positions';
+const NO_EXIT_RECOVERY_TAIL_MS = 30_000;
 const EXPORT_TABLES = Object.freeze([
   {
     name: POSITION_TABLE,
@@ -52,7 +53,7 @@ const EXPORT_TABLES = Object.freeze([
             position.exit_deadline_at,
             position.updated_at,
             position.signal_at
-          ) + 5000
+          ) + ${NO_EXIT_RECOVERY_TAIL_MS}
       )`,
       bind: [],
     }),
@@ -256,4 +257,9 @@ if (require.main === module) {
   }
 }
 
-module.exports = { EXPORT_TABLES, exportHolderGrowthShadow, parseArgs };
+module.exports = {
+  EXPORT_TABLES,
+  NO_EXIT_RECOVERY_TAIL_MS,
+  exportHolderGrowthShadow,
+  parseArgs,
+};

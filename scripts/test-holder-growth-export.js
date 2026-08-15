@@ -84,7 +84,7 @@ function run() {
       flow_tokens: 2,
       launch_quality_observations: 2,
       launch_quality_snapshots: 3,
-      raw_trades: 4,
+      raw_trades: 6,
     },
   );
 
@@ -98,7 +98,8 @@ function run() {
     assert.strictEqual(
       output.prepare("SELECT COUNT(*) AS count FROM raw_trades WHERE timestamp_ms IN (8001, 17001)")
         .get().count,
-      0,
+      2,
+      'the verified export must retain the 30s NO_EXIT recovery tail',
     );
     assert.ok(output.prepare(`
       SELECT name FROM sqlite_master WHERE type='index' AND name='idx_raw_mint_time'

@@ -23,7 +23,7 @@ function makeConfig() {
     entryDelayMs: 200,
     entryTimeoutMs: 2_000,
     exitDelayMs: 200,
-    exitTimeoutMs: 5_000,
+    exitTimeoutMs: 30_000,
     maxEntryPriceJumpPct: 100,
     maxEntryPriceDropPct: 99,
     maxPlausibleReturnPct: 500,
@@ -389,3 +389,56 @@ function runForwardEntryBoundsAndMigrationExit() {
 }
 
 runForwardEntryBoundsAndMigrationExit();
+
+function runNoExitRemainsUnpriced() {
+  const base = 1_830_000_000_000;
+  let now = base;
+  const store = makeStore();
+  const config = makeConfig();
+  config.entryProfiles = [{
+    id: 'HG30_BAL', label: 'Balanced', horizonMs: 30_000,
+    minBuyers: 10, minNewBuyers: 10, minRetentionPct: 50,
+    minNetFlowSol: 5, maxTop3SharePct: 80,
+  }];
+  config.exitProfile = {
+    id: 'X5_FIXED', label: '5s', exitMode: 'FIXED_HOLD',
+    fixedHoldMs: 5_000, hardStopPct: 100, maxHoldMs: 5_000,
+  };
+  const suite = new HolderGrowthShadowSuite({ config, store, now: () => now });
+  suite.start();
+  const mint = 'HolderGrowthNoExit111111111111111111111111';
+  recordToken(store, mint, base);
+  now = base + 30_000;
+  suite.onSnapshot(snapshot(mint, now));
+  now += 250;
+  suite.observeTrade(curveTrade(mint, now, 1));
+  now += 5_001;
+  suite.advanceTime(now);
+  let row = store.db.prepare(`
+    SELECT * FROM holder_growth_shadow_positions WHERE mint=?
+  `).get(mint);
+  assert.strictEqual(row.status, 'EXIT_PENDING');
+  assert.strictEqual(row.exit_deadline_at - row.exit_target_at, 30_000);
+
+  now = row.exit_deadline_at + 1;
+  suite.advanceTime(now);
+  row = store.db.prepare(`
+    SELECT * FROM holder_growth_shadow_positions WHERE mint=?
+  `).get(mint);
+  assert.strictEqual(row.status, 'NO_EXIT');
+  assert.ok(row.entry_at);
+  assert.ok(row.exit_trigger_at);
+  assert.strictEqual(row.exit_at, null);
+  assert.strictEqual(row.gross_return_pct, null);
+  assert.strictEqual(row.net_return_pct, null);
+
+  const cohort = store.holderGrowthShadowDashboard().cohorts[0];
+  assert.strictEqual(cohort.resolved, 0, 'unpriced exits must not pollute priced returns');
+  assert.strictEqual(cohort.no_exit, 1);
+  assert.strictEqual(cohort.no_exit_rate_pct, 100);
+  assert.strictEqual(cohort.conservative_average_net_return_pct, -100);
+  store.close();
+  console.log('test-holder-growth-shadow no-exit censoring: ok');
+}
+
+runNoExitRemainsUnpriced();

@@ -282,6 +282,7 @@ assert.deepStrictEqual(
   config.holderGrowthShadow.exitProfiles.map((profile) => profile.id),
   ['X5_FIXED', 'X15_FIXED'],
 );
+assert.strictEqual(config.holderGrowthShadow.exitTimeoutMs, 30_000);
 assert.ok(config.holderGrowthShadow.exitProfiles
   .filter((profile) => ['ADAPTIVE_TRAILING', 'SCALE_ADAPTIVE'].includes(profile.exitMode))
   .every((profile) => profile.trailingTiers.length >= 4));

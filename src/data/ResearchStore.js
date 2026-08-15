@@ -224,7 +224,7 @@ class ResearchStore {
       ELSE '18-24'
     END`;
     const compute = () => {
-      const rows = this.db.prepare(`
+      const standardSql = `
         SELECT ${session} AS session_id,
           COUNT(*) AS resolved,
           COUNT(DISTINCT mint) AS independent_mints,
@@ -237,12 +237,35 @@ class ResearchStore {
         FROM ${strategy.table}
         WHERE status IN ('CLOSED', 'NO_EXIT') AND net_return_pct IS NOT NULL
         GROUP BY session_id
-      `).all();
+      `;
+      const holderGrowthSql = `
+        SELECT ${session} AS session_id,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
+          COUNT(DISTINCT CASE WHEN status = 'CLOSED' THEN mint END) AS independent_mints,
+          COALESCE(SUM(status = 'CLOSED' AND net_return_pct > 0), 0) AS wins,
+          AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
+            AS average_net_return_pct,
+          COALESCE(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct > 0
+            THEN net_return_pct ELSE 0 END), 0) AS total_profit_pct,
+          ABS(COALESCE(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0
+            THEN net_return_pct ELSE 0 END), 0)) AS total_loss_pct,
+          COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct
+            WHEN status = 'NO_EXIT' THEN -100 - configured_cost_pct END)
+            AS conservative_average_net_return_pct
+        FROM ${strategy.table}
+        WHERE status IN ('CLOSED', 'NO_EXIT')
+        GROUP BY session_id
+      `;
+      const rows = this.db.prepare(
+        strategyId === 'holder-growth' ? holderGrowthSql : standardSql,
+      ).all();
       const byId = new Map(rows.map((row) => [row.session_id, row]));
       return definitions.map((definition) => {
         const row = byId.get(definition.id) || {};
         const resolved = Number(row.resolved) || 0;
         const wins = Number(row.wins) || 0;
+        const noExit = Number(row.no_exit) || 0;
         const profit = Number(row.total_profit_pct) || 0;
         const loss = Number(row.total_loss_pct) || 0;
         return {
@@ -250,8 +273,12 @@ class ResearchStore {
           resolved,
           independent_mints: Number(row.independent_mints) || 0,
           wins,
+          no_exit: noExit,
+          no_exit_rate_pct: resolved + noExit ? noExit / (resolved + noExit) * 100 : null,
           win_rate_pct: resolved ? wins / resolved * 100 : null,
           average_net_return_pct: resolved ? Number(row.average_net_return_pct) : null,
+          conservative_average_net_return_pct: row.conservative_average_net_return_pct == null
+            ? null : Number(row.conservative_average_net_return_pct),
           profit_factor: loss > 0 ? profit / loss : (profit > 0 ? null : 0),
         };
       });
@@ -5867,7 +5894,9 @@ class ResearchStore {
           COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
           COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
           COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
-          COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
+          COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS exit_attempts,
           AVG(buyers) AS average_buyers,
           AVG(new_buyers) AS average_new_buyers,
           AVG(retention_pct) AS average_retention_pct,
@@ -5880,17 +5909,26 @@ class ResearchStore {
         GROUP BY cohort_id, entry_profile_id, exit_profile_id
         ORDER BY entry_profile_id
       `).all();
-      const returnsStatement = this.db.prepare(`
-        SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+      const outcomesStatement = this.db.prepare(`
+        SELECT status, configured_cost_pct, net_return_pct, gross_return_pct,
+          max_favorable_return_pct
         FROM holder_growth_shadow_positions
         WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
-          AND net_return_pct IS NOT NULL
         ORDER BY net_return_pct
       `);
       return groups.map((group) => {
-        const resolvedRows = returnsStatement.all(group.cohort_id);
+        const outcomeRows = outcomesStatement.all(group.cohort_id);
+        const resolvedRows = outcomeRows.filter((row) => (
+          row.status === 'CLOSED' && Number.isFinite(Number(row.net_return_pct))
+        ));
         const returns = resolvedRows.map((row) => Number(row.net_return_pct))
           .filter(Number.isFinite);
+        const noExitRows = outcomeRows.filter((row) => row.status === 'NO_EXIT');
+        const conservativeReturns = outcomeRows.map((row) => (
+          row.status === 'CLOSED' && Number.isFinite(Number(row.net_return_pct))
+            ? Number(row.net_return_pct)
+            : -100 - (Number(row.configured_cost_pct) || 0)
+        ));
         const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
         const losses = returns.filter((value) => value < 0);
         const totalProfit = wins.reduce((sum, value) => sum + value, 0);
@@ -5914,8 +5952,19 @@ class ResearchStore {
         return {
           ...group,
           resolved: returns.length,
+          no_exit: noExitRows.length,
+          no_exit_rate_pct: outcomeRows.length
+            ? noExitRows.length / outcomeRows.length * 100 : null,
           average_net_return_pct: returns.length
             ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+          conservative_average_net_return_pct: conservativeReturns.length
+            ? conservativeReturns.reduce((sum, value) => sum + value, 0)
+              / conservativeReturns.length
+            : null,
+          conservative_win_rate_pct: conservativeReturns.length
+            ? conservativeReturns.filter((value) => value > 0).length
+              / conservativeReturns.length * 100
+            : null,
           median_net_return_pct: median,
           win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
           profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),

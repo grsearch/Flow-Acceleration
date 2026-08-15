@@ -133,6 +133,15 @@ class HolderGrowthShadowSuite {
       if (position.graduatedAt && position.status === STATUS.EXIT_PENDING) {
         position.exitTargetMarket = 'PUMP_AMM';
       }
+      if (position.status === STATUS.EXIT_PENDING && position.exitTargetAt) {
+        const extendedDeadlineAt = position.exitTargetAt + this.config.exitTimeoutMs;
+        if (!position.exitDeadlineAt || position.exitDeadlineAt < extendedDeadlineAt) {
+          position.exitDeadlineAt = extendedDeadlineAt;
+          this.store.updateHolderGrowthShadowPosition(position.id, {
+            exitDeadlineAt: extendedDeadlineAt,
+          });
+        }
+      }
       if (position.status === STATUS.PENDING_ENTRY) this.pendingEntries.set(position.id, position);
       else this.positions.set(position.id, position);
       this._index(position);
@@ -631,11 +640,6 @@ class HolderGrowthShadowSuite {
       rejectionReason: position.graduatedAt
         ? 'NO_EXIT_AFTER_MIGRATION_AMM_TIMEOUT'
         : 'NO_EXIT_BONDING_CURVE_TIMEOUT',
-      grossReturnPct: -100,
-      netReturnPct: -100 - finite(
-        position.configuredCostPct,
-        this.costs.deterministicCostPct,
-      ),
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
