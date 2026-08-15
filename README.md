@@ -357,11 +357,20 @@ activation, 10% peak drawdown, -20% hard stop and a 30-second maximum. All three
 cohort IDs, the 1 SOL cost model and 200ms causal fills; none signs or sends a transaction.
 
 Range Scalper J is now behind the proven-negative override and therefore stops creating new
-positions by default while all historical rows remain queryable. Holder Growth N similarly
-keeps its complete history but defaults new forward evaluation to `HG30_BAL` crossed only
-with `X5_FIXED` and `X15_FIXED`. Set `FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED=true` only
-when intentionally resuming the old 8 x 13 research matrix. Smart Pullback A/B, lifecycle G,
-migration continuity M and the live strategy are unchanged.
+positions by default while all historical rows remain queryable. Holder Growth N keeps its
+complete history and preserves `HG30_BAL × X5_FIXED/X15_FIXED` as the unchanged baseline.
+Three isolated forward-only strong-flow entries are enabled by default: `HG30_NB20_NF25`,
+`HG30_RB15_NF25`, and `HG30_B80_NF25`. They respectively require new buyers >=20,
+recent-window buyers >=15, or total buyers >=80; all require NetFlow >=25 SOL and retain the
+baseline retention/concentration guards. Each new entry independently tests fixed 12/15/18
+second exits plus `X15_R20`: at 15 seconds a position below +20% exits in full, while a
+position still at least +20% schedules an 80% scale-out and keeps a 20% runner behind a 15%
+peak drawdown with a 120-second maximum. Entry profiles explicitly list their exit IDs, so
+new rows never leak into the historical baseline cohorts. Set
+`FLOW_HOLDER_GROWTH_STRONG_FLOW_ENABLED=false` to stop only these new cohorts, or
+`FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED=true` only when intentionally resuming the old full
+matrix. Smart Pullback A/B, lifecycle G, migration continuity M and the live strategy are
+unchanged.
 
 
 Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION` 只用毕业前 `PUMP_BONDING_CURVE` 成交触发信号和入场，AGE 从 Token 创建时间计算；`POST_MIGRATION` 只用毕业后的 `PUMP_AMM` 成交触发信号和入场，AGE 从毕业时间计算。两层拥有独立检测状态、Episode 与 cohort，统计时不会把两种市场结构混在一起。此前已经积累的毕业后记录会通过数据库默认值保留为 `POST_MIGRATION`。
