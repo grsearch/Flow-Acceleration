@@ -9,6 +9,8 @@ const LiveTradingManager = require('../src/core/LiveTradingManager');
 const { PUMP_AMM_PROGRAM_ID } = require('@pump-fun/pump-swap-sdk');
 const { PublicKey, TransactionInstruction } = require('@solana/web3.js');
 const {
+  ammQuotePriceDiagnostics,
+  ammReservePrice,
   classifyBuyReconciliation,
   replaceAmmBuyWithExactQuoteIn,
   tokenDeltaFromTransaction,
@@ -120,6 +122,41 @@ const decodedExactAmmBuy = require('@pump-fun/pump-swap-sdk')
 assert.strictEqual(decodedExactAmmBuy.name, 'buyExactQuoteIn');
 assert.strictEqual(decodedExactAmmBuy.data.spendableQuoteIn.toString(), '50000000');
 assert.strictEqual(decodedExactAmmBuy.data.minBaseAmountOut.toString(), '123456');
+
+const syntheticBaseReserve = 100_000_000_000_000n;
+const syntheticVirtualQuote = 20_000_000_000n;
+const syntheticFreshQuote = 52_000_000_000n;
+const syntheticEffectiveInput = 990_000_000n;
+const syntheticQuotedBase = syntheticBaseReserve * syntheticEffectiveInput
+  / (syntheticFreshQuote + syntheticVirtualQuote + syntheticEffectiveInput);
+const correctedSignalPrice = ammReservePrice({
+  baseReserveRaw: syntheticBaseReserve,
+  quoteReserveRaw: 50_000_000_000n,
+  virtualQuoteReservesRaw: syntheticVirtualQuote,
+  baseDecimals: 6,
+});
+assert.ok(Math.abs(correctedSignalPrice - 0.0000007) < 1e-15);
+const quoteDiagnostics = ammQuotePriceDiagnostics({
+  signalBaseReserveRaw: syntheticBaseReserve,
+  signalQuoteReserveRaw: 50_000_000_000n,
+  freshBaseReserveRaw: syntheticBaseReserve,
+  freshQuoteReserveRaw: syntheticFreshQuote,
+  virtualQuoteReservesRaw: syntheticVirtualQuote,
+  baseDecimals: 6,
+  positionSol: 1,
+  quotedBaseRaw: syntheticQuotedBase,
+  internalQuoteWithoutFeesRaw: syntheticEffectiveInput,
+  legacyReferencePrice: 0.0000005,
+});
+assert.strictEqual(quoteDiagnostics.referencePriceMode, 'EFFECTIVE_POOL_RESERVES');
+assert.ok(Math.abs(quoteDiagnostics.marketReferencePrice - 0.0000007) < 1e-15);
+assert.ok(Math.abs(quoteDiagnostics.signalReservePrice - 0.0000007) < 1e-15);
+assert.ok(Math.abs(quoteDiagnostics.freshReservePrice - 0.00000072) < 1e-15);
+assert.ok(Math.abs(quoteDiagnostics.marketMovePct - 2.857142857142847) < 1e-9);
+assert.ok(Math.abs(quoteDiagnostics.selfImpactPct - 1.375) < 1e-6);
+assert.ok(Math.abs(quoteDiagnostics.feeImpactPct - 1.0101010101010166) < 1e-6);
+assert.ok(quoteDiagnostics.totalQuotePremiumPct > 5
+  && quoteDiagnostics.totalQuotePremiumPct < 6);
 
 const receiptMint = PublicKey.unique().toBase58();
 const receiptOwner = PublicKey.unique().toBase58();
@@ -507,4 +544,3 @@ setImmediate(() => {
     process.exitCode = 1;
   });
 });
-
