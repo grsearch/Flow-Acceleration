@@ -315,6 +315,10 @@ const config = {
       min: 0,
       max: 100,
     }),
+    maxEntrySelfImpactPct: numberEnv('FLOW_LIVE_MAX_ENTRY_SELF_IMPACT_PCT', 10, {
+      min: 0,
+      max: 100,
+    }),
     buySlippagePct: numberEnv('FLOW_LIVE_BUY_SLIPPAGE_PCT', 10, { min: 0.1, max: 50 }),
     sellSlippagePct: numberEnv('FLOW_LIVE_SELL_SLIPPAGE_PCT', 15, { min: 0.1, max: 50 }),
     computeUnitLimit: integerEnv('FLOW_LIVE_COMPUTE_UNIT_LIMIT', 250_000, {
@@ -363,7 +367,7 @@ const config = {
       {
         id: 'post_gd25_32_r2_4_age30_xleg_v2',
         label: '毕业后精选深跌反弹 · XLEG-V2',
-        ruleVersion: 'post_migration_age30_drop25_32_rebound2_4_xleg_v1',
+        ruleVersion: 'post_migration_age30_drop25_32_rebound2_4_xleg_v2',
         enabled: booleanEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_ENABLED', true),
         entryEnabled: true,
         market: 'PUMP_AMM',
@@ -416,11 +420,16 @@ const config = {
           1_000,
           { min: 0, max: 10 * 60_000 },
         ),
-        // The executor compares a fresh 1-SOL PumpSwap quote with the signal's
-        // reserve price. This blocks both price movement and self-impact above 3%.
+        // Market movement and the strategy's own 1-SOL price impact are independent
+        // guards. PumpSwap virtual quote reserves are included in both spot prices.
         maxEntryPriceJumpPct: numberEnv(
           'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_ENTRY_JUMP_PCT',
           3,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
           { min: 0, max: 100 },
         ),
         trailingActivationPct: numberEnv(
