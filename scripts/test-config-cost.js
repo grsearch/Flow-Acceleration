@@ -276,11 +276,28 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   config.holderGrowthShadow.entryProfiles.map((profile) => [profile.id, profile.horizonMs]),
-  [['HG30_BAL', 30_000]],
+  [
+    ['HG30_BAL', 30_000],
+    ['HG30_NB20_NF25', 30_000],
+    ['HG30_RB15_NF25', 30_000],
+    ['HG30_B80_NF25', 30_000],
+  ],
 );
 assert.deepStrictEqual(
   config.holderGrowthShadow.exitProfiles.map((profile) => profile.id),
+  ['X5_FIXED', 'X15_FIXED', 'X12_FIXED', 'X18_FIXED', 'X15_R20'],
+);
+assert.deepStrictEqual(
+  config.holderGrowthShadow.entryProfiles.find((profile) => (
+    profile.id === 'HG30_BAL'
+  )).exitProfileIds,
   ['X5_FIXED', 'X15_FIXED'],
+);
+assert.strictEqual(
+  config.holderGrowthShadow.entryProfiles.find((profile) => (
+    profile.id === 'HG30_RB15_NF25'
+  )).minRecentBuyers,
+  15,
 );
 assert.strictEqual(config.holderGrowthShadow.exitTimeoutMs, 30_000);
 assert.ok(config.holderGrowthShadow.exitProfiles
