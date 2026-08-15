@@ -225,6 +225,12 @@ const config = {
     maxHoldMs: 15_000,
   }],
 };
+config.strategies.push({
+  ...config.strategies[0],
+  id: 'legacy_history_only',
+  label: 'legacy history only',
+  entryEnabled: false,
+});
 
 store.recordCreate({
   mint: 'MintLive111111111111111111111111111111111', symbol: 'LIVE',
@@ -279,6 +285,12 @@ setImmediate(() => {
   assert.strictEqual(dashboard.positions[0].position_sol, 0.05);
   assert.strictEqual(dashboard.positions[0].entry_market, 'PUMP_AMM');
   assert.strictEqual(manager.health().strategies[0].positionSizeSol, 0.05);
+  assert.strictEqual(manager._riskReason({
+    strategyId: 'legacy_history_only', mint: 'NeverEnterLegacy111111111111111111111111111',
+  }), 'STRATEGY_ENTRY_DISABLED');
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) AS n FROM live_strategy_decisions WHERE strategy_id='legacy_history_only'
+  `).get().n, 0);
 
   // A loss visible at the six-second checkpoint triggers XLEG loss exit.
   trade(70, 7_000);
@@ -495,3 +507,4 @@ setImmediate(() => {
     process.exitCode = 1;
   });
 });
+

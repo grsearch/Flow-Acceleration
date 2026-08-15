@@ -170,10 +170,11 @@ function shadowPositionEnv(name) {
 // exact legacy value as inherited so upgrading an existing server moves the
 // active strategy to the new 1 SOL size without requiring a manual .env edit.
 // Other values remain explicit operator overrides.
-function livePositionEnv(name, fallback = 1) {
-  const raw = process.env[name];
+function livePositionEnv(name, fallback = 1, legacyName = null) {
+  const raw = process.env[name] ?? (legacyName ? process.env[legacyName] : undefined);
   if (raw == null || raw === '' || Number(raw) === 0.05) return fallback;
-  return numberEnv(name, fallback, { min: 0.000001 });
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.max(0.000001, value) : fallback;
 }
 
 function priorityFeeMicroLamports(priorityFeeSol, computeUnitLimit) {
@@ -360,9 +361,105 @@ const config = {
     // and independent decision history; the retired Primary live rule is not listed.
     strategies: [
       {
+        id: 'post_gd25_32_r2_4_age30_xleg_v2',
+        label: '毕业后精选深跌反弹 · XLEG-V2',
+        ruleVersion: 'post_migration_age30_drop25_32_rebound2_4_xleg_v1',
+        enabled: booleanEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_ENABLED', true),
+        entryEnabled: true,
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL',
+          1,
+          'FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL',
+        ),
+        trackingAgeMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_TRACKING_MS',
+          30_000,
+          { min: 10_000, max: 10 * 60_000 },
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        windowMs: integerEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_WINDOW_MS', 1_000, {
+          min: 250,
+        }),
+        dropMinPct: numberEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_DROP_MIN_PCT', 25, {
+          min: 0.1,
+        }),
+        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_DROP_MAX_PCT', 32, {
+          min: 0.1,
+        }),
+        reboundMinPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REBOUND_MIN_PCT',
+          2,
+          { min: 0.1 },
+        ),
+        reboundMaxPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REBOUND_MAX_PCT',
+          4,
+          { min: 0.1 },
+        ),
+        reboundTimeoutMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REBOUND_TIMEOUT_MS',
+          1_000,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: integerEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_ENTRIES_PER_MINT',
+          1,
+          { min: 1, max: 10 },
+        ),
+        reentryCooldownMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REENTRY_COOLDOWN_MS',
+          1_000,
+          { min: 0, max: 10 * 60_000 },
+        ),
+        // The executor compares a fresh 1-SOL PumpSwap quote with the signal's
+        // reserve price. This blocks both price movement and self-impact above 3%.
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_ENTRY_JUMP_PCT',
+          3,
+          { min: 0, max: 100 },
+        ),
+        trailingActivationPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_TRAILING_ACTIVATION_PCT',
+          8,
+          { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_TRAILING_STOP_PCT',
+          3,
+          { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_FAST_TP_PCT',
+          18,
+          { min: 0 },
+        ),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_FAST_TP_WINDOW_MS',
+          5_000,
+          { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_LOSS_CHECK_MS',
+          6_000,
+          { min: 0 },
+        ),
+        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      },
+      {
         id: 'post_gd25_35_xleg',
-        label: '毕业后深跌反弹 · XLEG',
-        enabled: booleanEnv('FLOW_LIVE_POST_GD25_35_XLEG_ENABLED', true),
+        label: '毕业后深跌反弹 · XLEG（旧版停止新开仓）',
+        ruleVersion: 'post_migration_gd25_35_xleg_reentry2_v2',
+        enabled: true,
+        // Keep the definition loaded so historical rows stay visible and any
+        // legacy active position still has its original exit rules after restart.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 1),
         trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_TRACKING_MS', 120_000, {
@@ -1742,6 +1839,23 @@ const config = {
         maxLifecycleAgeMs: 30_000,
         maxSignalsPerMint: 3,
       },
+      {
+        id: 'GE30_D25_32_R24_F1',
+        label: 'V2 · 毕业后30秒内 · 跌25%–32% · 反弹2%–4% · 首次',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 32,
+        reboundMinPct: 2,
+        reboundMaxPct: 4,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_V2_MAX_ENTRY_JUMP_PCT',
+          3,
+          { min: 0, max: 100 },
+        ),
+      },
     ],
     exitProfiles: [
       {
@@ -1841,6 +1955,53 @@ const config = {
           min: 0,
         }),
       },
+      ...[
+        ['V2_R2_H10', 10],
+        ['V2_R2_H15', 15],
+      ].map(([id, fallbackHardStopPct]) => ({
+        id,
+        label: `${id} | 2秒弱势检查 / 硬止损${fallbackHardStopPct}%`,
+        entryProfileIds: ['GE30_D25_32_R24_F1'],
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        hardStopPct: numberEnv(
+          `FLOW_MIGRATED_REBOUND_V2_HARD_STOP_${fallbackHardStopPct}_PCT`,
+          fallbackHardStopPct,
+          { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_V2_LOSS_CHECK_MS', 2_000, {
+          min: 0,
+        }),
+        lossCheckRecoveryPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_V2_MAX_RECOVERY_FROM_LOW_PCT',
+          1,
+          { min: 0, max: 100 },
+        ),
+        maxHoldMs: 15_000,
+      })),
+      ...[
+        ['V2_B75_H20', 20_000],
+        ['V2_B75_H60', 60_000],
+      ].map(([id, fallbackRunnerHoldMs]) => ({
+        id,
+        label: `${id} | 25% XLEG core + 75% runner`,
+        entryProfileIds: ['GE30_D25_32_R24_F1'],
+        exitMode: 'BLEND_XLEG_RUNNER',
+        coreWeightPct: 25,
+        runnerHoldMs: integerEnv(
+          `FLOW_MIGRATED_REBOUND_${id}_RUNNER_HOLD_MS`,
+          fallbackRunnerHoldMs,
+          { min: 250 },
+        ),
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: 6_000,
+      })),
       ...[
         ['XR3_H12', 3_000, 12],
         ['XR3_H15', 3_000, 15],
@@ -2538,8 +2699,11 @@ function validateConfig() {
     if (!config.liveTrading.privateKey) {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
-    if (!process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL) {
-      errors.push('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL must be explicitly set for live trading');
+    if (!process.env.FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL
+      && !process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL) {
+      errors.push(
+        'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL must be explicitly set for live trading (the legacy XLEG size is accepted during migration)',
+      );
     }
   }
   return errors;

@@ -227,7 +227,12 @@ async function main() {
     )).json();
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
     assert.strictEqual(liveTrading.runtime.safetyLock, true);
-    assert.strictEqual(liveTrading.runtime.strategies[0].id, 'post_gd25_35_xleg');
+    assert.strictEqual(
+      liveTrading.runtime.strategies[0].id,
+      'post_gd25_32_r2_4_age30_xleg_v2',
+    );
+    assert.strictEqual(liveTrading.runtime.strategies[0].entryEnabled, true);
+    assert.strictEqual(liveTrading.runtime.strategies[1].entryEnabled, false);
     assert.strictEqual(liveTrading.runtime.strategies[0].market, 'PUMP_AMM');
     assert.strictEqual(liveTrading.runtime.strategies[0].positionSizeSol, 1);
     assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
@@ -392,10 +397,14 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 3);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 4);
     assert.deepStrictEqual(
       migratedRebound.runtime.exitProfiles.map((profile) => profile.id),
-      ['X3', 'X8', 'XLEG', 'XB50', 'XB25', 'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15'],
+      [
+        'X3', 'X8', 'XLEG', 'XB50', 'XB25',
+        'V2_R2_H10', 'V2_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
+        'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15',
+      ],
     );
     assert.strictEqual(
       migratedRebound.runtime.strategy.scope,
@@ -430,6 +439,7 @@ async function main() {
       [
         ['GE30_R23_F1', 30_000, 1, 3],
         ['GE30_R23_F3', 30_000, 3, 3],
+        ['GE30_D25_32_R24_F1', 30_000, 1, 4],
       ],
     );
     assert.ok(Array.isArray(migratedRebound.cohorts));
@@ -601,3 +611,4 @@ main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
+

@@ -271,6 +271,9 @@ function decodeAmmBuy(data, context) {
   const wallet = reader.pubkey();
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
+  const poolBaseTokens = numberOf(poolBaseReservesRaw) / 1e6;
+  const poolQuoteSol = numberOf(poolQuoteReservesRaw) / 1e9;
+  const reservePrice = poolBaseTokens > 0 ? poolQuoteSol / poolBaseTokens : null;
 
   return {
     type: 'ammTrade',
@@ -282,6 +285,7 @@ function decodeAmmBuy(data, context) {
     solAmount,
     tokenAmount,
     price: tokenAmount > 0 ? solAmount / tokenAmount : null,
+    reservePrice: Number.isFinite(reservePrice) && reservePrice > 0 ? reservePrice : null,
     chainTimestampMs,
     poolBaseReservesRaw: poolBaseReservesRaw.toString(),
     poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
@@ -308,6 +312,9 @@ function decodeAmmSell(data, context) {
   const wallet = reader.pubkey();
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
+  const poolBaseTokens = numberOf(poolBaseReservesRaw) / 1e6;
+  const poolQuoteSol = numberOf(poolQuoteReservesRaw) / 1e9;
+  const reservePrice = poolBaseTokens > 0 ? poolQuoteSol / poolBaseTokens : null;
 
   return {
     type: 'ammTrade',
@@ -319,6 +326,7 @@ function decodeAmmSell(data, context) {
     solAmount,
     tokenAmount,
     price: tokenAmount > 0 ? solAmount / tokenAmount : null,
+    reservePrice: Number.isFinite(reservePrice) && reservePrice > 0 ? reservePrice : null,
     chainTimestampMs,
     poolBaseReservesRaw: poolBaseReservesRaw.toString(),
     poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
@@ -410,3 +418,4 @@ module.exports = {
   extractSignature,
   extractProgramData,
 };
+

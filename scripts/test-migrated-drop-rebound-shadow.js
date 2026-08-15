@@ -499,6 +499,63 @@ function testRiskExitRequiresWeakRecovery() {
   store.close();
 }
 
+function testV2ProfileSpecificJumpAndRunner() {
+  const base = 2_200_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const config = optimizationConfig([{
+    id: 'V2_B75_H20', label: 'v2 runner',
+    entryProfileIds: ['GE30_D25_32_R24_F1'], exitMode: 'BLEND_XLEG_RUNNER',
+    coreWeightPct: 25, runnerHoldMs: 20_000,
+    trailingActivationPct: 8, trailingStopPct: 3,
+    fastTakeProfitPct: 18, fastTakeProfitWindowMs: 5_000, lossCheckAtMs: 6_000,
+  }]);
+  config.entryProfiles = [{
+    id: 'GE30_D25_32_R24_F1', label: 'v2', windowMs: 1_000,
+    dropMinPct: 25, dropMaxPct: 32, reboundMinPct: 2, reboundMaxPct: 4,
+    reboundTimeoutMs: 1_000, maxLifecycleAgeMs: 30_000,
+    maxSignalsPerMint: 1, maxEntryPriceJumpPct: 3,
+  }];
+  const rejectedMint = 'V2JumpRejected111111111111111111111111111111';
+  recordCreate(store, rejectedMint, base);
+  store.recordComplete({ mint: rejectedMint, completedAt: base, timestampMs: base });
+  let suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  suite.onGraduated(store.getToken(rejectedMint));
+  suite.observeTrade(trade(rejectedMint, base + 100, 1));
+  suite.observeTrade(trade(rejectedMint, base + 200, 0.7));
+  suite.observeTrade(trade(rejectedMint, base + 300, 0.721));
+  suite.observeTrade(trade(rejectedMint, base + 500, 0.75));
+  const rejected = store.db.prepare(`
+    SELECT status, rejection_reason FROM migrated_drop_rebound_shadow_positions WHERE mint=?
+  `).get(rejectedMint);
+  assert.strictEqual(rejected.status, 'PRICE_JUMP');
+  assert.match(rejected.rejection_reason, /ENTRY_PRICE_JUMP/);
+
+  const runnerMint = 'V2Runner11111111111111111111111111111111111';
+  recordCreate(store, runnerMint, base + 100_000);
+  store.recordComplete({ mint: runnerMint, completedAt: base + 100_000, timestampMs: base + 100_000 });
+  suite.onGraduated(store.getToken(runnerMint));
+  suite.observeTrade(trade(runnerMint, base + 100_100, 1));
+  suite.observeTrade(trade(runnerMint, base + 100_200, 0.7));
+  suite.observeTrade(trade(runnerMint, base + 100_300, 0.721));
+  suite.observeTrade(trade(runnerMint, base + 100_500, 0.73));
+  suite.observeTrade(trade(runnerMint, base + 101_000, 0.95));
+  suite.observeTrade(trade(runnerMint, base + 101_200, 0.9));
+  suite.observeTrade(trade(runnerMint, base + 120_500, 1.2));
+  suite.observeTrade(trade(runnerMint, base + 120_700, 1.2));
+  const runner = store.db.prepare(`
+    SELECT status, core_exit_price, exit_reason FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=?
+  `).get(runnerMint);
+  assert.strictEqual(runner.status, 'CLOSED');
+  assert.strictEqual(runner.core_exit_price, 0.9);
+  assert.match(runner.exit_reason, /RUNNER_20000MS/);
+  store.close();
+}
+
 testEarlyOpportunityProfiles();
 testSplitRunnerPersistsAcrossRestart();
 testRiskExitRequiresWeakRecovery();
+testV2ProfileSpecificJumpAndRunner();
+
