@@ -535,6 +535,86 @@ setImmediate(() => {
     .get(legacyOrderId).requested_token_raw, '134585106701');
   await recoveryManager.stop();
 
+  // A block-height-expired signature must not reserve a global position slot
+  // forever. Release it only after the grace period and only when signature
+  // history, transaction metadata and a token receipt all remain absent.
+  const expiredMint = 'MintExpiredUnknown111111111111111111111111111';
+  const expiredDecision = store.recordLiveStrategyDecision({
+    strategyId: 'post_gd25_35_xleg',
+    episodeId: `${expiredMint}:episode`,
+    timestampMs: now - 120_000,
+    receivedAtMs: now - 120_000,
+    mint: expiredMint,
+    ruleVersion: 'test',
+    market: 'PUMP_AMM',
+    referencePrice: 1,
+    features: {},
+    ruleMatched: true,
+    rejectionReasons: [],
+    mode: 'LIVE',
+    actionStatus: 'ENTRY_CONFIRMATION_UNKNOWN',
+  });
+  const expiredPosition = store.createLivePosition({
+    strategyDecisionId: expiredDecision.id,
+    strategyId: 'post_gd25_35_xleg',
+    sourceType: 'post_gd25_35_xleg',
+    mint: expiredMint,
+    mode: 'LIVE',
+    status: 'OPENING',
+    positionSol: 0.05,
+    entryMarket: 'PUMP_AMM',
+    entryPrice: 1,
+  });
+  const expiredError = 'Signature expired-entry-signature has expired: block height exceeded';
+  store.updateLivePosition(expiredPosition.id, {
+    status: 'EXIT_FAILED',
+    entrySignature: 'expired-entry-signature',
+    entryError: expiredError,
+    exitReason: 'ENTRY_CONFIRMATION_UNKNOWN',
+    exitError: expiredError,
+  });
+  store.db.prepare('UPDATE live_positions SET created_at = ? WHERE id = ?')
+    .run(now - 120_000, expiredPosition.id);
+  const expiredOrderId = store.recordLiveOrder({
+    positionId: expiredPosition.id,
+    strategyDecisionId: expiredDecision.id,
+    strategyId: 'post_gd25_35_xleg',
+    mint: expiredMint,
+    side: 'BUY',
+    venue: 'PUMP_AMM',
+    attempt: 1,
+    requestedSol: 0.05,
+    status: 'CONFIRMATION_UNKNOWN',
+    signature: 'expired-entry-signature',
+    error: expiredError,
+  });
+  const expiredManager = new LiveTradingManager({
+    config: { ...config, dryRun: false, expiredEntryReleaseMs: 60_000 },
+    store,
+    now: () => now,
+    executor: {
+      async reconcileBuy() {
+        return {
+          state: 'UNKNOWN',
+          tokenAmountRaw: '0',
+          confirmationStatus: null,
+          transactionObserved: false,
+          balanceObserved: false,
+        };
+      },
+    },
+  });
+  expiredManager.start();
+  await Promise.allSettled([...expiredManager.pending]);
+  const releasedPosition = store.db.prepare('SELECT * FROM live_positions WHERE id = ?')
+    .get(expiredPosition.id);
+  assert.strictEqual(releasedPosition.status, 'ENTRY_FAILED');
+  assert.strictEqual(releasedPosition.exit_reason, 'ENTRY_EXPIRED_UNOBSERVED');
+  assert.strictEqual(store.db.prepare('SELECT status FROM live_orders WHERE id = ?')
+    .get(expiredOrderId).status, 'FAILED');
+  assert.strictEqual(expiredManager.positions.has(expiredMint), false);
+  await expiredManager.stop();
+
   await manager.stop();
   store.close();
   fs.rmSync(temp, { recursive: true, force: true });

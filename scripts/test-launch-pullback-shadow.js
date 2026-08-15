@@ -108,7 +108,6 @@ function makeConfig({ withTrailing = false, withDeep = false, withOptimization =
         trailingActivationPct: 20, trailingDrawdownPct: 10,
         minHoldMs: 0, maxHoldMs: 30_000, hardStopPct: 20,
       },
-
       {
         id: 'F2_8S_NF30', label: 'F2-8S-NF30', profileId: 'F2_NF30',
         referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
@@ -495,7 +494,6 @@ function testOptimizationCohortsStayIsolated() {
     3,
     'the new quality cohorts must reject NetFlow above their causal upper bound',
   );
-
   assert.strictEqual(suite.health().referenceGroups.length, 2);
   assert.strictEqual(suite.health().sendsTransactions, false);
   store.close();

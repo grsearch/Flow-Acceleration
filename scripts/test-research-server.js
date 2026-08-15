@@ -236,10 +236,11 @@ async function main() {
     assert.strictEqual(liveTrading.runtime.safetyLock, true);
     assert.strictEqual(
       liveTrading.runtime.strategies[0].id,
-      'post_gd25_32_r2_4_age30_xleg_v2',
+      'post_gd20_35_r1_5_5_age60_xleg_v3',
     );
     assert.strictEqual(liveTrading.runtime.strategies[0].entryEnabled, true);
     assert.strictEqual(liveTrading.runtime.strategies[1].entryEnabled, false);
+    assert.strictEqual(liveTrading.runtime.strategies[2].entryEnabled, false);
     assert.strictEqual(liveTrading.runtime.strategies[0].market, 'PUMP_AMM');
     assert.strictEqual(liveTrading.runtime.strategies[0].positionSizeSol, 1);
     assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
