@@ -493,7 +493,8 @@ class MigratedDropReboundShadowSuite {
         && !exitProfile.entryProfileIds.includes(profile.id)) continue;
       const cohortId = `${stageCode}_${profile.id}_${exitProfile.id}`;
       const configuredCostPct = this.costs.deterministicCostPct
-        + (exitProfile.exitMode === 'BLEND_XLEG_X8' ? this.costs.fixedCostPct : 0);
+        + (['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(exitProfile.exitMode)
+          ? this.costs.fixedCostPct : 0);
       const saved = this.store.createMigratedDropReboundShadowPosition({
         cohortId,
         lifecycleStage,
@@ -557,7 +558,11 @@ class MigratedDropReboundShadowSuite {
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
         const jumpPct = ((price / position.reboundPrice) - 1) * 100;
-        if (jumpPct > this.config.maxEntryPriceJumpPct) {
+        const entryProfile = this.entryProfiles.get(position.entryProfileId);
+        const maxEntryPriceJumpPct = Number.isFinite(Number(entryProfile?.maxEntryPriceJumpPct))
+          ? Number(entryProfile.maxEntryPriceJumpPct)
+          : this.config.maxEntryPriceJumpPct;
+        if (jumpPct > maxEntryPriceJumpPct) {
           this.store.updateMigratedDropReboundShadowPosition(position.id, {
             status: STATUS.PRICE_JUMP,
             rejectionReason: `ENTRY_PRICE_JUMP_${jumpPct.toFixed(2)}PCT`,
@@ -603,7 +608,8 @@ class MigratedDropReboundShadowSuite {
       }
       if (position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt
         || !this._eligibleExitTrade(position, trade, price)) continue;
-      if (position.exitMode === 'BLEND_XLEG_X8' && position.coreExitTargetAt
+      if (['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(position.exitMode)
+        && position.coreExitTargetAt
         && !position.coreExitAt && trade.timestampMs >= position.coreExitTargetAt) {
         this._fillCoreExit(position, trade.timestampMs, price);
       }
@@ -677,9 +683,10 @@ class MigratedDropReboundShadowSuite {
     if (position.exitMode === 'FIXED_HOLD' && ageMs >= position.fixedHoldMs) {
       reason = `FIXED_HOLD_${position.fixedHoldMs}MS`;
       triggerAt = position.entryAt + position.fixedHoldMs;
-    } else if (['LEGACY', 'RISK_XLEG', 'BLEND_XLEG_X8'].includes(position.exitMode)) {
+    } else if (['LEGACY', 'RISK_XLEG', 'BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER']
+      .includes(position.exitMode)) {
       const riskMode = position.exitMode === 'RISK_XLEG';
-      const blendMode = position.exitMode === 'BLEND_XLEG_X8';
+      const blendMode = ['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(position.exitMode);
       if (riskMode && position.hardStopPct > 0
         && grossReturnPct <= -position.hardStopPct) reason = 'RISK_HARD_STOP';
       if (!reason && position.fastTakeProfitPct > 0
@@ -780,14 +787,17 @@ class MigratedDropReboundShadowSuite {
     let grossReturnPct = runnerGrossReturnPct;
     let exitPrice = price;
     let exitReason = position.exitReason;
-    if (position.exitMode === 'BLEND_XLEG_X8') {
+    if (['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(position.exitMode)) {
       const coreWeight = Math.min(1, Math.max(0, finite(position.coreWeightPct, 50) / 100));
       const corePrice = finite(position.coreExitPrice, price);
       const coreGrossReturnPct = ((corePrice / position.entryPrice) - 1) * 100;
       grossReturnPct = coreGrossReturnPct * coreWeight
         + runnerGrossReturnPct * (1 - coreWeight);
       exitPrice = position.entryPrice * (1 + grossReturnPct / 100);
-      exitReason = `BLEND_${position.coreExitReason || 'CORE_AT_RUNNER'}_X8`;
+      const runnerTag = position.exitMode === 'BLEND_XLEG_X8'
+        ? 'X8'
+        : `RUNNER_${position.runnerHoldMs}MS`;
+      exitReason = `BLEND_${position.coreExitReason || 'CORE_AT_RUNNER'}_${runnerTag}`;
     }
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
       status: STATUS.CLOSED,
@@ -849,3 +859,4 @@ class MigratedDropReboundShadowSuite {
 }
 
 module.exports = { MigratedDropReboundShadowSuite, STATUS, shadowPrice };
+
