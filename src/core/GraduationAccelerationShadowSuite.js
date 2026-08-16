@@ -90,10 +90,11 @@ function curveBuyAveragePrice(trade, positionSol, fallbackPrice) {
 }
 
 class GraduationAccelerationShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.capacitySols = [...new Set((config.capacitySols || [0.05, 0.5, 1])
       .map(Number).filter((value) => Number.isFinite(value) && value > 0))];
@@ -428,6 +429,32 @@ class GraduationAccelerationShadowSuite {
 
   _createPendingRows(state, profile, trade, price, features) {
     const episodeId = `${state.mint}:${profile.id}:${trade.timestampMs}`;
+    if (this.onLiveSignal && profile.liveStrategyId) {
+      try {
+        this.onLiveSignal({
+          strategyId: profile.liveStrategyId,
+          episodeId,
+          mint: state.mint,
+          symbol: state.symbol,
+          price,
+          slot: trade.slot,
+          timestampMs: trade.timestampMs,
+          receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+          market: 'PUMP_BONDING_CURVE',
+          virtualSolReservesRaw: trade.virtualSolReservesRaw || null,
+          virtualTokenReservesRaw: trade.virtualTokenReservesRaw || null,
+          features: {
+            ...features,
+            creator: state.creator,
+            creatorSold: state.creatorSold,
+            signalCurvePct: finite(trade.curvePct),
+            recentWindowMs: profile.recentWindowMs,
+          },
+        });
+      } catch (error) {
+        this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
+      }
+    }
     for (const positionSol of this.capacitySols) {
       const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: positionSol });
       const cohortId = `${profile.id}:${capacityId(positionSol)}`;
