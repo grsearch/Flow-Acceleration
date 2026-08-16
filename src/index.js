@@ -101,6 +101,7 @@ function createRuntime(runtimeConfig = config) {
   const migrationContinuityShadow = new MigrationContinuityShadowSuite({
     config: runtimeConfig.migrationContinuityShadow,
     store,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   migrationContinuityShadow.start();
   const rangeScalperShadow = new RangeScalperShadowSuite({
@@ -126,6 +127,7 @@ function createRuntime(runtimeConfig = config) {
   const graduationAccelerationShadow = new GraduationAccelerationShadowSuite({
     config: runtimeConfig.graduationAccelerationShadow,
     store,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   graduationAccelerationShadow.start();
   const server = new ResearchServer({
