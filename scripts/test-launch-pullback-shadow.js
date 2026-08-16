@@ -631,3 +631,96 @@ main();
 testTrailingCohorts();
 testDeepCohortsStayIsolated();
 testOptimizationCohortsStayIsolated();
+
+function testFlowConsensusAndExitVariants() {
+  const store = makeStore();
+  let now = 6_000_000;
+  const config = makeConfig();
+  config.profiles = [];
+  config.holds = [];
+  config.optimizationCohorts = [
+    {
+      id: 'FC_BASE_X12', label: 'base', profileId: 'FC_BASE',
+      referenceProfileId: 'LEGACY_7_5_R3', minNetFlowSol: 5,
+      maxCreatorSharePct: 5, minRecentBuyers: 10, maxTop3SharePct: 100,
+      flowConfirmationWindowMs: 5_000, minFlowSignalBuyersW3: 3,
+      maxEntryPriceJumpPct: 3, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 12_000,
+    },
+    {
+      id: 'FC_BASE_STAIR60', label: 'stair', profileId: 'FC_BASE',
+      referenceProfileId: 'LEGACY_7_5_R3', minNetFlowSol: 5,
+      maxCreatorSharePct: 5, minRecentBuyers: 10, maxTop3SharePct: 100,
+      flowConfirmationWindowMs: 5_000, minFlowSignalBuyersW3: 3,
+      maxEntryPriceJumpPct: 3, exitPolicy: 'TIERED_TRAILING',
+      trailingTiers: [{ activationPct: 20, drawdownPct: 10 }],
+      minHoldMs: 0, maxHoldMs: 60_000, hardStopPct: 25,
+    },
+    {
+      id: 'FC_BASE_WEAK3_X12', label: 'weak3', profileId: 'FC_BASE',
+      referenceProfileId: 'LEGACY_7_5_R3', minNetFlowSol: 5,
+      maxCreatorSharePct: 5, minRecentBuyers: 10, maxTop3SharePct: 100,
+      flowConfirmationWindowMs: 5_000, minFlowSignalBuyersW3: 3,
+      maxEntryPriceJumpPct: 3, exitPolicy: 'EARLY_STRENGTH',
+      strengthCheckMs: 3_000, minStrengthMfePct: 5,
+      maxHoldMs: 12_000, hardStopPct: 25,
+    },
+  ];
+  const suite = new LaunchPullbackShadowSuite({ config, store, now: () => now });
+  suite.start();
+
+  suite.onReference(reference('no-flow', now));
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions
+    WHERE mint='no-flow' AND status='RULE_REJECTED'
+  `).get().n, 3, 'a launch reference alone must not satisfy Flow consensus');
+
+  now += 10_000;
+  suite.onSignal({
+    mint: 'confirmed', timestampMs: now - 1_000, signalVariant: 'primary_3w',
+    uniqueBuyersW3: 3, netFlowW3: 8,
+  });
+  const confirmed = reference('confirmed', now);
+  confirmed.features.recentBuyers = 12;
+  suite.onReference(confirmed);
+  const evidence = store.db.prepare(`
+    SELECT flow_confirmation_at, flow_confirmation_variant, flow_confirmation_buyers_w3,
+      flow_confirmation_netflow_w3, flow_confirmation_window_ms
+    FROM launch_pullback_shadow_positions
+    WHERE mint='confirmed' AND cohort_id='FC_BASE_X12'
+  `).get();
+  assert.deepStrictEqual(evidence, {
+    flow_confirmation_at: now - 1_000,
+    flow_confirmation_variant: 'primary_3w',
+    flow_confirmation_buyers_w3: 3,
+    flow_confirmation_netflow_w3: 8,
+    flow_confirmation_window_ms: 5_000,
+  });
+  suite.observeTrade(trade('confirmed', now + 200, 1.02));
+  suite.observeTrade(trade('confirmed', now + 3_200, 1.03));
+  suite.observeTrade(trade('confirmed', now + 3_400, 1.03));
+  assert.deepStrictEqual(store.db.prepare(`
+    SELECT status, exit_reason FROM launch_pullback_shadow_positions
+    WHERE mint='confirmed' AND cohort_id='FC_BASE_WEAK3_X12'
+  `).get(), { status: 'CLOSED', exit_reason: 'NO_STRENGTH_3S' });
+
+  suite.observeTrade(trade('confirmed', now + 4_000, 1.5));
+  suite.observeTrade(trade('confirmed', now + 4_200, 1.34));
+  suite.observeTrade(trade('confirmed', now + 4_400, 1.33));
+  assert.ok(store.db.prepare(`
+    SELECT exit_reason FROM launch_pullback_shadow_positions
+    WHERE mint='confirmed' AND cohort_id='FC_BASE_STAIR60'
+  `).get().exit_reason.startsWith('TIERED_TRAILING_20_10'));
+
+  now += 20_000;
+  suite.onReference(reference('future-signal', now));
+  suite.onSignal({
+    mint: 'future-signal', timestampMs: now + 1, uniqueBuyersW3: 10, netFlowW3: 50,
+  });
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions
+    WHERE mint='future-signal' AND status='RULE_REJECTED'
+  `).get().n, 3, 'signals after the reference must never leak into the entry decision');
+  store.close();
+}
+
+testFlowConsensusAndExitVariants();

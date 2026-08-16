@@ -201,6 +201,7 @@ function createRuntime(runtimeConfig = config) {
     try {
       const saved = store.recordSignal(signal);
       labeler.addSignal(saved);
+      observeShadow('launchPullbackSignal', () => launchPullbackShadow.onSignal(saved));
       console.log(
         `[${logPrefix}] ${signal.signalVariant} ${signal.symbol || signal.mint.slice(0, 8)} `
         + `net=${signal.netFlowW1.toFixed(2)}→${signal.netFlowW2.toFixed(2)}`

@@ -729,3 +729,53 @@ testV2ProfileSpecificJumpAndRunner();
 testCapacityAwareEntryFill();
 testSecondOpportunityOnlyAndBeijingWindows();
 testStairTrailingAndRunnerHardStop();
+
+function testFastReboundCapacityProfile() {
+  const base = 2_600_000_000_000;
+  const store = optimizationStore();
+  const config = optimizationConfig([{
+    id: 'GQ_XLEG', label: 'gq', entryProfileIds: ['GE30_D25_32_R23_F1_FAST200'],
+    exitMode: 'LEGACY', trailingActivationPct: 8, trailingStopPct: 3,
+    fastTakeProfitPct: 18, fastTakeProfitWindowMs: 5_000,
+    lossCheckAtMs: 6_000, maxHoldMs: 15_000,
+  }]);
+  config.entryProfiles = [{
+    id: 'GE30_D25_32_R23_F1_FAST200', label: 'fast200', windowMs: 1_000,
+    dropMinPct: 25, dropMaxPct: 32, reboundMinPct: 2, reboundMaxPct: 3,
+    reboundTimeoutMs: 1_000, maxReboundFromLowMs: 200,
+    maxLifecycleAgeMs: 30_000, maxSignalsPerMint: 1,
+    maxEntryPriceJumpPct: 5, exitProfileIds: ['GQ_XLEG'], capacityAware: true,
+    positionSols: [0.05, 0.25, 0.5, 1],
+  }];
+  const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => base });
+  suite.start();
+
+  const slowMint = 'SlowReboundGQ11111111111111111111111111111111';
+  recordCreate(store, slowMint, base);
+  store.recordComplete({ mint: slowMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(slowMint));
+  suite.observeTrade(trade(slowMint, base + 100, 1));
+  suite.observeTrade(trade(slowMint, base + 200, 0.7));
+  suite.observeTrade(trade(slowMint, base + 500, 0.7203));
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE mint=?
+  `).get(slowMint).n, 0, 'a rebound after 200ms must be rejected before cohort creation');
+  assert.strictEqual(suite.health().reboundTooSlow, 1);
+
+  const fastMint = 'FastReboundGQ11111111111111111111111111111111';
+  recordCreate(store, fastMint, base);
+  store.recordComplete({ mint: fastMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(fastMint));
+  suite.observeTrade(trade(fastMint, base + 1_100, 1));
+  suite.observeTrade(trade(fastMint, base + 1_200, 0.7));
+  suite.observeTrade(trade(fastMint, base + 1_350, 0.7203));
+  const pending = store.db.prepare(`
+    SELECT position_sol, status FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=? ORDER BY position_sol
+  `).all(fastMint);
+  assert.deepStrictEqual(pending.map((row) => row.position_sol), [0.05, 0.25, 0.5, 1]);
+  assert.ok(pending.every((row) => row.status === 'PENDING_ENTRY'));
+  store.close();
+}
+
+testFastReboundCapacityProfile();

@@ -895,6 +895,11 @@ class ResearchStore {
         market_regime_average_net_return_5s REAL,
         market_regime_win_rate_5s REAL,
         market_regime_big20_rate_5s REAL,
+        flow_confirmation_at INTEGER,
+        flow_confirmation_variant TEXT,
+        flow_confirmation_buyers_w3 INTEGER,
+        flow_confirmation_netflow_w3 REAL,
+        flow_confirmation_window_ms INTEGER,
         entry_target_at INTEGER,
         entry_deadline_at INTEGER,
         entry_at INTEGER,
@@ -1622,6 +1627,11 @@ class ResearchStore {
       ['market_regime_average_net_return_5s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_average_net_return_5s REAL'],
       ['market_regime_win_rate_5s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_win_rate_5s REAL'],
       ['market_regime_big20_rate_5s', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN market_regime_big20_rate_5s REAL'],
+      ['flow_confirmation_at', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN flow_confirmation_at INTEGER'],
+      ['flow_confirmation_variant', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN flow_confirmation_variant TEXT'],
+      ['flow_confirmation_buyers_w3', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN flow_confirmation_buyers_w3 INTEGER'],
+      ['flow_confirmation_netflow_w3', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN flow_confirmation_netflow_w3 REAL'],
+      ['flow_confirmation_window_ms', 'ALTER TABLE launch_pullback_shadow_positions ADD COLUMN flow_confirmation_window_ms INTEGER'],
     ];
     for (const [column, sql] of pullbackMigrations) {
       if (!pullbackColumns.has(column)) this.db.exec(sql);
@@ -2790,6 +2800,8 @@ class ResearchStore {
           market_regime_observed_at, market_regime_independent_mints,
           market_regime_average_net_return_5s, market_regime_win_rate_5s,
           market_regime_big20_rate_5s,
+          flow_confirmation_at, flow_confirmation_variant, flow_confirmation_buyers_w3,
+          flow_confirmation_netflow_w3, flow_confirmation_window_ms,
           entry_target_at, entry_deadline_at, created_at, updated_at
         ) VALUES (
           @cohortId, @mint, @symbol, @status, @rejectionReason,
@@ -2806,6 +2818,8 @@ class ResearchStore {
           @marketRegimeObservedAt, @marketRegimeIndependentMints,
           @marketRegimeAverageNetReturn5s, @marketRegimeWinRate5s,
           @marketRegimeBig20Rate5s,
+          @flowConfirmationAt, @flowConfirmationVariant, @flowConfirmationBuyersW3,
+          @flowConfirmationNetFlowW3, @flowConfirmationWindowMs,
           @entryTargetAt, @entryDeadlineAt, @createdAt, @updatedAt
         )
       `),
@@ -4435,6 +4449,14 @@ class ResearchStore {
       marketRegimeAverageNetReturn5s: finiteOrNull(position.marketRegimeAverageNetReturn5s),
       marketRegimeWinRate5s: finiteOrNull(position.marketRegimeWinRate5s),
       marketRegimeBig20Rate5s: finiteOrNull(position.marketRegimeBig20Rate5s),
+      flowConfirmationAt: Number.isFinite(position.flowConfirmationAt)
+        ? Math.trunc(position.flowConfirmationAt) : null,
+      flowConfirmationVariant: position.flowConfirmationVariant || null,
+      flowConfirmationBuyersW3: Number.isFinite(position.flowConfirmationBuyersW3)
+        ? Math.trunc(position.flowConfirmationBuyersW3) : null,
+      flowConfirmationNetFlowW3: finiteOrNull(position.flowConfirmationNetFlowW3),
+      flowConfirmationWindowMs: Number.isFinite(position.flowConfirmationWindowMs)
+        ? Math.trunc(position.flowConfirmationWindowMs) : null,
       entryTargetAt: position.entryTargetAt || null,
       entryDeadlineAt: position.entryDeadlineAt || null,
       createdAt: now,

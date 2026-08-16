@@ -416,12 +416,12 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 8);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 9);
     assert.deepStrictEqual(
       migratedRebound.runtime.exitProfiles.map((profile) => profile.id),
       [
         'X3', 'X8', 'XLEG',
-        'GEXEC_XLEG', 'G2_XLEG', 'GTIME_XLEG',
+        'GEXEC_XLEG', 'G2_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
         'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
         'G1_B75_H30', 'G1_B50_H60',
         'G1_STAIR_H60', 'G1_STAIR_H120',
@@ -468,8 +468,14 @@ async function main() {
         ['GE30_R23_F1_NIGHT', 30_000, 1, 3],
         ['GE30_R23_F1_DAY', 30_000, 1, 3],
         ['GE30_D25_32_R24_F1', 30_000, 1, 4],
+        ['GE30_D25_32_R23_F1_FAST200', 30_000, 1, 3],
       ],
     );
+    const gqProfile = migratedRebound.runtime.entryProfiles.find(
+      (profile) => profile.id === 'GE30_D25_32_R23_F1_FAST200',
+    );
+    assert.strictEqual(gqProfile.maxReboundFromLowMs, 200);
+    assert.deepStrictEqual(gqProfile.positionSols, [0.05, 0.25, 0.5, 1]);
     assert.ok(Array.isArray(migratedRebound.cohorts));
     assert.ok(Array.isArray(migratedRebound.positions));
     const rangeScalper = await (await fetch(
@@ -570,6 +576,22 @@ async function main() {
     assert.strictEqual(
       graduationAcceleration.runtime.strategy.research.noExitPricedAsLoss,
       false,
+    );
+    assert.deepStrictEqual(
+      graduationAcceleration.runtime.entryProfiles
+        .filter((profile) => profile.id.startsWith('O90_M5_'))
+        .map((profile) => [
+          profile.id,
+          profile.thresholdPct,
+          profile.postMigrationGate.minBuyers,
+          profile.runnerExitMode,
+          profile.runnerMaxHoldMs,
+        ]),
+      [
+        ['O90_M5_X60', 90, 25, 'FIXED_HOLD', 60_000],
+        ['O90_M5_X120', 90, 25, 'FIXED_HOLD', 120_000],
+        ['O90_M5_STAIR120', 90, 25, 'TIERED_TRAILING', 120_000],
+      ],
     );
     assert.ok(Array.isArray(graduationAcceleration.cohorts));
     assert.ok(Array.isArray(graduationAcceleration.positions));

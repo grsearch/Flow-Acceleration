@@ -178,6 +178,7 @@ class MigratedDropReboundShadowSuite {
       reboundTimeouts: 0,
       dropExceededMax: 0,
       reboundExceededMax: 0,
+      reboundTooSlow: 0,
       priceJump: 0,
       noEntry: 0,
       opened: 0,
@@ -506,8 +507,12 @@ class MigratedDropReboundShadowSuite {
           if (reboundPct >= profile.reboundMinPct) {
             state.candidate = null;
             state.dropReady = false;
+            const reboundFromLowMs = timestampMs - candidate.lowAt;
             if (reboundPct > profile.reboundMaxPct) {
               this.metrics.reboundExceededMax += 1;
+            } else if (profile.maxReboundFromLowMs != null
+              && reboundFromLowMs > profile.maxReboundFromLowMs) {
+              this.metrics.reboundTooSlow += 1;
             } else if (replay) {
               this.metrics.replaySignalsSuppressed += 1;
             } else {

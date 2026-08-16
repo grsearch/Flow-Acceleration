@@ -496,3 +496,15 @@ systemctl list-timers flow-acceleration-backup.timer --all
 Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，即使服务器位于硅谷也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予该 Bucket 前缀所需的上传和查询权限。
 
 安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传和验证均有独立超时与重试，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`DONE` 或 `FAILED`），COSCLI 卡住时不会无限占用下一次任务。
+
+## 前向组合 Shadow（2026-08-17）
+
+以下组合只对部署后的新数据生效，使用全新 cohort ID，不回填、不改写旧策略历史，也没有签名或发送交易的路径：
+
+- `FC_BASE_X12` / `FC_STRICT_NF20_X12`：Launch 首次回踩必须得到参考点之前 5 秒内已经存在的 Flow 信号确认（`BuyersW3 >= 3`），固定持有 12 秒。严格组另要求 Launch NetFlow `>= 20 SOL`。
+- `FC_BASE_STAIR60`：相同 FC 入场，测试 `+20%/10%`、`+40%/15%`、`+80%/20%` 的阶梯移动止盈，最长 60 秒。
+- `FC_BASE_WEAK3_X12` / `FC_BASE_WEAK5_X12`：相同 FC 入场，分别在 3 秒 MFE `<5%`、5 秒 MFE `<10%` 时提前退出，最长 12 秒。
+- `GE30_D25_32_R23_F1_FAST200 + GQ_XLEG`：毕业后 30 秒内，1 秒跌 25%～32%，从低点 200ms 内反弹 2%～3%，每 Mint 只取首次机会；分别模拟 0.05、0.25、0.5、1 SOL 容量冲击。
+- `O90_M5_X60` / `O90_M5_X120` / `O90_M5_STAIR120`：首次 Curve `>=90%` 且 5 秒推进 `>=5%`、买家 `>=1`、卖单 `<=1`、Creator 未卖。毕业时退出 50% Core；只有首个 PumpSwap 5 秒买家 `>=25` 且净流入非负才保留 Runner，再分别测试固定 60 秒、固定 120 秒与阶梯 120 秒。
+
+FC 的 Flow 证据使用“信号时间不晚于回踩参考时间”的因果约束，未来信号不能反向使历史参考点合格。O90→M5 的 PumpSwap 门槛只决定毕业后的 Runner，失败时不会把未成交或不可定价样本伪记为盈利。

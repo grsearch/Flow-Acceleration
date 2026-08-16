@@ -103,6 +103,7 @@ class GraduationAccelerationShadowSuite {
     this.positions = new Map();
     this.rowsByMint = new Map();
     this.graduatedMints = new Set();
+    this.postMigrationTrades = new Map();
     this.metrics = {
       evaluated: 0,
       signals: 0,
@@ -113,6 +114,8 @@ class GraduationAccelerationShadowSuite {
       opened: 0,
       graduated: 0,
       coreExits: 0,
+      postMigrationGatePassed: 0,
+      postMigrationGateFailed: 0,
       runnerExits: 0,
       closed: 0,
       noExit: 0,
@@ -131,6 +134,10 @@ class GraduationAccelerationShadowSuite {
       this._index(position);
     }
     const startupAt = this.now();
+    const postMigrationSince = startupAt - Math.max(this.config.maxPostGraduationHoldMs, 30_000);
+    for (const trade of this.store.recentAmmTrades(postMigrationSince)) {
+      this._recordPostMigrationTrade(trade);
+    }
     const since = startupAt - Math.max(this.config.maxPreGraduationHoldMs, 30_000);
     for (const trade of this.store.recentCurveTrades(since)) this._recordState(trade);
     for (const state of this.states.values()) {
@@ -199,7 +206,7 @@ class GraduationAccelerationShadowSuite {
       crossed: new Set(),
       triggered: new Set(),
       creatorSold: false,
-      lastAt: null,
+      lastAt: finite(token.createdAt ?? token.created_at),
     });
   }
 
@@ -283,6 +290,7 @@ class GraduationAccelerationShadowSuite {
     const timestampMs = finite(trade?.timestampMs);
     const price = shadowPrice(trade);
     if (!this.config.enabled || !trade?.mint || !(timestampMs > 0) || !(price > 0)) return;
+    if (trade.market === 'PUMP_AMM') this._recordPostMigrationTrade(trade);
     this.advanceTime(timestampMs);
     this._observePositions(trade, price);
     if (trade.market !== 'PUMP_BONDING_CURVE') return;
@@ -312,11 +320,24 @@ class GraduationAccelerationShadowSuite {
         && now >= position.entryAt + this.config.maxPreGraduationHoldMs) {
         this._requestExit(position, position.entryAt + this.config.maxPreGraduationHoldMs,
           'MAX_PRE_GRAD_HOLD', 'PUMP_BONDING_CURVE');
-      } else if (position.status === STATUS.RUNNER
-        && now >= position.graduatedAt + this.config.maxPostGraduationHoldMs) {
-        this._requestExit(position,
-          position.graduatedAt + this.config.maxPostGraduationHoldMs,
-          'MAX_POST_GRAD_RUNNER', 'PUMP_AMM');
+      } else if (position.status === STATUS.RUNNER) {
+        const profile = this.entryProfiles.get(position.entryProfileId);
+        const gate = this._postMigrationGateDecision(position, now);
+        if (gate && !gate.passed) {
+          this._requestExit(position, gate.evaluatedAt, 'POST_MIGRATION_GATE_FAIL', 'PUMP_AMM');
+          this.metrics.postMigrationGateFailed += 1;
+          continue;
+        }
+        if (gate?.passed && !gate.counted) {
+          gate.counted = true;
+          this.metrics.postMigrationGatePassed += 1;
+        }
+        const maxHoldMs = profile?.runnerMaxHoldMs ?? this.config.maxPostGraduationHoldMs;
+        if (now >= position.graduatedAt + maxHoldMs) {
+          this._requestExit(position,
+            position.graduatedAt + maxHoldMs,
+            'MAX_POST_GRAD_RUNNER', 'PUMP_AMM');
+        }
       }
     }
     for (const [mint, state] of this.states) {
@@ -474,7 +495,7 @@ class GraduationAccelerationShadowSuite {
         features,
         entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
         entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs,
-        coreWeightPct: this.config.coreExitPct,
+        coreWeightPct: profile.coreExitPct ?? this.config.coreExitPct,
       });
       if (!saved?.inserted) {
         this.metrics.deduplicated += 1;
@@ -583,6 +604,26 @@ class GraduationAccelerationShadowSuite {
   }
 
   _observeRunner(position, trade, price, gross) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    const gate = this._postMigrationGateDecision(position, trade.timestampMs);
+    if (profile?.postMigrationGate && !gate) return;
+    if (gate && !gate.passed) {
+      this._requestExit(position, gate.evaluatedAt, 'POST_MIGRATION_GATE_FAIL', 'PUMP_AMM');
+      this.metrics.postMigrationGateFailed += 1;
+      return;
+    }
+    if (gate?.passed && !gate.counted) {
+      gate.counted = true;
+      this.metrics.postMigrationGatePassed += 1;
+    }
+    const maxHoldMs = profile?.runnerMaxHoldMs ?? this.config.maxPostGraduationHoldMs;
+    if (profile?.runnerExitMode === 'FIXED_HOLD') {
+      if (trade.timestampMs >= position.graduatedAt + maxHoldMs) {
+        this._requestExit(position, position.graduatedAt + maxHoldMs,
+          `RUNNER_FIXED_${maxHoldMs / 1_000}S`, 'PUMP_AMM');
+      }
+      return;
+    }
     position.runnerHighestPrice = Math.max(position.runnerHighestPrice || price, price);
     let tierIndex = -1;
     for (let index = 0; index < this.config.trailingTiers.length; index += 1) {
@@ -601,6 +642,64 @@ class GraduationAccelerationShadowSuite {
       this._requestExit(position, trade.timestampMs,
         `RUNNER_STAIR_T${activeTier.activationPct}_D${activeTier.drawdownPct}`, 'PUMP_AMM');
     }
+  }
+
+  _recordPostMigrationTrade(trade) {
+    if (trade?.market !== 'PUMP_AMM' || !trade.mint) return;
+    const timestampMs = finite(trade.timestampMs);
+    if (!(timestampMs > 0)) return;
+    const positions = [...(this.rowsByMint.get(trade.mint) || [])]
+      .map((id) => this.positions.get(id))
+      .filter(Boolean);
+    const gated = positions.filter((position) => (
+      this.entryProfiles.get(position.entryProfileId)?.postMigrationGate
+      && position.graduatedAt > 0
+    ));
+    if (!gated.length) return;
+    const graduatedAt = Math.min(...gated.map((position) => position.graduatedAt));
+    const maxWindowMs = Math.max(...gated.map((position) => (
+      this.entryProfiles.get(position.entryProfileId).postMigrationGate.windowMs
+    )));
+    if (timestampMs < graduatedAt || timestampMs > graduatedAt + maxWindowMs) return;
+    const rows = this.postMigrationTrades.get(trade.mint) || [];
+    rows.push({
+      timestampMs,
+      side: trade.side,
+      wallet: trade.wallet || null,
+      solAmount: finite(trade.solAmount, 0),
+    });
+    rows.sort((left, right) => left.timestampMs - right.timestampMs);
+    this.postMigrationTrades.set(trade.mint, rows);
+  }
+
+  _postMigrationGateDecision(position, now) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    const gate = profile?.postMigrationGate;
+    if (!gate || !(position.graduatedAt > 0)) return null;
+    const evaluatedAt = position.graduatedAt + gate.windowMs;
+    if (now < evaluatedAt) return null;
+    const rows = (this.postMigrationTrades.get(position.mint) || []).filter((row) => (
+      row.timestampMs >= position.graduatedAt && row.timestampMs <= evaluatedAt
+    ));
+    const buys = rows.filter((row) => row.side === 'BUY');
+    const sells = rows.filter((row) => row.side === 'SELL');
+    const buyers = new Set(buys.map((row) => row.wallet).filter(Boolean)).size;
+    const netFlowSol = buys.reduce((sum, row) => sum + row.solAmount, 0)
+      - sells.reduce((sum, row) => sum + row.solAmount, 0);
+    const key = `${position.id}:${evaluatedAt}`;
+    if (!this._gateDecisions) this._gateDecisions = new Map();
+    let decision = this._gateDecisions.get(key);
+    if (!decision) {
+      decision = {
+        evaluatedAt,
+        buyers,
+        netFlowSol,
+        passed: buyers >= gate.minBuyers && netFlowSol >= gate.minNetFlowSol,
+        counted: false,
+      };
+      this._gateDecisions.set(key, decision);
+    }
+    return decision;
   }
 
   _updateExtrema(position, timestampMs, price) {
@@ -690,7 +789,14 @@ class GraduationAccelerationShadowSuite {
     const ids = this.rowsByMint.get(position.mint);
     if (!ids) return;
     ids.delete(position.id);
-    if (!ids.size) this.rowsByMint.delete(position.mint);
+    if (!ids.size) {
+      this.rowsByMint.delete(position.mint);
+      this.postMigrationTrades.delete(position.mint);
+    }
+    const gate = this.entryProfiles.get(position.entryProfileId)?.postMigrationGate;
+    if (gate && position.graduatedAt > 0 && this._gateDecisions) {
+      this._gateDecisions.delete(`${position.id}:${position.graduatedAt + gate.windowMs}`);
+    }
   }
 }
 

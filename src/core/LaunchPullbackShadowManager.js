@@ -113,28 +113,27 @@ class LaunchPullbackShadowManager {
           minBuyRefillRatio: this.config.minBuyRefillRatio ?? null,
           minRecentNetFlow1s: this.config.minRecentNetFlow1s ?? null,
           minNetFlowAcceleration1s: this.config.minNetFlowAcceleration1s ?? null,
+          flowConfirmationWindowMs: this.config.flowConfirmationWindowMs ?? null,
+          minFlowSignalBuyersW3: this.config.minFlowSignalBuyersW3 ?? null,
           entryDelayMs: this.config.entryDelayMs,
           entryTimeoutMs: this.config.entryTimeoutMs,
           maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
           market: 'PUMP_BONDING_CURVE',
         },
-        exit: this.config.exitPolicy === 'TRAILING_STOP'
-          ? {
-            policy: 'TRAILING_STOP',
-            activationPct: this.config.trailingActivationPct,
-            drawdownPct: this.config.trailingDrawdownPct,
-            minHoldMs: this.config.minHoldMs,
-            maxHoldMs: this.config.maxHoldMs,
-            hardStopPct: this.config.hardStopPct,
-            exitDelayMs: this.config.exitDelayMs,
-            exitTimeoutMs: this.config.exitTimeoutMs,
-          }
-          : {
-            policy: 'FIXED_HOLD',
-            fixedHoldMs: this.config.fixedHoldMs,
-            exitDelayMs: this.config.exitDelayMs,
-            exitTimeoutMs: this.config.exitTimeoutMs,
-          },
+        exit: {
+          policy: this.config.exitPolicy,
+          fixedHoldMs: this.config.fixedHoldMs ?? null,
+          activationPct: this.config.trailingActivationPct ?? null,
+          drawdownPct: this.config.trailingDrawdownPct ?? null,
+          trailingTiers: this.config.trailingTiers || null,
+          strengthCheckMs: this.config.strengthCheckMs ?? null,
+          minStrengthMfePct: this.config.minStrengthMfePct ?? null,
+          minHoldMs: this.config.minHoldMs ?? null,
+          maxHoldMs: this.config.maxHoldMs ?? null,
+          hardStopPct: this.config.hardStopPct ?? null,
+          exitDelayMs: this.config.exitDelayMs,
+          exitTimeoutMs: this.config.exitTimeoutMs,
+        },
         research: {
           bigWinnerPct: this.config.bigWinnerPct,
           simulatedPositionSol: this.config.positionSizeSol,
@@ -167,6 +166,18 @@ class LaunchPullbackShadowManager {
     const netFlowAcceleration1s = finite(
       features.netFlowAcceleration1s,
       recentNetFlow1s - previousNetFlow1s,
+    );
+    const flowConfirmationAt = features.flowConfirmationAt == null
+      ? null : finite(features.flowConfirmationAt);
+    const flowConfirmationVariant = features.flowConfirmationVariant == null
+      ? null : String(features.flowConfirmationVariant);
+    const flowConfirmationBuyersW3 = features.flowConfirmationBuyersW3 == null
+      ? null : finite(features.flowConfirmationBuyersW3);
+    const flowConfirmationNetFlowW3 = features.flowConfirmationNetFlowW3 == null
+      ? null : finite(features.flowConfirmationNetFlowW3);
+    const flowConfirmationWindowMs = finite(
+      features.flowConfirmationWindowMs,
+      this.config.flowConfirmationWindowMs,
     );
     const reasons = reference.rejectionReason ? [reference.rejectionReason] : [];
     if (!(netFlowSol >= this.config.minNetFlowSol)) reasons.push('NET_FLOW_BELOW_MIN');
@@ -203,6 +214,10 @@ class LaunchPullbackShadowManager {
     if (this.config.minNetFlowAcceleration1s != null
       && netFlowAcceleration1s < this.config.minNetFlowAcceleration1s) {
       reasons.push('NET_FLOW_ACCEL_1S_BELOW_MIN');
+    }
+    if (this.config.minFlowSignalBuyersW3 != null
+      && !(flowConfirmationBuyersW3 >= this.config.minFlowSignalBuyersW3)) {
+      reasons.push('FLOW_CONFIRMATION_BUYERS_W3_BELOW_MIN');
     }
     const matched = reasons.length === 0;
     const saved = this.store.createLaunchPullbackShadowPosition({
@@ -244,6 +259,11 @@ class LaunchPullbackShadowManager {
       recentNetFlow1s,
       previousNetFlow1s,
       netFlowAcceleration1s,
+      flowConfirmationAt,
+      flowConfirmationVariant,
+      flowConfirmationBuyersW3,
+      flowConfirmationNetFlowW3,
+      flowConfirmationWindowMs,
       marketRegimeObservedAt: finite(features.marketRegimeObservedAt),
       marketRegimeIndependentMints: finite(features.marketRegimeIndependentMints),
       marketRegimeAverageNetReturn5s: features.marketRegimeAverageNetReturn5s == null
@@ -354,14 +374,14 @@ class LaunchPullbackShadowManager {
         continue;
       }
       if (position.status !== STATUS.OPEN) continue;
-      const holdMs = this.config.exitPolicy === 'TRAILING_STOP'
-        ? this.config.maxHoldMs
-        : this.config.fixedHoldMs;
+      const holdMs = this.config.exitPolicy === 'FIXED_HOLD'
+        ? this.config.fixedHoldMs
+        : this.config.maxHoldMs;
       const triggerAt = position.entryAt + holdMs;
       if (now >= triggerAt) {
-        const reason = this.config.exitPolicy === 'TRAILING_STOP'
-          ? `MAX_HOLD_${holdMs / 1_000}S`
-          : `FIXED_HOLD_${holdMs / 1_000}S`;
+        const reason = this.config.exitPolicy === 'FIXED_HOLD'
+          ? `FIXED_HOLD_${holdMs / 1_000}S`
+          : `MAX_HOLD_${holdMs / 1_000}S`;
         this._requestExit(position, triggerAt, reason);
       }
     }
@@ -389,7 +409,7 @@ class LaunchPullbackShadowManager {
   }
 
   _evaluateTrailingExit(position, price, timestampMs) {
-    if (this.config.exitPolicy !== 'TRAILING_STOP' || position.status !== STATUS.OPEN) return;
+    if (this.config.exitPolicy === 'FIXED_HOLD' || position.status !== STATUS.OPEN) return;
     const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
     if (this.config.hardStopPct != null && grossReturnPct <= -this.config.hardStopPct) {
       this._requestExit(
@@ -400,9 +420,32 @@ class LaunchPullbackShadowManager {
       return;
     }
 
+    const ageMs = timestampMs - position.entryAt;
+    if (this.config.exitPolicy === 'EARLY_STRENGTH'
+      && ageMs >= this.config.strengthCheckMs
+      && position.maxFavorableReturnPct < this.config.minStrengthMfePct) {
+      this._requestExit(position, timestampMs,
+        `NO_STRENGTH_${this.config.strengthCheckMs / 1_000}S`);
+      return;
+    }
+
     const peakReturnPct = ((position.highestPrice / position.entryPrice) - 1) * 100;
+    if (this.config.exitPolicy === 'TIERED_TRAILING') {
+      const tier = [...(this.config.trailingTiers || [])]
+        .sort((left, right) => left.activationPct - right.activationPct)
+        .filter((row) => peakReturnPct >= row.activationPct)
+        .at(-1);
+      const oldEnough = ageMs >= (this.config.minHoldMs || 0);
+      const drawdownPct = (1 - price / position.highestPrice) * 100;
+      if (tier && oldEnough && drawdownPct >= tier.drawdownPct) {
+        this._requestExit(position, timestampMs,
+          `TIERED_TRAILING_${tier.activationPct}_${tier.drawdownPct}`);
+      }
+      return;
+    }
+    if (this.config.exitPolicy !== 'TRAILING_STOP') return;
     const armed = peakReturnPct >= this.config.trailingActivationPct;
-    const oldEnough = timestampMs - position.entryAt >= this.config.minHoldMs;
+    const oldEnough = ageMs >= this.config.minHoldMs;
     const drawdownPct = (1 - price / position.highestPrice) * 100;
     if (armed && oldEnough && drawdownPct >= this.config.trailingDrawdownPct) {
       this._requestExit(

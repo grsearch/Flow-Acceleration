@@ -209,6 +209,8 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   config.launchPullbackShadow.optimizationCohorts.map((cohort) => cohort.id),
   [
+    'FC_BASE_X12', 'FC_STRICT_NF20_X12', 'FC_BASE_STAIR60',
+    'FC_BASE_WEAK3_X12', 'FC_BASE_WEAK5_X12',
     'FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15', 'FO_RB10_30S', 'FO_RB10_T20',
     'FO_D12_R3_10S', 'FO_D12_R3_T15',
     'FO_D12_R3_Q_10S', 'FO_D12_R3_QC_10S', 'FO_D12_R3_Q_T10_H30',
@@ -223,8 +225,13 @@ assert.strictEqual(
 );
 assert.strictEqual(
   config.launchPullbackShadow.optimizationCohorts[0].maxEntryPriceJumpPct,
-  2,
+  3,
 );
+const flowConsensus = config.launchPullbackShadow.optimizationCohorts
+  .find((cohort) => cohort.id === 'FC_BASE_X12');
+assert.strictEqual(flowConsensus.flowConfirmationWindowMs, 5_000);
+assert.strictEqual(flowConsensus.minFlowSignalBuyersW3, 3);
+assert.strictEqual(flowConsensus.fixedHoldMs, 12_000);
 assert.ok(
   Math.abs(costBreakdown(config.launchPullbackShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
@@ -287,6 +294,7 @@ assert.deepStrictEqual(
     ['GE30_R23_F1_NIGHT', 30_000, 1],
     ['GE30_R23_F1_DAY', 30_000, 1],
     ['GE30_D25_32_R24_F1', 30_000, 1],
+    ['GE30_D25_32_R23_F1_FAST200', 30_000, 1],
   ],
 );
 assert.deepStrictEqual(
@@ -303,7 +311,7 @@ assert.deepStrictEqual(
   config.migratedDropReboundShadow.exitProfiles.map((profile) => profile.id),
   [
     'X3', 'X8', 'XLEG',
-    'GEXEC_XLEG', 'G2_XLEG', 'GTIME_XLEG',
+    'GEXEC_XLEG', 'G2_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
     'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
     'G1_B75_H30', 'G1_B50_H60',
     'G1_STAIR_H60', 'G1_STAIR_H120',
@@ -318,6 +326,10 @@ assert.ok(config.migratedDropReboundShadow.exitProfiles
 assert.ok(config.migratedDropReboundShadow.exitProfiles
   .filter((profile) => profile.id.startsWith('V2_'))
   .every((profile) => profile.entryProfileIds.join(',') === 'GE30_D25_32_R24_F1'));
+const gqProfile = config.migratedDropReboundShadow.entryProfiles
+  .find((profile) => profile.id === 'GE30_D25_32_R23_F1_FAST200');
+assert.strictEqual(gqProfile.maxReboundFromLowMs, 200);
+assert.deepStrictEqual(gqProfile.positionSols, [0.05, 0.25, 0.5, 1]);
 assert.strictEqual(config.migrationContinuityShadow.enabled, true);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
 assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
@@ -370,8 +382,16 @@ assert.strictEqual(config.graduationAccelerationShadow.enabled, true);
 assert.deepStrictEqual(config.graduationAccelerationShadow.capacitySols, [0.05, 0.5, 1]);
 assert.deepStrictEqual(
   config.graduationAccelerationShadow.entryProfiles.map((profile) => profile.id),
-  ['O_FAST10_C80_B20_R07', 'O_C80_D5_B2_S0_NC'],
+  [
+    'O_FAST10_C80_B20_R07', 'O_C80_D5_B2_S0_NC',
+    'O90_M5_X60', 'O90_M5_X120', 'O90_M5_STAIR120',
+  ],
 );
+const o90Gate = config.graduationAccelerationShadow.entryProfiles
+  .find((profile) => profile.id === 'O90_M5_X60');
+assert.deepStrictEqual(o90Gate.postMigrationGate, {
+  windowMs: 5_000, minBuyers: 25, minNetFlowSol: 0,
+});
 assert.deepStrictEqual(
   config.graduationAccelerationShadow.trailingTiers.map((tier) => [
     tier.activationPct, tier.drawdownPct,

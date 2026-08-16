@@ -177,3 +177,97 @@ function main() {
 }
 
 main();
+
+function testCurve90PostMigrationGate() {
+  const store = makeStore();
+  let now = 1_000_000;
+  const settings = config();
+  settings.capacitySols = [1];
+  settings.entryProfiles = [{
+    id: 'O90_M5_X60', label: 'o90', mode: 'CURVE_MILESTONE',
+    thresholdPct: 90, recentWindowMs: 5_000, minCurveDeltaPct: 5,
+    minBuyers: 1, maxSellTx: 1, requireNoCreatorSell: true,
+    coreExitPct: 50,
+    postMigrationGate: { windowMs: 5_000, minBuyers: 25, minNetFlowSol: 0 },
+    runnerExitMode: 'FIXED_HOLD', runnerMaxHoldMs: 60_000,
+  }];
+  const suite = new GraduationAccelerationShadowSuite({
+    config: settings, store, now: () => now,
+  });
+  suite.start();
+
+  const open = (mint, base) => {
+    suite.onCreate({ mint, symbol: mint, creator: `${mint}-creator`, createdAt: base });
+    suite.observeTrade(trade({
+      mint, timestampMs: base + 100, curvePct: 80, wallet: `${mint}-pre-1`,
+    }));
+    suite.observeTrade(trade({
+      mint, timestampMs: base + 1_000, curvePct: 90, wallet: `${mint}-pre-2`,
+    }));
+    suite.observeTrade(trade({
+      mint, timestampMs: base + 1_200, curvePct: 91, wallet: `${mint}-fill`,
+    }));
+    suite.onGraduated({ mint, graduated_at: base + 2_000 });
+    suite.observeTrade(trade({
+      mint, timestampMs: base + 2_200, price: 2e-7,
+      market: 'PUMP_AMM', wallet: `${mint}-amm-open`,
+    }));
+  };
+
+  const passMint = 'o90-gate-pass';
+  open(passMint, now);
+  // The first executable PumpSwap core-exit trade is buyer #1; 24 additional
+  // buyers complete the causal five-second gate.
+  for (let index = 0; index < 24; index += 1) {
+    suite.observeTrade(trade({
+      mint: passMint,
+      timestampMs: now + 2_300 + index * 150,
+      price: 2.1e-7,
+      market: 'PUMP_AMM',
+      wallet: `o90-pass-buyer-${index}`,
+      side: 'BUY', solAmount: 0.1,
+    }));
+  }
+  suite.observeTrade(trade({
+    mint: passMint, timestampMs: now + 7_000, price: 2.2e-7,
+    market: 'PUMP_AMM', wallet: 'o90-pass-gate-tick',
+  }));
+  assert.strictEqual(store.db.prepare(`
+    SELECT status FROM graduation_acceleration_shadow_positions WHERE mint=?
+  `).get(passMint).status, 'RUNNER', '25 post-migration buyers keep the runner alive');
+  assert.strictEqual(suite.health().postMigrationGatePassed, 1);
+  suite.observeTrade(trade({
+    mint: passMint, timestampMs: now + 62_200, price: 2.3e-7,
+    market: 'PUMP_AMM', wallet: 'o90-pass-timeout-trigger',
+  }));
+  suite.observeTrade(trade({
+    mint: passMint, timestampMs: now + 62_400, price: 2.3e-7,
+    market: 'PUMP_AMM', wallet: 'o90-pass-timeout-fill',
+  }));
+  assert.deepStrictEqual(store.db.prepare(`
+    SELECT status, exit_reason FROM graduation_acceleration_shadow_positions WHERE mint=?
+  `).get(passMint), { status: 'CLOSED', exit_reason: 'MAX_POST_GRAD_RUNNER' });
+
+  now = 2_000_000;
+  const failMint = 'o90-gate-fail';
+  open(failMint, now);
+  suite.observeTrade(trade({
+    mint: failMint, timestampMs: now + 3_000, price: 2.1e-7,
+    market: 'PUMP_AMM', wallet: 'o90-fail-buyer-1',
+  }));
+  suite.observeTrade(trade({
+    mint: failMint, timestampMs: now + 7_000, price: 2e-7,
+    market: 'PUMP_AMM', wallet: 'o90-fail-gate-tick',
+  }));
+  suite.observeTrade(trade({
+    mint: failMint, timestampMs: now + 7_200, price: 2e-7,
+    market: 'PUMP_AMM', wallet: 'o90-fail-exit-fill',
+  }));
+  assert.deepStrictEqual(store.db.prepare(`
+    SELECT status, exit_reason FROM graduation_acceleration_shadow_positions WHERE mint=?
+  `).get(failMint), { status: 'CLOSED', exit_reason: 'POST_MIGRATION_GATE_FAIL' });
+  assert.strictEqual(suite.health().postMigrationGateFailed, 1);
+  store.close();
+}
+
+testCurve90PostMigrationGate();

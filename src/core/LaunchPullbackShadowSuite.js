@@ -6,6 +6,12 @@ class LaunchPullbackShadowSuite {
   constructor({ config, store, now = () => Date.now() }) {
     this.config = config;
     this.managers = new Map();
+    this.flowSignals = new Map();
+    this.flowSignalRetentionMs = Math.max(
+      60_000,
+      ...(config.optimizationCohorts || [])
+        .map((cohort) => Number(cohort.flowConfirmationWindowMs) || 0),
+    );
     for (const profile of config.profiles || []) {
       for (const hold of config.holds || []) {
         const cohortId = `${profile.id}_${hold.id}`;
@@ -124,7 +130,62 @@ class LaunchPullbackShadowSuite {
   }
 
   onReference(reference) {
-    return [...this.managers.values()].map((manager) => manager.onReference(reference));
+    const referenceAt = Number(reference?.referenceAt);
+    const signals = this.flowSignals.get(reference?.mint) || [];
+    const results = [];
+    for (const manager of this.managers.values()) {
+      const windowMs = Number(manager.config.flowConfirmationWindowMs) || 0;
+      if (!(windowMs > 0) || !(referenceAt > 0)) {
+        results.push(manager.onReference(reference));
+        continue;
+      }
+      const eligible = signals.filter((signal) => (
+        signal.timestampMs <= referenceAt && signal.timestampMs >= referenceAt - windowMs
+      ));
+      const confirmation = eligible.reduce((best, signal) => (
+        !best || signal.uniqueBuyersW3 > best.uniqueBuyersW3 ? signal : best
+      ), null);
+      results.push(manager.onReference({
+        ...reference,
+        features: {
+          ...(reference.features || {}),
+          flowConfirmationAt: confirmation?.timestampMs ?? null,
+          flowConfirmationVariant: confirmation?.signalVariant ?? null,
+          flowConfirmationBuyersW3: confirmation?.uniqueBuyersW3 ?? null,
+          flowConfirmationNetFlowW3: confirmation?.netFlowW3 ?? null,
+          flowConfirmationWindowMs: windowMs,
+        },
+      }));
+    }
+    this._pruneFlowSignals(referenceAt);
+    return results;
+  }
+
+  onSignal(signal) {
+    if (!this.config.enabled || !signal?.mint) return;
+    const timestampMs = Number(signal.timestampMs ?? signal.timestamp_ms);
+    const uniqueBuyersW3 = Number(signal.uniqueBuyersW3 ?? signal.unique_buyers_w3);
+    if (!(timestampMs > 0) || !Number.isFinite(uniqueBuyersW3)) return;
+    const rows = this.flowSignals.get(signal.mint) || [];
+    rows.push({
+      timestampMs,
+      signalVariant: signal.signalVariant ?? signal.signal_variant ?? 'unknown',
+      uniqueBuyersW3: Math.max(0, Math.trunc(uniqueBuyersW3)),
+      netFlowW3: Number(signal.netFlowW3 ?? signal.netflow_w3) || 0,
+    });
+    rows.sort((left, right) => left.timestampMs - right.timestampMs);
+    this.flowSignals.set(signal.mint, rows);
+    this._pruneFlowSignals(timestampMs);
+  }
+
+  _pruneFlowSignals(now) {
+    if (!(now > 0)) return;
+    const cutoff = now - this.flowSignalRetentionMs;
+    for (const [mint, rows] of this.flowSignals) {
+      const kept = rows.filter((row) => row.timestampMs >= cutoff);
+      if (kept.length) this.flowSignals.set(mint, kept);
+      else this.flowSignals.delete(mint);
+    }
   }
 
   observeTrade(trade) {
