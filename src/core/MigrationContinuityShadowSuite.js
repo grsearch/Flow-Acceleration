@@ -63,10 +63,11 @@ function restoredPosition(row) {
 }
 
 class MigrationContinuityShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [
       profile.id,
@@ -272,6 +273,33 @@ class MigrationContinuityShadowSuite {
 
   _emitSignal(state, trade, price, features) {
     const episodeId = `${state.mint}:MC_C5:${state.graduatedAt}`;
+    if (this.onLiveSignal && this.config.entryProfile.liveStrategyId) {
+      try {
+        this.onLiveSignal({
+          strategyId: this.config.entryProfile.liveStrategyId,
+          episodeId,
+          mint: state.mint,
+          symbol: trade.symbol || state.symbol,
+          price,
+          slot: trade.slot,
+          timestampMs: trade.timestampMs,
+          receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+          market: 'PUMP_AMM',
+          poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+          poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+          virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+          features: {
+            ...features,
+            graduatedAt: state.graduatedAt,
+            migrationAgeMs: trade.timestampMs - state.graduatedAt,
+            confirmWindowMs: this.config.confirmWindowMs,
+            flowWindowMs: this.config.flowWindowMs,
+          },
+        });
+      } catch (error) {
+        this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
+      }
+    }
     for (const exitProfile of this.exitProfiles.values()) {
       const saved = this.store.createMigrationContinuityShadowPosition({
         cohortId: `MC_C5_${exitProfile.id}`,
