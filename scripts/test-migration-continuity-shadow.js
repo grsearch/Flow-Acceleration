@@ -22,7 +22,8 @@ function config() {
     entryDelayMs: 200, entryTimeoutMs: 2_000, exitDelayMs: 200, exitTimeoutMs: 5_000,
     maxEntryPriceJumpPct: 10,
     entryProfile: {
-      id: 'MC_C5', minBuyers: 20, minNetFlowSol: 5,
+      id: 'MC_C5', liveStrategyId: 'migration_continuity_mc_c5_e120_live',
+      minBuyers: 20, minNetFlowSol: 5,
       minReturnPct: 5, maxSellBuyRatio: 0.6,
     },
     exitProfiles: [
@@ -50,7 +51,11 @@ function main() {
     creator: null, createdAt: base - 60_000, initialRealTokenReservesRaw: null,
     tokenTotalSupplyRaw: null });
   store.recordComplete({ mint, completedAt: base, timestampMs: base });
-  let suite = new MigrationContinuityShadowSuite({ config: config(), store, now: () => now });
+  const liveSignals = [];
+  let suite = new MigrationContinuityShadowSuite({
+    config: config(), store, now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
   suite.start();
   suite.onGraduated(store.getToken(mint));
   suite.observeTrade(trade(mint, base + 100, 1));
@@ -67,6 +72,9 @@ function main() {
   now = base + 5_000;
   suite.observeTrade(trade(mint, now, 1.07, 'BUY', 0.4, 'buyer-20'));
   assert.strictEqual(suite.health().matched, 1);
+  assert.strictEqual(liveSignals.length, 1);
+  assert.strictEqual(liveSignals[0].strategyId, 'migration_continuity_mc_c5_e120_live');
+  assert.ok(liveSignals[0].features.buyers >= 20);
   assert.strictEqual(suite.health().pendingEntries, 3);
   now += 250;
   suite.observeTrade(trade(mint, now, 1.075, 'BUY', 0.2, 'fill'));
