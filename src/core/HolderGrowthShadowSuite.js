@@ -323,13 +323,23 @@ class HolderGrowthShadowSuite {
   }
 
   _matches(profile, snapshot) {
+    const buySolSincePeak = finite(snapshot.buySolSincePeak, -1);
+    const sellSolSincePeak = finite(snapshot.sellSolSincePeak, -1);
     return snapshot.buyers >= profile.minBuyers
       && snapshot.newBuyers >= profile.minNewBuyers
       && (profile.minRecentBuyers == null
         || finite(snapshot.recentBuyers, -1) >= profile.minRecentBuyers)
       && finite(snapshot.retentionPct, -1) >= profile.minRetentionPct
       && snapshot.netFlowSol >= profile.minNetFlowSol
-      && finite(snapshot.top3SharePct, 101) <= profile.maxTop3SharePct;
+      && finite(snapshot.top3SharePct, 101) <= profile.maxTop3SharePct
+      && (profile.minCurvePct == null
+        || finite(snapshot.curvePct, -1) >= profile.minCurvePct)
+      && (profile.maxCurvePct == null
+        || finite(snapshot.curvePct, 101) < profile.maxCurvePct)
+      && (!profile.requirePostPeakNetPositive
+        || (buySolSincePeak >= 0
+          && sellSolSincePeak >= 0
+          && buySolSincePeak >= sellSolSincePeak));
   }
 
   _createPendingRows(profile, snapshot) {
