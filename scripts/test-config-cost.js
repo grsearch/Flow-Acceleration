@@ -69,7 +69,7 @@ assert.strictEqual(liveContinuity.entryEnabled, true);
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
 assert.strictEqual(liveGraduationAccel.positionSizeSol, 1);
-assert.strictEqual(liveGraduationAccel.entryEnabled, true);
+assert.strictEqual(liveGraduationAccel.entryEnabled, false);
 assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);

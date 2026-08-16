@@ -404,31 +404,30 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-旧的 Primary Early 与 XLEG-V3 实盘入口已经停止新开仓，Primary 和历史 XLEG 数据继续保留用于研究及存量仓位退出。当前启用两个彼此独立、单笔均为 `1 SOL` 的实盘策略：
+旧的 Primary Early、Graduation Acceleration O 与 XLEG-V3 实盘入口已经停止新开仓，相关历史数据继续保留用于研究及存量仓位退出。当前只启用 Migration Continuity M 实盘策略，单笔为 `1 SOL`：
 
 ```text
 M / migration_continuity_mc_c5_e120_live
 毕业后5秒 Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6
 → PumpSwap买入1 SOL → 20%硬止损或固定120秒卖出
 
-O / graduation_accel_o_c80_d5_b2_s0_nc_live
-首次Curve≥80%、最近5秒ΔCurve≥5、Buyers≥2、0卖单、Creator未卖
-→ Bonding Curve买入1 SOL → 毕业后卖50% → 余下50%按20/40/80/150/300%阶梯移动止盈
+O / graduation_accel_o_c80_d5_b2_s0_nc_live（停止新开仓）
+保留历史展示与存量仓位退出；Graduation Acceleration Shadow O 继续独立观察
 ```
 
-M/O 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_strategy_decisions`，仓位和订单保存各自 `strategy_id`，不会混入原 Shadow 统计。三个历史 XLEG 版本继续加载用于历史展示和存量仓位退出；V3 的 `ENTRY_ENABLED` 默认 `false`。
+M/O 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_strategy_decisions`，仓位和订单保存各自 `strategy_id`，不会混入原 Shadow 统计。O 与三个历史 XLEG 版本继续加载用于历史展示和存量仓位退出，但 O 和 V3 均停止新开仓。
 
 执行模块有三种模式：
 
 - `DISABLED`：全局安全锁模式，不签名；各实盘策略的独立 `entryEnabled=false` 还会进一步阻止其产生新仓。
 - `DRY_RUN`：只有先显式解除 `FLOW_LIVE_TRADING_SAFETY_LOCK`，再设置 `FLOW_LIVE_TRADING_ENABLED=true` 并保留 `FLOW_LIVE_DRY_RUN=true` 才能启用。
-- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写 M/O 的 `POSITION_SOL=1`。升级时已有的 XLEG 仓位变量仍可作为配置迁移回退值。
+- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写 M 的 `POSITION_SOL=1`。升级时已有的 O/XLEG 仓位变量仍可作为存量退出配置回退值。
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
 M 使用官方 PumpSwap SDK，O 在毕业前使用 Pump Bonding Curve、毕业后使用 PumpSwap。买入均为固定 SOL 输入，`1 SOL` 是硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、每策略单次成功买入、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
 
-M 的卖出规则与 Shadow E120 一致：20%硬止损，否则从真实成交时间起固定120秒后卖出全部余额。O 在毕业后的首笔可执行 PumpSwap 行情卖出50%核心仓位，剩余50%按 `+20/40/80/150/300%` 对应 `10/15/20/25/30%` 峰值回撤退出；毕业前和毕业后各有5分钟兜底，整体保留30%硬止损。最终卖出失败会按配置重试并保留 `EXIT_FAILED`，防止同 Mint 再开仓；紧急开关只阻止新开仓，不阻止存量退出。
+M 的卖出规则与 Shadow E120 一致：20%硬止损，否则从真实成交时间起固定120秒后卖出全部余额。如 O 仍有存量仓位，则继续沿用原退出规则：毕业后首笔可执行 PumpSwap 行情卖出50%核心仓位，剩余50%按 `+20/40/80/150/300%` 对应 `10/15/20/25/30%` 峰值回撤退出；毕业前和毕业后各有5分钟兜底，整体保留30%硬止损。最终卖出失败会按配置重试并保留 `EXIT_FAILED`，防止同 Mint 再开仓；紧急开关和单策略停开都只阻止新开仓，不阻止存量退出。
 
 买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时同时查询签名历史、确认交易的 `pre/postTokenBalances` 和交易钱包的Token余额。即使Token-2022 ATA尚未被RPC账户索引，只要交易回执显示钱包实际收到Token，也会按真实raw数量恢复仓位。单次余额为0或账户暂不可见只保持 `ENTRY_CONFIRMATION_UNKNOWN`，不会再误写 `ENTRY_CONFIRMED_EMPTY`，也不会盲目发送卖出。若签名明确因区块高度过期，并且等待 `FLOW_LIVE_EXPIRED_ENTRY_RELEASE_MS`（默认10分钟）后签名历史、交易回执与Token收款仍全部不可见，程序才会将其标记为 `ENTRY_EXPIRED_UNOBSERVED` 并释放并发槽；其余任何歧义状态继续保留等待人工/重启复核。服务重启时也会自动重新核对未知仓位，以及旧版本曾误关的 `ENTRY_CONFIRMED_EMPTY` 仓位；恢复成功且已超过持仓兜底时间时会立即进入正常卖出流程。
 

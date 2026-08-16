@@ -411,7 +411,10 @@ const config = {
         ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v1',
         signalSource: 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC',
         enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_O_C80_ENABLED', true),
-        entryEnabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_O_C80_ENTRY_ENABLED', true),
+        // Keep the live definition loaded for historical display and any
+        // already-open position exits. New O entries are intentionally
+        // disabled after the weak daytime live sample; Shadow O is separate.
+        entryEnabled: false,
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv('FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL', 1),
         maxSignalAgeMs: integerEnv(
