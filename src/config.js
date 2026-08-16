@@ -135,18 +135,18 @@ const provenNegativeShadowsEnabled = booleanEnv(
 );
 // Holder Growth produced a large, consistently negative entry/exit cross-product.
 // Keep the complete historical matrix queryable, but only create new rows for the
-// two short fixed-hold controls unless an operator explicitly re-enables the full
-// experiment. A new flag is used so an older server .env cannot silently restore
-// the 8 x 13 matrix after a normal code upgrade.
+// 15-second control and the isolated forward quality cohorts unless an operator
+// explicitly re-enables the full experiment. A new flag is used so an older server
+// .env cannot silently restore a retired experiment after a normal code upgrade.
 const holderGrowthFullMatrixEnabled = booleanEnv(
   'FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED',
   false,
 );
-// Forward-only optimization discovered after repricing historical NO_EXIT rows.
-// Keep it independently switchable so old HG30_BAL controls and every
-// historical cohort ID remain unchanged.
-const holderGrowthStrongFlowEnabled = booleanEnv(
-  'FLOW_HOLDER_GROWTH_STRONG_FLOW_ENABLED',
+// Forward-only quality cohorts selected on two non-overlapping 24-hour windows.
+// This deliberately uses a new flag: an old STRONG_FLOW=true server setting must
+// not revive the proven-negative absolute-flow cohorts.
+const holderGrowthQualityEnabled = booleanEnv(
+  'FLOW_HOLDER_GROWTH_QUALITY_ENABLED',
   true,
 );
 
@@ -2692,7 +2692,7 @@ const config = {
         minRetentionPct: 50,
         minNetFlowSol: 5,
         maxTop3SharePct: 80,
-        exitProfileIds: holderGrowthFullMatrixEnabled ? null : ['X5_FIXED', 'X15_FIXED'],
+        exitProfileIds: holderGrowthFullMatrixEnabled ? null : ['X15_FIXED'],
       },
       {
         id: 'HG30_FAST',
@@ -2749,12 +2749,58 @@ const config = {
         exitProfileIds: holderGrowthFullMatrixEnabled
           ? null : ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
       },
+      {
+        id: 'HG30_NQ_A_R75_C40_75',
+        label: 'HG30 NQ-A · Retention>=75% · Curve 40-75%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 10,
+        minRetentionPct: 75,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+        minCurvePct: 40,
+        maxCurvePct: 75,
+        exitProfileIds: ['X15_FIXED'],
+      },
+      {
+        id: 'HG30_NQ_B_R80_C45_70',
+        label: 'HG30 NQ-B · Retention>=80% · Curve 45-70%',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 10,
+        minRetentionPct: 80,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+        minCurvePct: 45,
+        maxCurvePct: 70,
+        exitProfileIds: ['X15_FIXED'],
+      },
+      {
+        id: 'HG30_NQ_C_POST_PEAK',
+        label: 'HG30 NQ-C · NQ-A + post-peak net buying',
+        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
+          min: 5_000, max: 60_000,
+        }),
+        minBuyers: 10,
+        minNewBuyers: 10,
+        minRetentionPct: 75,
+        minNetFlowSol: 5,
+        maxTop3SharePct: 80,
+        minCurvePct: 40,
+        maxCurvePct: 75,
+        requirePostPeakNetPositive: true,
+        exitProfileIds: ['X12_FIXED', 'X15_FIXED', 'X18_FIXED'],
+      },
     ].filter((profile) => holderGrowthFullMatrixEnabled
       || profile.id === 'HG30_BAL'
-      || (holderGrowthStrongFlowEnabled && [
-        'HG30_NB20_NF25',
-        'HG30_RB15_NF25',
-        'HG30_B80_NF25',
+      || (holderGrowthQualityEnabled && [
+        'HG30_NQ_A_R75_C40_75',
+        'HG30_NQ_B_R80_C45_70',
+        'HG30_NQ_C_POST_PEAK',
       ].includes(profile.id))),
     // Every exit is crossed with every entry as an independent cohort. Keep
     // XT15_H120 unchanged so existing production rows remain comparable.
@@ -2890,9 +2936,9 @@ const config = {
         ],
       },
     ].filter((profile) => holderGrowthFullMatrixEnabled
-      || ['X5_FIXED', 'X15_FIXED'].includes(profile.id)
-      || (holderGrowthStrongFlowEnabled
-        && ['X12_FIXED', 'X18_FIXED', 'X15_R20'].includes(profile.id))),
+      || profile.id === 'X15_FIXED'
+      || (holderGrowthQualityEnabled
+        && ['X12_FIXED', 'X18_FIXED'].includes(profile.id))),
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),

@@ -92,6 +92,8 @@ function snapshot(mint, observedAt, overrides = {}) {
     top3SharePct: 80,
     curvePct: 60,
     virtualSolReserves: 60,
+    buySolSincePeak: 1,
+    sellSolSincePeak: 0,
     ...overrides,
   };
 }
@@ -444,7 +446,7 @@ function runNoExitRemainsUnpriced() {
 
 runNoExitRemainsUnpriced();
 
-function runStrongFlowForwardMatrix() {
+function runQualityForwardMatrix() {
   const base = 1_840_000_000_000;
   let now = base;
   const store = makeStore();
@@ -455,102 +457,101 @@ function runStrongFlowForwardMatrix() {
       id: 'HG30_BAL', label: 'baseline', horizonMs: 30_000,
       minBuyers: 10, minNewBuyers: 10, minRetentionPct: 50,
       minNetFlowSol: 5, maxTop3SharePct: 80,
-      exitProfileIds: ['X5_FIXED', 'X15_FIXED'],
+      exitProfileIds: ['X15_FIXED'],
     },
     {
-      id: 'HG30_NB20_NF25', label: 'strong-a', horizonMs: 30_000,
-      minBuyers: 10, minNewBuyers: 20, minRetentionPct: 50,
-      minNetFlowSol: 25, maxTop3SharePct: 80,
-      exitProfileIds: ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
+      id: 'HG30_NQ_A_R75_C40_75', label: 'quality-a', horizonMs: 30_000,
+      minBuyers: 10, minNewBuyers: 10, minRetentionPct: 75,
+      minNetFlowSol: 5, maxTop3SharePct: 80, minCurvePct: 40, maxCurvePct: 75,
+      exitProfileIds: ['X15_FIXED'],
     },
     {
-      id: 'HG30_RB15_NF25', label: 'strong-b', horizonMs: 30_000,
-      minBuyers: 10, minNewBuyers: 10, minRecentBuyers: 15,
-      minRetentionPct: 50, minNetFlowSol: 25, maxTop3SharePct: 80,
-      exitProfileIds: ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
+      id: 'HG30_NQ_B_R80_C45_70', label: 'quality-b', horizonMs: 30_000,
+      minBuyers: 10, minNewBuyers: 10, minRetentionPct: 80,
+      minNetFlowSol: 5, maxTop3SharePct: 80, minCurvePct: 45, maxCurvePct: 70,
+      exitProfileIds: ['X15_FIXED'],
+    },
+    {
+      id: 'HG30_NQ_C_POST_PEAK', label: 'quality-c', horizonMs: 30_000,
+      minBuyers: 10, minNewBuyers: 10, minRetentionPct: 75,
+      minNetFlowSol: 5, maxTop3SharePct: 80, minCurvePct: 40, maxCurvePct: 75,
+      requirePostPeakNetPositive: true,
+      exitProfileIds: ['X12_FIXED', 'X15_FIXED', 'X18_FIXED'],
     },
   ];
   config.exitProfiles = [
-    { id: 'X5_FIXED', exitMode: 'FIXED_HOLD', fixedHoldMs: 5_000, hardStopPct: 100, maxHoldMs: 5_000 },
     { id: 'X12_FIXED', exitMode: 'FIXED_HOLD', fixedHoldMs: 12_000, hardStopPct: 100, maxHoldMs: 12_000 },
     { id: 'X15_FIXED', exitMode: 'FIXED_HOLD', fixedHoldMs: 15_000, hardStopPct: 100, maxHoldMs: 15_000 },
     { id: 'X18_FIXED', exitMode: 'FIXED_HOLD', fixedHoldMs: 18_000, hardStopPct: 100, maxHoldMs: 18_000 },
-    {
-      id: 'X15_R20', exitMode: 'FIXED_SCALE_RUNNER', fixedHoldMs: 15_000,
-      hardStopPct: 100, scaleOutTriggerPct: 20, scaleOutFractionPct: 80,
-      trailingActivationPct: 20, trailingStopPct: 15, maxHoldMs: 120_000,
-    },
   ];
   const suite = new HolderGrowthShadowSuite({ config, store, now: () => now });
   suite.start();
 
-  const mint = 'HolderGrowthStrongMatrix111111111111111111111';
+  const mint = 'HolderGrowthQualityMatrix11111111111111111111';
   recordToken(store, mint, base);
   now = base + 30_000;
   suite.onSnapshot(snapshot(mint, now, {
-    buyers: 50, recentBuyers: 16, newBuyers: 20,
-    retentionPct: 60, netFlowSol: 25, top3SharePct: 50,
+    buyers: 20, newBuyers: 15, retentionPct: 85,
+    netFlowSol: 10, top3SharePct: 50, curvePct: 60,
+    buySolSincePeak: 3, sellSolSincePeak: 1,
   }));
   const created = store.db.prepare(`
     SELECT cohort_id FROM holder_growth_shadow_positions WHERE mint=? ORDER BY cohort_id
   `).all(mint).map((row) => row.cohort_id);
-  assert.strictEqual(created.length, 10, 'restricted profiles must create only their own exits');
-  assert.deepStrictEqual(created.filter((id) => id.startsWith('HG30_BAL:')), [
-    'HG30_BAL:X15_FIXED', 'HG30_BAL:X5_FIXED',
+  assert.deepStrictEqual(created, [
+    'HG30_BAL:X15_FIXED',
+    'HG30_NQ_A_R75_C40_75:X15_FIXED',
+    'HG30_NQ_B_R80_C45_70:X15_FIXED',
+    'HG30_NQ_C_POST_PEAK:X12_FIXED',
+    'HG30_NQ_C_POST_PEAK:X15_FIXED',
+    'HG30_NQ_C_POST_PEAK:X18_FIXED',
   ]);
-  assert.ok(created.includes('HG30_NB20_NF25:X12_FIXED'));
-  assert.ok(created.includes('HG30_RB15_NF25:X15_R20'));
-  assert.strictEqual(suite.health().strategy.cohortCount, 10);
+  assert.strictEqual(suite.health().strategy.cohortCount, 6);
 
-  const rejectedRecentMint = 'HolderGrowthRecentRejected111111111111111111';
-  recordToken(store, rejectedRecentMint, base);
+  const highCurveMint = 'HolderGrowthHighCurveRejected11111111111111111';
+  recordToken(store, highCurveMint, base);
   now += 1_000;
-  suite.onSnapshot(snapshot(rejectedRecentMint, now, {
-    buyers: 15, recentBuyers: 14, newBuyers: 10,
-    retentionPct: 60, netFlowSol: 25, top3SharePct: 50,
+  suite.onSnapshot(snapshot(highCurveMint, now, {
+    buyers: 20, newBuyers: 15, retentionPct: 85,
+    netFlowSol: 10, top3SharePct: 50, curvePct: 80,
+    buySolSincePeak: 3, sellSolSincePeak: 1,
   }));
-  const recentRows = store.db.prepare(`
+  const highCurveRows = store.db.prepare(`
     SELECT entry_profile_id FROM holder_growth_shadow_positions WHERE mint=?
-  `).all(rejectedRecentMint);
-  assert.ok(recentRows.every((row) => row.entry_profile_id !== 'HG30_RB15_NF25'));
+  `).all(highCurveMint);
+  assert.deepStrictEqual(highCurveRows.map((row) => row.entry_profile_id), ['HG30_BAL']);
 
-  const runnerMint = 'HolderGrowthStrongRunner111111111111111111111';
-  recordToken(store, runnerMint, base);
+  const lowRetentionMint = 'HolderGrowthLowRetention111111111111111111111';
+  recordToken(store, lowRetentionMint, base);
   now += 1_000;
-  suite.onSnapshot(snapshot(runnerMint, now, {
-    buyers: 25, recentBuyers: 10, newBuyers: 20,
-    retentionPct: 60, netFlowSol: 25, top3SharePct: 50,
+  suite.onSnapshot(snapshot(lowRetentionMint, now, {
+    buyers: 20, newBuyers: 15, retentionPct: 70,
+    netFlowSol: 10, top3SharePct: 50, curvePct: 60,
+    buySolSincePeak: 3, sellSolSincePeak: 1,
   }));
-  now += 250;
-  suite.observeTrade(curveTrade(runnerMint, now, 1));
-  now += 15_000;
-  suite.observeTrade(curveTrade(runnerMint, now, 1.25));
-  let runner = store.db.prepare(`
-    SELECT * FROM holder_growth_shadow_positions
-    WHERE mint=? AND cohort_id='HG30_NB20_NF25:X15_R20'
-  `).get(runnerMint);
-  assert.ok(runner.partial_exit_target_at, 'strong at 15s must schedule the 80% scale-out');
-  now += 250;
-  suite.observeTrade(curveTrade(runnerMint, now, 1.24));
-  runner = store.db.prepare(`
-    SELECT * FROM holder_growth_shadow_positions
-    WHERE mint=? AND cohort_id='HG30_NB20_NF25:X15_R20'
-  `).get(runnerMint);
-  assert.strictEqual(runner.scale_out_price, 1.24);
-  now += 250;
-  suite.observeTrade(curveTrade(runnerMint, now, 1.05));
-  now += 250;
-  suite.observeTrade(curveTrade(runnerMint, now, 1.04));
-  runner = store.db.prepare(`
-    SELECT * FROM holder_growth_shadow_positions
-    WHERE mint=? AND cohort_id='HG30_NB20_NF25:X15_R20'
-  `).get(runnerMint);
-  assert.strictEqual(runner.status, 'CLOSED');
-  assert.ok(Math.abs(runner.gross_return_pct - 20) < 0.01,
-    '80% at +24% and 20% runner at +4% must realize +20%');
+  const lowRetentionRows = store.db.prepare(`
+    SELECT entry_profile_id FROM holder_growth_shadow_positions WHERE mint=?
+  `).all(lowRetentionMint);
+  assert.deepStrictEqual(lowRetentionRows.map((row) => row.entry_profile_id), ['HG30_BAL']);
+
+  const postPeakSellMint = 'HolderGrowthPostPeakSelling111111111111111111';
+  recordToken(store, postPeakSellMint, base);
+  now += 1_000;
+  suite.onSnapshot(snapshot(postPeakSellMint, now, {
+    buyers: 20, newBuyers: 15, retentionPct: 85,
+    netFlowSol: 10, top3SharePct: 50, curvePct: 60,
+    buySolSincePeak: 1, sellSolSincePeak: 2,
+  }));
+  const postPeakRows = store.db.prepare(`
+    SELECT entry_profile_id FROM holder_growth_shadow_positions WHERE mint=?
+  `).all(postPeakSellMint).map((row) => row.entry_profile_id);
+  assert.ok(postPeakRows.includes('HG30_BAL'));
+  assert.ok(postPeakRows.includes('HG30_NQ_A_R75_C40_75'));
+  assert.ok(postPeakRows.includes('HG30_NQ_B_R80_C45_70'));
+  assert.ok(!postPeakRows.includes('HG30_NQ_C_POST_PEAK'));
 
   store.close();
-  console.log('test-holder-growth-shadow strong-flow matrix: ok');
+  console.log('test-holder-growth-shadow quality matrix: ok');
 }
 
-runStrongFlowForwardMatrix();
+runQualityForwardMatrix();

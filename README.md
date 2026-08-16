@@ -289,11 +289,12 @@ Shadow N 复用 Launch Quality Observer 已有的10/20/30/60秒因果快照，�
 - `HG20_BAL`：20秒早期均衡组，Buyers≥8、10–20秒新增买家≥5、留存≥40%、NetFlow≥3 SOL、Top3≤85%。
 - `HG20_FAST`：20秒早期加速组，Buyers≥10、10–20秒新增买家≥8、留存≥50%、NetFlow≥5 SOL、Top3≤80%。
 - `HG20_QUALITY_J2`：20秒质量组，Buyers≥40、留存≥60%、NetFlow≥5 SOL、Top3≤80%，并只接受0%～2%的入场跳价。
-- `HG30_BAL`：Buyers≥10、20–30秒新增买家≥10、前20买家留存≥50%、NetFlow≥5 SOL、Top3≤80%。
-- `HG30_FAST`：Buyers≥10、20–30秒新增买家≥20、前20买家留存≥70%、NetFlow≥10 SOL、Top3≤80%。
-- 八组均在各自快照后200ms的首笔 Bonding Curve 成交模拟入场；旧组和旧 `XT15_H120` cohort 保持原ID，不重算历史。
+- `HG30_BAL × X15_FIXED`：保留原条件和原 cohort ID，作为固定15秒控制组；旧5秒组、Strong A/B/C 和完整历史矩阵停止新增，但历史结果不删除。
+- `HG30_NQ_A_R75_C40_75`：留存≥75%、Curve 40%–75%，固定持有15秒。
+- `HG30_NQ_B_R80_C45_70`：留存≥80%、Curve 45%–70%，固定持有15秒。
+- `HG30_NQ_C_POST_PEAK`：在 NQ-A 上增加“峰值后买入 SOL≥卖出 SOL”，独立测试固定12/15/18秒。
 
-每个入场与十三种独立卖出规则交叉建仓：原十组保持不变；新增 `XP20_50_D15_H120`（+20%减仓50%，尾仓回撤15%）、`XP20_70_D20_H180`（+20%减仓70%，尾仓回撤20%）及 `XP30_70_STAIR`（+30%减仓70%，余仓使用30/60/100/200%阶梯移动止盈）。这些分批组用于验证高MFE后RUG样本是否能先兑现利润，而不是事后挑选赢家。
+新组都使用30秒因果快照，并在快照后200ms的首笔 Bonding Curve 成交模拟入场。Curve 上限采用排他边界，峰值后资金流只读取快照时已经发生的交易；新 cohort ID 与历史行完全隔离，不重算旧数据。
 
 阶梯组会随着峰值从20%/40%/80%/150%/300%等档位逐步放宽允许回撤，以争取保留大赢家；但实际止损价使用 `max(旧止损价, 新档位候选止损价)`，只能上移、绝不因切换到更宽档位而下移。Dashboard 同时比较平均/中位净收益、去Top5收益、PF、大赢家兑现率与MFE兑现率，避免只靠胜率或单个极端赢家判断。
 
@@ -361,18 +362,19 @@ cohort IDs, the 1 SOL cost model and 200ms causal fills; none signs or sends a t
 
 Range Scalper J is now behind the proven-negative override and therefore stops creating new
 positions by default while all historical rows remain queryable. Holder Growth N keeps its
-complete history and preserves `HG30_BAL × X5_FIXED/X15_FIXED` as the unchanged baseline.
-Three isolated forward-only strong-flow entries are enabled by default: `HG30_NB20_NF25`,
-`HG30_RB15_NF25`, and `HG30_B80_NF25`. They respectively require new buyers >=20,
-recent-window buyers >=15, or total buyers >=80; all require NetFlow >=25 SOL and retain the
-baseline retention/concentration guards. Each new entry independently tests fixed 12/15/18
-second exits plus `X15_R20`: at 15 seconds a position below +20% exits in full, while a
-position still at least +20% schedules an 80% scale-out and keeps a 20% runner behind a 15%
-peak drawdown with a 120-second maximum. Entry profiles explicitly list their exit IDs, so
-new rows never leak into the historical baseline cohorts. Set
-`FLOW_HOLDER_GROWTH_STRONG_FLOW_ENABLED=false` to stop only these new cohorts, or
+complete history and preserves `HG30_BAL × X15_FIXED` as the unchanged control. The old
+5-second control and the absolute-flow Strong A/B/C cohorts stop creating new positions.
+
+Three isolated forward-only quality entries are enabled by default. `HG30_NQ_A_R75_C40_75`
+requires retention >=75% and Curve 40-75%; `HG30_NQ_B_R80_C45_70` requires retention >=80%
+and Curve 45-70%. Both use the fixed 15-second exit. `HG30_NQ_C_POST_PEAK` adds the causal
+requirement that buy SOL since the observed peak is at least sell SOL since that peak, and
+independently tests fixed 12/15/18-second exits. These filters were positive after the 1 SOL
+cost model in two non-overlapping 24-hour windows. Entry profiles explicitly list their exit
+IDs, so new rows never leak into historical cohort IDs. Set
+`FLOW_HOLDER_GROWTH_QUALITY_ENABLED=false` to stop only the new quality cohorts, or
 `FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED=true` only when intentionally resuming the old full
-matrix. Smart Pullback A/B, lifecycle G, migration continuity M and the live strategy are
+matrix. Smart Pullback A/B, lifecycle G, migration continuity M and live strategies are
 unchanged.
 
 

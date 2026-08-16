@@ -378,7 +378,7 @@
               <b>Launch Quality · E</b><small>只观察选币、存活与首次回踩</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="holder-growth">
-              <b>Observed Holder Growth · N</b><small>30秒基准组 + 强资金流独立前向组</small>
+              <b>Observed Holder Growth · N</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first">
               <b>Flow-First · C（已停）</b><small>负期望，历史数据保留</small>
@@ -674,7 +674,7 @@
               <div class="strategy-expression" id="holder-growth-expression">等待 Holder Growth 配置…</div>
               <div class="strategy-metric-groups" id="holder-growth-metrics"></div>
               <div class="strategy-metric-groups" id="holder-growth-time-sessions"></div>
-              <div class="section-title"><h2>基准 / 强资金流组表现</h2><p>每个 Mint、买入条件和退出规则均独立计数</p></div>
+              <div class="section-title"><h2>控制组 / 质量组表现</h2><p>每个 Mint、买入条件和退出规则均独立计数</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>组别</th><th>样本 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>买家增长</th><th>留存 / NetFlow / Top3</th><th>MFE / MAE</th></tr></thead>
                 <tbody id="holder-growth-cohort-rows"></tbody>
@@ -1795,7 +1795,7 @@
         ['Bonding Momentum H', [['模式', bondingMomentum.enabled ? 'SHADOW H' : '关闭'], ['订单流信号', number(bondingMomentum.signals)], ['待入场', number(bondingMomentum.pendingEntries)], ['活动仓位', number(bondingMomentum.activePositions)], ['因果快照', number(bondingMomentum.snapshotsWritten)], ['无成交快照', number(bondingMomentum.snapshotsMissed)], ['组合', '四组入场 × 三组退出'], ['链上交易', '永不发送']]],
         ['Graduation Hold I', [['模式', graduationHold.enabled ? 'SHADOW I' : '关闭'], ['早期Primary', number(graduationHold.signalsSeen)], ['合格入场信号', number(graduationHold.eligibleSignals)], ['待入场', number(graduationHold.pendingEntries)], ['活动仓位', number(graduationHold.activePositions)], ['检查点通过 / 失败', `${number(graduationHold.gatesPassed)} / ${number(graduationHold.gatesFailed)}`], ['毕业就绪', number(graduationHold.graduationReady)], ['链上交易', '永不发送']]],
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['旧7.5%参考', number(launchQuality.referencePullbacks)], ['FD深回踩参考 / 过深拒绝', `${number(launchQuality.deepReferences)} / ${number(launchQuality.deepRejected)}`], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
-        ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N · 基准 + 强资金流组' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 早期留存 + 净流入'], ['数据表', '历史全保留，新 cohort 独立'], ['链上交易', '永不发送']]],
+        ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N · 15秒控制 + NQ质量组' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 留存 + Curve + 峰后资金流'], ['数据表', '历史全保留，新 cohort 独立'], ['链上交易', '永不发送']]],
         ['Scope Guard', [['实盘入场', 'PumpSwap 毕业后独立深跌反弹周期'], ['实盘出场', 'PumpSwap XLEG'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓 / 最多成功2次'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
