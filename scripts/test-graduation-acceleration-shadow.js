@@ -33,6 +33,7 @@ function config() {
       },
       {
         id: 'O_C80_D5_B2_S0_NC', label: 'curve80', mode: 'CURVE_MILESTONE',
+        liveStrategyId: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
         thresholdPct: 80, recentWindowMs: 5_000, minCurveDeltaPct: 5,
         minBuyers: 2, maxSellTx: 0, requireNoCreatorSell: true,
       },
@@ -78,7 +79,11 @@ function trade({
 function main() {
   const store = makeStore();
   let now = 100_000;
-  const suite = new GraduationAccelerationShadowSuite({ config: config(), store, now: () => now });
+  const liveSignals = [];
+  const suite = new GraduationAccelerationShadowSuite({
+    config: config(), store, now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
   suite.start();
   assert.strictEqual(suite.health().sendsTransactions, false);
   assert.strictEqual(suite.health().mode, 'SHADOW_O');
@@ -147,6 +152,9 @@ function main() {
     mint: 'curve80-mint', timestampMs: 202_000, curvePct: 80, wallet: 'c80-buyer-2',
   }));
   assert.strictEqual(suite.health().pendingEntries, 3, 'Curve80 order flow creates capacity rows');
+  assert.strictEqual(liveSignals.length, 1, 'only the selected Curve80 profile bridges to live');
+  assert.strictEqual(liveSignals[0].strategyId, 'graduation_accel_o_c80_d5_b2_s0_nc_live');
+  assert.strictEqual(liveSignals[0].features.sellTx, 0);
   suite.observeTrade(trade({
     mint: 'curve80-mint', timestampMs: 202_200, curvePct: 81, wallet: 'c80-fill',
   }));
