@@ -248,7 +248,7 @@ async function main() {
       strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
     ));
     assert.strictEqual(continuity.entryEnabled, true);
-    assert.strictEqual(graduationAccel.entryEnabled, true);
+    assert.strictEqual(graduationAccel.entryEnabled, false);
     assert.strictEqual(retiredV3.entryEnabled, false);
     assert.strictEqual(continuity.market, 'PUMP_AMM');
     assert.strictEqual(graduationAccel.market, 'PUMP_BONDING_CURVE');
