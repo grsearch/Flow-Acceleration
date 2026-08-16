@@ -2,7 +2,12 @@
 
 const assert = require('assert');
 const { ResearchStore } = require('../src/data/ResearchStore');
-const { MigratedDropReboundShadowSuite } = require(
+const {
+  MigratedDropReboundShadowSuite,
+  ammBuyAveragePrice,
+  ammSellAveragePrice,
+  beijingHourAllowed,
+} = require(
   '../src/core/MigratedDropReboundShadowSuite'
 );
 
@@ -407,7 +412,7 @@ function seedPostMigrationSignal({ suite, store, mint, base }) {
   suite.onGraduated(store.getToken(mint));
   suite.observeTrade(trade(mint, base + 100, 1));
   suite.observeTrade(trade(mint, base + 200, 0.7));
-  suite.observeTrade(trade(mint, base + 300, 0.721));
+  suite.observeTrade(trade(mint, base + 300, 0.7203));
   suite.observeTrade(trade(mint, base + 500, 0.73));
 }
 
@@ -554,7 +559,173 @@ function testV2ProfileSpecificJumpAndRunner() {
   store.close();
 }
 
+function testCapacityAwareEntryFill() {
+  const base = 2_300_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const config = optimizationConfig([{
+    id: 'GEXEC_XLEG', label: 'capacity', entryProfileIds: ['GE30_R23_F1_EXEC'],
+    exitMode: 'FIXED_HOLD', fixedHoldMs: 300,
+  }]);
+  config.entryProfiles = [{
+    id: 'GE30_R23_F1_EXEC', label: 'capacity', windowMs: 1_000,
+    dropMinPct: 25, dropMaxPct: 35, reboundMinPct: 2, reboundMaxPct: 3,
+    reboundTimeoutMs: 1_000, maxLifecycleAgeMs: 30_000,
+    maxSignalsPerMint: 1, exitProfileIds: ['GEXEC_XLEG'],
+    capacityAware: true, positionSols: [0.05, 1],
+  }];
+  const mint = 'CapacityFill111111111111111111111111111111111';
+  recordCreate(store, mint, base);
+  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  suite.onGraduated(store.getToken(mint));
+  suite.observeTrade(trade(mint, base + 100, 1));
+  suite.observeTrade(trade(mint, base + 200, 0.7));
+  suite.observeTrade(trade(mint, base + 300, 0.7203));
+  suite.observeTrade({
+    ...trade(mint, base + 500, 0.73),
+    poolBaseReservesRaw: '100000000',
+    poolQuoteReservesRaw: '73000000000',
+    virtualQuoteReservesRaw: '0',
+  });
+  const rows = store.db.prepare(`
+    SELECT cohort_id, status, position_sol, entry_price, entry_impact_pct
+    FROM migrated_drop_rebound_shadow_positions WHERE mint=? ORDER BY position_sol
+  `).all(mint);
+  assert.strictEqual(rows.length, 2);
+  assert(rows.every((row) => row.status === 'OPEN'));
+  assert.deepStrictEqual(rows.map((row) => row.position_sol), [0.05, 1]);
+  assert.match(rows[0].cohort_id, /0_05SOL$/);
+  assert.match(rows[1].cohort_id, /1SOL$/);
+  assert(rows[1].entry_price > rows[0].entry_price);
+  assert(rows[1].entry_impact_pct > rows[0].entry_impact_pct);
+  const direct = ammBuyAveragePrice({
+    poolBaseReservesRaw: '100000000',
+    poolQuoteReservesRaw: '73000000000',
+  }, 1, 0.73);
+  assert(direct.price > 0.73 && direct.impactPct > 1);
+  const sell = ammSellAveragePrice({
+    poolBaseReservesRaw: '100000000',
+    poolQuoteReservesRaw: '73000000000',
+  }, 1, 0.73);
+  assert(sell.price < 0.73 && sell.impactPct < 0);
+  suite.observeTrade({
+    ...trade(mint, base + 1_000, 0.8),
+    poolBaseReservesRaw: '100000000',
+    poolQuoteReservesRaw: '80000000000',
+    virtualQuoteReservesRaw: '0',
+  });
+  const closedRows = store.db.prepare(`
+    SELECT status, position_sol, exit_impact_pct
+    FROM migrated_drop_rebound_shadow_positions WHERE mint=? ORDER BY position_sol
+  `).all(mint);
+  assert(closedRows.every((row) => row.status === 'CLOSED'));
+  assert(closedRows.every((row) => row.exit_impact_pct < 0));
+  assert(closedRows[1].exit_impact_pct < closedRows[0].exit_impact_pct);
+  store.close();
+}
+
+function testSecondOpportunityOnlyAndBeijingWindows() {
+  const base = 2_400_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const config = optimizationConfig([{
+    id: 'G2_XLEG', label: 'second', entryProfileIds: ['GE30_R23_F2_ONLY'],
+    exitMode: 'LEGACY', trailingActivationPct: 8, trailingStopPct: 3,
+    fastTakeProfitPct: 18, fastTakeProfitWindowMs: 5_000,
+    lossCheckAtMs: 6_000, maxHoldMs: 15_000,
+  }]);
+  config.entryProfiles = [{
+    id: 'GE30_R23_F2_ONLY', label: 'second', windowMs: 1_000,
+    dropMinPct: 25, dropMaxPct: 35, reboundMinPct: 2, reboundMaxPct: 3,
+    reboundTimeoutMs: 1_000, maxLifecycleAgeMs: 30_000,
+    minSignalOrdinal: 2, maxSignalsPerMint: 2, exitProfileIds: ['G2_XLEG'],
+  }];
+  const mint = 'SecondOpportunity11111111111111111111111111111';
+  recordCreate(store, mint, base);
+  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  suite.onGraduated(store.getToken(mint));
+  suite.observeTrade(trade(mint, base + 100, 1));
+  suite.observeTrade(trade(mint, base + 200, 0.7));
+  suite.observeTrade(trade(mint, base + 300, 0.7203));
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE mint=?
+  `).get(mint).n, 0);
+  suite.observeTrade(trade(mint, base + 1_500, 0.8));
+  suite.observeTrade(trade(mint, base + 1_600, 0.56));
+  suite.observeTrade(trade(mint, base + 1_700, 0.57624));
+  suite.observeTrade(trade(mint, base + 1_900, 0.58));
+  const row = store.db.prepare(`
+    SELECT status, entry_profile_id FROM migrated_drop_rebound_shadow_positions WHERE mint=?
+  `).get(mint);
+  assert.strictEqual(row.status, 'OPEN');
+  assert.strictEqual(row.entry_profile_id, 'GE30_R23_F2_ONLY');
+
+  const beijingNoon = Date.UTC(2026, 7, 16, 4, 0, 0);
+  const beijingNight = Date.UTC(2026, 7, 16, 18, 0, 0);
+  assert.strictEqual(beijingHourAllowed(beijingNoon, [[8, 18]]), true);
+  assert.strictEqual(beijingHourAllowed(beijingNoon, [[0, 8], [18, 24]]), false);
+  assert.strictEqual(beijingHourAllowed(beijingNight, [[0, 8], [18, 24]]), true);
+  store.close();
+}
+
+function testStairTrailingAndRunnerHardStop() {
+  const base = 2_500_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const config = optimizationConfig([
+    {
+      id: 'G1_STAIR_H60', label: 'stair', entryProfileIds: ['GD25_35'],
+      exitMode: 'STAIR_TRAILING', hardStopPct: 15, maxHoldMs: 60_000,
+      trailingTiers: [
+        { activationPct: 20, stopPct: 8 },
+        { activationPct: 40, stopPct: 12 },
+      ],
+    },
+    {
+      id: 'G1_B75_H30', label: 'runner risk', entryProfileIds: ['GD25_35'],
+      exitMode: 'BLEND_XLEG_RUNNER_RISK', coreWeightPct: 75,
+      runnerHoldMs: 30_000, trailingActivationPct: 8, trailingStopPct: 3,
+      hardStopPct: 15, fastTakeProfitPct: 18, fastTakeProfitWindowMs: 5_000,
+      lossCheckAtMs: 6_000,
+    },
+  ]);
+  const stairMint = 'StairTrailing111111111111111111111111111111111';
+  let suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  seedPostMigrationSignal({ suite, store, mint: stairMint, base });
+  suite.observeTrade(trade(stairMint, base + 1_000, 0.95));
+  suite.observeTrade(trade(stairMint, base + 1_200, 0.85));
+  suite.observeTrade(trade(stairMint, base + 1_500, 0.84));
+  const stair = store.db.prepare(`
+    SELECT status, exit_reason FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=? AND exit_profile_id='G1_STAIR_H60'
+  `).get(stairMint);
+  assert.strictEqual(stair.status, 'CLOSED');
+  assert.strictEqual(stair.exit_reason, 'STAIR_TRAILING_20_8');
+
+  const riskMint = 'RunnerRisk1111111111111111111111111111111111';
+  const riskBase = base + 100_000;
+  seedPostMigrationSignal({ suite, store, mint: riskMint, base: riskBase });
+  suite.observeTrade(trade(riskMint, riskBase + 1_000, 0.6));
+  suite.observeTrade(trade(riskMint, riskBase + 1_300, 0.59));
+  const risk = store.db.prepare(`
+    SELECT status, exit_reason, core_exit_price FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=? AND exit_profile_id='G1_B75_H30'
+  `).get(riskMint);
+  assert.strictEqual(risk.status, 'CLOSED');
+  assert.strictEqual(risk.exit_reason, 'BLEND_HARD_STOP');
+  assert.strictEqual(risk.core_exit_price, null);
+  store.close();
+}
+
 testEarlyOpportunityProfiles();
 testSplitRunnerPersistsAcrossRestart();
 testRiskExitRequiresWeakRecovery();
 testV2ProfileSpecificJumpAndRunner();
+testCapacityAwareEntryFill();
+testSecondOpportunityOnlyAndBeijingWindows();
+testStairTrailingAndRunnerHardStop();

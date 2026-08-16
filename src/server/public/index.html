@@ -145,7 +145,16 @@
     .strategy-nav-item b, .strategy-nav-item small { display: block; }
     .strategy-nav-item b { margin-bottom: 4px; font-size: 13px; }
     .strategy-nav-item small { color: var(--muted); font-size: 10px; line-height: 1.35; }
-    .strategy-pane[hidden] { display: none; }
+    .strategy-content { min-width: 0; }
+    .strategy-pane { position: relative; min-height: 120px; }
+    .strategy-pane[hidden], .strategy-load-status[hidden] { display: none; }
+    .strategy-load-status {
+      position: sticky; top: 10px; z-index: 6; margin: 0 0 10px; padding: 9px 12px;
+      border: 1px solid var(--border); border-radius: 10px;
+      background: rgba(10, 29, 38, .96); color: var(--muted); box-shadow: 0 8px 24px rgba(0,0,0,.22);
+      font-size: 12px;
+    }
+    .strategy-load-status.error { border-color: rgba(255, 103, 96, .55); color: var(--negative); }
     .strategy-pane > .record-section:first-child, .strategy-pane > .live-summary:first-child { margin-top: 0; }
     .status-chip { padding: 5px 8px; font-size: 10px; }
     .status-chip.good { border-color: rgba(183,243,74,.4); background: rgba(183,243,74,.08); color: var(--lime); }
@@ -384,6 +393,7 @@
         </aside>
 
         <div class="strategy-content">
+          <div class="strategy-load-status" id="strategy-load-status" role="status" aria-live="polite" hidden></div>
           <div class="strategy-pane" data-live-strategy-pane="execution">
             <div class="grid live-summary">
               <article class="card mode-card disabled" id="live-mode-card">
@@ -790,19 +800,48 @@
         </section>
       `;
     }
-    async function json(url) { const response = await fetch(url); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
+    async function json(url, { signal } = {}) {
+      const response = await fetch(url, { signal });
+      if (!response.ok) throw new Error(`${response.status}`);
+      return response.json();
+    }
 
     const tabs = [...document.querySelectorAll('[role="tab"]')];
     const liveStrategyButtons = () => [...document.querySelectorAll('[data-live-strategy]')];
     let activeTabId = 'overview';
     let activeLiveStrategyId = 'execution';
-    let activeExecutionStrategyId = null;
+    let activeExecutionStrategyId = document.querySelector(
+      '[data-live-execution-strategy][aria-current="true"]',
+    )?.dataset.liveExecutionStrategy || null;
     let refreshInFlight = false;
-    let refreshQueued = false;
+    let refreshGeneration = 0;
+    let activeRefreshController = null;
+    const strategyViewCache = new Map();
+    function activeViewKey() {
+      if (activeTabId !== 'live-trading') return activeTabId;
+      return `${activeLiveStrategyId}:${activeLiveStrategyId === 'execution' ? activeExecutionStrategyId || '' : ''}`;
+    }
+    function setStrategyLoadStatus(message = '', kind = '') {
+      const status = document.querySelector('#strategy-load-status');
+      if (!status) return;
+      status.hidden = !message;
+      status.className = `strategy-load-status${kind ? ` ${kind}` : ''}`;
+      status.textContent = message;
+    }
+    function renderCachedStrategyView() {
+      const cached = strategyViewCache.get(activeViewKey());
+      if (!cached) return false;
+      cached.render(cached.data);
+      setStrategyLoadStatus('已显示最近一次结果，正在后台更新…');
+      return true;
+    }
     function selectTab(id) {
       activeTabId = id;
       tabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.getAttribute('aria-controls') === id)));
       document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== id; });
+      if (id === 'live-trading' && !renderCachedStrategyView()) {
+        setStrategyLoadStatus('正在加载所选策略…');
+      }
       void refresh(true);
     }
     tabs.forEach((tab, index) => {
@@ -827,7 +866,10 @@
       document.querySelectorAll('[data-live-strategy-pane]').forEach(pane => {
         pane.hidden = pane.dataset.liveStrategyPane !== id;
       });
-      if (activeTabId === 'live-trading') void refresh(true);
+      if (activeTabId === 'live-trading') {
+        if (!renderCachedStrategyView()) setStrategyLoadStatus('正在加载所选策略…');
+        void refresh(true);
+      }
     }
     document.querySelector('.strategy-sidebar').addEventListener('click', event => {
       const button = event.target.closest('[data-live-strategy]');
@@ -1778,88 +1820,112 @@
       catch (error) { target.innerHTML = `<div class="card empty error">回测失败：${escapeHtml(error.message)}</div>`; }
     });
 
+    async function loadDashboard(url, render, context) {
+      const data = await json(url, { signal: context.signal });
+      if (context.generation !== refreshGeneration || context.viewKey !== activeViewKey()) return;
+      render(data);
+      strategyViewCache.set(context.viewKey, { data, render, storedAt: Date.now() });
+      if (activeTabId === 'live-trading') setStrategyLoadStatus();
+    }
+
     async function refresh(force = false) {
       if (document.hidden && !force) return;
-      if (refreshInFlight) {
-        if (force) refreshQueued = true;
-        return;
-      }
+      if (refreshInFlight && !force) return;
+      if (force) activeRefreshController?.abort();
+      const generation = ++refreshGeneration;
+      const controller = new AbortController();
+      activeRefreshController = controller;
+      const context = {
+        generation,
+        signal: controller.signal,
+        viewKey: activeViewKey(),
+      };
       refreshInFlight = true;
+      if (activeTabId === 'live-trading' && !strategyViewCache.has(context.viewKey)) {
+        setStrategyLoadStatus('正在加载所选策略…');
+      }
       const liveStrategyRequests = {
-        execution: () => [
-          json(`/api/live-trading?strategyId=${encodeURIComponent(activeExecutionStrategyId || '')}&positionLimit=30&orderLimit=30&decisionLimit=30`).then(renderLiveTrading),
+        execution: requestContext => [
+          loadDashboard(`/api/live-trading?strategyId=${encodeURIComponent(activeExecutionStrategyId || '')}&positionLimit=30&orderLimit=30&decisionLimit=30`, renderLiveTrading, requestContext),
         ],
-        'smart-open': () => [
-          json('/api/smart-open-shadow?positionLimit=30').then(renderSmartOpenShadow),
+        'smart-open': requestContext => [
+          loadDashboard('/api/smart-open-shadow?positionLimit=30', renderSmartOpenShadow, requestContext),
         ],
-        'flow-smart-confirm': () => [
-          json('/api/flow-smart-confirm-shadow?positionLimit=30').then(renderFlowSmartConfirmShadow),
+        'flow-smart-confirm': requestContext => [
+          loadDashboard('/api/flow-smart-confirm-shadow?positionLimit=30', renderFlowSmartConfirmShadow, requestContext),
         ],
-        'launch-pullback': () => [
-          json('/api/launch-pullback-shadow?positionLimit=30').then(renderLaunchPullbackShadow),
+        'launch-pullback': requestContext => [
+          loadDashboard('/api/launch-pullback-shadow?positionLimit=30', renderLaunchPullbackShadow, requestContext),
         ],
-        'migrated-rebound': () => [
-          json('/api/migrated-drop-rebound-shadow?positionLimit=30').then(renderMigratedDropReboundShadow),
+        'migrated-rebound': requestContext => [
+          loadDashboard('/api/migrated-drop-rebound-shadow?positionLimit=30', renderMigratedDropReboundShadow, requestContext),
         ],
-        'migration-continuity': () => [
-          json('/api/migration-continuity-shadow?positionLimit=100').then(renderMigrationContinuityShadow),
+        'migration-continuity': requestContext => [
+          loadDashboard('/api/migration-continuity-shadow?positionLimit=30', renderMigrationContinuityShadow, requestContext),
         ],
-        'range-scalper': () => [
-          json('/api/range-scalper-shadow?positionLimit=100').then(renderRangeScalperShadow),
+        'range-scalper': requestContext => [
+          loadDashboard('/api/range-scalper-shadow?positionLimit=30', renderRangeScalperShadow, requestContext),
         ],
-        'cya-early-pyramid': () => [
-          json('/api/cya-early-pyramid-shadow?positionLimit=100').then(renderCyaEarlyPyramidShadow),
+        'cya-early-pyramid': requestContext => [
+          loadDashboard('/api/cya-early-pyramid-shadow?positionLimit=30', renderCyaEarlyPyramidShadow, requestContext),
         ],
-        'bonding-momentum': () => [
-          json('/api/bonding-curve-momentum-shadow?positionLimit=30&snapshotLimit=40').then(renderBondingCurveMomentumShadow),
+        'bonding-momentum': requestContext => [
+          loadDashboard('/api/bonding-curve-momentum-shadow?positionLimit=30&snapshotLimit=30', renderBondingCurveMomentumShadow, requestContext),
         ],
-        'graduation-hold': () => [
-          json('/api/graduation-hold-shadow?positionLimit=30').then(renderGraduationHoldShadow),
+        'graduation-hold': requestContext => [
+          loadDashboard('/api/graduation-hold-shadow?positionLimit=30', renderGraduationHoldShadow, requestContext),
         ],
-        'graduation-acceleration': () => [
-          json('/api/graduation-acceleration-shadow?positionLimit=100').then(renderGraduationAccelerationShadow),
+        'graduation-acceleration': requestContext => [
+          loadDashboard('/api/graduation-acceleration-shadow?positionLimit=30', renderGraduationAccelerationShadow, requestContext),
         ],
-        'launch-quality': () => [
-          json('/api/launch-quality-observer?observationLimit=30&snapshotLimit=60').then(renderLaunchQualityObserver),
+        'launch-quality': requestContext => [
+          loadDashboard('/api/launch-quality-observer?observationLimit=30&snapshotLimit=30', renderLaunchQualityObserver, requestContext),
         ],
-        'holder-growth': () => [
-          json('/api/holder-growth-shadow?positionLimit=100').then(renderHolderGrowthShadow),
+        'holder-growth': requestContext => [
+          loadDashboard('/api/holder-growth-shadow?positionLimit=30', renderHolderGrowthShadow, requestContext),
         ],
-        'flow-first': () => [
-          json('/api/flow-first-shadow?positionLimit=30').then(renderFlowFirstShadow),
+        'flow-first': requestContext => [
+          loadDashboard('/api/flow-first-shadow?positionLimit=30', renderFlowFirstShadow, requestContext),
         ],
-        'smart-pullback': () => [
-          json('/api/smart-pullback-shadow?positionLimit=30').then(renderSmartPullbackShadow),
+        'smart-pullback': requestContext => [
+          loadDashboard('/api/smart-pullback-shadow?positionLimit=30', renderSmartPullbackShadow, requestContext),
         ],
-        'primary-shadow': () => [
-          json('/api/primary-signal-shadow?positionLimit=30').then(renderPrimarySignalShadow),
+        'primary-shadow': requestContext => [
+          loadDashboard('/api/primary-signal-shadow?positionLimit=30', renderPrimarySignalShadow, requestContext),
         ],
       };
       const requestsByTab = {
-        overview: () => [
-          json('/api/overview').then(renderOverview),
+        overview: requestContext => [
+          loadDashboard('/api/overview', renderOverview, requestContext),
         ],
-        signals: () => [
-          json('/api/signals?limit=50').then(renderSignals),
+        signals: requestContext => [
+          loadDashboard('/api/signals?limit=50', renderSignals, requestContext),
         ],
         backtest: () => [],
-        wallets: () => [
-          json('/api/smart-wallets').then(renderWallets),
-          json('/api/signal-repetition').then(renderSignalQuality),
+        wallets: requestContext => [
+          loadDashboard('/api/smart-wallets', renderWallets, requestContext),
+          loadDashboard('/api/signal-repetition', renderSignalQuality, requestContext),
         ],
-        'live-trading': () => (liveStrategyRequests[activeLiveStrategyId] || (() => []))(),
-        health: () => [
-          json('/api/health').then(renderHealth),
+        'live-trading': requestContext => (
+          liveStrategyRequests[activeLiveStrategyId] || (() => [])
+        )(requestContext),
+        health: requestContext => [
+          loadDashboard('/api/health', renderHealth, requestContext),
         ],
       };
       try {
         const createRequests = requestsByTab[activeTabId] || (() => []);
-        await Promise.allSettled(createRequests());
+        const results = await Promise.allSettled(createRequests(context));
+        const failure = results.find(result => (
+          result.status === 'rejected' && result.reason?.name !== 'AbortError'
+        ));
+        if (failure && generation === refreshGeneration && activeTabId === 'live-trading') {
+          setStrategyLoadStatus(`加载失败：${failure.reason?.message || '接口无响应'}。请再次点击该策略重试。`, 'error');
+        }
       } finally {
-        refreshInFlight = false;
-        if (refreshQueued) {
-          refreshQueued = false;
-          void refresh();
+        if (generation === refreshGeneration) {
+          refreshInFlight = false;
+          activeRefreshController = null;
         }
       }
     }
