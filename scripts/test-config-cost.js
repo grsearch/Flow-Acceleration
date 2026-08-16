@@ -55,27 +55,44 @@ assert.strictEqual(config.liveTrading.maxDailySpendSol, undefined);
 assert.strictEqual(config.liveTrading.maxDailyTrades, undefined);
 assert.strictEqual(config.liveTrading.maxDailyLossSol, undefined);
 assert.strictEqual(config.liveTrading.maxConcurrentPositions, 3);
-assert.strictEqual(config.liveTrading.strategies[0].id, 'post_gd20_35_r1_5_5_age60_xleg_v3');
-assert.strictEqual(config.liveTrading.strategies[0].positionSizeSol, 1);
-assert.strictEqual(config.liveTrading.strategies[0].entryEnabled, true);
+const liveContinuity = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'migration_continuity_mc_c5_e120_live'
+));
+const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
+));
+const liveV3 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
+));
+assert.strictEqual(liveContinuity.positionSizeSol, 1);
+assert.strictEqual(liveContinuity.entryEnabled, true);
+assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
+assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
+assert.strictEqual(liveGraduationAccel.positionSizeSol, 1);
+assert.strictEqual(liveGraduationAccel.entryEnabled, true);
+assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
+assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
+assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
+assert.strictEqual(liveV3.positionSizeSol, 1);
+assert.strictEqual(liveV3.entryEnabled, false);
 assert.strictEqual(config.liveTrading.priorityFeeSol, 0.0005);
 assert.strictEqual(config.liveTrading.priorityFeeMicroLamports, 2_000_000);
-assert.strictEqual(config.liveTrading.strategies[0].market, 'PUMP_AMM');
-assert.strictEqual(config.liveTrading.strategies[0].dropMinPct, 20);
-assert.strictEqual(config.liveTrading.strategies[0].dropMaxPct, 35);
-assert.strictEqual(config.liveTrading.strategies[0].reboundMinPct, 1.5);
-assert.strictEqual(config.liveTrading.strategies[0].reboundMaxPct, 5);
-assert.strictEqual(config.liveTrading.strategies[0].trackingAgeMs, 60_000);
-assert.strictEqual(config.liveTrading.strategies[0].maxEntryPriceJumpPct, 3);
-assert.strictEqual(config.liveTrading.strategies[0].maxEntriesPerMint, 1);
-assert.strictEqual(config.liveTrading.strategies[0].reentryCooldownMs, 1_000);
-assert.strictEqual(config.liveTrading.strategies[0].trailingActivationPct, 8);
-assert.strictEqual(config.liveTrading.strategies[0].trailingStopPct, 3);
-assert.strictEqual(config.liveTrading.strategies[0].maxHoldMs, 15_000);
-assert.strictEqual(config.liveTrading.strategies[1].id, 'post_gd25_32_r2_4_age30_xleg_v2');
-assert.strictEqual(config.liveTrading.strategies[1].entryEnabled, false);
-assert.strictEqual(config.liveTrading.strategies[2].id, 'post_gd25_35_xleg');
-assert.strictEqual(config.liveTrading.strategies[2].entryEnabled, false);
+assert.strictEqual(liveV3.market, 'PUMP_AMM');
+assert.strictEqual(liveV3.dropMinPct, 20);
+assert.strictEqual(liveV3.dropMaxPct, 35);
+assert.strictEqual(liveV3.reboundMinPct, 1.5);
+assert.strictEqual(liveV3.reboundMaxPct, 5);
+assert.strictEqual(liveV3.trackingAgeMs, 60_000);
+assert.strictEqual(liveV3.maxEntryPriceJumpPct, 3);
+assert.strictEqual(liveV3.maxEntriesPerMint, 1);
+assert.strictEqual(liveV3.reentryCooldownMs, 1_000);
+assert.strictEqual(liveV3.trailingActivationPct, 8);
+assert.strictEqual(liveV3.trailingStopPct, 3);
+assert.strictEqual(liveV3.maxHoldMs, 15_000);
+assert.strictEqual(config.liveTrading.strategies
+  .find((strategy) => strategy.id === 'post_gd25_32_r2_4_age30_xleg_v2').entryEnabled, false);
+assert.strictEqual(config.liveTrading.strategies
+  .find((strategy) => strategy.id === 'post_gd25_35_xleg').entryEnabled, false);
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);
 assert.strictEqual(config.liveTrading.sellSlippagePct, 15);
 assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
@@ -265,13 +282,32 @@ assert.deepStrictEqual(
     ['GD25_35', null, null],
     ['GE30_R23_F1', 30_000, 1],
     ['GE30_R23_F3', 30_000, 3],
+    ['GE30_R23_F1_EXEC', 30_000, 1],
+    ['GE30_R23_F2_ONLY', 30_000, 2],
+    ['GE30_R23_F1_NIGHT', 30_000, 1],
+    ['GE30_R23_F1_DAY', 30_000, 1],
     ['GE30_D25_32_R24_F1', 30_000, 1],
   ],
 );
 assert.deepStrictEqual(
+  config.migratedDropReboundShadow.entryProfiles
+    .find((profile) => profile.id === 'GE30_R23_F1_EXEC').positionSols,
+  [0.05, 0.1, 0.25, 0.5, 1],
+);
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.entryProfiles
+    .find((profile) => profile.id === 'GE30_R23_F1_NIGHT').beijingHourRanges,
+  [[0, 8], [18, 24]],
+);
+assert.deepStrictEqual(
   config.migratedDropReboundShadow.exitProfiles.map((profile) => profile.id),
   [
-    'X3', 'X8', 'XLEG', 'XB50', 'XB25',
+    'X3', 'X8', 'XLEG',
+    'GEXEC_XLEG', 'G2_XLEG', 'GTIME_XLEG',
+    'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
+    'G1_B75_H30', 'G1_B50_H60',
+    'G1_STAIR_H60', 'G1_STAIR_H120',
+    'XB50', 'XB25',
     'V2_R2_H10', 'V2_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
     'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15',
   ],
@@ -286,6 +322,7 @@ assert.strictEqual(config.migrationContinuityShadow.enabled, true);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
 assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
   id: 'MC_C5', label: 'MC-C · 毕业后5秒质量延续',
+  liveStrategyId: 'migration_continuity_mc_c5_e120_live',
   minBuyers: 20, minNetFlowSol: 5, minReturnPct: 5, maxSellBuyRatio: 0.6,
 });
 assert.deepStrictEqual(
