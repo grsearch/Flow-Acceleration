@@ -22,6 +22,72 @@ function shadowPrice(trade) {
   return reservePrice > 0 ? reservePrice : finite(trade?.price);
 }
 
+const BLEND_EXIT_MODES = new Set([
+  'BLEND_XLEG_X8',
+  'BLEND_XLEG_RUNNER',
+  'BLEND_XLEG_RUNNER_RISK',
+]);
+
+function capacityId(positionSol) {
+  return `${String(positionSol).replace('.', '_')}SOL`;
+}
+
+function beijingHourAllowed(timestampMs, ranges) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return true;
+  const hour = new Date(timestampMs + 8 * 60 * 60_000).getUTCHours();
+  return ranges.some(([start, end]) => hour >= Number(start) && hour < Number(end));
+}
+
+// Approximate an exact-SOL PumpSwap fill from the pool reserves carried by the
+// causal trade. This deliberately excludes protocol/LP fees: those remain in
+// configuredCostPct, while the size-dependent AMM curve impact is reflected in
+// the entry price itself.
+function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
+  try {
+    const base = BigInt(trade.poolBaseReservesRaw || 0);
+    const quote = BigInt(trade.poolQuoteReservesRaw || 0)
+      + BigInt(trade.virtualQuoteReservesRaw || 0);
+    const input = BigInt(Math.max(1, Math.round(Number(positionSol) * 1e9)));
+    if (base <= 0n || quote <= 0n || input <= 0n) {
+      return { price: fallbackPrice, impactPct: null };
+    }
+    const tokensOutRaw = base * input / (quote + input);
+    const tokenUnits = Number(tokensOutRaw) / 1e6;
+    const baseTokens = Number(base) / 1e6;
+    const spotPrice = (Number(quote) / 1e9) / baseTokens;
+    const price = Number(positionSol) / tokenUnits;
+    if (!(price > 0) || !(spotPrice > 0)) {
+      return { price: fallbackPrice, impactPct: null };
+    }
+    return { price, impactPct: ((price / spotPrice) - 1) * 100 };
+  } catch (_) {
+    return { price: fallbackPrice, impactPct: null };
+  }
+}
+
+function ammSellAveragePrice(trade, tokenUnits, fallbackPrice) {
+  try {
+    const base = BigInt(trade.poolBaseReservesRaw || 0);
+    const quote = BigInt(trade.poolQuoteReservesRaw || 0)
+      + BigInt(trade.virtualQuoteReservesRaw || 0);
+    const input = BigInt(Math.max(1, Math.round(Number(tokenUnits) * 1e6)));
+    if (base <= 0n || quote <= 0n || input <= 0n) {
+      return { price: fallbackPrice, impactPct: null };
+    }
+    const quoteOutRaw = quote * input / (base + input);
+    const solOut = Number(quoteOutRaw) / 1e9;
+    const baseTokens = Number(base) / 1e6;
+    const spotPrice = (Number(quote) / 1e9) / baseTokens;
+    const price = solOut / Number(tokenUnits);
+    if (!(price > 0) || !(spotPrice > 0)) {
+      return { price: fallbackPrice, impactPct: null };
+    }
+    return { price, impactPct: ((price / spotPrice) - 1) * 100 };
+  } catch (_) {
+    return { price: fallbackPrice, impactPct: null };
+  }
+}
+
 function rowPosition(row) {
   const value = (snake, camel) => row[snake] ?? row[camel];
   return {
@@ -34,6 +100,7 @@ function rowPosition(row) {
     mint: row.mint,
     symbol: row.symbol,
     status: row.status,
+    positionSol: finite(value('position_sol', 'positionSol'), 1),
     configuredCostPct: finite(value('configured_cost_pct', 'configuredCostPct'), 0),
     reboundAt: value('rebound_at', 'reboundAt'),
     reboundPrice: value('rebound_price', 'reboundPrice'),
@@ -43,6 +110,8 @@ function rowPosition(row) {
     entryMarket: value('entry_market', 'entryMarket'),
     entryPrice: value('entry_price', 'entryPrice'),
     entryJumpPct: value('entry_jump_pct', 'entryJumpPct'),
+    entryImpactPct: value('entry_impact_pct', 'entryImpactPct'),
+    exitImpactPct: value('exit_impact_pct', 'exitImpactPct'),
     highestPrice: value('highest_price', 'highestPrice'),
     lowestPrice: value('lowest_price', 'lowestPrice'),
     lastObservedAt: value('last_observed_at', 'lastObservedAt'),
@@ -312,14 +381,22 @@ class MigratedDropReboundShadowSuite {
     return `${lifecycleStage}:${profileId}:${mint}`;
   }
 
-  _signalCount(lifecycleStage, profileId, mint) {
+  _signalCount(lifecycleStage, profile, mint) {
+    const profileId = profile.id;
     const key = this._signalCountKey(lifecycleStage, profileId, mint);
     if (!this.signalCounts.has(key)) {
-      this.signalCounts.set(key, this.store.migratedDropReboundShadowSignalCount(
+      const stored = this.store.migratedDropReboundShadowSignalCount(
         lifecycleStage,
         profileId,
         mint,
-      ));
+      );
+      // A second-opportunity-only profile stores no row for opportunity one.
+      // Once its row exists, restore the causal ordinal rather than treating a
+      // process restart as another second opportunity.
+      const ordinalOffset = stored > 0
+        ? Math.max(0, Number(profile.minSignalOrdinal || 1) - 1)
+        : 0;
+      this.signalCounts.set(key, stored + ordinalOffset);
     }
     return this.signalCounts.get(key) || 0;
   }
@@ -436,23 +513,32 @@ class MigratedDropReboundShadowSuite {
             } else {
               const lifecycleAgeMs = Math.max(0, trade.timestampMs - anchorAt);
               const signalKey = this._signalCountKey(lifecycleStage, profile.id, trade.mint);
-              const signalCount = this._signalCount(lifecycleStage, profile.id, trade.mint);
+              const signalCount = this._signalCount(lifecycleStage, profile, trade.mint);
+              const signalOrdinal = signalCount + 1;
               const agePass = profile.maxLifecycleAgeMs == null
                 || lifecycleAgeMs <= profile.maxLifecycleAgeMs;
               const countPass = profile.maxSignalsPerMint == null
-                || signalCount < profile.maxSignalsPerMint;
-              if (agePass && countPass) {
-                this._emitSignal({
-                  profile,
-                  lifecycleStage,
-                  trade,
-                  price,
-                  anchorAt,
-                  candidate,
-                  dropPct,
-                  reboundPct,
-                });
-                this.signalCounts.set(signalKey, signalCount + 1);
+                || signalOrdinal <= profile.maxSignalsPerMint;
+              const minimumPass = profile.minSignalOrdinal == null
+                || signalOrdinal >= profile.minSignalOrdinal;
+              const timePass = beijingHourAllowed(
+                trade.timestampMs,
+                profile.beijingHourRanges,
+              );
+              if (agePass && countPass && timePass) {
+                if (minimumPass) {
+                  this._emitSignal({
+                    profile,
+                    lifecycleStage,
+                    trade,
+                    price,
+                    anchorAt,
+                    candidate,
+                    dropPct,
+                    reboundPct,
+                  });
+                }
+                this.signalCounts.set(signalKey, signalOrdinal);
               }
             }
           }
@@ -491,59 +577,70 @@ class MigratedDropReboundShadowSuite {
     for (const exitProfile of this.exitProfiles.values()) {
       if (Array.isArray(exitProfile.entryProfileIds)
         && !exitProfile.entryProfileIds.includes(profile.id)) continue;
-      const cohortId = `${stageCode}_${profile.id}_${exitProfile.id}`;
-      const configuredCostPct = this.costs.deterministicCostPct
-        + (['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(exitProfile.exitMode)
-          ? this.costs.fixedCostPct : 0);
-      const saved = this.store.createMigratedDropReboundShadowPosition({
-        cohortId,
-        lifecycleStage,
-        entryProfileId: profile.id,
-        exitProfileId: exitProfile.id,
-        episodeId,
-        mint: trade.mint,
-        symbol: trade.symbol || this.store.getToken(trade.mint)?.symbol || null,
-        status: STATUS.PENDING_ENTRY,
-        positionSol: this.config.positionSizeSol,
-        configuredCostPct,
-        migratedAt: anchorAt,
-        migrationAgeMs: Math.max(0, trade.timestampMs - anchorAt),
-        windowMs: profile.windowMs,
-        dropMinPct: profile.dropMinPct,
-        dropMaxPct: profile.dropMaxPct,
-        reboundMinPct: profile.reboundMinPct,
-        reboundMaxPct: profile.reboundMaxPct,
-        reboundTimeoutMs: profile.reboundTimeoutMs,
-        peakAt: candidate.peakAt,
-        peakPrice: candidate.peakPrice,
-        lowAt: candidate.lowAt,
-        lowPrice: candidate.lowPrice,
-        dropPct,
-        reboundAt: trade.timestampMs,
-        reboundPrice: price,
-        reboundPct,
-        reboundElapsedMs: trade.timestampMs - candidate.startedAt,
-        reboundFromLowMs: trade.timestampMs - candidate.lowAt,
-        entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
-        entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs
-          + this.config.entryTimeoutMs,
-        exitMode: exitProfile.exitMode,
-        fixedHoldMs: exitProfile.fixedHoldMs,
-        trailingActivationPct: exitProfile.trailingActivationPct,
-        trailingStopPct: exitProfile.trailingStopPct,
-        hardStopPct: exitProfile.hardStopPct,
-        fastTakeProfitPct: exitProfile.fastTakeProfitPct,
-        fastTakeProfitWindowMs: exitProfile.fastTakeProfitWindowMs,
-        lossCheckAtMs: exitProfile.lossCheckAtMs,
-        lossCheckRecoveryPct: exitProfile.lossCheckRecoveryPct,
-        maxHoldMs: exitProfile.maxHoldMs,
-        coreWeightPct: exitProfile.coreWeightPct,
-        runnerHoldMs: exitProfile.runnerHoldMs,
-      });
-      if (!saved?.inserted) continue;
-      const pending = rowPosition(saved);
-      this.pendingEntries.set(pending.id, pending);
-      this._indexRow(pending);
+      if (Array.isArray(profile.exitProfileIds)
+        && !profile.exitProfileIds.includes(exitProfile.id)) continue;
+      const positionSols = Array.isArray(profile.positionSols) && profile.positionSols.length
+        ? profile.positionSols : [this.config.positionSizeSol];
+      for (const positionSol of positionSols) {
+        const capacitySuffix = positionSols.length > 1 ? `_${capacityId(positionSol)}` : '';
+        const cohortId = `${stageCode}_${profile.id}_${exitProfile.id}${capacitySuffix}`;
+        const costs = costBreakdown({
+          ...this.config.costModel,
+          positionSizeSol: positionSol,
+        });
+        const configuredCostPct = costs.deterministicCostPct
+          - (profile.capacityAware ? costs.priceImpactPct : 0)
+          + (BLEND_EXIT_MODES.has(exitProfile.exitMode) ? costs.fixedCostPct : 0);
+        const saved = this.store.createMigratedDropReboundShadowPosition({
+          cohortId,
+          lifecycleStage,
+          entryProfileId: profile.id,
+          exitProfileId: exitProfile.id,
+          episodeId,
+          mint: trade.mint,
+          symbol: trade.symbol || this.store.getToken(trade.mint)?.symbol || null,
+          status: STATUS.PENDING_ENTRY,
+          positionSol,
+          configuredCostPct,
+          migratedAt: anchorAt,
+          migrationAgeMs: Math.max(0, trade.timestampMs - anchorAt),
+          windowMs: profile.windowMs,
+          dropMinPct: profile.dropMinPct,
+          dropMaxPct: profile.dropMaxPct,
+          reboundMinPct: profile.reboundMinPct,
+          reboundMaxPct: profile.reboundMaxPct,
+          reboundTimeoutMs: profile.reboundTimeoutMs,
+          peakAt: candidate.peakAt,
+          peakPrice: candidate.peakPrice,
+          lowAt: candidate.lowAt,
+          lowPrice: candidate.lowPrice,
+          dropPct,
+          reboundAt: trade.timestampMs,
+          reboundPrice: price,
+          reboundPct,
+          reboundElapsedMs: trade.timestampMs - candidate.startedAt,
+          reboundFromLowMs: trade.timestampMs - candidate.lowAt,
+          entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
+          entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs
+            + this.config.entryTimeoutMs,
+          exitMode: exitProfile.exitMode,
+          fixedHoldMs: exitProfile.fixedHoldMs,
+          trailingActivationPct: exitProfile.trailingActivationPct,
+          trailingStopPct: exitProfile.trailingStopPct,
+          hardStopPct: exitProfile.hardStopPct,
+          fastTakeProfitPct: exitProfile.fastTakeProfitPct,
+          fastTakeProfitWindowMs: exitProfile.fastTakeProfitWindowMs,
+          lossCheckAtMs: exitProfile.lossCheckAtMs,
+          lossCheckRecoveryPct: exitProfile.lossCheckRecoveryPct,
+          maxHoldMs: exitProfile.maxHoldMs,
+          coreWeightPct: exitProfile.coreWeightPct,
+          runnerHoldMs: exitProfile.runnerHoldMs,
+        });
+        if (!saved?.inserted) continue;
+        const pending = rowPosition(saved);
+        this.pendingEntries.set(pending.id, pending);
+        this._indexRow(pending);
+      }
     }
     this.metrics.lastActionAt = this.now();
   }
@@ -573,23 +670,28 @@ class MigratedDropReboundShadowSuite {
           this.metrics.priceJump += 1;
           continue;
         }
+        const fill = entryProfile?.capacityAware && position.lifecycleStage === 'POST_MIGRATION'
+          ? ammBuyAveragePrice(trade, position.positionSol, price)
+          : { price, impactPct: null };
         position.status = STATUS.OPEN;
         position.entryAt = trade.timestampMs;
         position.entryMarket = trade.market;
-        position.entryPrice = price;
+        position.entryPrice = fill.price;
         position.entryJumpPct = jumpPct;
-        position.highestPrice = price;
-        position.lowestPrice = price;
+        position.entryImpactPct = fill.impactPct;
+        position.highestPrice = fill.price;
+        position.lowestPrice = fill.price;
         position.lastObservedAt = trade.timestampMs;
         position.lastPrice = price;
         this.store.updateMigratedDropReboundShadowPosition(position.id, {
           status: STATUS.OPEN,
           entryAt: trade.timestampMs,
           entryMarket: trade.market,
-          entryPrice: price,
+          entryPrice: fill.price,
           entryJumpPct: jumpPct,
-          highestPrice: price,
-          lowestPrice: price,
+          entryImpactPct: fill.impactPct,
+          highestPrice: fill.price,
+          lowestPrice: fill.price,
           lastObservedAt: trade.timestampMs,
           lastPrice: price,
           maxFavorableReturnPct: 0,
@@ -608,7 +710,7 @@ class MigratedDropReboundShadowSuite {
       }
       if (position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt
         || !this._eligibleExitTrade(position, trade, price)) continue;
-      if (['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(position.exitMode)
+      if (BLEND_EXIT_MODES.has(position.exitMode)
         && position.coreExitTargetAt
         && !position.coreExitAt && trade.timestampMs >= position.coreExitTargetAt) {
         this._fillCoreExit(position, trade.timestampMs, price);
@@ -683,12 +785,15 @@ class MigratedDropReboundShadowSuite {
     if (position.exitMode === 'FIXED_HOLD' && ageMs >= position.fixedHoldMs) {
       reason = `FIXED_HOLD_${position.fixedHoldMs}MS`;
       triggerAt = position.entryAt + position.fixedHoldMs;
-    } else if (['LEGACY', 'RISK_XLEG', 'BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER']
+    } else if (['LEGACY', 'RISK_XLEG', ...BLEND_EXIT_MODES]
       .includes(position.exitMode)) {
       const riskMode = position.exitMode === 'RISK_XLEG';
-      const blendMode = ['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(position.exitMode);
+      const blendMode = BLEND_EXIT_MODES.has(position.exitMode);
+      const blendRiskMode = position.exitMode === 'BLEND_XLEG_RUNNER_RISK';
       if (riskMode && position.hardStopPct > 0
         && grossReturnPct <= -position.hardStopPct) reason = 'RISK_HARD_STOP';
+      if (blendRiskMode && position.hardStopPct > 0
+        && grossReturnPct <= -position.hardStopPct) reason = 'BLEND_HARD_STOP';
       if (!reason && position.fastTakeProfitPct > 0
         && ageMs <= position.fastTakeProfitWindowMs
         && grossReturnPct >= position.fastTakeProfitPct) reason = 'FAST_TAKE_PROFIT';
@@ -713,16 +818,44 @@ class MigratedDropReboundShadowSuite {
         }
       }
       if (blendMode) {
-        if (reason && !position.coreExitTargetAt && !position.coreExitAt) {
-          this._requestCoreExit(position, triggerAt, reason);
+        if (reason === 'BLEND_HARD_STOP') {
+          // A full-position safety exit prevents the runner from deliberately
+          // remaining exposed after a sudden post-migration collapse.
+        } else {
+          if (reason && !position.coreExitTargetAt && !position.coreExitAt) {
+            this._requestCoreExit(position, triggerAt, reason);
+          }
+          // Legacy/runner exits only close the core. Once it is filled, keep
+          // the runner open until its independent time horizon.
+          reason = null;
         }
-        reason = null;
-        if (ageMs >= position.runnerHoldMs) {
+        if (!reason && ageMs >= position.runnerHoldMs) {
           reason = `BLEND_RUNNER_HOLD_${position.runnerHoldMs}MS`;
           triggerAt = position.entryAt + position.runnerHoldMs;
         }
       } else if (!reason && ageMs >= position.maxHoldMs) {
         reason = 'MAX_HOLD';
+        triggerAt = position.entryAt + position.maxHoldMs;
+      }
+    } else if (position.exitMode === 'STAIR_TRAILING') {
+      const exitProfile = this.exitProfiles.get(position.exitProfileId);
+      const tiers = [...(exitProfile?.trailingTiers || [])]
+        .sort((left, right) => left.activationPct - right.activationPct);
+      const activeTier = tiers.filter((tier) => peakReturnPct >= tier.activationPct).at(-1);
+      if (position.hardStopPct > 0 && grossReturnPct <= -position.hardStopPct) {
+        reason = 'STAIR_HARD_STOP';
+      }
+      if (!reason && activeTier && !position.trailingActivatedAt) {
+        position.trailingActivatedAt = timestampMs;
+        this.store.updateMigratedDropReboundShadowPosition(position.id, {
+          trailingActivatedAt: timestampMs,
+        });
+      }
+      if (!reason && activeTier && drawdownPct >= activeTier.stopPct) {
+        reason = `STAIR_TRAILING_${activeTier.activationPct}_${activeTier.stopPct}`;
+      }
+      if (!reason && ageMs >= position.maxHoldMs) {
+        reason = 'STAIR_MAX_HOLD';
         triggerAt = position.entryAt + position.maxHoldMs;
       }
     } else if (position.exitMode === 'TAIL') {
@@ -783,11 +916,20 @@ class MigratedDropReboundShadowSuite {
 
   _close(position, trade, price) {
     this._updateExtrema(position, trade.timestampMs, price);
-    const runnerGrossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const entryProfile = this.entryProfiles.get(position.entryProfileId);
+    const exitFill = entryProfile?.capacityAware
+      ? ammSellAveragePrice(
+        trade,
+        position.positionSol / position.entryPrice,
+        price,
+      )
+      : { price, impactPct: null };
+    const runnerExitPrice = exitFill.price;
+    const runnerGrossReturnPct = ((runnerExitPrice / position.entryPrice) - 1) * 100;
     let grossReturnPct = runnerGrossReturnPct;
-    let exitPrice = price;
+    let exitPrice = runnerExitPrice;
     let exitReason = position.exitReason;
-    if (['BLEND_XLEG_X8', 'BLEND_XLEG_RUNNER'].includes(position.exitMode)) {
+    if (BLEND_EXIT_MODES.has(position.exitMode) && exitReason !== 'BLEND_HARD_STOP') {
       const coreWeight = Math.min(1, Math.max(0, finite(position.coreWeightPct, 50) / 100));
       const corePrice = finite(position.coreExitPrice, price);
       const coreGrossReturnPct = ((corePrice / position.entryPrice) - 1) * 100;
@@ -804,6 +946,7 @@ class MigratedDropReboundShadowSuite {
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
       exitPrice,
+      exitImpactPct: exitFill.impactPct,
       exitReason,
       grossReturnPct,
       netReturnPct: grossReturnPct - finite(
@@ -858,4 +1001,11 @@ class MigratedDropReboundShadowSuite {
   }
 }
 
-module.exports = { MigratedDropReboundShadowSuite, STATUS, shadowPrice };
+module.exports = {
+  MigratedDropReboundShadowSuite,
+  STATUS,
+  shadowPrice,
+  ammBuyAveragePrice,
+  ammSellAveragePrice,
+  beijingHourAllowed,
+};
