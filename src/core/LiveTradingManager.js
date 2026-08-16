@@ -451,7 +451,512 @@ class LiveTradingManager {
     // DISABLED is execution-disabled, not observation-disabled. Keep recording
     // strategy matches so a safety-locked deployment still produces evidence.
     return this.detectorStrategies.size > 0;
-…5825 tokens truncated…D_UNOBSERVED';
+  }
+
+  _maxTrackingAgeMs() {
+    return Math.max(0, ...[...this.detectorStrategies.values()]
+      .map((strategy) => Number(strategy.trackingAgeMs) || 0));
+  }
+
+  _acceptAmmPrice(trade) {
+    const settings = this.config.ammPriceContinuity || {
+      minRatio: 0.2,
+      maxRatio: 5,
+      resetAfterMs: 15_000,
+    };
+    const current = this.ammPriceStates.get(trade.mint);
+    if (!current || trade.timestampMs - current.at > settings.resetAfterMs) {
+      this.ammPriceStates.set(trade.mint, { price: trade.price, at: trade.timestampMs });
+      return true;
+    }
+    const ratio = trade.price / current.price;
+    if (ratio < settings.minRatio || ratio > settings.maxRatio) return false;
+    current.price = trade.price;
+    current.at = trade.timestampMs;
+    return true;
+  }
+
+  _observeStrategy(strategy, trade, graduatedAt) {
+    if (!(graduatedAt > 0) || trade.timestampMs < graduatedAt
+      || trade.timestampMs - graduatedAt > strategy.trackingAgeMs) return;
+    const states = this.detectors.get(strategy.id);
+    if (!states) return;
+    let state = states.get(trade.mint);
+    if (!state) {
+      state = { prices: [], candidate: null, dropReady: true, lastTimestampMs: 0 };
+      states.set(trade.mint, state);
+    }
+    if (state.lastTimestampMs && trade.timestampMs < state.lastTimestampMs) return;
+    state.lastTimestampMs = trade.timestampMs;
+    state.prices.push({ timestampMs: trade.timestampMs, price: trade.price });
+    const cutoff = trade.timestampMs - strategy.windowMs;
+    while (state.prices.length && state.prices[0].timestampMs < cutoff) state.prices.shift();
+    let peak = state.prices[0];
+    for (const row of state.prices) if (row.price > peak.price) peak = row;
+    const rollingDropPct = ((trade.price / peak.price) - 1) * 100;
+    if (rollingDropPct > -strategy.dropMinPct) state.dropReady = true;
+    if (rollingDropPct < -strategy.dropMaxPct) state.dropReady = false;
+
+    if (state.candidate) {
+      const candidate = state.candidate;
+      if (trade.timestampMs > candidate.expiresAt) {
+        state.candidate = null;
+      } else {
+        if (trade.price < candidate.lowPrice) {
+          candidate.lowPrice = trade.price;
+          candidate.lowAt = trade.timestampMs;
+        }
+        const dropPct = ((candidate.lowPrice / candidate.peakPrice) - 1) * 100;
+        const reboundPct = ((trade.price / candidate.lowPrice) - 1) * 100;
+        if (dropPct < -strategy.dropMaxPct) {
+          state.candidate = null;
+          state.dropReady = false;
+        } else if (reboundPct >= strategy.reboundMinPct) {
+          state.candidate = null;
+          state.dropReady = false;
+          if (reboundPct <= strategy.reboundMaxPct) {
+            this._emitStrategySignal(strategy, trade, graduatedAt, candidate, dropPct, reboundPct);
+          }
+        }
+      }
+    }
+
+    if (!state.candidate && state.dropReady
+      && rollingDropPct <= -strategy.dropMinPct && rollingDropPct >= -strategy.dropMaxPct) {
+      state.candidate = {
+        peakPrice: peak.price,
+        peakAt: peak.timestampMs,
+        lowPrice: trade.price,
+        lowAt: trade.timestampMs,
+        expiresAt: trade.timestampMs + strategy.reboundTimeoutMs,
+      };
+      state.dropReady = false;
+      this.metrics.candidates += 1;
+    }
+  }
+
+  _emitStrategySignal(strategy, trade, graduatedAt, candidate, dropPct, reboundPct) {
+    // The timestamp/slot/low tuple makes each fresh causal drop-rebound cycle
+    // durable across restarts. The successful-entry limit is enforced from
+    // live_positions, so rejected or failed buys do not consume an entry.
+    const episodeId = [
+      strategy.id,
+      trade.mint,
+      trade.timestampMs,
+      Number.isSafeInteger(Number(trade.slot)) ? Number(trade.slot) : 'NA',
+      candidate.lowAt,
+    ].join(':');
+    this.metrics.evaluated += 1;
+    this.metrics.matched += 1;
+    this.metrics.signals += 1;
+    const decision = this.store.recordLiveStrategyDecision({
+      strategyId: strategy.id,
+      episodeId,
+      timestampMs: trade.timestampMs,
+      receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+      mint: trade.mint,
+      symbol: this.tracked.get(trade.mint)?.symbol || null,
+      ruleVersion: strategy.ruleVersion || LIVE_RULE_VERSION,
+      market: 'PUMP_AMM',
+      referencePrice: trade.price,
+      features: {
+        migratedAt: graduatedAt,
+        migrationAgeMs: trade.timestampMs - graduatedAt,
+        peakAt: candidate.peakAt,
+        lowAt: candidate.lowAt,
+        dropPct,
+        reboundPct,
+        windowMs: strategy.windowMs,
+        referencePriceSource: Number(trade.reservePrice) > 0
+          ? 'EFFECTIVE_POOL_RESERVES'
+          : 'TRADE_AVERAGE',
+        poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+        poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+        virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+        maxEntryPriceJumpPct: strategy.maxEntryPriceJumpPct,
+        maxEntrySelfImpactPct: strategy.maxEntrySelfImpactPct
+          ?? this.config.maxEntrySelfImpactPct,
+      },
+      ruleMatched: true,
+      rejectionReasons: [],
+      mode: this.mode,
+      actionStatus: this.mode === 'DISABLED' ? 'MATCHED_DISABLED' : 'QUEUED',
+    });
+    if (!decision?.inserted || this.mode === 'DISABLED' || this.stopping) return;
+    const event = {
+      strategyId: strategy.id,
+      episodeId,
+      mint: trade.mint,
+      symbol: this.tracked.get(trade.mint)?.symbol || null,
+      price: trade.price,
+      slot: trade.slot,
+      timestampMs: trade.timestampMs,
+      receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+      market: 'PUMP_AMM',
+      poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+      poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+      virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+    };
+    this.entryQueue = this.entryQueue
+      .then(() => this._enter(decision, event))
+      .catch((error) => this._rememberError(error));
+    this._track(this.entryQueue);
+  }
+
+  _riskReason(event) {
+    if (this._killSwitchActive()) return 'KILL_SWITCH';
+    const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
+    const strategy = this.strategies.get(event.strategyId);
+    if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
+    const maxSignalAgeMs = strategy?.maxSignalAgeMs || this.config.maxSignalAgeMs;
+    if (Number.isFinite(receivedAt)
+      && this.now() - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
+    if (this.positions.has(event.mint)) return 'ACTIVE_MINT';
+    if (this.positions.size >= this.config.maxConcurrentPositions) return 'MAX_POSITIONS';
+    const maxEntriesPerMint = Math.max(1, Number(strategy?.maxEntriesPerMint) || 1);
+    const successfulEntries = typeof this.store.successfulLiveEntryCountForMintStrategy === 'function'
+      ? this.store.successfulLiveEntryCountForMintStrategy(event.mint, event.strategyId)
+      : 0;
+    if (successfulEntries >= maxEntriesPerMint) return 'MINT_ENTRY_LIMIT';
+    const lastSuccessful = typeof this.store.lastSuccessfulLivePositionForMintStrategy === 'function'
+      ? this.store.lastSuccessfulLivePositionForMintStrategy(event.mint, event.strategyId)
+      : this.store.lastLivePositionForMint(event.mint);
+    const cooldownMs = Number.isFinite(Number(strategy?.reentryCooldownMs))
+      ? Math.max(0, Number(strategy.reentryCooldownMs))
+      : this.config.mintCooldownMs;
+    if (lastSuccessful
+      && this.now() - Number(
+        lastSuccessful.closed_at || lastSuccessful.updated_at || lastSuccessful.created_at,
+      ) < cooldownMs) {
+      return 'MINT_REENTRY_COOLDOWN';
+    }
+    return null;
+  }
+
+  async _enter(decision, event) {
+    if (this.stopping) return;
+    const strategy = this.strategies.get(event.strategyId);
+    if (!strategy) return;
+    const riskReason = this._riskReason(event);
+    if (riskReason) {
+      this.metrics.riskRejected += 1;
+      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', riskReason);
+      return;
+    }
+
+    let position;
+    try {
+      position = this.store.createLivePosition({
+        strategyDecisionId: decision.id,
+        strategyId: strategy.id,
+        signalId: null,
+        sourceType: strategy.id,
+        mint: event.mint,
+        triggerWallet: null,
+        mode: this.mode,
+        status: 'OPENING',
+        positionSol: strategy.positionSizeSol,
+        entryMarket: event.market || strategy.market,
+        entryPrice: event.price,
+      });
+      position.tokenAmountRaw = null;
+      position.openedAt = null;
+      position.strategy = strategy;
+      this.positions.set(position.mint, position);
+    } catch (error) {
+      this.metrics.riskRejected += 1;
+      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', 'ACTIVE_MINT');
+      return;
+    }
+
+    const submittedAt = this.now();
+    position.entryStartedAt = submittedAt;
+    try {
+      let result;
+      if (this.mode === 'DRY_RUN') {
+        if (!(event.price > 0)) throw new Error('Missing strategy signal price for simulation');
+        const venue = event.market || strategy.market || 'PUMP_AMM';
+        const raw = BigInt(Math.max(
+          1,
+          Math.round((strategy.positionSizeSol / event.price) * 1e6),
+        ));
+        result = {
+          signature: `DRY-${strategy.id}-${decision.id}`,
+          venue,
+          tokenAmountRaw: raw.toString(),
+          expectedPrice: event.price,
+          execution: {
+            version: 2,
+            buyMode: `DRY_RUN_${venue}_FIXED_SOL`,
+            positionSol: strategy.positionSizeSol,
+            signalSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
+            readCommitment: this.config.readCommitment || 'processed',
+            confirmationCommitment: this.config.confirmationCommitment
+              || this.config.commitment
+              || 'confirmed',
+          },
+        };
+      } else if ((event.market || strategy.market) === 'PUMP_BONDING_CURVE') {
+        result = await this.executor.buy({
+          mint: event.mint,
+          solAmount: strategy.positionSizeSol,
+          referencePrice: event.price,
+          maxPriceJumpPct: strategy.maxEntryPriceJumpPct,
+          signalSlot: event.slot,
+        });
+      } else {
+        result = await this.executor.buyAmm({
+          mint: event.mint,
+          solAmount: strategy.positionSizeSol,
+          referencePrice: event.price,
+          maxPriceJumpPct: strategy.maxEntryPriceJumpPct,
+          maxSelfImpactPct: strategy.maxEntrySelfImpactPct
+            ?? this.config.maxEntrySelfImpactPct,
+          signalPoolBaseReservesRaw: event.poolBaseReservesRaw,
+          signalPoolQuoteReservesRaw: event.poolQuoteReservesRaw,
+          signalVirtualQuoteReservesRaw: event.virtualQuoteReservesRaw,
+        });
+      }
+      const openedAt = this.now();
+      position.status = 'OPEN';
+      position.tokenAmountRaw = result.tokenAmountRaw;
+      position.entryPrice = result.expectedPrice || event.price;
+      position.highestPrice = position.entryPrice;
+      position.lastObservedPrice = null;
+      position.openedAt = openedAt;
+      const settlement = result.execution?.settlement || null;
+      const orderId = this.store.recordLiveOrder({
+        positionId: position.id,
+        strategyDecisionId: decision.id,
+        strategyId: strategy.id,
+        mint: position.mint,
+        side: 'BUY',
+        venue: result.venue,
+        attempt: 1,
+        requestedSol: strategy.positionSizeSol,
+        requestedTokenRaw: result.tokenAmountRaw,
+        status: 'CONFIRMED',
+        signature: result.signature,
+        walletSolDelta: settlement?.walletSolDelta,
+        networkFeeSol: settlement?.networkFeeSol,
+        execution: orderExecution(result.execution, event, submittedAt, openedAt),
+        submittedAt,
+        confirmedAt: openedAt,
+      });
+      this.store.updateLivePosition(position.id, {
+        status: 'OPEN',
+        tokenAmountRaw: result.tokenAmountRaw,
+        entryMarket: result.venue,
+        entryPrice: position.entryPrice,
+        entrySignature: result.signature,
+        highestPrice: position.highestPrice,
+        openedAt,
+      });
+      this.store.refreshLivePositionSettlement(position.id);
+      if (position.mode === 'LIVE' && !settlement && result.signature) {
+        this._track(this._reconcileOrderSettlement({
+          orderId,
+          positionId: position.id,
+          signature: result.signature,
+        }));
+      }
+      this.store.updateLiveStrategyDecision(decision.id, 'OPEN', null);
+      this.metrics.entries += 1;
+      this.metrics.lastActionAt = openedAt;
+      this._armPositionExit(position);
+      if (strategy.exitMode === 'GRADUATION_CORE_RUNNER') {
+        const token = this.store.getToken(position.mint);
+        if (token?.graduated_at) this.onGraduated(token);
+      }
+    } catch (error) {
+      const failedAt = this.now();
+      const transactionFailed = error.transactionFailed || error.code === 'TRANSACTION_FAILED';
+      const confirmationUnknown = Boolean(error.signature) && !transactionFailed;
+      const orderId = this.store.recordLiveOrder({
+        positionId: position.id,
+        strategyDecisionId: decision.id,
+        strategyId: strategy.id,
+        mint: position.mint,
+        side: 'BUY',
+        venue: event.market || strategy.market || 'PUMP_AMM',
+        attempt: 1,
+        requestedSol: strategy.positionSizeSol,
+        status: confirmationUnknown ? 'CONFIRMATION_UNKNOWN' : 'FAILED',
+        signature: error.signature,
+        error: errorText(error),
+        walletSolDelta: error.execution?.settlement?.walletSolDelta,
+        networkFeeSol: error.execution?.settlement?.networkFeeSol,
+        execution: orderExecution(error.execution, event, submittedAt, failedAt),
+        submittedAt,
+      });
+      if (position.mode === 'LIVE' && transactionFailed && error.signature) {
+        this._track(this._reconcileOrderSettlement({
+          orderId,
+          positionId: position.id,
+          signature: error.signature,
+        }));
+      }
+      if (confirmationUnknown) {
+        position.status = 'EXIT_FAILED';
+        position.tokenAmountRaw = null;
+        position.entrySignature = error.signature;
+        position.entryError = errorText(error);
+        position.exitReason = 'ENTRY_CONFIRMATION_UNKNOWN';
+        this.store.updateLivePosition(position.id, {
+          status: 'EXIT_FAILED',
+          entrySignature: error.signature,
+          entryError: errorText(error),
+          exitReason: 'ENTRY_CONFIRMATION_UNKNOWN',
+        });
+        this.store.updateLiveStrategyDecision(
+          decision.id,
+          'ENTRY_CONFIRMATION_UNKNOWN',
+          errorText(error),
+        );
+        this.metrics.lastActionAt = failedAt;
+        this._rememberError(error);
+        await this._recoverUnknownEntry(position, { orderId, initialError: error });
+        return;
+      }
+      const rejectionReason = transactionFailed
+        ? 'ENTRY_TRANSACTION_FAILED'
+        : error.code === 'MARKET_PRICE_MOVED'
+          ? 'ENTRY_MARKET_PRICE_MOVED'
+          : error.code === 'SELF_IMPACT_REJECTED'
+            ? 'ENTRY_SELF_IMPACT_REJECTED'
+            : 'ENTRY_REJECTED';
+      this.store.updateLivePosition(position.id, {
+        status: 'ENTRY_FAILED',
+        entrySignature: error.signature,
+        entryError: errorText(error),
+        exitReason: rejectionReason,
+      });
+      this.store.updateLiveStrategyDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
+      this.positions.delete(position.mint);
+      this.metrics.entryFailures += 1;
+      this.metrics.lastActionAt = failedAt;
+      this._rememberError(error);
+    }
+  }
+
+  async _recoverUnknownEntry(position, { orderId = null, initialError = null } = {}) {
+    const attempts = Math.max(1, Number(this.config.entryReconcileCount) || 5);
+    const delayMs = Math.max(100, Number(this.config.entryReconcileDelayMs) || 1_000);
+    let result = { state: 'UNKNOWN' };
+    let lastError = initialError;
+
+    if (!this.executor || typeof this.executor.reconcileBuy !== 'function') {
+      lastError = new Error('Executor cannot reconcile an unknown buy transaction');
+    } else {
+      for (let attempt = 1; attempt <= attempts && !this.stopping; attempt += 1) {
+        try {
+          result = await this.executor.reconcileBuy({
+            mint: position.mint,
+            signature: position.entrySignature || null,
+          });
+        } catch (error) {
+          lastError = error;
+          result = { state: 'UNKNOWN' };
+        }
+        if (result?.state === 'EMPTY') {
+          result = {
+            ...result,
+            state: 'UNKNOWN',
+            error: result.error || 'Confirmed buy token receipt has not been reconciled yet',
+          };
+        }
+        if (result?.state && result.state !== 'UNKNOWN') break;
+        if (attempt < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    }
+
+    const reconciledAt = this.now();
+    const signature = position.entrySignature || null;
+    if (result.state === 'FAILED') {
+      const failure = result.error || errorText(lastError || initialError || 'Transaction failed');
+      if (orderId) this.store.updateLiveOrder(orderId, { status: 'FAILED', error: failure });
+      position.status = 'ENTRY_FAILED';
+      position.entryError = failure;
+      position.exitReason = 'ENTRY_TRANSACTION_FAILED';
+      this.store.updateLivePosition(position.id, {
+        status: 'ENTRY_FAILED',
+        entrySignature: signature,
+        entryError: failure,
+        exitReason: 'ENTRY_TRANSACTION_FAILED',
+        exitError: null,
+      });
+      this._updatePositionDecision(position, 'ENTRY_FAILED', failure);
+      this.positions.delete(position.mint);
+      this.metrics.entryFailures += 1;
+      this.metrics.lastActionAt = reconciledAt;
+      return 'FAILED';
+    }
+
+    if (result.state === 'CONFIRMED' && result.tokenAmountRaw !== '0') {
+      const openedAt = position.openedAt || position.createdAt || reconciledAt;
+      if (orderId) {
+        this.store.updateLiveOrder(orderId, {
+          status: 'CONFIRMED',
+          requestedTokenRaw: result.tokenAmountRaw,
+          error: null,
+          confirmedAt: reconciledAt,
+        });
+        if (position.mode === 'LIVE' && signature) {
+          this._track(this._reconcileOrderSettlement({
+            orderId,
+            positionId: position.id,
+            signature,
+          }));
+        }
+      }
+      position.status = 'OPEN';
+      position.tokenAmountRaw = result.tokenAmountRaw;
+      position.openedAt = openedAt;
+      position.exitReason = 'ENTRY_RECONCILED';
+      position.highestPrice = position.entryPrice;
+      position.lastObservedPrice = null;
+      this.store.updateLivePosition(position.id, {
+        status: 'OPEN',
+        tokenAmountRaw: result.tokenAmountRaw,
+        entrySignature: signature,
+        entryError: null,
+        highestPrice: position.highestPrice,
+        exitReason: 'ENTRY_RECONCILED',
+        exitError: null,
+        openedAt,
+      });
+      this._updatePositionDecision(position, 'OPEN', 'ENTRY_RECONCILED');
+      this.metrics.entries += 1;
+      this.metrics.entryRecoveries += 1;
+      this.metrics.lastActionAt = reconciledAt;
+      const strategy = position.strategy || this.strategies.get(position.strategyId);
+      if (reconciledAt - openedAt >= (strategy?.maxHoldMs || this.config.maxHoldMs)) {
+        this._requestExit(position, 'ENTRY_RECONCILED_MAX_HOLD', null);
+      } else {
+        this._armPositionExit(position);
+      }
+      return 'CONFIRMED';
+    }
+
+    const unresolved = errorText(lastError || initialError || position.entryError
+      || 'Transaction status is still unknown');
+    const unknownAgeMs = reconciledAt - Number(position.createdAt || reconciledAt);
+    const expiredReleaseMs = Math.max(
+      60_000,
+      Number(this.config.expiredEntryReleaseMs) || 10 * 60_000,
+    );
+    const signatureExpired = /(?:signature .* expired|block height exceeded)/i.test(unresolved);
+    const safelyAbsent = !result.confirmationStatus
+      && result.transactionObserved !== true
+      && String(result.tokenAmountRaw || '0') === '0';
+    if (signature && signatureExpired && safelyAbsent && unknownAgeMs >= expiredReleaseMs) {
+      const failure = `Expired entry was not found on chain after ${Math.round(unknownAgeMs / 1_000)}s`;
+      if (orderId) this.store.updateLiveOrder(orderId, { status: 'FAILED', error: failure });
+      position.status = 'ENTRY_FAILED';
+      position.entryError = failure;
+      position.exitReason = 'ENTRY_EXPIRED_UNOBSERVED';
       this.store.updateLivePosition(position.id, {
         status: 'ENTRY_FAILED',
         entrySignature: signature,
