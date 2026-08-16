@@ -500,7 +500,180 @@ class PumpTradeExecutor {
     let associatedUserAccountInfo;
     if (mintAccountInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) {
       tokenProgram = TOKEN_2022_PROGRAM_ID;
-      associatedUserAccountInfo = token20…1706 tokens truncated…      };
+      associatedUserAccountInfo = token2022AtaInfo;
+    } else if (mintAccountInfo.owner.equals(TOKEN_PROGRAM_ID)) {
+      tokenProgram = TOKEN_PROGRAM_ID;
+      associatedUserAccountInfo = legacyAtaInfo;
+    } else {
+      throw errorWithCode(
+        `Unsupported token program: ${mintAccountInfo.owner.toBase58()}`,
+        'TOKEN_PROGRAM',
+      );
+    }
+    if (!bondingCurveAccountInfo) {
+      throw errorWithCode(
+        `Bonding curve account not found for mint: ${mint.toBase58()}`,
+        'CURVE_NOT_FOUND',
+      );
+    }
+    this.tokenPrograms.set(mint.toBase58(), tokenProgram);
+    return {
+      tokenProgram,
+      balanceBefore: associatedUserAccountInfo
+        ? AccountLayout.decode(associatedUserAccountInfo.data).amount
+        : 0n,
+      bondingCurveAccountInfo,
+      bondingCurve: this.pump.decodeBondingCurve(bondingCurveAccountInfo),
+      associatedUserAccountInfo,
+      contextSlot: response.context.slot,
+      contextRetries,
+    };
+  }
+
+  _budgetInstructions() {
+    const instructions = [ComputeBudgetProgram.setComputeUnitLimit({
+      units: this.config.computeUnitLimit,
+    })];
+    if (this.config.priorityFeeMicroLamports > 0) {
+      instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: this.config.priorityFeeMicroLamports,
+      }));
+    }
+    return instructions;
+  }
+
+  async _send(instructions, { latestBlockhash = null, onStage = null } = {}) {
+    const stage = (name) => {
+      if (typeof onStage === 'function') onStage(name);
+    };
+    const latest = latestBlockhash
+      || await this.connection.getLatestBlockhash(this.readCommitment);
+    stage('blockhash_ready_ms');
+    const transaction = new Transaction({
+      feePayer: this.signer.publicKey,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    });
+    transaction.add(...this._budgetInstructions(), ...instructions);
+    transaction.sign(this.signer);
+    stage('signed_ms');
+    let signature;
+    try {
+      signature = await this.connection.sendRawTransaction(transaction.serialize(), {
+        skipPreflight: false,
+        maxRetries: 2,
+        preflightCommitment: this.readCommitment,
+      });
+      stage('submitted_ms');
+      const confirmation = await this.connection.confirmTransaction({
+        signature,
+        blockhash: latest.blockhash,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
+      }, this.confirmationCommitment);
+      if (confirmation.value.err) {
+        throw confirmedTransactionFailure(signature, confirmation.value.err);
+      }
+      stage('confirmed_ms');
+      return signature;
+    } catch (error) {
+      if (signature) error.signature = signature;
+      throw error;
+    }
+  }
+
+  async reconcileBuy({ mint: mintValue, signature = null }) {
+    const mint = new PublicKey(mintValue);
+    const tokenProgram = await this._tokenProgram(mint);
+    const [statusResponse, tokenBalance, transactionResponse] = await Promise.all([
+      signature
+        ? this.connection.getSignatureStatuses([signature], { searchTransactionHistory: true })
+        : Promise.resolve({ value: [null] }),
+      this._tokenBalanceSnapshot(mint, tokenProgram, this.confirmationCommitment),
+      signature && typeof this.connection.getTransaction === 'function'
+        ? this.connection.getTransaction(signature, {
+          commitment: this.confirmationCommitment,
+          maxSupportedTransactionVersion: 0,
+        }).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    const status = statusResponse?.value?.[0] || null;
+    const transactionDelta = tokenDeltaFromTransaction(
+      transactionResponse,
+      mint.toBase58(),
+      this.signer.publicKey.toBase58(),
+    );
+    return classifyBuyReconciliation(status, tokenBalance.amount, {
+      transactionTokenDeltaRaw: transactionDelta,
+      transactionObserved: transactionResponse != null,
+      balanceObserved: tokenBalance.observed,
+    });
+  }
+
+  async buy({
+    mint: mintValue,
+    solAmount,
+    referencePrice,
+    maxPriceJumpPct,
+    signalSlot = null,
+  }) {
+    const startedAt = Date.now();
+    const minimumContextSlot = normalizedSlot(signalSlot);
+    const execution = {
+      version: 2,
+      buyMode: 'EXACT_QUOTE_IN_V2_FIXED_SOL',
+      hardSpendCap: true,
+      positionSol: solAmount,
+      slippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
+      signalSlot: minimumContextSlot,
+      readCommitment: this.readCommitment,
+      preflightCommitment: this.readCommitment,
+      confirmationCommitment: this.confirmationCommitment,
+      skipPreflight: false,
+      startedAt,
+      timelineMs: {},
+    };
+    const mark = (name) => {
+      execution.timelineMs[name] = Date.now() - startedAt;
+    };
+
+    try {
+      const mint = new PublicKey(mintValue);
+      const readConfig = commitmentConfig(this.readCommitment);
+      const buyStatePromise = this._buyStateAtSignalSlot(mint, minimumContextSlot);
+      const protocolPromise = this._protocolState();
+      const latestBlockhashPromise = this.connection.getLatestBlockhashAndContext(readConfig);
+      const balanceLamportsPromise = this.connection.getBalanceAndContext(
+        this.signer.publicKey,
+        readConfig,
+      );
+
+      const spendLamports = BigInt(Math.round(solAmount * LAMPORTS_PER_SOL));
+      execution.spendableQuoteRaw = spendLamports.toString();
+      const [
+        state,
+        balanceResponse,
+        protocol,
+        blockhashResponse,
+      ] = await Promise.all([
+        buyStatePromise,
+        balanceLamportsPromise,
+        protocolPromise,
+        latestBlockhashPromise,
+      ]);
+      const { tokenProgram, balanceBefore } = state;
+      const balanceLamports = balanceResponse.value;
+      const latestBlockhash = blockhashResponse.value;
+      execution.rpcContextSlot = state.contextSlot;
+      execution.slotLag = minimumContextSlot === null
+        ? null
+        : state.contextSlot - minimumContextSlot;
+      execution.contextRetries = state.contextRetries;
+      execution.rpcSlots = {
+        minimumContextSlot,
+        quoteContextSlot: state.contextSlot,
+        walletContextSlot: balanceResponse.context.slot,
+        blockhashContextSlot: blockhashResponse.context.slot,
+      };
       mark('state_and_blockhash_ready_ms');
       if (balanceBefore > 0n) {
         throw errorWithCode(
