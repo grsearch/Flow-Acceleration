@@ -69,7 +69,7 @@ async function main() {
   assert.ok(dashboard.includes('id="migrated-rebound-position-rows"'));
   assert.ok(dashboard.includes('生命周期超跌反弹 · G'));
   assert.ok(dashboard.includes('毕业前 Curve / 毕业后 PumpSwap 分层'));
-  assert.ok(dashboard.includes('GE30_R23_F1/F3 使用全新 cohort，不混入历史'));
+  assert.ok(dashboard.includes('每个新入口/退出/容量均使用全新 cohort，不混入历史'));
   assert.ok(dashboard.includes('FO_F2_J2_3S'));
   assert.ok(dashboard.includes('第1波只预热，仅交易第2/3波'));
   assert.ok(dashboard.includes('CYA Early Pyramid · K（已停）'));
@@ -234,19 +234,26 @@ async function main() {
     )).json();
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
     assert.strictEqual(liveTrading.runtime.safetyLock, true);
-    assert.strictEqual(
-      liveTrading.runtime.strategies[0].id,
-      'post_gd20_35_r1_5_5_age60_xleg_v3',
-    );
-    assert.strictEqual(liveTrading.runtime.strategies[0].entryEnabled, true);
-    assert.strictEqual(liveTrading.runtime.strategies[1].entryEnabled, false);
-    assert.strictEqual(liveTrading.runtime.strategies[2].entryEnabled, false);
-    assert.strictEqual(liveTrading.runtime.strategies[0].market, 'PUMP_AMM');
-    assert.strictEqual(liveTrading.runtime.strategies[0].positionSizeSol, 1);
+    const continuity = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'migration_continuity_mc_c5_e120_live'
+    ));
+    const graduationAccel = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
+    ));
+    const retiredV3 = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
+    ));
+    assert.strictEqual(continuity.entryEnabled, true);
+    assert.strictEqual(graduationAccel.entryEnabled, true);
+    assert.strictEqual(retiredV3.entryEnabled, false);
+    assert.strictEqual(continuity.market, 'PUMP_AMM');
+    assert.strictEqual(graduationAccel.market, 'PUMP_BONDING_CURVE');
+    assert.strictEqual(continuity.positionSizeSol, 1);
+    assert.strictEqual(graduationAccel.positionSizeSol, 1);
     assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
     assert.strictEqual(liveTrading.runtime.priorityFeeMicroLamports, 2_000_000);
-    assert.strictEqual(liveTrading.runtime.strategies[0].trailingActivationPct, 8);
-    assert.strictEqual(liveTrading.runtime.strategies[0].trailingStopPct, 3);
+    assert.strictEqual(continuity.fixedHoldMs, 120_000);
+    assert.strictEqual(graduationAccel.coreExitPct, 50);
     assert.ok(Array.isArray(liveTrading.positions));
     assert.ok(Array.isArray(liveTrading.orders));
     assert.ok(Array.isArray(liveTrading.decisions));
@@ -405,11 +412,16 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 4);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 8);
     assert.deepStrictEqual(
       migratedRebound.runtime.exitProfiles.map((profile) => profile.id),
       [
-        'X3', 'X8', 'XLEG', 'XB50', 'XB25',
+        'X3', 'X8', 'XLEG',
+        'GEXEC_XLEG', 'G2_XLEG', 'GTIME_XLEG',
+        'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
+        'G1_B75_H30', 'G1_B50_H60',
+        'G1_STAIR_H60', 'G1_STAIR_H120',
+        'XB50', 'XB25',
         'V2_R2_H10', 'V2_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
         'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15',
       ],
@@ -447,6 +459,10 @@ async function main() {
       [
         ['GE30_R23_F1', 30_000, 1, 3],
         ['GE30_R23_F3', 30_000, 3, 3],
+        ['GE30_R23_F1_EXEC', 30_000, 1, 3],
+        ['GE30_R23_F2_ONLY', 30_000, 2, 3],
+        ['GE30_R23_F1_NIGHT', 30_000, 1, 3],
+        ['GE30_R23_F1_DAY', 30_000, 1, 3],
         ['GE30_D25_32_R24_F1', 30_000, 1, 4],
       ],
     );
