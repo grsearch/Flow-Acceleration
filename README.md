@@ -1,5 +1,16 @@
 # Pump.fun Flow Acceleration Research + Multi-Strategy Executor
 
+## Big Winner Pullback + Flow Shadow (BW)
+
+`BigWinnerShadowSuite` is an isolated, post-graduation PumpSwap research path. It crosses
+four causal entry profiles (`PBR_A`, `PBR_B`, `PBR_C`, `FLOW_R`) with four independent
+Core/Runner exits (`X50_15`, `X50_12`, `X50_RATCHET`, `X40_RATCHET`) for 16 cohorts.
+Every fill uses a 200 ms delay, a 1 SOL position model, configured costs, and an entry
+impact guard when live pool reserves are present. It never signs or submits a transaction.
+Rows are stored only in `big_winner_shadow_positions`; `NO_EXIT` remains censored with a
+null return and cannot be aggregated as a -100% loss. Daily research exports include the
+new table automatically.
+
 这是一个同时采集 Pump.fun 毕业前 Bonding Curve 与所需毕业后 PumpSwap 成交的研究项目，并带有默认关闭、按策略隔离的实盘执行模块。研究主线验证：
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
