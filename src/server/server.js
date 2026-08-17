@@ -26,6 +26,7 @@ class ResearchServer {
     config, store, engine, stream, labeler, trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     flowSmartConfirmShadow = null,
+    smartLikeEarlyShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
     migrationContinuityShadow = null,
@@ -48,6 +49,7 @@ class ResearchServer {
     this.smartPullbackShadow = smartPullbackShadow;
     this.smartOpenShadow = smartOpenShadow;
     this.flowSmartConfirmShadow = flowSmartConfirmShadow;
+    this.smartLikeEarlyShadow = smartLikeEarlyShadow;
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
@@ -436,6 +438,26 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/smart-like-early-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.smartLikeEarlyShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_SMART_LIKE_EARLY',
+          sendsTransactions: false,
+          entryProfiles: [],
+          addProfiles: [],
+          exitProfiles: [],
+        },
+        timeSessions: this.smartLikeEarlyShadow
+          ? this.store.shadowTimeSessionDashboard('smart-like-early')
+          : { sessions: [] },
+        ...(this.smartLikeEarlyShadow?.dashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+        }) || { cohorts: [], positions: [] }),
+      });
+    });
+
     this.app.get('/api/cya-early-pyramid-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -508,6 +530,7 @@ class ResearchServer {
         smartPullbackShadow: this.smartPullbackShadow?.health() || null,
         smartOpenShadow: this.smartOpenShadow?.health() || null,
         flowSmartConfirmShadow: this.flowSmartConfirmShadow?.health() || null,
+        smartLikeEarlyShadow: this.smartLikeEarlyShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         holderGrowthShadow: this.holderGrowthShadow?.health() || null,
