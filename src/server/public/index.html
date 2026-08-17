@@ -1070,19 +1070,25 @@
 
       const isContinuityLive = strategy.signalSource === 'MIGRATION_CONTINUITY_MC_C5';
       const isGraduationAccelLive = strategy.signalSource === 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC';
+      const isQualityLeaderLive = strategy.signalSource === 'QUALITY_LEADER_QL_STRICT_PROTECTED';
+      const isBondingCurveLive = isGraduationAccelLive || isQualityLeaderLive;
       const mintOpportunityCopy = strategy.maxSignalsPerMint
         ? `每Mint只取首次机会（最多${number(strategy.maxSignalsPerMint)}个匹配信号）`
         : `每Mint最多成功开仓${number(strategy.maxEntriesPerMint || 1)}次`;
-      const strategyExpression = isContinuityLive
+      let strategyExpression = isContinuityLive
         ? '毕业后5秒：Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6 → 固定持有120秒（20%硬止损）'
         : isGraduationAccelLive
           ? '首次Curve≥80% + 最近5秒ΔCurve≥5 + Buyers≥2 + 0卖单 + Creator未卖 → 毕业卖50%，剩余阶梯移动止盈'
           : `毕业后≤${age(strategy.trackingAgeMs)} + 1秒深跌${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}% + 低点反弹${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}% → ${mintOpportunityCopy} → XLEG退出`;
+      if (isQualityLeaderLive) {
+        strategyExpression = 'QL Strict：10秒涨幅≥140%、20秒回撤≤12%、Retention≥80%、买家与净流入继续增长 → 首笔可执行 Bonding Curve 成交入场 → 全仓阶梯保护 Runner';
+      }
       document.querySelector('#live-strategy-expression').textContent = strategyExpression;
       const wallets = data.monitoredWallets || [];
-      const venueCopy = isGraduationAccelLive
+      let venueCopy = isGraduationAccelLive
         ? '毕业前使用 Bonding Curve 买入；毕业后使用 PumpSwap 分批卖出'
         : '使用 PumpSwap 固定 SOL 买入与卖出';
+      if (isQualityLeaderLive) venueCopy = '毕业前使用 Bonding Curve 买入；毕业前后均卖出全部链上余额';
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>${venueCopy}</b><br>单笔 ${number(strategy.positionSizeSol,4)} SOL；Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究。`;
 
       const matchRate = stats.decisions > 0 ? stats.matched / stats.decisions * 100 : null;
@@ -1105,6 +1111,10 @@
         ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '毕业后5秒延续质量'], ['市场', 'PUMP_AMM'],
         ['独立买家', '≥20'], ['净流入', '≥5 SOL'], ['毕业后涨幅', '≥5%'], ['Sell / Buy', '≤0.6'],
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isQualityLeaderLive ? [
+        ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'QL Strict 两阶段质量确认'], ['市场', 'PUMP_BONDING_CURVE'],
+        ['10秒涨幅 / 20秒回撤', '≥140% / ≤12%'], ['Retention', '≥80%'], ['买家增量 / 净流入增量', '≥8 / ≥3 SOL'], ['Creator / Curve', '≤3% / 55%–90%'],
+        ['Sell / Buy', '≤0.55'], ['virtual SOL', '≥30'], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
       ] : isGraduationAccelLive ? [
         ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '首次Curve80加速'], ['市场', 'PUMP_BONDING_CURVE'],
         ['Curve阈值', '首次≥80%'], ['最近5秒ΔCurve', '≥5%'], ['独立买家', '≥2'], ['卖单 / Creator卖出', '0 / 否'],
@@ -1118,6 +1128,12 @@
       const liveExitRows = isContinuityLive ? [
         ['策略模式', '固定持有'], ['固定持仓', age(strategy.fixedHoldMs)],
         ['硬止损', rate(strategy.hardStopPct)], ['最大持仓兜底', age(strategy.maxHoldMs)],
+      ] : isQualityLeaderLive ? [
+        ['策略模式', 'Protected Runner（不分批）'], ['硬止损', rate(strategy.hardStopPct)],
+        ['强势激活', rate(strategy.strengthActivationPct)], ['30秒未走强', '退出全部余额'],
+        ['峰值20%–50%', '保护峰值−15%（最低0%）'], ['峰值50%–100%', '保护峰值−25%（最低+15%）'],
+        ['峰值100%–200%', '保护峰值−40%（最低+40%）'], ['峰值≥200%', '保护峰值−80%（最低+100%）'],
+        ['最大持仓兜底', age(strategy.maxHoldMs)],
       ] : isGraduationAccelLive ? [
         ['策略模式', '毕业核心 + Runner'], ['毕业时核心卖出', rate(strategy.coreExitPct)],
         ['Runner阶梯', '+20/40/80/150/300%'], ['对应峰值回撤', '10/15/20/25/30%'],
@@ -1138,7 +1154,7 @@
           ['紧急开关', runtime.killSwitchActive ? '已禁止开仓' : '正常'], ['当前模式', mode],
         ]],
         ['链上执行', [
-          ['买入模式', isGraduationAccelLive ? 'Bonding Curve 固定SOL硬上限' : 'PumpSwap 固定SOL硬上限'], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
+          ['买入模式', isBondingCurveLive ? 'Bonding Curve 固定SOL硬上限' : 'PumpSwap 固定SOL硬上限'], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
           ['卖出数量', isGraduationAccelLive ? '毕业50% + Runner余额100%' : '链上当前余额 100%'], ['卖后余额核对', '残余自动重试'],
           ['买/卖优先费', `${number(runtime.priorityFeeSol,6)} SOL / 笔`],
         ]],
