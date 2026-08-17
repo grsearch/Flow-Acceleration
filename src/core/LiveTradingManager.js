@@ -346,6 +346,8 @@ class LiveTradingManager {
     if (position?.strategy?.exitMode === 'GRADUATION_CORE_RUNNER') {
       position.graduatedAt = position.graduatedAt || graduatedAt;
       this._scheduleMaxHold(position);
+    } else if (position?.strategy?.exitMode === 'QUALITY_PROTECTED_RUNNER') {
+      position.graduatedAt = position.graduatedAt || graduatedAt;
     }
   }
 
@@ -401,6 +403,12 @@ class LiveTradingManager {
           this._requestCoreExit(position);
           return;
         }
+      } else if (observedTrade.market !== 'PUMP_BONDING_CURVE') return;
+    } else if (strategy?.exitMode === 'QUALITY_PROTECTED_RUNNER') {
+      if (graduatedAt) {
+        position.graduatedAt = position.graduatedAt || graduatedAt;
+        if (observedTrade.market !== 'PUMP_AMM'
+          || observedTrade.timestampMs < graduatedAt) return;
       } else if (observedTrade.market !== 'PUMP_BONDING_CURVE') return;
     } else if (observedTrade.market === 'PUMP_AMM') {
       const token = this.store.getToken(observedTrade.mint);
@@ -1067,6 +1075,10 @@ class LiveTradingManager {
       this._scheduleMaxHold(position);
       return;
     }
+    if (strategy?.exitMode === 'QUALITY_PROTECTED_RUNNER') {
+      this._scheduleMaxHold(position);
+      return;
+    }
     const lastPrice = position.lastObservedPrice == null
       ? Number.NaN
       : Number(position.lastObservedPrice);
@@ -1099,7 +1111,7 @@ class LiveTradingManager {
       ? (position.graduatedAt ? 'MAX_POST_GRAD_RUNNER' : 'MAX_PRE_GRAD_HOLD')
       : (strategy?.exitMode === 'FIXED_HOLD'
         ? `FIXED_HOLD_${strategy.fixedHoldMs || holdMs}MS`
-        : 'MAX_HOLD');
+        : (strategy?.exitMode === 'QUALITY_PROTECTED_RUNNER' ? 'MAX_HOLD_5M' : 'MAX_HOLD'));
     const delay = Math.max(0, anchorAt + holdMs - this.now());
     const timer = setTimeout(() => {
       this.timers.delete(position.id);
@@ -1154,6 +1166,22 @@ class LiveTradingManager {
       if (reason) this._requestExit(position, reason, price);
       return;
     }
+    if (strategy.exitMode === 'QUALITY_PROTECTED_RUNNER') {
+      if (strategy.hardStopPct > 0 && grossReturnPct <= -strategy.hardStopPct) {
+        reason = 'HARD_STOP';
+      } else if (ageMs >= strategy.noStrengthMs
+        && peakReturnPct < strategy.strengthActivationPct) {
+        reason = `NO_STRENGTH_${strategy.noStrengthMs}MS`;
+      } else if (peakReturnPct >= strategy.strengthActivationPct) {
+        const floorPct = this._qualityProtectedFloor(strategy, peakReturnPct);
+        if (floorPct != null && grossReturnPct <= floorPct) {
+          reason = `PROTECTED_FLOOR_${Number(floorPct.toFixed(2))}`;
+        }
+      }
+      if (!reason && ageMs >= strategy.maxHoldMs) reason = 'MAX_HOLD_5M';
+      if (reason) this._requestExit(position, reason, price);
+      return;
+    }
     if (strategy.fastTakeProfitPct > 0 && ageMs <= strategy.fastTakeProfitWindowMs
       && grossReturnPct >= strategy.fastTakeProfitPct) reason = 'FAST_TAKE_PROFIT';
     if (!reason && peakReturnPct >= strategy.trailingActivationPct
@@ -1162,6 +1190,18 @@ class LiveTradingManager {
       && grossReturnPct < 0) reason = 'LOSS_CHECK';
     if (!reason && ageMs >= strategy.maxHoldMs) reason = 'MAX_HOLD';
     if (reason) this._requestExit(position, reason, price);
+  }
+
+  _qualityProtectedFloor(strategy, peakReturnPct) {
+    let selected = null;
+    for (const tier of strategy.protectedFloors || []) {
+      if (peakReturnPct >= tier.activationPct) selected = tier;
+    }
+    if (!selected) return null;
+    return Math.max(
+      Number(selected.minFloorPct) || 0,
+      peakReturnPct - (Number(selected.peakGivebackPct) || 0),
+    );
   }
 
   _requestCoreExit(position) {
