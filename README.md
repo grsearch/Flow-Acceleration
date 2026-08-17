@@ -192,6 +192,17 @@ Smart Wallet 事件按 Token 余额保存 `OPEN / ADD / REDUCE / CLOSE / SELL` �
 
 止盈、止损、移动止损、滚动 NetFlow 衰减和 Smart Wallet SELL 按逐笔路径判断谁先触发；触发以后再应用卖出延迟与失败重试。`hold-ms` 现在表示动态条件都未触发时的最大持仓兜底。若全部动态退出均关闭，结果会返回 `FIXED_TIME_EXIT_ONLY` 警告。`Observed Entry Gap` 是信号到下一笔可观察市场成交的间隔，不代表机器人真实上链延迟。
 
+## Smart-Like Early Entry Shadow
+
+`smart_like_early_shadow_positions` 是独立的前向研究表，不修改任何旧 Shadow，也没有签名或发链路径。它同时运行 18 个组合：
+
+- 入场：优质 Smart OPEN 直接确认、`AGE<=10s + 最近5秒 Primary Flow` 严格确认、Primary Rank 1 预测式提前入场。
+- 共同过滤：`Curve<=40%`、入场前5秒涨幅不超过10%、5秒净流入非负；所有成交均使用信号后200ms的下一笔真实 Bonding Curve 成交。
+- 加仓：不加仓基线；或平均成本上方 `+50%/+80%/+120%` 各增加初始仓位的8%，只在5秒净流入仍非负时执行。
+- 退出：`+50%` 卖40%后12%尾仓回撤、`+75%` 卖50%后15%尾仓回撤、`+100%` 卖40%后订单流衰减或20%回撤；最长均为180秒。
+
+F9/FAic 被标记为同一操作集群，短时间重复 OPEN 不会重复触发。预测式入场的后续 Smart OPEN 只写入确认标签，不会回填历史入场价。缺少可执行退出成交时记录为 `NO_EXIT`，收益字段保持空值，不按 -100% 污染统计。Dashboard 接口为 `GET /api/smart-like-early-shadow`。
+
 ## Flow -> Smart Confirmation Shadow L
 
 该路径把 Smart Wallet 确认改成严格的前向实验：只接受 `primary_3w Rank 1`
