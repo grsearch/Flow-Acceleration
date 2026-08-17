@@ -205,6 +205,11 @@ class ResearchStore {
         table: 'holder_growth_shadow_positions',
         anchor: 'signal_at',
       },
+      'quality-leader': {
+        label: 'Quality Leader · QL',
+        table: 'quality_leader_shadow_positions',
+        anchor: 'signal_at',
+      },
     };
     const strategy = strategies[strategyId];
     if (!strategy) throw new Error(`Unknown Shadow time-session strategy: ${strategyId}`);
@@ -257,7 +262,8 @@ class ResearchStore {
         GROUP BY session_id
       `;
       const rows = this.db.prepare(
-        strategyId === 'holder-growth' ? holderGrowthSql : standardSql,
+        ['holder-growth', 'quality-leader'].includes(strategyId)
+          ? holderGrowthSql : standardSql,
       ).all();
       const byId = new Map(rows.map((row) => [row.session_id, row]));
       return definitions.map((definition) => {
@@ -1532,6 +1538,76 @@ class ResearchStore {
         ON holder_growth_shadow_positions(status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_holder_growth_shadow_signal
         ON holder_growth_shadow_positions(signal_at DESC, entry_profile_id);
+
+      CREATE TABLE IF NOT EXISTS quality_leader_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        entry_profile_id TEXT NOT NULL,
+        exit_profile_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        return_10_pct REAL,
+        drawdown_20_pct REAL,
+        buyers_10 INTEGER,
+        buyers_20 INTEGER,
+        buyer_delta INTEGER,
+        net_flow_10_sol REAL,
+        net_flow_20_sol REAL,
+        net_flow_delta_sol REAL,
+        retention_20_pct REAL,
+        creator_share_20_pct REAL,
+        curve_20_pct REAL,
+        sell_buy_ratio_20 REAL,
+        virtual_sol_20 REAL,
+        features_json TEXT NOT NULL,
+        entry_target_at INTEGER NOT NULL,
+        entry_deadline_at INTEGER NOT NULL,
+        entry_at INTEGER,
+        entry_market TEXT,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        entry_impact_pct REAL,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        partial_stage INTEGER NOT NULL DEFAULT 0,
+        pending_partial_stage INTEGER NOT NULL DEFAULT 0,
+        partial_exit_target_at INTEGER,
+        partial_exit_deadline_at INTEGER,
+        scale1_at INTEGER,
+        scale1_price REAL,
+        scale2_at INTEGER,
+        scale2_price REAL,
+        graduated_at INTEGER,
+        last_curve_price REAL,
+        amm_price_scale REAL,
+        exit_target_market TEXT,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_market TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, mint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_leader_shadow_status
+        ON quality_leader_shadow_positions(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_quality_leader_shadow_signal
+        ON quality_leader_shadow_positions(signal_at DESC, entry_profile_id);
 
       CREATE TABLE IF NOT EXISTS graduation_acceleration_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5319,6 +5395,145 @@ class ResearchStore {
     return this.stmts.activeHolderGrowthShadowPositions.all();
   }
 
+  createQualityLeaderShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      cohortId: position.cohortId,
+      entryProfileId: position.entryProfileId,
+      exitProfileId: position.exitProfileId,
+      mint: position.mint,
+      symbol: position.symbol || null,
+      status: position.status,
+      rejectionReason: position.rejectionReason || null,
+      positionSol: finiteOrNull(position.positionSol) ?? 1,
+      configuredCostPct: finiteOrNull(position.configuredCostPct) ?? 0,
+      signalAt: Math.trunc(position.signalAt),
+      signalPrice: finiteOrNull(position.signalPrice),
+      return10Pct: finiteOrNull(position.return10Pct),
+      drawdown20Pct: finiteOrNull(position.drawdown20Pct),
+      buyers10: Math.max(0, Math.trunc(position.buyers10 || 0)),
+      buyers20: Math.max(0, Math.trunc(position.buyers20 || 0)),
+      buyerDelta: Math.trunc(position.buyerDelta || 0),
+      netFlow10Sol: finiteOrNull(position.netFlow10Sol),
+      netFlow20Sol: finiteOrNull(position.netFlow20Sol),
+      netFlowDeltaSol: finiteOrNull(position.netFlowDeltaSol),
+      retention20Pct: finiteOrNull(position.retention20Pct),
+      creatorShare20Pct: finiteOrNull(position.creatorShare20Pct),
+      curve20Pct: finiteOrNull(position.curve20Pct),
+      sellBuyRatio20: finiteOrNull(position.sellBuyRatio20),
+      virtualSol20: finiteOrNull(position.virtualSol20),
+      featuresJson: JSON.stringify(position.features || {}),
+      entryTargetAt: Math.trunc(position.entryTargetAt),
+      entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const statement = this.db.prepare(`
+      INSERT OR IGNORE INTO quality_leader_shadow_positions (
+        cohort_id, entry_profile_id, exit_profile_id, mint, symbol,
+        status, rejection_reason, position_sol, configured_cost_pct,
+        signal_at, signal_price, return_10_pct, drawdown_20_pct,
+        buyers_10, buyers_20, buyer_delta, net_flow_10_sol, net_flow_20_sol,
+        net_flow_delta_sol, retention_20_pct, creator_share_20_pct,
+        curve_20_pct, sell_buy_ratio_20, virtual_sol_20, features_json,
+        entry_target_at, entry_deadline_at, created_at, updated_at
+      ) VALUES (
+        @cohortId, @entryProfileId, @exitProfileId, @mint, @symbol,
+        @status, @rejectionReason, @positionSol, @configuredCostPct,
+        @signalAt, @signalPrice, @return10Pct, @drawdown20Pct,
+        @buyers10, @buyers20, @buyerDelta, @netFlow10Sol, @netFlow20Sol,
+        @netFlowDeltaSol, @retention20Pct, @creatorShare20Pct,
+        @curve20Pct, @sellBuyRatio20, @virtualSol20, @featuresJson,
+        @entryTargetAt, @entryDeadlineAt, @createdAt, @updatedAt
+      )
+    `);
+    const result = statement.run(row);
+    if (result.changes > 0) return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    const existing = this.db.prepare(`
+      SELECT * FROM quality_leader_shadow_positions WHERE cohort_id = ? AND mint = ?
+    `).get(row.cohortId, row.mint);
+    return existing ? { ...existing, inserted: false } : null;
+  }
+
+  updateQualityLeaderShadowPosition(id, patch = {}) {
+    const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    return this.db.prepare(`
+      UPDATE quality_leader_shadow_positions SET
+        status = COALESCE(@status, status),
+        rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+        entry_at = COALESCE(@entryAt, entry_at),
+        entry_market = COALESCE(@entryMarket, entry_market),
+        entry_price = COALESCE(@entryPrice, entry_price),
+        entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+        entry_impact_pct = COALESCE(@entryImpactPct, entry_impact_pct),
+        highest_price = COALESCE(@highestPrice, highest_price),
+        lowest_price = COALESCE(@lowestPrice, lowest_price),
+        last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+        last_price = COALESCE(@lastPrice, last_price),
+        max_favorable_return_pct = COALESCE(@maxFavorableReturnPct, max_favorable_return_pct),
+        max_adverse_return_pct = COALESCE(@maxAdverseReturnPct, max_adverse_return_pct),
+        partial_stage = COALESCE(@partialStage, partial_stage),
+        pending_partial_stage = COALESCE(@pendingPartialStage, pending_partial_stage),
+        partial_exit_target_at = CASE WHEN @clearPartialExitPending = 1
+          THEN NULL ELSE COALESCE(@partialExitTargetAt, partial_exit_target_at) END,
+        partial_exit_deadline_at = CASE WHEN @clearPartialExitPending = 1
+          THEN NULL ELSE COALESCE(@partialExitDeadlineAt, partial_exit_deadline_at) END,
+        scale1_at = COALESCE(@scale1At, scale1_at),
+        scale1_price = COALESCE(@scale1Price, scale1_price),
+        scale2_at = COALESCE(@scale2At, scale2_at),
+        scale2_price = COALESCE(@scale2Price, scale2_price),
+        graduated_at = COALESCE(@graduatedAt, graduated_at),
+        last_curve_price = COALESCE(@lastCurvePrice, last_curve_price),
+        amm_price_scale = COALESCE(@ammPriceScale, amm_price_scale),
+        exit_target_market = COALESCE(@exitTargetMarket, exit_target_market),
+        exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+        exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+        exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+        exit_at = COALESCE(@exitAt, exit_at),
+        exit_market = COALESCE(@exitMarket, exit_market),
+        exit_price = COALESCE(@exitPrice, exit_price),
+        exit_reason = COALESCE(@exitReason, exit_reason),
+        gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+        net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+        updated_at = @updatedAt
+      WHERE id = @id
+    `).run({
+      id,
+      status: value('status'), rejectionReason: value('rejectionReason'),
+      entryAt: value('entryAt'), entryMarket: value('entryMarket'),
+      entryPrice: finiteOrNull(value('entryPrice')),
+      entryJumpPct: finiteOrNull(value('entryJumpPct')),
+      entryImpactPct: finiteOrNull(value('entryImpactPct')),
+      highestPrice: finiteOrNull(value('highestPrice')),
+      lowestPrice: finiteOrNull(value('lowestPrice')),
+      lastObservedAt: value('lastObservedAt'), lastPrice: finiteOrNull(value('lastPrice')),
+      maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
+      maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
+      partialStage: value('partialStage'), pendingPartialStage: value('pendingPartialStage'),
+      partialExitTargetAt: value('partialExitTargetAt'),
+      partialExitDeadlineAt: value('partialExitDeadlineAt'),
+      clearPartialExitPending: patch.clearPartialExitPending ? 1 : 0,
+      scale1At: value('scale1At'), scale1Price: finiteOrNull(value('scale1Price')),
+      scale2At: value('scale2At'), scale2Price: finiteOrNull(value('scale2Price')),
+      graduatedAt: value('graduatedAt'), lastCurvePrice: finiteOrNull(value('lastCurvePrice')),
+      ammPriceScale: finiteOrNull(value('ammPriceScale')),
+      exitTargetMarket: value('exitTargetMarket'), exitTriggerAt: value('exitTriggerAt'),
+      exitTargetAt: value('exitTargetAt'), exitDeadlineAt: value('exitDeadlineAt'),
+      exitAt: value('exitAt'), exitMarket: value('exitMarket'),
+      exitPrice: finiteOrNull(value('exitPrice')), exitReason: value('exitReason'),
+      grossReturnPct: finiteOrNull(value('grossReturnPct')),
+      netReturnPct: finiteOrNull(value('netReturnPct')), updatedAt: Date.now(),
+    });
+  }
+
+  activeQualityLeaderShadowPositions() {
+    return this.db.prepare(`
+      SELECT * FROM quality_leader_shadow_positions
+      WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+      ORDER BY signal_at, id
+    `).all();
+  }
+
   createGraduationAccelerationShadowPosition(position) {
     const now = Date.now();
     const row = {
@@ -6336,6 +6551,82 @@ class ResearchStore {
     return { cohorts, positions };
   }
 
+  qualityLeaderShadowDashboard({ positionLimit = 100, bigWinnerPct = 100 } = {}) {
+    const limit = Math.min(300, Math.max(1, Math.trunc(Number(positionLimit) || 100)));
+    const positions = this.db.prepare(`
+      SELECT *, CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+        THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM quality_leader_shadow_positions
+      ORDER BY CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING') THEN 0 ELSE 1 END,
+        updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit);
+    const groups = this.db.prepare(`
+      SELECT cohort_id, entry_profile_id, exit_profile_id,
+        COUNT(*) AS attempts, COUNT(DISTINCT mint) AS independent_mints,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+        COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+        COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        AVG(return_10_pct) AS average_return_10_pct,
+        AVG(drawdown_20_pct) AS average_drawdown_20_pct,
+        AVG(buyer_delta) AS average_buyer_delta,
+        AVG(net_flow_delta_sol) AS average_net_flow_delta_sol,
+        AVG(retention_20_pct) AS average_retention_20_pct,
+        AVG(creator_share_20_pct) AS average_creator_share_20_pct,
+        AVG(curve_20_pct) AS average_curve_20_pct,
+        AVG(entry_jump_pct) AS average_entry_jump_pct,
+        AVG(max_favorable_return_pct) AS average_mfe_pct,
+        AVG(max_adverse_return_pct) AS average_mae_pct
+      FROM quality_leader_shadow_positions
+      GROUP BY cohort_id, entry_profile_id, exit_profile_id
+      ORDER BY entry_profile_id, exit_profile_id
+    `).all();
+    const outcomes = this.db.prepare(`
+      SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
+      FROM quality_leader_shadow_positions
+      WHERE cohort_id = ? AND status = 'CLOSED' AND net_return_pct IS NOT NULL
+      ORDER BY net_return_pct DESC
+    `);
+    const cohorts = groups.map((group) => {
+      const rows = outcomes.all(group.cohort_id);
+      const returns = rows.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+      const sorted = [...returns].sort((a, b) => a - b);
+      const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
+      const losses = returns.filter((value) => value < 0);
+      const totalProfit = wins.reduce((sum, value) => sum + value, 0);
+      const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+      const middle = Math.floor(sorted.length / 2);
+      const exTop5 = [...returns].sort((a, b) => b - a).slice(5);
+      const opportunities = rows.filter((row) => Number(row.max_favorable_return_pct) >= bigWinnerPct);
+      const realized = rows.filter((row) => Number(row.gross_return_pct) >= bigWinnerPct);
+      return {
+        ...group,
+        resolved: returns.length,
+        average_net_return_pct: returns.length
+          ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+        median_net_return_pct: sorted.length
+          ? (sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2)
+          : null,
+        win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+        profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+        average_net_return_ex_top5_pct: exTop5.length
+          ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length : null,
+        max_winner_pct: wins[0] ?? null,
+        top_5_winner_contribution_pct: totalProfit > 0
+          ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100 : null,
+        big_winner_threshold_pct: bigWinnerPct,
+        big_winner_opportunities: opportunities.length,
+        big_winners_realized: realized.length,
+        big_winner_realization_rate_pct: opportunities.length
+          ? realized.length / opportunities.length * 100 : null,
+      };
+    });
+    return { cohorts, positions };
+  }
+
   launchQualityDashboard({ observationLimit = 30, snapshotLimit = 60 } = {}) {
     const safeLimit = (value, fallback) => Math.min(
       200,
@@ -7255,6 +7546,15 @@ class ResearchStore {
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
       FROM holder_growth_shadow_positions
     `).get();
+    const qualityLeaderShadowPositions = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump
+      FROM quality_leader_shadow_positions
+    `).get();
     const launchQualityObservations = this.db.prepare(`
       SELECT COUNT(*) AS total,
         COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
@@ -7303,6 +7603,7 @@ class ResearchStore {
       graduationHoldShadowPositions,
       graduationAccelerationShadowPositions,
       holderGrowthShadowPositions,
+      qualityLeaderShadowPositions,
       launchQualityObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),

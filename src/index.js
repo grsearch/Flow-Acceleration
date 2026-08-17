@@ -22,6 +22,7 @@ const {
 } = require('./core/BondingCurveMomentumShadowSuite');
 const { GraduationHoldShadowSuite } = require('./core/GraduationHoldShadowSuite');
 const { HolderGrowthShadowSuite } = require('./core/HolderGrowthShadowSuite');
+const { QualityLeaderShadowSuite } = require('./core/QualityLeaderShadowSuite');
 const {
   GraduationAccelerationShadowSuite,
 } = require('./core/GraduationAccelerationShadowSuite');
@@ -86,11 +87,19 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   holderGrowthShadow.start();
+  const qualityLeaderShadow = new QualityLeaderShadowSuite({
+    config: runtimeConfig.qualityLeaderShadow,
+    store,
+  });
+  qualityLeaderShadow.start();
   const launchQualityObserver = new LaunchQualityObserver({
     config: runtimeConfig.launchQualityObserver,
     store,
     onReference: (reference) => launchPullbackShadow.onReference(reference),
-    onSnapshot: (snapshot, options) => holderGrowthShadow.onSnapshot(snapshot, options),
+    onSnapshot: (snapshot, options) => {
+      holderGrowthShadow.onSnapshot(snapshot, options);
+      qualityLeaderShadow.onSnapshot(snapshot, options);
+    },
   });
   launchQualityObserver.start();
   const migratedDropReboundShadow = new MigratedDropReboundShadowSuite({
@@ -151,6 +160,7 @@ function createRuntime(runtimeConfig = config) {
     bondingCurveMomentumShadow,
     graduationHoldShadow,
     holderGrowthShadow,
+    qualityLeaderShadow,
     graduationAccelerationShadow,
   });
   const smartWallets = new Set(runtimeConfig.smartWallets);
@@ -184,6 +194,7 @@ function createRuntime(runtimeConfig = config) {
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
       ...holderGrowthShadow.trackedMints(),
+      ...qualityLeaderShadow.trackedMints(),
       ...graduationAccelerationShadow.trackedMints(),
     ])]);
   };
@@ -265,6 +276,7 @@ function createRuntime(runtimeConfig = config) {
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
+          observeShadow('qualityLeaderGraduate', () => qualityLeaderShadow.onGraduated(token || event));
           observeShadow('graduationAccelerationGraduate', () => (
             graduationAccelerationShadow.onGraduated(token || event)
           ));
@@ -284,6 +296,7 @@ function createRuntime(runtimeConfig = config) {
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
+          observeShadow('qualityLeaderGraduate', () => qualityLeaderShadow.onGraduated(token || event));
           observeShadow('graduationAccelerationGraduate', () => (
             graduationAccelerationShadow.onGraduated(token || event)
           ));
@@ -324,6 +337,7 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('graduationHold', () => graduationHoldShadow.observeTrade(trade));
         observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
         observeShadow('holderGrowth', () => holderGrowthShadow.observeTrade(trade));
+        observeShadow('qualityLeader', () => qualityLeaderShadow.observeTrade(trade));
         observeShadow('graduationAcceleration', () => (
           graduationAccelerationShadow.observeTrade(trade)
         ));
@@ -484,6 +498,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
       observeShadow('holderGrowthAdvance', () => holderGrowthShadow.advanceTime(now));
+      observeShadow('qualityLeaderAdvance', () => qualityLeaderShadow.advanceTime(now));
       observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
       observeShadow('migrationContinuityAdvance', () => migrationContinuityShadow.advanceTime(now));
       observeShadow('rangeScalperAdvance', () => rangeScalperShadow.advanceTime(now));
@@ -517,6 +532,7 @@ function createRuntime(runtimeConfig = config) {
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     holderGrowthShadow.stop();
+    qualityLeaderShadow.stop();
     migratedDropReboundShadow.stop();
     migrationContinuityShadow.stop();
     rangeScalperShadow.stop();
@@ -544,6 +560,7 @@ function createRuntime(runtimeConfig = config) {
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       holderGrowthShadow: holderGrowthShadow.health(),
+      qualityLeaderShadow: qualityLeaderShadow.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
       migrationContinuityShadow: migrationContinuityShadow.health(),
       rangeScalperShadow: rangeScalperShadow.health(),
@@ -558,7 +575,7 @@ function createRuntime(runtimeConfig = config) {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     launchPullbackShadow,
-    launchQualityObserver, holderGrowthShadow, migratedDropReboundShadow,
+    launchQualityObserver, holderGrowthShadow, qualityLeaderShadow, migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
     migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
     graduationAccelerationShadow,

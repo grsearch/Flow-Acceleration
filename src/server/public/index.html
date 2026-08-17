@@ -380,6 +380,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="holder-growth">
               <b>Observed Holder Growth · N</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="quality-leader">
+              <b>Quality Leader · QL</b><small>10s强势 + 20s质量确认，Barbell / 长尾退出</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first">
               <b>Flow-First · C（已停）</b><small>负期望，历史数据保留</small>
             </button>
@@ -684,6 +687,20 @@
                 <thead><tr><th>信号时间</th><th>组别 / 状态</th><th>Mint</th><th>Buyers / 20–30秒新增</th><th>Retention / NetFlow / Top3</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="holder-growth-position-rows"></tbody>
               </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="quality-leader" hidden>
+            <article class="card record-section">
+              <div class="section-title"><h2>Quality Leader Shadow QL</h2><p>独立前瞻表，只模拟、不签名、不发送链上交易</p></div>
+              <div class="strategy-expression" id="quality-leader-expression">等待 Quality Leader 配置…</div>
+              <div class="strategy-metric-groups" id="quality-leader-metrics"></div>
+              <div class="strategy-metric-groups" id="quality-leader-time-sessions"></div>
+              <div class="table-wrap"><table><thead><tr><th>组别</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>均值 / 中位</th><th>PF / 大赢家</th><th>10s涨幅 / 20s回撤</th><th>买家Δ / 净流Δ</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="quality-leader-cohort-rows"></tbody></table></div>
+              <div class="section-title"><h3>最近模拟仓位</h3><p>迁移后价格使用边界锚定归一化，避免跨市场价格尺度污染</p></div>
+              <div class="table-wrap"><table><thead><tr><th>信号时间</th><th>组别 / 状态</th><th>Mint</th><th>10s / 20s</th><th>买家Δ / 净流Δ</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="quality-leader-position-rows"></tbody></table></div>
             </article>
           </div>
 
@@ -1605,6 +1622,36 @@
       }).join('') : '<tr><td colspan="8" class="empty">暂无 Holder Growth Shadow N 模拟仓位</td></tr>';
     }
 
+    function renderQualityLeaderShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const research = strategy.research || {};
+      const profiles = runtime.entryProfiles || [];
+      const exits = runtime.exitProfiles || [];
+      const profileLabels = Object.fromEntries(profiles.map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries(exits.map(row => [row.id, row.label]));
+      document.querySelector('#quality-leader-expression').textContent =
+        '10秒涨幅≥140% → 20秒回撤≤12% + 买家增量≥8 + 净流增量≥3 SOL + Retention 80%/60% + Creator≤3% + Curve 55–90% → 200ms后按1 SOL曲线冲击价模拟入场';
+      renderMetricGroups('#quality-leader-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW QL' : '关闭', '独立表，永不签名或发送交易'],
+        ['快照评估 / 命中', `${number(runtime.evaluated)} / ${number(runtime.matched)}`, `回放抑制 ${number(runtime.replayMatchesSuppressed)}`],
+        ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
+        ['独立 Cohort', number(strategy.cohortCount), '严格Barbell / 严格长尾 / 宽松Barbell'],
+        ['仓位 / 确定性成本', `${number(research.simulatedPositionSol,2)} SOL / ${rate(research.configuredCostPct)}`, '分批退出另扣额外执行固定成本'],
+      ], []);
+      renderTimeSessions('#quality-leader-time-sessions', data.timeSessions);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#quality-leader-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.attempts)} / ${number(row.independent_mints)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 活动 ${number(row.active_positions)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}<br><span class="table-note">去Top5 ${pct(row.average_net_return_ex_top5_pct)}</span></td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5贡献 ${rate(row.top_5_winner_contribution_pct)} · 大赢家 ${number(row.big_winners_realized)}/${number(row.big_winner_opportunities)}</span></td><td>${pct(row.average_return_10_pct)} / ${pct(row.average_drawdown_20_pct)}</td><td>+${number(row.average_buyer_delta,1)} / ${number(row.average_net_flow_delta_sol,2)} SOL<br><span class="table-note">Retention ${rate(row.average_retention_20_pct)} · Creator ${rate(row.average_creator_share_20_pct)}</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待满足 Quality Leader 两阶段质量条件的新 Launch</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#quality-leader-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const prices = `${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${pct(row.return_10_pct)} / ${pct(row.drawdown_20_pct)}</td><td>+${number(row.buyer_delta)} / ${number(row.net_flow_delta_sol,2)} SOL</td><td>${prices}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)} · 分批 ${number(row.partial_stage)}/2</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">暂无 Quality Leader Shadow 模拟仓位</td></tr>';
+    }
+
     function renderFlowFirstShadow(data) {
       const runtime = data.runtime || {};
       const runtimeCohorts = runtime.cohorts || [];
@@ -1811,7 +1858,7 @@
         ['Range Scalper J', [['模式', rangeScalper.enabled ? 'SHADOW J（人工重新启用）' : '已停，仅保留历史'], ['订阅 Mint', number(rangeScalper.trackedMints)], ['区间有效', number(rangeScalper.rangeActive)], ['候选 / 信号', `${number(rangeScalper.candidates)} / ${number(rangeScalper.signals)}`], ['待入场', number(rangeScalper.pendingEntries)], ['活动仓位', number(rangeScalper.activePositions)], ['延长订阅', number(rangeScalper.extendedMints)], ['数据库仓位', number(data.database.rangeScalperShadowPositions?.total)], ['链上交易', '永不发送']]],
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Holder Growth N仓位', number(data.database.holderGrowthShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Holder Growth N仓位', number(data.database.holderGrowthShadowPositions?.total)], ['Quality Leader QL仓位', number(data.database.qualityLeaderShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['策略', escapeHtml(activeLiveStrategy.label || '未启用')], ['规则', `毕业后≤${age(liveEntry.trackingAgeMs)} · 1秒跌${number(liveEntry.dropMinPct)}–${number(liveEntry.dropMaxPct)}% · 反弹${number(liveEntry.reboundMinPct)}–${number(liveEntry.reboundMaxPct)}%`], ['单笔', `${number(activeLiveStrategy.positionSizeSol,4)} SOL`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Flow-First C', [['模式', flowFirst.enabled ? 'SHADOW C' : '关闭'], ['Primary信号', number(flowFirst.signalsSeen)], ['独立Episode', number(flowFirst.episodes)], ['重复行去重', number(flowFirst.deduplicated)], ['待入场', number(flowFirst.pendingEntries)], ['活动模拟仓位', number(flowFirst.activePositions)], ['C组退出', '5秒 / 7.5% / 12.5%'], ['链上交易', '永不发送']]],
@@ -1911,6 +1958,9 @@
         ],
         'holder-growth': requestContext => [
           loadDashboard('/api/holder-growth-shadow?positionLimit=30', renderHolderGrowthShadow, requestContext),
+        ],
+        'quality-leader': requestContext => [
+          loadDashboard('/api/quality-leader-shadow?positionLimit=30', renderQualityLeaderShadow, requestContext),
         ],
         'flow-first': requestContext => [
           loadDashboard('/api/flow-first-shadow?positionLimit=30', renderFlowFirstShadow, requestContext),

@@ -3177,6 +3177,96 @@ const config = {
     }),
   },
 
+  // Independent two-stage Quality Leader research. It consumes existing 10s/20s
+  // Launch Quality snapshots and therefore adds no RPC or gRPC subscriptions.
+  qualityLeaderShadow: {
+    enabled: booleanEnv('FLOW_QUALITY_LEADER_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_QUALITY_LEADER_POSITION_SOL'),
+    snapshot10Ms: 10_000,
+    snapshot20Ms: 20_000,
+    maxSnapshotLagMs: integerEnv('FLOW_QUALITY_LEADER_MAX_SNAPSHOT_LAG_MS', 2_000, {
+      min: 0, max: 30_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_QUALITY_LEADER_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_QUALITY_LEADER_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_QUALITY_LEADER_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_QUALITY_LEADER_EXIT_TIMEOUT_MS', 30_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_QUALITY_LEADER_MAX_ENTRY_JUMP_PCT', 20, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_QUALITY_LEADER_MAX_ENTRY_DROP_PCT', 20, {
+      min: 0, max: 100,
+    }),
+    hardStopPct: numberEnv('FLOW_QUALITY_LEADER_HARD_STOP_PCT', 20, {
+      min: 0.1, max: 100,
+    }),
+    strengthActivationPct: numberEnv('FLOW_QUALITY_LEADER_STRENGTH_PCT', 20, {
+      min: 0.1, max: 1_000,
+    }),
+    noStrengthMs: integerEnv('FLOW_QUALITY_LEADER_NO_STRENGTH_MS', 30_000, {
+      min: 1_000, max: 5 * 60_000,
+    }),
+    maxHoldMs: integerEnv('FLOW_QUALITY_LEADER_MAX_HOLD_MS', 5 * 60_000, {
+      min: 10_000, max: 30 * 60_000,
+    }),
+    maxPlausibleReturnPct: numberEnv('FLOW_QUALITY_LEADER_MAX_PLAUSIBLE_RETURN_PCT', 5_000, {
+      min: 100, max: 100_000,
+    }),
+    bigWinnerPct: numberEnv('FLOW_QUALITY_LEADER_BIG_WINNER_PCT', 100, { min: 1 }),
+    entryProfiles: [
+      {
+        id: 'QL_STRICT',
+        label: 'QL-A/B Strict · Retention≥80%',
+        minReturn10Pct: 140,
+        maxDrawdown20Pct: 12,
+        minBuyerDelta: 8,
+        minNetFlowDeltaSol: 3,
+        minRetentionPct: 80,
+        maxCreatorSharePct: 3,
+        minCurvePct: 55,
+        maxCurvePct: 90,
+        maxSellBuyRatio: 0.55,
+        minVirtualSolReserves: 30,
+        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
+      },
+      {
+        id: 'QL_BROAD',
+        label: 'QL-C Broad · Retention≥60%',
+        minReturn10Pct: 140,
+        maxDrawdown20Pct: 12,
+        minBuyerDelta: 8,
+        minNetFlowDeltaSol: 3,
+        minRetentionPct: 60,
+        maxCreatorSharePct: 3,
+        minCurvePct: 55,
+        maxCurvePct: 90,
+        maxSellBuyRatio: 0.55,
+        minVirtualSolReserves: 30,
+        exitProfileIds: ['QL_BARBELL'],
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'QL_BARBELL',
+        label: 'Barbell · +20%卖33% / +100%卖17% / 50%保护尾仓',
+        mode: 'BARBELL',
+        scale1TriggerPct: 20,
+        scale1FractionPct: 33,
+        scale2TriggerPct: 100,
+        scale2FractionPct: 17,
+      },
+      {
+        id: 'QL_PROTECTED',
+        label: 'Protected Runner · 不分批 / 阶梯保护尾仓',
+        mode: 'PROTECTED_RUNNER',
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_QUALITY_LEADER_POSITION_SOL'),
+    }),
+  },
+
   // Graduation Acceleration Shadow O. This is an independent forward-only
   // experiment derived from the non-overlapping historical graduation study.
   // It never signs or submits a transaction and does not reuse old I cohorts.
@@ -3385,6 +3475,24 @@ function validateConfig() {
     for (const exitProfileId of profile.exitProfileIds || []) {
       if (!holderGrowthExitIds.has(exitProfileId)) {
         errors.push(`Holder Growth entry ${profile.id} references missing exit ${exitProfileId}`);
+      }
+    }
+  }
+  if (config.qualityLeaderShadow.enabled && !config.launchQualityObserver.enabled) {
+    errors.push('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED must be true when Quality Leader is enabled');
+  }
+  if (config.qualityLeaderShadow.enabled
+    && ![config.qualityLeaderShadow.snapshot10Ms, config.qualityLeaderShadow.snapshot20Ms]
+      .every((horizonMs) => config.launchQualityObserver.snapshotHorizonsMs.includes(horizonMs))) {
+    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include 10 and 20 for Quality Leader');
+  }
+  const qualityLeaderExitIds = new Set(
+    config.qualityLeaderShadow.exitProfiles.map((profile) => profile.id),
+  );
+  for (const profile of config.qualityLeaderShadow.entryProfiles) {
+    for (const exitProfileId of profile.exitProfileIds || []) {
+      if (!qualityLeaderExitIds.has(exitProfileId)) {
+        errors.push(`Quality Leader entry ${profile.id} references missing exit ${exitProfileId}`);
       }
     }
   }

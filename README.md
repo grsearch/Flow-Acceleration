@@ -306,6 +306,14 @@ Shadow N 复用 Launch Quality Observer 已有的10/20/30/60秒因果快照，�
 
 同一入场并行建立六个独立退出 cohort：固定60秒、固定120秒、5秒保护后`+10%激活/峰值回撤10%`、10秒保护后`+15%激活/峰值回撤12.5%`、10秒保护后的3秒订单流转弱，以及最长300秒的分层自适应尾仓。全部组合使用1 SOL成本模型、200ms退出延迟和独立表 `migration_continuity_shadow_positions`；历史策略和实盘规则都不变，该路径永不签名或发送交易。
 
+## Quality Leader Shadow QL
+
+QL 是基于非重叠历史日样本筛选出的两阶段强势质量实验，不修改任何旧 Shadow 或实盘策略。它复用 Launch Quality Observer 已有的 10 秒与 20 秒快照，不增加 Helius 订阅或 RPC 请求：10 秒涨幅至少 140%，到 20 秒时从峰值回撤不超过 12%，10→20 秒独立买家增加至少 8、净流入增加至少 3 SOL；同时要求 Creator 占比不超过 3%、Curve 55%–90%、卖/买笔数比不超过 0.55、virtual SOL reserves 至少 30。
+
+每个命中建立三组完全独立的前瞻仓位：`QL_STRICT:QL_BARBELL`（Retention≥80%，+20% 卖 33%、+100% 再卖 17%、剩余 50% 跑长尾）、`QL_STRICT:QL_PROTECTED`（Retention≥80%，不分批、全仓跑长尾）以及 `QL_BROAD:QL_BARBELL`（Retention≥60%的宽松样本）。三组在 +20% 前都使用 -20% 硬止损；30 秒仍未达到 +20% 则退出；达到强度后按峰值区间逐级保护，最长持有 5 分钟。分批组按实际额外执行次数扣除固定链上成本。
+
+入场使用信号后 200ms 的首笔 Bonding Curve 成交，并按 1 SOL 对虚拟储备的冲击计算平均成交价。迁移后的 PumpSwap 价格以最后 Curve 价格作边界锚定，避免跨市场价格尺度制造虚假大赢家。所有记录仅写入独立表 `quality_leader_shadow_positions`，接口为 `GET /api/quality-leader-shadow`；该路径没有执行器、不会读取私钥，也不会签名或发送交易。
+
 ## PumpSwap Range Scalper Shadow J
 
 Shadow J 对每个新毕业 Mint 先订阅 PumpSwap 成交120秒，用滚动60秒成交构建因果区间状态：成交笔数、SOL成交量、独立钱包、买卖占比、振幅、价格路径效率、均值穿越次数、最大钱包集中度和短期趋势。只有高成交量、低趋势、持续来回穿越均值的市场才延长订阅，最长20分钟；区间连续失效30秒且没有活动仓位时自动退订，避免无边界增加 Helius 消耗。
