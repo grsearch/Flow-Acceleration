@@ -165,6 +165,11 @@ class ResearchStore {
         table: 'flow_smart_confirm_shadow_positions',
         anchor: 'smart_open_at',
       },
+      'smart-like-early': {
+        label: 'Smart-Like Early Entry',
+        table: 'smart_like_early_shadow_positions',
+        anchor: 'signal_at',
+      },
       'launch-pullback': {
         label: 'Launch 回踩 · F',
         table: 'launch_pullback_shadow_positions',
