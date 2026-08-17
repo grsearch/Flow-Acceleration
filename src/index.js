@@ -11,6 +11,7 @@ const { FlowFirstShadowSuite } = require('./core/FlowFirstShadowSuite');
 const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
 const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
 const { FlowSmartConfirmShadowSuite } = require('./core/FlowSmartConfirmShadowSuite');
+const { SmartLikeEarlyShadowSuite } = require('./core/SmartLikeEarlyShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
@@ -77,6 +78,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   flowSmartConfirmShadow.start();
+  const smartLikeEarlyShadow = new SmartLikeEarlyShadowSuite({
+    config: runtimeConfig.smartLikeEarlyShadow,
+    store,
+  });
+  smartLikeEarlyShadow.start();
   const launchPullbackShadow = new LaunchPullbackShadowSuite({
     config: runtimeConfig.launchPullbackShadow,
     store,
@@ -151,6 +157,7 @@ function createRuntime(runtimeConfig = config) {
     smartPullbackShadow,
     smartOpenShadow,
     flowSmartConfirmShadow,
+    smartLikeEarlyShadow,
     launchPullbackShadow,
     launchQualityObserver,
     migratedDropReboundShadow,
@@ -163,7 +170,12 @@ function createRuntime(runtimeConfig = config) {
     qualityLeaderShadow,
     graduationAccelerationShadow,
   });
-  const smartWallets = new Set(runtimeConfig.smartWallets);
+  const smartWallets = new Set([
+    ...runtimeConfig.smartWallets,
+    ...(runtimeConfig.smartLikeEarlyShadow.priorityWallets || []),
+    ...(runtimeConfig.smartLikeEarlyShadow.walletClusters || [])
+      .flatMap((cluster) => cluster.wallets || []),
+  ]);
   const runtimeMetrics = {
     parsedEvents: 0,
     parseErrors: 0,
@@ -191,6 +203,7 @@ function createRuntime(runtimeConfig = config) {
       ...migrationContinuityShadow.trackedMints(now),
       ...rangeScalperShadow.trackedMints(now),
       ...cyaEarlyPyramidShadow.trackedMints(),
+      ...smartLikeEarlyShadow.trackedMints(),
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
       ...holderGrowthShadow.trackedMints(),
@@ -212,6 +225,7 @@ function createRuntime(runtimeConfig = config) {
       const saved = store.recordSignal(signal);
       labeler.addSignal(saved);
       observeShadow('launchPullbackSignal', () => launchPullbackShadow.onSignal(saved));
+      observeShadow('smartLikeEarlySignal', () => smartLikeEarlyShadow.onSignal(saved));
       console.log(
         `[${logPrefix}] ${signal.signalVariant} ${signal.symbol || signal.mint.slice(0, 8)} `
         + `net=${signal.netFlowW1.toFixed(2)}→${signal.netFlowW2.toFixed(2)}`
@@ -329,6 +343,7 @@ function createRuntime(runtimeConfig = config) {
           )
           : null;
         store.queueRawTrade(trade);
+        observeShadow('smartLikeEarly', () => smartLikeEarlyShadow.observeTrade(trade));
         observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
         observeShadow('migrationContinuity', () => migrationContinuityShadow.observeTrade(trade));
         observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
@@ -356,6 +371,9 @@ function createRuntime(runtimeConfig = config) {
             ));
             observeShadow('flowSmartConfirmEvent', () => (
               flowSmartConfirmShadow.onSmartWalletOpen(normalizedSmartEvent)
+            ));
+            observeShadow('smartLikeEarlyEvent', () => (
+              smartLikeEarlyShadow.onSmartWalletEvent(normalizedSmartEvent)
             ));
             if (trade.side === 'BUY') {
               observeShadow('smartPullbackEvent', () => (
@@ -413,6 +431,12 @@ function createRuntime(runtimeConfig = config) {
     console.log(
       `Flow->Smart Confirm Shadow L: ${runtimeConfig.flowSmartConfirmShadow.cohorts
         .map((cohort) => cohort.id).join(', ')}; forward entry only; sends transactions=false.`,
+    );
+    console.log(
+      `Smart-Like Early Shadow: ${runtimeConfig.smartLikeEarlyShadow.entryProfiles.length} entries x `
+      + `${runtimeConfig.smartLikeEarlyShadow.addProfiles.length} add policies x `
+      + `${runtimeConfig.smartLikeEarlyShadow.exitProfiles.length} exits; isolated table; `
+      + 'causal fills only; sends transactions=false.',
     );
     console.log(
       `Launch Quality Observer: snapshots=${runtimeConfig.launchQualityObserver.snapshotHorizonsMs
@@ -495,6 +519,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('smartPullbackAdvance', () => smartPullbackShadow.advanceTime(now));
       observeShadow('smartOpenAdvance', () => smartOpenShadow.advanceTime(now));
       observeShadow('flowSmartConfirmAdvance', () => flowSmartConfirmShadow.advanceTime(now));
+      observeShadow('smartLikeEarlyAdvance', () => smartLikeEarlyShadow.advanceTime(now));
       observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
       observeShadow('holderGrowthAdvance', () => holderGrowthShadow.advanceTime(now));
@@ -529,6 +554,7 @@ function createRuntime(runtimeConfig = config) {
     smartPullbackShadow.stop();
     smartOpenShadow.stop();
     flowSmartConfirmShadow.stop();
+    smartLikeEarlyShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     holderGrowthShadow.stop();
@@ -557,6 +583,7 @@ function createRuntime(runtimeConfig = config) {
       smartPullbackShadow: smartPullbackShadow.health(),
       smartOpenShadow: smartOpenShadow.health(),
       flowSmartConfirmShadow: flowSmartConfirmShadow.health(),
+      smartLikeEarlyShadow: smartLikeEarlyShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       holderGrowthShadow: holderGrowthShadow.health(),
@@ -574,6 +601,7 @@ function createRuntime(runtimeConfig = config) {
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
+    smartLikeEarlyShadow,
     launchPullbackShadow,
     launchQualityObserver, holderGrowthShadow, qualityLeaderShadow, migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
