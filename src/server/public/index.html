@@ -350,6 +350,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-smart-confirm">
               <b>Flow → Smart 确认 · L</b><small>Primary Rank 1 后 Smart OPEN，再按下一笔成交入场</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-like-early">
+              <b>Smart-Like Early · SLE</b><small>早期不追涨入场、顺势加仓、分批止盈与长尾退出</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback">
               <b>Launch 回踩 · F / FT / FD / FO / FC / FA / FR</b><small>旧组保留；新增前置 Flow 共振与多退出对照</small>
             </button>
@@ -686,6 +689,28 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号时间</th><th>组别 / 状态</th><th>Mint</th><th>Buyers / 20–30秒新增</th><th>Retention / NetFlow / Top3</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="holder-growth-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="smart-like-early" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Smart-Like Early Entry Shadow</h2>
+                <p>独立因果 Shadow：不会签名或发送交易；后续 Smart OPEN 只作为标签，不会回填更早的成交价。</p>
+              </div>
+              <div class="strategy-expression" id="smart-like-early-expression">3种入场 × 2种加仓 × 3种退出；F9/FAic 按同一钱包集群去重</div>
+              <div class="strategy-metric-groups" id="smart-like-early-metrics"></div>
+              <div class="strategy-metric-groups" id="smart-like-early-time-sessions"></div>
+              <div class="section-title"><h2>组合统计</h2><p>NO_EXIT 单独计数，不按 -100% 计入盈亏。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 加仓 / 退出</th><th>信号 / 币</th><th>完成 / 胜率</th><th>平均 / 中位净收益</th><th>PF / 最大赢家</th><th>Smart确认率</th><th>入场状态</th><th>加仓 / 止盈</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="smart-like-early-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>仓位、成本、后续 Smart 确认和退出原因均独立保存。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>来源 / 状态</th><th>Mint / 钱包</th><th>AGE / Curve</th><th>5秒资金流 / 涨幅</th><th>信号 / 均价 / 出场</th><th>投入 / 加仓 / 止盈</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="smart-like-early-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1120,6 +1145,32 @@
         const f = row.features || {};
         return `<tr><td>${dateTime(row.timestamp_ms)}</td><td>${statusChip(row.rule_matched ? 'MATCHED' : 'NOT_MATCHED')}</td><td>${statusChip(row.action_status)}</td><td>${mintLink(row.mint)}</td><td>${escapeHtml(row.strategy_id || '—')}<br><span class="table-note">${escapeHtml(row.episode_id || '')}</span></td><td>${pct(f.dropPct)}</td><td>${pct(f.reboundPct)}</td><td>${age(f.migrationAgeMs)}</td><td class="wrap-cell">${escapeHtml(rejection)}</td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；毕业后独立深跌反弹周期出现后会自动记录</td></tr>';
+    }
+
+    function renderSmartLikeEarlyShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
+      const addLabels = Object.fromEntries((runtime.addProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#smart-like-early-expression').textContent = `Curve<=${number(strategy.maxCurvePct)}% / AGE<=${age(strategy.maxAgeMs)} / 5s涨幅<=${pct(strategy.maxReturn5sPct)} / NetFlow5>=${number(strategy.minNetFlow5s,2)} SOL；+${(strategy.addThresholdsPct || []).join('/+')}% 各加 ${(Number(strategy.addFraction || 0) * 100).toFixed(0)}%`;
+      renderMetricGroups('#smart-like-early-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW SLE' : '关闭', '独立表；永不签名或发送交易'],
+        ['合格信号 / 拒绝', `${number(runtime.qualifiedSignals)} / ${number(runtime.rejectedSignals)}`, `Flow评估 ${number(runtime.evaluatedFlowSignals)} · Smart评估 ${number(runtime.evaluatedSmartOpens)}`],
+        ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `开仓 ${number(runtime.opened)} · 关闭 ${number(runtime.closed)}`],
+        ['加仓 / 分批止盈', `${number(runtime.adds)} / ${number(runtime.partialExits)}`, `Smart后验确认 ${number(runtime.smartConfirmations)} · NO_EXIT ${number(runtime.noExit)}`],
+      ], []);
+      renderTimeSessions('#smart-like-early-time-sessions', data.timeSessions);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#smart-like-early-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(addLabels[row.add_profile_id] || row.add_profile_id)} · ${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}</td><td>${rate(row.smart_confirmation_rate_pct)}</td><td>拒绝 ${number(row.rule_rejected)} · 跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</td><td>${number(row.average_add_count,2)} / ${number(row.average_partial_exit_count,2)}<br><span class="table-note">${number(row.average_invested_sol,3)} SOL</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="9" class="empty">等待早期因果信号样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#smart-like-early-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const wallet = row.source_wallet || row.smart_confirm_wallet || '';
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.source_type)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(wallet)}</span></td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.net_flow_5s,2)} SOL / ${pct(row.return_5s_pct)}<br><span class="table-note">buyers ${number(row.buyers_5s)} · sells1 ${number(row.sell_tx_1s)}</span></td><td>${number(row.signal_price,10)} / ${number(row.average_entry_price,10)} / ${number(row.exit_price,10)}</td><td>${number(row.total_invested_sol ?? row.position_sol,3)} SOL / ${number(row.add_count)} / ${number(row.partial_exit_count)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart-Like Early 模拟仓位。</td></tr>';
     }
 
     function renderFlowSmartConfirmShadow(data) {
@@ -1928,6 +1979,9 @@
         ],
         'flow-smart-confirm': requestContext => [
           loadDashboard('/api/flow-smart-confirm-shadow?positionLimit=30', renderFlowSmartConfirmShadow, requestContext),
+        ],
+        'smart-like-early': requestContext => [
+          loadDashboard('/api/smart-like-early-shadow?positionLimit=50', renderSmartLikeEarlyShadow, requestContext),
         ],
         'launch-pullback': requestContext => [
           loadDashboard('/api/launch-pullback-shadow?positionLimit=30', renderLaunchPullbackShadow, requestContext),
