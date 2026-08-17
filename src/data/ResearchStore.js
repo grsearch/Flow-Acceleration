@@ -215,6 +215,11 @@ class ResearchStore {
         table: 'quality_leader_shadow_positions',
         anchor: 'signal_at',
       },
+      'big-winner': {
+        label: 'Big Winner Pullback + Flow - BW',
+        table: 'big_winner_shadow_positions',
+        anchor: 'signal_at',
+      },
     };
     const strategy = strategies[strategyId];
     if (!strategy) throw new Error(`Unknown Shadow time-session strategy: ${strategyId}`);
