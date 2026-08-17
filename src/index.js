@@ -97,6 +97,7 @@ function createRuntime(runtimeConfig = config) {
   const qualityLeaderShadow = new QualityLeaderShadowSuite({
     config: runtimeConfig.qualityLeaderShadow,
     store,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   qualityLeaderShadow.start();
   const bigWinnerShadow = new BigWinnerShadowSuite({
