@@ -1,0 +1,148 @@
+'use strict';
+
+const assert = require('assert');
+const { ResearchStore } = require('../src/data/ResearchStore');
+const { BigWinnerShadowSuite } = require('../src/core/BigWinnerShadowSuite');
+
+function store() {
+  return new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+}
+
+function config() {
+  const pullback = (id, wave, drawMin, drawMax, net) => ({
+    id, family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
+    minFirstWavePct: wave, minPullbackPct: drawMin, maxPullbackPct: drawMax,
+    minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: net,
+    minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
+  });
+  const ratchet = (id, weight, stop) => ({
+    id, coreActivationPct: 20, coreWeightPct: weight, hardStopPct: stop,
+    trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+    trailingTiers: [],
+    profitFloors: [
+      { activationPct: 50, lockPct: 20 }, { activationPct: 100, lockPct: 60 },
+      { activationPct: 150, lockPct: 100 }, { activationPct: 250, lockPct: 170 },
+    ],
+    maxHoldMs: 300_000,
+  });
+  return {
+    enabled: true, positionSizeSol: 1, stateWindowMs: 10_000,
+    stateRetentionMs: 600_000, entryDelayMs: 200, entryTimeoutMs: 2_000,
+    noExitGraceMs: 60_000, maxEntryPriceJumpPct: 50,
+    maxEntryPriceDropPct: 50, maxEntryImpactPct: 40, maxAdjacentPriceRatio: 20,
+    entryProfiles: [
+      pullback('PBR_A', 40, 12, 25, 3),
+      pullback('PBR_B', 50, 18, 30, 2),
+      pullback('PBR_C', 40, 15, 25, 2),
+      {
+        id: 'FLOW_R', family: 'FLOW', minAgeMs: 5_000, maxAgeMs: 60_000,
+        minNetFlow8sSol: 20, minBuyers8s: 12, maxLargestBuyerShare8s: 0.5,
+        maxRunupPct: 40, maxDistanceFromHigh10sPct: 10, maxJump2sPct: 20,
+        minRecentFlowRatio: 0.5,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X50_15', coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 15,
+        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+        trailingTiers: [
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+        ],
+        profitFloors: [], maxHoldMs: 180_000,
+      },
+      {
+        id: 'X50_12', coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 12,
+        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+        trailingTiers: [
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+        ],
+        profitFloors: [], maxHoldMs: 180_000,
+      },
+      ratchet('X50_RATCHET', 50, 15),
+      ratchet('X40_RATCHET', 40, 15),
+    ],
+    costModel: {
+      platformFeePct: 3.2, buySlippagePct: 0, sellSlippagePct: 0,
+      priceImpactPct: 0, baseTxFeeSol: 0, priorityFeeSol: 0,
+      jitoTipSol: 0, fixedCostSol: 0, positionSizeSol: 1,
+      entryFailureRatePct: 0, entryFailureCostPct: 0,
+    },
+  };
+}
+
+function run() {
+  const db = store();
+  const base = 1_900_100_000_000;
+  let now = base;
+  const suite = new BigWinnerShadowSuite({ config: config(), store: db, now: () => now });
+  suite.start();
+  let sequence = 0;
+  const emit = (mint, origin, offset, side, sol, wallet, price) => {
+    sequence += 1;
+    now = origin + offset;
+    suite.observeTrade({
+      mint, symbol: 'BW', timestampMs: now, market: 'PUMP_AMM', side,
+      solAmount: sol, tokenAmount: sol / price, wallet, price, reservePrice: price,
+      signature: `bw-${sequence}`, eventIndex: 0,
+    });
+  };
+
+  const pullMint = 'BigWinnerPullback111111111111111111111111111';
+  suite.onGraduated({ mint: pullMint, migratedAt: base, symbol: 'PBR' });
+  emit(pullMint, base, 0, 'BUY', 0.1, 'seed', 1);
+  emit(pullMint, base, 1_000, 'BUY', 0.1, 'peak', 1.7);
+  emit(pullMint, base, 2_000, 'SELL', 0.1, 'seller', 1.3);
+  emit(pullMint, base, 3_200, 'BUY', 1, 'buyer-1', 1.305);
+  emit(pullMint, base, 3_800, 'BUY', 1, 'buyer-2', 1.31);
+  emit(pullMint, base, 4_400, 'BUY', 1, 'buyer-3', 1.315);
+  emit(pullMint, base, 5_000, 'BUY', 1, 'buyer-4', 1.326);
+  assert.strictEqual(suite.health().pendingEntries, 12,
+    'three pullback entries must each create four independent exits');
+  emit(pullMint, base, 5_250, 'BUY', 0.2, 'fill', 1.326);
+  assert.strictEqual(suite.health().activePositions, 12);
+  emit(pullMint, base, 5_500, 'BUY', 1, 'core', 1.61);
+  emit(pullMint, base, 6_000, 'BUY', 1, 'runner', 2.2);
+  emit(pullMint, base, 6_500, 'SELL', 1, 'profit', 1.84);
+  const pullRows = db.db.prepare(`
+    SELECT * FROM big_winner_shadow_positions WHERE mint=? ORDER BY cohort_id
+  `).all(pullMint);
+  assert.strictEqual(pullRows.length, 12);
+  assert.ok(pullRows.every((row) => row.status === 'CLOSED'));
+  assert.ok(pullRows.every((row) => row.core_exit_at != null));
+  assert.ok(pullRows.every((row) => row.net_return_pct > 0));
+
+  const flowBase = base + 100_000;
+  const flowMint = 'BigWinnerFlow1111111111111111111111111111111';
+  suite.onGraduated({ mint: flowMint, migratedAt: flowBase, symbol: 'FLOW' });
+  emit(flowMint, flowBase, 0, 'BUY', 0.1, 'seed-flow', 1);
+  for (let index = 0; index < 11; index += 1) {
+    emit(flowMint, flowBase, 1_000 + index * 400, 'BUY', 2, `flow-${index}`, 1.1 + index * 0.008);
+  }
+  assert.strictEqual(suite.health().pendingEntries, 4,
+    'FLOW-R must create four independent exits');
+  emit(flowMint, flowBase, 5_250, 'BUY', 0.2, 'flow-fill', 1.19);
+  assert.strictEqual(suite.health().activePositions, 4);
+  now = flowBase + 370_000;
+  suite.advanceTime(now);
+  const censored = db.db.prepare(`
+    SELECT status, net_return_pct FROM big_winner_shadow_positions WHERE mint=?
+  `).all(flowMint);
+  assert.ok(censored.every((row) => row.status === 'NO_EXIT'));
+  assert.ok(censored.every((row) => row.net_return_pct == null),
+    'NO_EXIT must remain censored instead of becoming a -100% return');
+
+  const dashboard = suite.dashboard();
+  assert.strictEqual(dashboard.cohorts.length, 16);
+  assert.strictEqual(db.shadowTimeSessionDashboard('big-winner').sessions.length, 4);
+  assert.strictEqual(db.db.prepare('SELECT COUNT(*) AS n FROM live_positions').get().n, 0,
+    'Big Winner Shadow must never create a live position');
+  db.close();
+  console.log('big winner shadow tests passed');
+}
+
+run();
