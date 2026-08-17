@@ -4096,8 +4096,7 @@ class ResearchStore {
       WHERE p.mode = 'LIVE'
         AND o.signature IS NOT NULL
         AND o.wallet_sol_delta IS NULL
-        AND (o.side = 'BUY' OR p.status = 'CLOSED')
-      ORDER BY o.id DESC
+      ORDER BY o.id ASC
       LIMIT ?
     `).all(Math.min(2_000, Math.max(1, Math.trunc(Number(limit) || 500))));
   }
@@ -4109,7 +4108,8 @@ class ResearchStore {
         SUM(CASE WHEN side = 'SELL' THEN wallet_sol_delta ELSE 0 END) AS exit_delta,
         SUM(wallet_sol_delta) AS pnl_sol,
         SUM(side = 'BUY' AND wallet_sol_delta IS NOT NULL) AS settled_buys,
-        SUM(side = 'SELL' AND wallet_sol_delta IS NOT NULL) AS settled_sells
+        SUM(side = 'SELL' AND wallet_sol_delta IS NOT NULL) AS settled_sells,
+        SUM(signature IS NOT NULL AND wallet_sol_delta IS NULL) AS pending_settlements
       FROM live_orders
       WHERE position_id = ?
     `).get(positionId);
@@ -4120,6 +4120,7 @@ class ResearchStore {
     const complete = position?.status === 'CLOSED'
       && Number(totals.settled_buys) > 0
       && Number(totals.settled_sells) > 0
+      && Number(totals.pending_settlements) === 0
       && entryDelta < 0;
     const realizedPnlSol = complete ? pnlSol : null;
     const realizedReturnPct = complete ? (pnlSol / Math.abs(entryDelta)) * 100 : null;
@@ -4138,6 +4139,7 @@ class ResearchStore {
       realizedPnlSol,
       realizedReturnPct,
       complete,
+      pendingSettlements: Number(totals.pending_settlements) || 0,
     };
   }
 

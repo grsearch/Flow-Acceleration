@@ -375,6 +375,93 @@ setImmediate(() => {
   assert.strictEqual(settledDashboard.stats.settled_closed_positions, 1);
   assert.strictEqual(settledDashboard.stats.win_rate_pct, 100);
 
+  // A failed sell fee is not proof that the successful sell receipt has settled.
+  // Keep realized PnL pending until every signed order has a wallet SOL delta,
+  // then durably recover the missing partial-sell receipt after a restart.
+  const partialDecision = store.recordLiveStrategyDecision({
+    strategyId: 'partial_settlement_test', episodeId: 'partial-settlement-test:1',
+    timestampMs: now, receivedAtMs: now, mint: 'MintPartialSettlementTest',
+    ruleVersion: 'test', market: 'PUMP_AMM', referencePrice: 1,
+    features: {}, ruleMatched: true, rejectionReasons: [], mode: 'LIVE',
+    actionStatus: 'CLOSED',
+  });
+  const partialPosition = store.createLivePosition({
+    strategyDecisionId: partialDecision.id, strategyId: 'partial_settlement_test',
+    sourceType: 'partial_settlement_test', mint: 'MintPartialSettlementTest', mode: 'LIVE',
+    status: 'OPENING', positionSol: 1, entryMarket: 'PUMP_AMM', entryPrice: 1,
+  });
+  store.updateLivePosition(partialPosition.id, {
+    status: 'CLOSED', entryPrice: 1, exitPrice: 0.9643,
+    openedAt: now, closedAt: now + 10_000, exitReason: 'LOSS_CHECK',
+  });
+  store.recordLiveOrder({
+    positionId: partialPosition.id, strategyDecisionId: partialDecision.id,
+    strategyId: 'partial_settlement_test', mint: 'MintPartialSettlementTest', side: 'BUY',
+    attempt: 1, status: 'CONFIRMED', signature: 'partial-settlement-buy',
+    walletSolDelta: -1.00257908, networkFeeSol: 0.0005,
+  });
+  store.recordLiveOrder({
+    positionId: partialPosition.id, strategyDecisionId: partialDecision.id,
+    strategyId: 'partial_settlement_test', mint: 'MintPartialSettlementTest', side: 'SELL',
+    attempt: 1, status: 'FAILED', signature: 'partial-settlement-failed-sell',
+    walletSolDelta: -0.000505, networkFeeSol: 0.000505,
+  });
+  const partialSellOrderId = store.recordLiveOrder({
+    positionId: partialPosition.id, strategyDecisionId: partialDecision.id,
+    strategyId: 'partial_settlement_test', mint: 'MintPartialSettlementTest', side: 'SELL',
+    attempt: 2, status: 'CONFIRMED_PARTIAL', signature: 'partial-settlement-successful-sell',
+  });
+  store.recordLiveOrder({
+    positionId: partialPosition.id, strategyDecisionId: partialDecision.id,
+    strategyId: 'partial_settlement_test', mint: 'MintPartialSettlementTest', side: 'SELL',
+    attempt: 3, status: 'ALREADY_EMPTY', signature: null,
+  });
+  const pendingSettlement = store.refreshLivePositionSettlement(partialPosition.id);
+  assert.strictEqual(pendingSettlement.complete, false);
+  assert.strictEqual(pendingSettlement.pendingSettlements, 1);
+  let partialDashboard = store.liveTradingDashboard({ strategyId: 'partial_settlement_test' });
+  assert.strictEqual(partialDashboard.positions[0].realized_pnl_sol, null);
+  assert.strictEqual(partialDashboard.positions[0].realized_return_pct, null);
+  assert.strictEqual(partialDashboard.stats.settled_closed_positions, 0);
+  assert.ok(store.unsettledLiveOrders(2_000)
+    .some((order) => order.id === partialSellOrderId));
+  // Simulate the stale -100% persisted by the previous completeness rule.
+  store.updateLivePosition(partialPosition.id, {
+    realizedPnlSol: -1.003084,
+    realizedReturnPct: -100.05,
+  });
+
+  let settlementAvailable = false;
+  let settlementRecoveryNow = now;
+  const settlementRecoveryManager = new LiveTradingManager({
+    config: { ...config, dryRun: false, strategies: [] },
+    store,
+    now: () => settlementRecoveryNow,
+    executor: {
+      async transactionSettlement(signature) {
+        if (settlementAvailable && signature === 'partial-settlement-successful-sell') {
+          return { walletSolDelta: 0.659232, networkFeeSol: 0.0005 };
+        }
+        return null;
+      },
+    },
+  });
+  settlementRecoveryManager.start();
+  await Promise.allSettled([...settlementRecoveryManager.pending]);
+  partialDashboard = store.liveTradingDashboard({ strategyId: 'partial_settlement_test' });
+  assert.strictEqual(partialDashboard.positions[0].realized_pnl_sol, null);
+  settlementAvailable = true;
+  settlementRecoveryNow += 30_001;
+  settlementRecoveryManager.advanceTime(settlementRecoveryNow);
+  await Promise.allSettled([...settlementRecoveryManager.pending]);
+  partialDashboard = store.liveTradingDashboard({ strategyId: 'partial_settlement_test' });
+  assert.ok(Math.abs(partialDashboard.positions[0].realized_pnl_sol - (-0.34385208)) < 1e-12);
+  assert.ok(Math.abs(
+    partialDashboard.positions[0].realized_return_pct - (-34.29675392787968)
+  ) < 1e-9);
+  assert.strictEqual(partialDashboard.stats.settled_closed_positions, 1);
+  await settlementRecoveryManager.stop();
+
   // A fully closed mint may enter one fresh causal cycle a second time.
   trade(100, 8_000);
   trade(70, 8_300);

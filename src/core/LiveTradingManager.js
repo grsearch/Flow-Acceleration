@@ -93,6 +93,9 @@ class LiveTradingManager {
     this.positions = new Map();
     this.timers = new Map();
     this.pending = new Set();
+    this.settlementOrdersInFlight = new Set();
+    this.settlementSweepPromise = null;
+    this.nextSettlementSweepAt = 0;
     this.coreExitPending = new Set();
     this.entryQueue = Promise.resolve();
     this.stopping = false;
@@ -188,32 +191,42 @@ class LiveTradingManager {
     }
     if (this.mode === 'LIVE' && this.executor?.transactionSettlement
       && typeof this.store.unsettledLiveOrders === 'function') {
-      this._track(this._reconcileHistoricalSettlements());
+      this._scheduleSettlementReconciliation(this.now(), true);
     }
   }
 
   async _reconcileOrderSettlement({ orderId, positionId, signature, attempts = 5 }) {
     if (!signature || !this.executor?.transactionSettlement) return null;
+    const key = Number(orderId);
+    if (this.settlementOrdersInFlight.has(key)) return null;
+    this.settlementOrdersInFlight.add(key);
     const delayMs = Math.max(250, Number(this.config.entryReconcileDelayMs) || 1_000);
-    for (let attempt = 1; attempt <= attempts && !this.stopping; attempt += 1) {
-      try {
-        const settlement = await this.executor.transactionSettlement(signature);
-        if (settlement && Number.isFinite(settlement.walletSolDelta)) {
-          this.store.updateLiveOrderSettlement(orderId, settlement);
-          return this.store.refreshLivePositionSettlement(positionId);
+    try {
+      for (let attempt = 1; attempt <= attempts && !this.stopping; attempt += 1) {
+        try {
+          const settlement = await this.executor.transactionSettlement(signature);
+          if (settlement && Number.isFinite(settlement.walletSolDelta)) {
+            this.store.updateLiveOrderSettlement(orderId, settlement);
+            return this.store.refreshLivePositionSettlement(positionId);
+          }
+        } catch (error) {
+          if (attempt === attempts) this._rememberError(error);
         }
-      } catch (error) {
-        if (attempt === attempts) this._rememberError(error);
+        if (attempt < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       }
-      if (attempt < attempts) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
+      return null;
+    } finally {
+      this.settlementOrdersInFlight.delete(key);
     }
-    return null;
   }
 
   async _reconcileHistoricalSettlements() {
-    const rows = this.store.unsettledLiveOrders(500);
+    const rows = this.store.unsettledLiveOrders(2_000);
+    for (const positionId of new Set(rows.map((row) => row.position_id))) {
+      this.store.refreshLivePositionSettlement(positionId);
+    }
     const concurrency = 4;
     for (let index = 0; index < rows.length && !this.stopping; index += concurrency) {
       const batch = rows.slice(index, index + concurrency);
@@ -224,6 +237,22 @@ class LiveTradingManager {
         attempts: 1,
       })));
     }
+  }
+
+  _scheduleSettlementReconciliation(now = this.now(), force = false) {
+    if (this.mode !== 'LIVE' || this.stopping || !this.executor?.transactionSettlement
+      || typeof this.store.unsettledLiveOrders !== 'function') return;
+    if (this.settlementSweepPromise || (!force && now < this.nextSettlementSweepAt)) return;
+    this.nextSettlementSweepAt = now + 30_000;
+    const sweep = this._reconcileHistoricalSettlements()
+      .catch((error) => {
+        this._rememberError(error);
+      })
+      .finally(() => {
+        if (this.settlementSweepPromise === sweep) this.settlementSweepPromise = null;
+      });
+    this.settlementSweepPromise = sweep;
+    this._track(sweep);
   }
 
   health() {
@@ -393,6 +422,7 @@ class LiveTradingManager {
   }
 
   advanceTime(now = this.now()) {
+    this._scheduleSettlementReconciliation(now);
     for (const states of this.detectors.values()) {
       for (const [mint, state] of states) {
         if (state.candidate && now > state.candidate.expiresAt) state.candidate = null;
