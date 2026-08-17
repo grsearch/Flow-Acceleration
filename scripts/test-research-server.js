@@ -244,6 +244,9 @@ async function main() {
     const graduationAccel = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
     ));
+    const qualityLeader = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'quality_leader_ql_strict_protected_live'
+    ));
     const retiredV3 = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
     ));
@@ -255,11 +258,14 @@ async function main() {
     assert.strictEqual(retiredV3.entryEnabled, false);
     assert.strictEqual(gd25F1.entryEnabled, true);
     assert.strictEqual(gd25F1.maxSignalsPerMint, 1);
-    assert.strictEqual(gd25F1.positionSizeSol, 1);
+    assert.strictEqual(gd25F1.positionSizeSol, 0.1);
     assert.strictEqual(continuity.market, 'PUMP_AMM');
     assert.strictEqual(graduationAccel.market, 'PUMP_BONDING_CURVE');
-    assert.strictEqual(continuity.positionSizeSol, 1);
-    assert.strictEqual(graduationAccel.positionSizeSol, 1);
+    assert.strictEqual(continuity.positionSizeSol, 0.1);
+    assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
+    assert.strictEqual(qualityLeader.positionSizeSol, 0.1);
+    assert.strictEqual(qualityLeader.entryEnabled, true);
+    assert.strictEqual(qualityLeader.exitMode, 'QUALITY_PROTECTED_RUNNER');
     assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
     assert.strictEqual(liveTrading.runtime.priorityFeeMicroLamports, 2_000_000);
     assert.strictEqual(continuity.fixedHoldMs, 120_000);
