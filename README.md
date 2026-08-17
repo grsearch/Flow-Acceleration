@@ -347,6 +347,8 @@ QL 是基于非重叠历史日样本筛选出的两阶段强势质量实验，�
 
 入场使用信号后 200ms 的首笔 Bonding Curve 成交，并按 1 SOL 对虚拟储备的冲击计算平均成交价。迁移后的 PumpSwap 价格以最后 Curve 价格作边界锚定，避免跨市场价格尺度制造虚假大赢家。所有记录仅写入独立表 `quality_leader_shadow_positions`，接口为 `GET /api/quality-leader-shadow`；该路径没有执行器、不会读取私钥，也不会签名或发送交易。
 
+`QL_STRICT:QL_PROTECTED` 另有独立实盘提升策略 `quality_leader_ql_strict_protected_live`。它只在 Strict + Protected 的200ms可执行入场通过跳价检查后发出一次实盘信号，不会因 Barbell/Protected 两条 Shadow 记录重复下单；Shadow QL 仍按原三组继续写入。实盘默认0.1 SOL，不分批卖出：+20%前硬止损20%，30秒未达到+20%退出；走强后按峰值20/50/100/200%分层保护，最长5分钟，并可跨毕业阶段卖出当前全部链上余额。
+
 ## PumpSwap Range Scalper Shadow J
 
 Shadow J 对每个新毕业 Mint 先订阅 PumpSwap 成交120秒，用滚动60秒成交构建因果区间状态：成交笔数、SOL成交量、独立钱包、买卖占比、振幅、价格路径效率、均值穿越次数、最大钱包集中度和短期趋势。只有高成交量、低趋势、持续来回穿越均值的市场才延长订阅，最长20分钟；区间连续失效30秒且没有活动仓位时自动退订，避免无边界增加 Helius 消耗。
@@ -447,16 +449,20 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-旧的 Primary Early、Graduation Acceleration O 与 XLEG-V3 实盘入口已经停止新开仓，相关历史数据继续保留用于研究及存量仓位退出。当前启用 Migration Continuity M 与独立的 GD25 F1 XLEG 实盘策略，单笔均为 `1 SOL`：
+旧的 Primary Early、Graduation Acceleration O 与 XLEG-V3 实盘入口已经停止新开仓，相关历史数据继续保留用于研究及存量仓位退出。当前所有实盘策略的默认单笔仓位统一为 `0.1 SOL`；旧服务器 `.env` 中历史默认值 `0.05` 或 `1` 会在升级后自动继承为 `0.1 SOL`：
 
 ```text
 M / migration_continuity_mc_c5_e120_live
 毕业后5秒 Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6
-→ PumpSwap买入1 SOL → 20%硬止损或固定120秒卖出
+→ PumpSwap买入0.1 SOL → 20%硬止损或固定120秒卖出
+
+QL Strict Protected / quality_leader_ql_strict_protected_live
+10秒涨幅≥140%、20秒回撤≤12%、Retention≥80%，且买家/净流入继续增长
+→ Bonding Curve买入0.1 SOL → 不分批的阶梯保护Runner，30秒未走强退出、5分钟兜底
 
 GD25 F1 / post_gd25_35_f1_xleg_live_v1
 毕业后120秒内，1秒跌25%–35%，低点1秒内反弹2%–5%
-→ 每Mint只消费首次合格机会 → PumpSwap买入1 SOL
+→ 每Mint只消费首次合格机会 → PumpSwap买入0.1 SOL
 → 5秒内+18%快速止盈；否则+8%激活、峰值回撤3%；6秒仍亏损退出；15秒兜底
 
 O / graduation_accel_o_c80_d5_b2_s0_nc_live（停止新开仓）
@@ -469,11 +475,11 @@ M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_s
 
 - `DISABLED`：全局安全锁模式，不签名；各实盘策略的独立 `entryEnabled=false` 还会进一步阻止其产生新仓。
 - `DRY_RUN`：只有先显式解除 `FLOW_LIVE_TRADING_SAFETY_LOCK`，再设置 `FLOW_LIVE_TRADING_ENABLED=true` 并保留 `FLOW_LIVE_DRY_RUN=true` 才能启用。
-- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写至少一个启用策略的 `POSITION_SOL=1`。升级时已有的 O/XLEG 仓位变量仍可作为存量退出配置回退值。
+- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写至少一个启用策略的 `POSITION_SOL=0.1`。升级时已有的 O/XLEG 仓位变量仍可作为存量退出配置回退值。
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-M 与 GD25 F1 使用官方 PumpSwap SDK，O 的历史存量仓位仍可在毕业前使用 Pump Bonding Curve、毕业后使用 PumpSwap。买入均为固定 SOL 输入，`1 SOL` 是硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、GD25 F1 每 Mint 只取首次匹配机会、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
+M 与 GD25 F1 使用官方 PumpSwap SDK，O 的历史存量仓位仍可在毕业前使用 Pump Bonding Curve、毕业后使用 PumpSwap。买入均为固定 SOL 输入，默认 `0.1 SOL` 是单笔硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、GD25 F1 每 Mint 只取首次匹配机会、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
 
 M 的卖出规则与 Shadow E120 一致：20%硬止损，否则从真实成交时间起固定120秒后卖出全部余额。如 O 仍有存量仓位，则继续沿用原退出规则：毕业后首笔可执行 PumpSwap 行情卖出50%核心仓位，剩余50%按 `+20/40/80/150/300%` 对应 `10/15/20/25/30%` 峰值回撤退出；毕业前和毕业后各有5分钟兜底，整体保留30%硬止损。最终卖出失败会按配置重试并保留 `EXIT_FAILED`，防止同 Mint 再开仓；紧急开关和单策略停开都只阻止新开仓，不阻止存量退出。
 
