@@ -1151,6 +1151,122 @@ const config = {
     }),
   },
 
+  // Independent right-tail study. It consumes the existing PumpSwap trade stream,
+  // opens no real positions, and never treats an unobservable exit as a total loss.
+  bigWinnerShadow: {
+    enabled: booleanEnv('FLOW_BIG_WINNER_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_BIG_WINNER_SHADOW_POSITION_SOL'),
+    stateWindowMs: integerEnv('FLOW_BIG_WINNER_SHADOW_STATE_WINDOW_MS', 10_000, {
+      min: 8_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_BIG_WINNER_SHADOW_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 6 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_BIG_WINNER_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_BIG_WINNER_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    noExitGraceMs: integerEnv('FLOW_BIG_WINNER_SHADOW_NO_EXIT_GRACE_MS', 60_000, {
+      min: 1_000,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_ENTRY_JUMP_PCT', 50, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_ENTRY_DROP_PCT', 50, {
+      min: 0, max: 100,
+    }),
+    maxEntryImpactPct: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_ENTRY_IMPACT_PCT', 40, {
+      min: 0, max: 1_000,
+    }),
+    maxAdjacentPriceRatio: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_PRICE_RATIO', 20, {
+      min: 2, max: 1_000,
+    }),
+    entryProfiles: [
+      {
+        id: 'PBR_A',
+        label: 'PBR-A balanced: wave 40 / pullback 12-25 / NF3 3',
+        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
+        minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 25,
+        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 3,
+        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
+      },
+      {
+        id: 'PBR_B',
+        label: 'PBR-B right tail: wave 50 / pullback 18-30 / NF3 2',
+        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
+        minFirstWavePct: 50, minPullbackPct: 18, maxPullbackPct: 30,
+        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
+        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
+      },
+      {
+        id: 'PBR_C',
+        label: 'PBR-C frequency: wave 40 / pullback 15-25 / NF3 2',
+        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
+        minFirstWavePct: 40, minPullbackPct: 15, maxPullbackPct: 25,
+        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
+        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
+      },
+      {
+        id: 'FLOW_R',
+        label: 'FLOW-R: post-grad 5-60s / NF8 20 / buyers 12 / no chase',
+        family: 'FLOW', minAgeMs: 5_000, maxAgeMs: 60_000,
+        minNetFlow8sSol: 20, minBuyers8s: 12, maxLargestBuyerShare8s: 0.5,
+        maxRunupPct: 40, maxDistanceFromHigh10sPct: 10, maxJump2sPct: 20,
+        minRecentFlowRatio: 0.5,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X50_15', label: '+20 sell 50%; adaptive 15/20/25 trail',
+        coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 15,
+        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+        trailingTiers: [
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+        ],
+        profitFloors: [], maxHoldMs: 180_000,
+      },
+      {
+        id: 'X50_12', label: '+20 sell 50%; tighter -12 hard stop',
+        coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 12,
+        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+        trailingTiers: [
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+        ],
+        profitFloors: [], maxHoldMs: 180_000,
+      },
+      {
+        id: 'X50_RATCHET', label: '+20 sell 50%; runner profit ratchet',
+        coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 15,
+        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+        trailingTiers: [],
+        profitFloors: [
+          { activationPct: 50, lockPct: 20 },
+          { activationPct: 100, lockPct: 60 },
+          { activationPct: 150, lockPct: 100 },
+          { activationPct: 250, lockPct: 170 },
+        ],
+        maxHoldMs: 300_000,
+      },
+      {
+        id: 'X40_RATCHET', label: '+20 sell 40%; 60% runner profit ratchet',
+        coreActivationPct: 20, coreWeightPct: 40, hardStopPct: 15,
+        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+        trailingTiers: [],
+        profitFloors: [
+          { activationPct: 50, lockPct: 20 },
+          { activationPct: 100, lockPct: 60 },
+          { activationPct: 150, lockPct: 100 },
+          { activationPct: 250, lockPct: 170 },
+        ],
+        maxHoldMs: 300_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_BIG_WINNER_SHADOW_POSITION_SOL'),
+    }),
+  },
+
   // Independent first-pullback execution research. References are emitted by
   // LaunchQualityObserver, but every simulated position lives in its own table.
   launchPullbackShadow: {
@@ -3597,6 +3713,22 @@ function validateConfig() {
       if (!qualityLeaderExitIds.has(exitProfileId)) {
         errors.push(`Quality Leader entry ${profile.id} references missing exit ${exitProfileId}`);
       }
+    }
+  }
+  if (config.bigWinnerShadow.enabled) {
+    if (config.bigWinnerShadow.entryProfiles.length === 0) {
+      errors.push('Big Winner Shadow requires at least one entry profile');
+    }
+    if (config.bigWinnerShadow.exitProfiles.length === 0) {
+      errors.push('Big Winner Shadow requires at least one exit profile');
+    }
+    const bigWinnerEntryIds = new Set(config.bigWinnerShadow.entryProfiles.map((row) => row.id));
+    const bigWinnerExitIds = new Set(config.bigWinnerShadow.exitProfiles.map((row) => row.id));
+    if (bigWinnerEntryIds.size !== config.bigWinnerShadow.entryProfiles.length) {
+      errors.push('Big Winner Shadow entry profile ids must be unique');
+    }
+    if (bigWinnerExitIds.size !== config.bigWinnerShadow.exitProfiles.length) {
+      errors.push('Big Winner Shadow exit profile ids must be unique');
     }
   }
   if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
