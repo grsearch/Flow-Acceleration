@@ -1048,6 +1048,109 @@ const config = {
     }),
   },
 
+  // Independent causal study derived from the observed behavior of consistently
+  // profitable wallets. It never signs transactions and never reuses a future
+  // Smart OPEN as an earlier fill price.
+  smartLikeEarlyShadow: {
+    enabled: booleanEnv('FLOW_SMART_LIKE_EARLY_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_LIKE_EARLY_POSITION_SOL'),
+    stateWindowMs: integerEnv('FLOW_SMART_LIKE_EARLY_STATE_WINDOW_MS', 5_000, { min: 1_000 }),
+    stateRetentionMs: integerEnv('FLOW_SMART_LIKE_EARLY_STATE_RETENTION_MS', 240_000, {
+      min: 30_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_SMART_LIKE_EARLY_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_LIKE_EARLY_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_LIKE_EARLY_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_LIKE_EARLY_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0, max: 100,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_ENTRY_DROP_PCT', 30, {
+      min: 0, max: 100,
+    }),
+    maxCurvePct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_CURVE_PCT', 40, { min: 0, max: 100 }),
+    maxAgeMs: integerEnv('FLOW_SMART_LIKE_EARLY_MAX_AGE_MS', 10_000, { min: 250 }),
+    maxReturn5sPct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_RETURN_5S_PCT', 10, {
+      min: -100, max: 1_000,
+    }),
+    minNetFlow5s: numberEnv('FLOW_SMART_LIKE_EARLY_MIN_NETFLOW_5S_SOL', 0, { min: -1_000 }),
+    minSmartOpenSol: numberEnv('FLOW_SMART_LIKE_EARLY_MIN_SMART_OPEN_SOL', 0.1, { min: 0 }),
+    smartConfirmationMs: integerEnv('FLOW_SMART_LIKE_EARLY_CONFIRMATION_MS', 5_000, { min: 100 }),
+    clusterDedupMs: integerEnv('FLOW_SMART_LIKE_EARLY_CLUSTER_DEDUP_MS', 1_000, { min: 0 }),
+    addThresholdsPct: [50, 80, 120],
+    addFraction: numberEnv('FLOW_SMART_LIKE_EARLY_ADD_FRACTION', 0.08, { min: 0, max: 1 }),
+    hardStopPct: numberEnv('FLOW_SMART_LIKE_EARLY_HARD_STOP_PCT', 20, { min: 0.1, max: 100 }),
+    noStrengthMs: integerEnv('FLOW_SMART_LIKE_EARLY_NO_STRENGTH_MS', 25_000, { min: 1_000 }),
+    noStrengthMfePct: numberEnv('FLOW_SMART_LIKE_EARLY_NO_STRENGTH_MFE_PCT', 10, {
+      min: 0, max: 1_000,
+    }),
+    flowDecayNetFlow1s: numberEnv('FLOW_SMART_LIKE_EARLY_FLOW_DECAY_NETFLOW_1S', -1, {
+      min: -1_000,
+    }),
+    flowDecaySellTx1s: integerEnv('FLOW_SMART_LIKE_EARLY_FLOW_DECAY_SELL_TX_1S', 3, {
+      min: 1,
+    }),
+    priorityWallets: listEnv('FLOW_SMART_LIKE_EARLY_PRIORITY_WALLETS', [
+      'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o',
+      '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9',
+      '2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f',
+      'ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT',
+      'Bi4rd5FH5bYEN8scZ7wevxNZyNmKHdaBcvewdPFxYdLt',
+    ]),
+    walletClusters: [{
+      id: 'F9_FAIC_CLUSTER',
+      wallets: [
+        'F9zT1F46HAoPanR4NC1Yw7TyP8Z9tCavTe48mrzK7aN4',
+        'FAicXNV5FVqtfbpn4Zccs71XcfGeyxBSGbqLDyDJZjke',
+      ],
+    }],
+    entryProfiles: [
+      {
+        id: 'SMART_DIRECT', label: 'Smart OPEN / Curve<=40 / no chase',
+        sourceType: 'SMART_OPEN', requireAge: false, requireFlowConfirmation: false,
+      },
+      {
+        id: 'SMART_STRICT', label: 'Smart OPEN / AGE<=10s / prior Flow<=5s',
+        sourceType: 'SMART_OPEN', requireAge: true, requireFlowConfirmation: true,
+      },
+      {
+        id: 'FLOW_PREDICT', label: 'Primary Rank 1 predictive entry / later Smart label',
+        sourceType: 'FLOW_PREDICT', requireAge: true, requireFlowConfirmation: false,
+      },
+    ],
+    addProfiles: [
+      { id: 'BASE', label: 'No add', thresholdsPct: [], addFraction: 0 },
+      {
+        id: 'PYRAMID', label: 'Add 8% at +50/+80/+120%',
+        thresholdsPct: [50, 80, 120],
+        addFraction: numberEnv('FLOW_SMART_LIKE_EARLY_ADD_FRACTION', 0.08, {
+          min: 0, max: 1,
+        }),
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'E50_T12', label: '+50% sell 40%, runner trail 12%',
+        activationPct: 50, sellFraction: 0.4, trailingStopPct: 12,
+        maxHoldMs: 180_000, flowDecayExit: false,
+      },
+      {
+        id: 'E75_T15', label: '+75% sell 50%, runner trail 15%',
+        activationPct: 75, sellFraction: 0.5, trailingStopPct: 15,
+        maxHoldMs: 180_000, flowDecayExit: false,
+      },
+      {
+        id: 'E100_FLOW', label: '+100% sell 40%, flow decay or trail 20%',
+        activationPct: 100, sellFraction: 0.4, trailingStopPct: 20,
+        maxHoldMs: 180_000, flowDecayExit: true,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_LIKE_EARLY_POSITION_SOL'),
+    }),
+  },
+
   // Independent first-pullback execution research. References are emitted by
   // LaunchQualityObserver, but every simulated position lives in its own table.
   launchPullbackShadow: {
