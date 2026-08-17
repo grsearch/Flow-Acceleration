@@ -53,6 +53,10 @@ function main() {
       { id: 'E50', activationPct: 50, sellFraction: 0.4, trailingStopPct: 12, maxHoldMs: 180_000, flowDecayExit: false },
       { id: 'E75', activationPct: 75, sellFraction: 0.5, trailingStopPct: 15, maxHoldMs: 180_000, flowDecayExit: false },
       { id: 'E100', activationPct: 100, sellFraction: 0.4, trailingStopPct: 20, maxHoldMs: 180_000, flowDecayExit: true },
+      { id: 'FIX60_H20', mode: 'FIXED_HOLD', hardStopPct: 20, maxHoldMs: 60_000,
+        allowedAddProfileIds: ['BASE'] },
+      { id: 'FIX120_H20', mode: 'FIXED_HOLD', hardStopPct: 20, maxHoldMs: 120_000,
+        allowedAddProfileIds: ['BASE'] },
     ],
     costModel: {
       platformFeePct: 1, buySlippagePct: 0, sellSlippagePct: 0, priceImpactPct: 0,
@@ -88,7 +92,7 @@ function main() {
     nearestFlowSignal: 5, timeFromFlowSignalMs: 1_000 });
   assert.strictEqual(store.db.prepare(
     "SELECT COUNT(*) n FROM smart_like_early_shadow_positions WHERE source_type='SMART_OPEN'",
-  ).get().n, 12);
+  ).get().n, 16);
 
   // A second wallet from the same operator cluster must not generate another episode.
   const duplicate = trade(10, 'BUY', 1, walletB, 1.04);
@@ -96,7 +100,7 @@ function main() {
     nearestFlowSignal: 5, timeFromFlowSignalMs: 1_010 });
   assert.strictEqual(store.db.prepare(
     "SELECT COUNT(*) n FROM smart_like_early_shadow_positions WHERE source_type='SMART_OPEN'",
-  ).get().n, 12);
+  ).get().n, 16);
 
   // Predictive entry exists before a later Smart OPEN and is labelled after the fact.
   suite.onSignal({
@@ -105,10 +109,10 @@ function main() {
   });
   assert.strictEqual(store.db.prepare(
     "SELECT COUNT(*) n FROM smart_like_early_shadow_positions WHERE source_type='FLOW_PREDICT'",
-  ).get().n, 6);
+  ).get().n, 8);
 
   trade(260, 'BUY', 0.2, 'fill', 1.05);
-  assert.strictEqual(suite.health().opened, 18);
+  assert.strictEqual(suite.health().opened, 24);
 
   // Only PYRAMID cohorts add, at the three configured profit thresholds.
   trade(600, 'BUY', 0.2, 'trend-a', 1.65);
@@ -126,21 +130,39 @@ function main() {
   // Every exit profile has taken a partial profit; a deep pullback then closes all runners.
   trade(1_500, 'BUY', 0.2, 'peak', 3.3);
   assert.strictEqual(store.db.prepare(
-    'SELECT MIN(partial_exit_count) n FROM smart_like_early_shadow_positions',
+    "SELECT MIN(partial_exit_count) n FROM smart_like_early_shadow_positions WHERE exit_profile_id NOT LIKE 'FIX%'",
   ).get().n, 1);
+  assert.strictEqual(store.db.prepare(
+    "SELECT MAX(partial_exit_count) n FROM smart_like_early_shadow_positions WHERE exit_profile_id LIKE 'FIX%'",
+  ).get().n, 0, 'fixed-hold cohorts must never take partial profit');
   trade(1_800, 'SELL', 0.2, 'drawdown', 2.2);
   trade(2_050, 'BUY', 0.1, 'exit-fill', 2.18);
   assert.strictEqual(store.db.prepare(
     "SELECT COUNT(*) n FROM smart_like_early_shadow_positions WHERE status='CLOSED'",
   ).get().n, 18);
   assert.strictEqual(store.db.prepare(
+    "SELECT COUNT(*) n FROM smart_like_early_shadow_positions WHERE status='OPEN' AND exit_profile_id LIKE 'FIX%'",
+  ).get().n, 6);
+  now = base + 60_300;
+  suite.advanceTime(now);
+  trade(60_600, 'BUY', 0.1, 'fixed-60-fill', 4);
+  now = base + 120_300;
+  suite.advanceTime(now);
+  trade(120_600, 'BUY', 0.1, 'fixed-120-fill', 5);
+  assert.strictEqual(store.db.prepare(
+    "SELECT COUNT(*) n FROM smart_like_early_shadow_positions WHERE status='CLOSED'",
+  ).get().n, 24);
+  assert.ok(store.db.prepare(`SELECT COUNT(*) n FROM smart_like_early_shadow_positions
+    WHERE exit_profile_id LIKE 'FIX%' AND partial_exit_count=0 AND exit_reason='MAX_HOLD'
+      AND net_return_pct>100`).get().n === 6);
+  assert.strictEqual(store.db.prepare(
     'SELECT COUNT(*) n FROM smart_like_early_shadow_positions WHERE net_return_pct IS NULL',
   ).get().n, 0);
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
 
   const dashboard = suite.dashboard({ positionLimit: 30 });
-  assert.strictEqual(dashboard.cohorts.length, 18);
-  assert.strictEqual(dashboard.positions.length, 18);
+  assert.strictEqual(dashboard.cohorts.length, 24);
+  assert.strictEqual(dashboard.positions.length, 24);
 
   // A missing executable exit is censored, not fabricated as a -100% loss.
   const mint2 = 'SmartLikeNoExit111111111111111111111111111111';
@@ -170,7 +192,7 @@ function main() {
   suite.advanceTime(now);
   const censored = store.db.prepare(`SELECT COUNT(*) n FROM smart_like_early_shadow_positions
     WHERE mint=? AND status='NO_EXIT' AND net_return_pct IS NULL`).get(mint2).n;
-  assert.strictEqual(censored, 12);
+  assert.strictEqual(censored, 16);
 
   store.close();
   console.log('Smart-Like Early Shadow tests: PASS');

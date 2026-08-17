@@ -409,7 +409,7 @@ class LaunchPullbackShadowManager {
   }
 
   _evaluateTrailingExit(position, price, timestampMs) {
-    if (this.config.exitPolicy === 'FIXED_HOLD' || position.status !== STATUS.OPEN) return;
+    if (position.status !== STATUS.OPEN) return;
     const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
     if (this.config.hardStopPct != null && grossReturnPct <= -this.config.hardStopPct) {
       this._requestExit(
@@ -419,6 +419,7 @@ class LaunchPullbackShadowManager {
       );
       return;
     }
+    if (this.config.exitPolicy === 'FIXED_HOLD') return;
 
     const ageMs = timestampMs - position.entryAt;
     if (this.config.exitPolicy === 'EARLY_STRENGTH'

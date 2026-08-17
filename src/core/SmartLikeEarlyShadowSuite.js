@@ -405,7 +405,7 @@ class SmartLikeEarlyShadowSuite {
         const exit = this.exitProfiles.get(position.exitProfileId);
         const heldMs = now - position.entryAt;
         if (heldMs >= exit.maxHoldMs) this._requestExit(position, position.entryAt + exit.maxHoldMs, 'MAX_HOLD');
-        else if (heldMs >= this.config.noStrengthMs
+        else if (exit.mode !== 'FIXED_HOLD' && heldMs >= this.config.noStrengthMs
           && position.maxFavorableReturnPct < this.config.noStrengthMfePct) {
           this._requestExit(position, position.entryAt + this.config.noStrengthMs, 'NO_STRENGTH');
         }
@@ -501,6 +501,8 @@ class SmartLikeEarlyShadowSuite {
     else this.metrics.rejectedSignals += 1;
     for (const addProfile of this.addProfiles.values()) {
       for (const exitProfile of this.exitProfiles.values()) {
+        if (Array.isArray(exitProfile.allowedAddProfileIds)
+          && !exitProfile.allowedAddProfileIds.includes(addProfile.id)) continue;
         const now = this.now();
         const cohortId = `${input.profile.id}_${addProfile.id}_${exitProfile.id}`;
         const result = this.insert.run({
@@ -644,6 +646,7 @@ class SmartLikeEarlyShadowSuite {
   _maybePartialExit(position, trade, price) {
     if (position.partialExitAt) return;
     const exit = this.exitProfiles.get(position.exitProfileId);
+    if (exit?.mode === 'FIXED_HOLD') return;
     const gross = (price / position.averageEntryPrice - 1) * 100;
     if (gross < exit.activationPct) return;
     const units = position.remainingTokenUnits * exit.sellFraction;
@@ -665,13 +668,16 @@ class SmartLikeEarlyShadowSuite {
     const heldMs = timestampMs - position.entryAt;
     const gross = (price / position.averageEntryPrice - 1) * 100;
     const drawdown = (1 - price / position.highestPrice) * 100;
+    const fixedHold = exit.mode === 'FIXED_HOLD';
+    const hardStopPct = exit.hardStopPct ?? this.config.hardStopPct;
     let reason = null;
-    if (!position.partialExitAt && gross <= -this.config.hardStopPct) reason = 'HARD_STOP';
-    else if (position.partialExitAt && exit.flowDecayExit
+    if (!position.partialExitAt && gross <= -hardStopPct) reason = `HARD_STOP_${hardStopPct}`;
+    else if (!fixedHold && position.partialExitAt && exit.flowDecayExit
       && (features.netFlow1s <= this.config.flowDecayNetFlow1s
         || features.sellTx1s >= this.config.flowDecaySellTx1s)) reason = 'FLOW_DECAY';
-    else if (position.partialExitAt && drawdown >= exit.trailingStopPct) reason = 'RUNNER_TRAIL';
-    else if (heldMs >= this.config.noStrengthMs
+    else if (!fixedHold && position.partialExitAt
+      && drawdown >= exit.trailingStopPct) reason = 'RUNNER_TRAIL';
+    else if (!fixedHold && heldMs >= this.config.noStrengthMs
       && position.maxFavorableReturnPct < this.config.noStrengthMfePct) reason = 'NO_STRENGTH';
     else if (heldMs >= exit.maxHoldMs) reason = 'MAX_HOLD';
     if (reason) this._requestExit(position, timestampMs, reason);

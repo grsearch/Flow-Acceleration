@@ -499,6 +499,36 @@ function testOptimizationCohortsStayIsolated() {
   store.close();
 }
 
+function testFixedHoldHardStop() {
+  const store = makeStore();
+  let now = 5_900_000;
+  const config = makeConfig();
+  config.profiles = [];
+  config.holds = [];
+  config.optimizationCohorts = [{
+    id: 'F2_NF30_H20_60S', label: 'fixed with hard stop', profileId: 'F2_NF30',
+    referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+    referenceReboundPct: 3, minNetFlowSol: 20, maxCreatorSharePct: 10,
+    maxTop3SharePct: 100, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 60_000,
+    hardStopPct: 20,
+  }];
+  const suite = new LaunchPullbackShadowSuite({ config, store, now: () => now });
+  suite.start();
+  suite.onReference(reference('fixed-hard-stop', now));
+  suite.observeTrade(trade('fixed-hard-stop', now + 200, 1));
+  suite.observeTrade(trade('fixed-hard-stop', now + 1_000, 0.79));
+  assert.deepStrictEqual(store.db.prepare(`
+    SELECT status, exit_reason FROM launch_pullback_shadow_positions
+    WHERE mint='fixed-hard-stop'
+  `).get(), { status: 'EXIT_PENDING', exit_reason: 'HARD_STOP_20PCT' });
+  suite.observeTrade(trade('fixed-hard-stop', now + 1_200, 0.78));
+  assert.deepStrictEqual(store.db.prepare(`
+    SELECT status, exit_reason FROM launch_pullback_shadow_positions
+    WHERE mint='fixed-hard-stop'
+  `).get(), { status: 'CLOSED', exit_reason: 'HARD_STOP_20PCT' });
+  store.close();
+}
+
 function reference(mint, at, netFlowSol = 20, creatorSharePct = 4) {
   return {
     mint,
@@ -631,6 +661,7 @@ main();
 testTrailingCohorts();
 testDeepCohortsStayIsolated();
 testOptimizationCohortsStayIsolated();
+testFixedHoldHardStop();
 
 function testFlowConsensusAndExitVariants() {
   const store = makeStore();

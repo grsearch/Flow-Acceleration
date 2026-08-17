@@ -65,6 +65,14 @@ function config() {
       },
       ratchet('X50_RATCHET', 50, 15),
       ratchet('X40_RATCHET', 40, 15),
+      {
+        id: 'XFIX60_H15', mode: 'FIXED_HOLD', coreWeightPct: 0,
+        hardStopPct: 15, trailingTiers: [], profitFloors: [], maxHoldMs: 60_000,
+      },
+      {
+        id: 'XFIX120_H15', mode: 'FIXED_HOLD', coreWeightPct: 0,
+        hardStopPct: 15, trailingTiers: [], profitFloors: [], maxHoldMs: 120_000,
+      },
     ],
     costModel: {
       platformFeePct: 3.2, buySlippagePct: 0, sellSlippagePct: 0,
@@ -101,20 +109,30 @@ function run() {
   emit(pullMint, base, 3_800, 'BUY', 1, 'buyer-2', 1.31);
   emit(pullMint, base, 4_400, 'BUY', 1, 'buyer-3', 1.315);
   emit(pullMint, base, 5_000, 'BUY', 1, 'buyer-4', 1.326);
-  assert.strictEqual(suite.health().pendingEntries, 12,
-    'three pullback entries must each create four independent exits');
+  assert.strictEqual(suite.health().pendingEntries, 18,
+    'three pullback entries must each create four runner exits and two fixed-hold exits');
   emit(pullMint, base, 5_250, 'BUY', 0.2, 'fill', 1.326);
-  assert.strictEqual(suite.health().activePositions, 12);
+  assert.strictEqual(suite.health().activePositions, 18);
   emit(pullMint, base, 5_500, 'BUY', 1, 'core', 1.61);
   emit(pullMint, base, 6_000, 'BUY', 1, 'runner', 2.2);
   emit(pullMint, base, 6_500, 'SELL', 1, 'profit', 1.84);
   const pullRows = db.db.prepare(`
     SELECT * FROM big_winner_shadow_positions WHERE mint=? ORDER BY cohort_id
   `).all(pullMint);
-  assert.strictEqual(pullRows.length, 12);
-  assert.ok(pullRows.every((row) => row.status === 'CLOSED'));
-  assert.ok(pullRows.every((row) => row.core_exit_at != null));
-  assert.ok(pullRows.every((row) => row.net_return_pct > 0));
+  assert.strictEqual(pullRows.length, 18);
+  assert.strictEqual(pullRows.filter((row) => row.status === 'CLOSED').length, 12);
+  assert.ok(pullRows.filter((row) => !row.exit_profile_id.startsWith('XFIX'))
+    .every((row) => row.core_exit_at != null && row.net_return_pct > 0));
+  assert.ok(pullRows.filter((row) => row.exit_profile_id.startsWith('XFIX'))
+    .every((row) => row.status === 'OPEN' && !row.core_exit_at));
+  emit(pullMint, base, 65_500, 'BUY', 1, 'fixed-60-exit', 3.5);
+  emit(pullMint, base, 125_500, 'BUY', 1, 'fixed-120-exit', 5);
+  const fixedRows = db.db.prepare(`
+    SELECT * FROM big_winner_shadow_positions
+    WHERE mint=? AND exit_profile_id LIKE 'XFIX%' ORDER BY exit_profile_id
+  `).all(pullMint);
+  assert.ok(fixedRows.every((row) => row.status === 'CLOSED'
+    && row.exit_reason === 'MAX_HOLD' && !row.core_exit_at && row.net_return_pct > 100));
 
   const flowBase = base + 100_000;
   const flowMint = 'BigWinnerFlow1111111111111111111111111111111';
@@ -123,10 +141,10 @@ function run() {
   for (let index = 0; index < 11; index += 1) {
     emit(flowMint, flowBase, 1_000 + index * 400, 'BUY', 2, `flow-${index}`, 1.1 + index * 0.008);
   }
-  assert.strictEqual(suite.health().pendingEntries, 4,
-    'FLOW-R must create four independent exits');
+  assert.strictEqual(suite.health().pendingEntries, 6,
+    'FLOW-R must create four runner exits and two fixed-hold exits');
   emit(flowMint, flowBase, 5_250, 'BUY', 0.2, 'flow-fill', 1.19);
-  assert.strictEqual(suite.health().activePositions, 4);
+  assert.strictEqual(suite.health().activePositions, 6);
   now = flowBase + 370_000;
   suite.advanceTime(now);
   const censored = db.db.prepare(`
@@ -137,7 +155,7 @@ function run() {
     'NO_EXIT must remain censored instead of becoming a -100% return');
 
   const dashboard = suite.dashboard();
-  assert.strictEqual(dashboard.cohorts.length, 16);
+  assert.strictEqual(dashboard.cohorts.length, 24);
   assert.strictEqual(db.shadowTimeSessionDashboard('big-winner').sessions.length, 4);
   assert.strictEqual(db.db.prepare('SELECT COUNT(*) AS n FROM live_positions').get().n, 0,
     'Big Winner Shadow must never create a live position');

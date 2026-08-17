@@ -653,13 +653,16 @@ class BigWinnerShadowSuite {
     );
     const gross = returnPct(price, position.entryPrice);
     const exit = this.exitProfiles.get(position.exitProfileId);
-    if (!position.coreExitAt && gross >= exit.coreActivationPct) {
+    const fixedHold = exit.mode === 'FIXED_HOLD';
+    if (!fixedHold && !position.coreExitAt && gross >= exit.coreActivationPct) {
       position.coreExitAt = timestampMs;
       position.coreExitPrice = price;
       position.coreReturnPct = gross;
       this.metrics.coreExits += 1;
     }
-    const runnerStop = this._runnerStop(position, exit);
+    const runnerStop = fixedHold
+      ? { price: null, tier: null, reason: null }
+      : this._runnerStop(position, exit);
     this._patch(position.id, {
       highestPrice: position.highestPrice,
       lowestPrice: position.lowestPrice,
@@ -675,8 +678,11 @@ class BigWinnerShadowSuite {
       runnerTier: runnerStop.tier,
     });
     let reason = null;
-    if (!position.coreExitAt && gross <= -exit.hardStopPct) reason = `HARD_STOP_${exit.hardStopPct}`;
-    else if (runnerStop.price > 0 && price <= runnerStop.price) reason = runnerStop.reason;
+    if ((fixedHold || !position.coreExitAt) && gross <= -exit.hardStopPct) {
+      reason = `HARD_STOP_${exit.hardStopPct}`;
+    } else if (!fixedHold && runnerStop.price > 0 && price <= runnerStop.price) {
+      reason = runnerStop.reason;
+    }
     else if (timestampMs >= position.entryAt + exit.maxHoldMs) reason = 'MAX_HOLD';
     if (reason) this._close(position, timestampMs, price, reason);
   }

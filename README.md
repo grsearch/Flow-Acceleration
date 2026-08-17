@@ -3,13 +3,24 @@
 ## Big Winner Pullback + Flow Shadow (BW)
 
 `BigWinnerShadowSuite` is an isolated, post-graduation PumpSwap research path. It crosses
-four causal entry profiles (`PBR_A`, `PBR_B`, `PBR_C`, `FLOW_R`) with four independent
-Core/Runner exits (`X50_15`, `X50_12`, `X50_RATCHET`, `X40_RATCHET`) for 16 cohorts.
+four causal entry profiles (`PBR_A`, `PBR_B`, `PBR_C`, `FLOW_R`) with the original four
+Core/Runner exits (`X50_15`, `X50_12`, `X50_RATCHET`, `X40_RATCHET`) plus two new
+right-tail controls: `XFIX60_H15` and `XFIX120_H15`. The controls use only a -15% hard
+stop and a fixed 60/120-second maximum; they never take partial profit or trail a peak.
+All 24 cohorts have independent IDs, so the original 16-cohort history is unchanged.
 Every fill uses a 200 ms delay, a 1 SOL position model, configured costs, and an entry
 impact guard when live pool reserves are present. It never signs or submits a transaction.
 Rows are stored only in `big_winner_shadow_positions`; `NO_EXIT` remains censored with a
 null return and cannot be aggregated as a -100% loss. Daily research exports include the
 new table automatically.
+
+The same exit hypothesis is tested without changing entry rules in two other promising
+families. Smart-Like Early adds BASE-only `FIX60_H20` / `FIX120_H20` exits (no pyramiding,
+partial profit, flow-decay exit, or trailing stop). Launch First Pullback adds
+`F2_NF30_H20_60S`, `F2_NF30_H20_120S`, `FO_RB10_H20_60S`, and
+`FO_RB10_H20_120S`. These four cohorts apply a -20% hard stop before their fixed horizon.
+They reuse existing streams and references, add no Helius subscriptions or RPC calls, and
+never sign or send transactions. Proven-negative entry families remain disabled.
 
 这是一个同时采集 Pump.fun 毕业前 Bonding Curve 与所需毕业后 PumpSwap 成交的研究项目，并带有默认关闭、按策略隔离的实盘执行模块。研究主线验证：
 
