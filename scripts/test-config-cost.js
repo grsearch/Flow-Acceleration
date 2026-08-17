@@ -20,7 +20,9 @@ process.env.FLOW_TEST_SHADOW_POSITION_SOL = '0.4';
 assert.strictEqual(shadowPositionEnv('FLOW_TEST_SHADOW_POSITION_SOL'), 0.4);
 delete process.env.FLOW_TEST_SHADOW_POSITION_SOL;
 process.env.FLOW_TEST_LIVE_POSITION_SOL = '0.05';
-assert.strictEqual(livePositionEnv('FLOW_TEST_LIVE_POSITION_SOL'), 1);
+assert.strictEqual(livePositionEnv('FLOW_TEST_LIVE_POSITION_SOL'), 0.1);
+process.env.FLOW_TEST_LIVE_POSITION_SOL = '1';
+assert.strictEqual(livePositionEnv('FLOW_TEST_LIVE_POSITION_SOL'), 0.1);
 process.env.FLOW_TEST_LIVE_POSITION_SOL = '0.4';
 assert.strictEqual(livePositionEnv('FLOW_TEST_LIVE_POSITION_SOL'), 0.4);
 delete process.env.FLOW_TEST_LIVE_POSITION_SOL;
@@ -61,24 +63,35 @@ const liveContinuity = config.liveTrading.strategies.find((strategy) => (
 const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
 ));
+const liveQualityLeader = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'quality_leader_ql_strict_protected_live'
+));
 const liveV3 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
 ));
 const liveGd25F1 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'post_gd25_35_f1_xleg_live_v1'
 ));
-assert.strictEqual(liveContinuity.positionSizeSol, 1);
+assert.strictEqual(liveContinuity.positionSizeSol, 0.1);
 assert.strictEqual(liveContinuity.entryEnabled, true);
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
-assert.strictEqual(liveGraduationAccel.positionSizeSol, 1);
+assert.strictEqual(liveQualityLeader.positionSizeSol, 0.1);
+assert.strictEqual(liveQualityLeader.entryEnabled, true);
+assert.strictEqual(liveQualityLeader.market, 'PUMP_BONDING_CURVE');
+assert.strictEqual(liveQualityLeader.exitMode, 'QUALITY_PROTECTED_RUNNER');
+assert.strictEqual(liveQualityLeader.hardStopPct, 20);
+assert.strictEqual(liveQualityLeader.noStrengthMs, 30_000);
+assert.strictEqual(liveQualityLeader.maxHoldMs, 300_000);
+assert.strictEqual(liveQualityLeader.protectedFloors.length, 4);
+assert.strictEqual(liveGraduationAccel.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationAccel.entryEnabled, false);
 assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
-assert.strictEqual(liveV3.positionSizeSol, 1);
+assert.strictEqual(liveV3.positionSizeSol, 0.1);
 assert.strictEqual(liveV3.entryEnabled, false);
-assert.strictEqual(liveGd25F1.positionSizeSol, 1);
+assert.strictEqual(liveGd25F1.positionSizeSol, 0.1);
 assert.strictEqual(liveGd25F1.entryEnabled, true);
 assert.strictEqual(liveGd25F1.market, 'PUMP_AMM');
 assert.strictEqual(liveGd25F1.trackingAgeMs, 120_000);
@@ -368,6 +381,11 @@ assert.deepStrictEqual(
     ['HG30_NQ_B_R80_C45_70', 30_000],
     ['HG30_NQ_C_POST_PEAK', 30_000],
   ],
+);
+assert.strictEqual(
+  config.qualityLeaderShadow.entryProfiles.find((profile) => profile.id === 'QL_STRICT')
+    .liveStrategyId,
+  'quality_leader_ql_strict_protected_live',
 );
 assert.deepStrictEqual(
   config.holderGrowthShadow.exitProfiles.map((profile) => profile.id),
