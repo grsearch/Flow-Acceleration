@@ -247,9 +247,15 @@ async function main() {
     const retiredV3 = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
     ));
+    const gd25F1 = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'post_gd25_35_f1_xleg_live_v1'
+    ));
     assert.strictEqual(continuity.entryEnabled, true);
     assert.strictEqual(graduationAccel.entryEnabled, false);
     assert.strictEqual(retiredV3.entryEnabled, false);
+    assert.strictEqual(gd25F1.entryEnabled, true);
+    assert.strictEqual(gd25F1.maxSignalsPerMint, 1);
+    assert.strictEqual(gd25F1.positionSizeSol, 1);
     assert.strictEqual(continuity.market, 'PUMP_AMM');
     assert.strictEqual(graduationAccel.market, 'PUMP_BONDING_CURVE');
     assert.strictEqual(continuity.positionSizeSol, 1);

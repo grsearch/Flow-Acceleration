@@ -547,6 +547,8 @@ class ResearchStore {
         ON live_strategy_decisions(strategy_id, timestamp_ms DESC);
       CREATE INDEX IF NOT EXISTS idx_live_strategy_decisions_match_ts
         ON live_strategy_decisions(strategy_id, rule_matched, timestamp_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_live_strategy_decisions_strategy_mint
+        ON live_strategy_decisions(strategy_id, mint, rule_matched);
 
       CREATE TABLE IF NOT EXISTS live_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2404,6 +2406,11 @@ class ResearchStore {
       getLiveStrategyDecision: this.db.prepare(`
         SELECT * FROM live_strategy_decisions WHERE strategy_id = ? AND episode_id = ?
       `),
+      liveStrategyDecisionCountForMintStrategy: this.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM live_strategy_decisions
+        WHERE mint = ? AND strategy_id = ? AND rule_matched = 1
+      `),
       updateLiveStrategyDecision: this.db.prepare(`
         UPDATE live_strategy_decisions SET
           action_status = @actionStatus,
@@ -3937,6 +3944,12 @@ class ResearchStore {
       actionReason,
       updatedAt: Date.now(),
     });
+  }
+
+  liveStrategyDecisionCountForMintStrategy(mint, strategyId) {
+    return Number(
+      this.stmts.liveStrategyDecisionCountForMintStrategy.get(mint, strategyId)?.n || 0,
+    );
   }
 
   createLivePosition(position) {

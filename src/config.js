@@ -644,6 +644,92 @@ const config = {
         }),
       },
       {
+        id: 'post_gd25_35_f1_xleg_live_v1',
+        label: '毕业后深跌反弹 · GD25 F1 XLEG',
+        ruleVersion: 'post_migration_gd25_35_first_xleg_live_v1',
+        enabled: booleanEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_ENABLED', true),
+        entryEnabled: booleanEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_ENTRY_ENABLED', true),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_POSITION_SOL',
+          1,
+          'FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL',
+        ),
+        trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_TRACKING_MS', 120_000, {
+          min: 30_000,
+          max: 10 * 60_000,
+        }),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        windowMs: integerEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_WINDOW_MS', 1_000, {
+          min: 250,
+        }),
+        dropMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_DROP_MIN_PCT', 25, {
+          min: 0.1,
+        }),
+        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_DROP_MAX_PCT', 35, {
+          min: 0.1,
+        }),
+        reboundMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_REBOUND_MIN_PCT', 2, {
+          min: 0.1,
+        }),
+        reboundMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_REBOUND_MAX_PCT', 5, {
+          min: 0.1,
+        }),
+        reboundTimeoutMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_REBOUND_TIMEOUT_MS',
+          1_000,
+          { min: 100 },
+        ),
+        // This is the promoted form of the offline "first row per Mint" result.
+        // A matched opportunity is consumed even if execution is later rejected
+        // or fails, so later rebounds cannot silently change the tested sample.
+        maxSignalsPerMint: 1,
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_ENTRY_JUMP_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        trailingActivationPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_TRAILING_ACTIVATION_PCT',
+          8,
+          { min: 0.1 },
+        ),
+        trailingStopPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_TRAILING_STOP_PCT',
+          3,
+          { min: 0.1, max: 100 },
+        ),
+        fastTakeProfitPct: numberEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_FAST_TP_PCT',
+          18,
+          { min: 0 },
+        ),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_FAST_TP_WINDOW_MS',
+          5_000,
+          { min: 0 },
+        ),
+        lossCheckAtMs: integerEnv(
+          'FLOW_LIVE_POST_GD25_35_F1_XLEG_LOSS_CHECK_MS',
+          6_000,
+          { min: 0 },
+        ),
+        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_HOLD_MS', 15_000, {
+          min: 1_000,
+        }),
+      },
+      {
         id: 'post_gd25_35_xleg',
         label: '毕业后深跌反弹 · XLEG（旧版停止新开仓）',
         ruleVersion: 'post_migration_gd25_35_xleg_reentry2_v2',
@@ -3314,6 +3400,7 @@ function validateConfig() {
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL
+      && !process.env.FLOW_LIVE_POST_GD25_35_F1_XLEG_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL) {
       errors.push(
         'At least one active live strategy POSITION_SOL must be explicitly set (a previous XLEG size is accepted during migration)',

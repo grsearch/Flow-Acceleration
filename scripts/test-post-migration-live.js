@@ -616,6 +616,90 @@ setImmediate(() => {
   await expiredManager.stop();
 
   await manager.stop();
+
+  // The promoted GD25 F1 strategy consumes the first matched opportunity,
+  // rather than the first successful entry. A later rebound cannot replace a
+  // rejected or losing first sample, and the count survives a process restart.
+  let firstNow = 2_000_000;
+  const firstOnlyStore = new ResearchStore({
+    dbPath: ':memory:', archiveDir: temp, rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 100,
+  }, { horizonsSeconds: [1], excursionSeconds: [1] });
+  const firstOnlyMint = 'MintFirstOpportunity11111111111111111111111111';
+  firstOnlyStore.recordCreate({
+    mint: firstOnlyMint, symbol: 'F1', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: firstNow - 10_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  firstOnlyStore.recordComplete({
+    mint: firstOnlyMint, completedAt: firstNow, timestampMs: firstNow,
+  });
+  const firstOnlyStrategy = {
+    ...config.strategies[0],
+    id: 'post_gd25_35_f1_xleg_live_v1',
+    ruleVersion: 'post_migration_gd25_35_first_xleg_live_v1',
+    maxSignalsPerMint: 1,
+    maxEntriesPerMint: 1,
+    reentryCooldownMs: 0,
+  };
+  const firstOnlyConfig = {
+    ...config,
+    maxConcurrentPositions: 1,
+    strategies: [firstOnlyStrategy],
+  };
+  const firstOnlyManager = new LiveTradingManager({
+    config: firstOnlyConfig, store: firstOnlyStore, now: () => firstNow,
+  });
+  firstOnlyManager.start();
+  firstOnlyManager.onGraduated(firstOnlyStore.getToken(firstOnlyMint));
+  const firstTrade = (price, offset) => {
+    firstNow = 2_000_000 + offset;
+    firstOnlyManager.observeTrade({
+      mint: firstOnlyMint, symbol: 'F1', market: 'PUMP_AMM', price,
+      reservePrice: price, timestampMs: firstNow, receivedAtMs: firstNow,
+      slot: 20_000 + offset,
+    });
+  };
+  firstTrade(100, 100);
+  firstTrade(72, 500);
+  firstTrade(74, 800);
+  await firstOnlyManager.entryQueue;
+  assert.strictEqual(firstOnlyStore.liveStrategyDecisionCountForMintStrategy(
+    firstOnlyMint, firstOnlyStrategy.id,
+  ), 1);
+  firstTrade(70, 7_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  firstTrade(100, 8_000);
+  firstTrade(72, 8_400);
+  firstTrade(74, 8_700);
+  await firstOnlyManager.entryQueue;
+  let firstOnlyDashboard = firstOnlyStore.liveTradingDashboard({
+    strategyId: firstOnlyStrategy.id,
+  });
+  assert.strictEqual(firstOnlyDashboard.decisions.length, 1);
+  assert.strictEqual(firstOnlyDashboard.positions.length, 1);
+  await firstOnlyManager.stop();
+
+  const firstOnlyRestarted = new LiveTradingManager({
+    config: firstOnlyConfig, store: firstOnlyStore, now: () => firstNow,
+  });
+  firstOnlyRestarted.start();
+  firstOnlyRestarted.onGraduated(firstOnlyStore.getToken(firstOnlyMint));
+  for (const [price, offset] of [[100, 16_000], [72, 16_400], [74, 16_700]]) {
+    firstNow = 2_000_000 + offset;
+    firstOnlyRestarted.observeTrade({
+      mint: firstOnlyMint, symbol: 'F1', market: 'PUMP_AMM', price,
+      reservePrice: price, timestampMs: firstNow, receivedAtMs: firstNow,
+      slot: 30_000 + offset,
+    });
+  }
+  await firstOnlyRestarted.entryQueue;
+  firstOnlyDashboard = firstOnlyStore.liveTradingDashboard({ strategyId: firstOnlyStrategy.id });
+  assert.strictEqual(firstOnlyDashboard.decisions.length, 1);
+  assert.strictEqual(firstOnlyDashboard.positions.length, 1);
+  await firstOnlyRestarted.stop();
+  firstOnlyStore.close();
+
   store.close();
   fs.rmSync(temp, { recursive: true, force: true });
     console.log('post-migration live tests passed');

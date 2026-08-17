@@ -64,6 +64,9 @@ const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
 const liveV3 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
 ));
+const liveGd25F1 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'post_gd25_35_f1_xleg_live_v1'
+));
 assert.strictEqual(liveContinuity.positionSizeSol, 1);
 assert.strictEqual(liveContinuity.entryEnabled, true);
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
@@ -75,6 +78,21 @@ assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
 assert.strictEqual(liveV3.positionSizeSol, 1);
 assert.strictEqual(liveV3.entryEnabled, false);
+assert.strictEqual(liveGd25F1.positionSizeSol, 1);
+assert.strictEqual(liveGd25F1.entryEnabled, true);
+assert.strictEqual(liveGd25F1.market, 'PUMP_AMM');
+assert.strictEqual(liveGd25F1.trackingAgeMs, 120_000);
+assert.strictEqual(liveGd25F1.dropMinPct, 25);
+assert.strictEqual(liveGd25F1.dropMaxPct, 35);
+assert.strictEqual(liveGd25F1.reboundMinPct, 2);
+assert.strictEqual(liveGd25F1.reboundMaxPct, 5);
+assert.strictEqual(liveGd25F1.maxSignalsPerMint, 1);
+assert.strictEqual(liveGd25F1.maxEntriesPerMint, 1);
+assert.strictEqual(liveGd25F1.maxEntryPriceJumpPct, 10);
+assert.strictEqual(liveGd25F1.maxEntrySelfImpactPct, 10);
+assert.strictEqual(liveGd25F1.trailingActivationPct, 8);
+assert.strictEqual(liveGd25F1.trailingStopPct, 3);
+assert.strictEqual(liveGd25F1.maxHoldMs, 15_000);
 assert.strictEqual(config.liveTrading.priorityFeeSol, 0.0005);
 assert.strictEqual(config.liveTrading.priorityFeeMicroLamports, 2_000_000);
 assert.strictEqual(liveV3.market, 'PUMP_AMM');

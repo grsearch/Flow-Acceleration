@@ -536,9 +536,16 @@ class LiveTradingManager {
   }
 
   _emitStrategySignal(strategy, trade, graduatedAt, candidate, dropPct, reboundPct) {
+    const maxSignalsPerMint = Number(strategy.maxSignalsPerMint);
+    if (Number.isFinite(maxSignalsPerMint) && maxSignalsPerMint > 0
+      && typeof this.store.liveStrategyDecisionCountForMintStrategy === 'function'
+      && this.store.liveStrategyDecisionCountForMintStrategy(trade.mint, strategy.id)
+        >= maxSignalsPerMint) {
+      return;
+    }
     // The timestamp/slot/low tuple makes each fresh causal drop-rebound cycle
-    // durable across restarts. The successful-entry limit is enforced from
-    // live_positions, so rejected or failed buys do not consume an entry.
+    // durable across restarts. Strategies without maxSignalsPerMint retain the
+    // older successful-entry behavior; F1 consumes its first matched decision.
     const episodeId = [
       strategy.id,
       trade.mint,
