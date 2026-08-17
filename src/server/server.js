@@ -36,6 +36,7 @@ class ResearchServer {
     graduationHoldShadow = null,
     holderGrowthShadow = null,
     qualityLeaderShadow = null,
+    bigWinnerShadow = null,
     graduationAccelerationShadow = null,
   }) {
     this.config = config;
@@ -60,6 +61,7 @@ class ResearchServer {
     this.graduationHoldShadow = graduationHoldShadow;
     this.holderGrowthShadow = holderGrowthShadow;
     this.qualityLeaderShadow = qualityLeaderShadow;
+    this.bigWinnerShadow = bigWinnerShadow;
     this.graduationAccelerationShadow = graduationAccelerationShadow;
     this.app = express();
     this.httpServer = null;
@@ -370,6 +372,25 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/big-winner-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.bigWinnerShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_BW',
+          sendsTransactions: false,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        timeSessions: this.bigWinnerShadow
+          ? this.store.shadowTimeSessionDashboard('big-winner')
+          : { sessions: [] },
+        ...(this.bigWinnerShadow?.dashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+        }) || { cohorts: [], positions: [] }),
+      });
+    });
+
     this.app.get('/api/migration-continuity-shadow', (request, response) => {
       response.json({
         runtime: this.migrationContinuityShadow?.health() || {
@@ -535,6 +556,7 @@ class ResearchServer {
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         holderGrowthShadow: this.holderGrowthShadow?.health() || null,
         qualityLeaderShadow: this.qualityLeaderShadow?.health() || null,
+        bigWinnerShadow: this.bigWinnerShadow?.health() || null,
         migratedDropReboundShadow: this.migratedDropReboundShadow?.health() || null,
         migrationContinuityShadow: this.migrationContinuityShadow?.health() || null,
         rangeScalperShadow: this.rangeScalperShadow?.health() || null,
