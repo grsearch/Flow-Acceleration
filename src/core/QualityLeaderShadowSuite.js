@@ -81,10 +81,11 @@ function rowPosition(row) {
 }
 
 class QualityLeaderShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
@@ -96,6 +97,7 @@ class QualityLeaderShadowSuite {
       evaluated: 0, matched: 0, replayMatchesSuppressed: 0,
       priceJump: 0, noEntry: 0, opened: 0, partialExits: 0,
       graduated: 0, closed: 0, noExit: 0, lastActionAt: null, lastError: null,
+      liveSignalsEmitted: 0, replayLiveSignalsSuppressed: 0,
     };
   }
 
@@ -207,7 +209,7 @@ class QualityLeaderShadowSuite {
     this.metrics.graduated += 1;
   }
 
-  observeTrade(trade) {
+  observeTrade(trade, { replay = false } = {}) {
     const timestampMs = finite(trade?.timestampMs);
     const rawPrice = shadowPrice(trade);
     if (!this.config.enabled || !trade?.mint || !(timestampMs > 0) || !(rawPrice > 0)
@@ -218,7 +220,7 @@ class QualityLeaderShadowSuite {
       if (pending) {
         if (trade.market === 'PUMP_BONDING_CURVE'
           && timestampMs >= pending.entryTargetAt && timestampMs <= pending.entryDeadlineAt) {
-          this._open(pending, trade, rawPrice);
+          this._open(pending, trade, rawPrice, { replay });
         }
         continue;
       }
@@ -333,12 +335,29 @@ class QualityLeaderShadowSuite {
     });
     if (!saved?.inserted) return;
     const position = rowPosition(saved);
+    position.liveFeatures = {
+      entryProfileId: profile.id,
+      exitProfileId: exitProfile.id,
+      return10Pct: s10.priceReturnPct,
+      drawdown20Pct: s20.drawdownPct,
+      buyers10: s10.buyers,
+      buyers20: s20.buyers,
+      buyerDelta,
+      netFlow10Sol: s10.netFlowSol,
+      netFlow20Sol: s20.netFlowSol,
+      netFlowDeltaSol,
+      retention20Pct: s20.retentionPct,
+      creatorShare20Pct: s20.creatorSharePct,
+      curve20Pct: s20.curvePct,
+      sellBuyRatio20: sellBuyRatio,
+      virtualSol20: s20.virtualSolReserves,
+    };
     this.pendingEntries.set(position.id, position);
     this._index(position);
     this.metrics.lastActionAt = this.now();
   }
 
-  _open(position, trade, marketPrice) {
+  _open(position, trade, marketPrice, { replay = false } = {}) {
     const entryPrice = curveBuyAveragePrice(trade, position.positionSol, marketPrice);
     const jumpPct = ((entryPrice / position.signalPrice) - 1) * 100;
     const impactPct = ((entryPrice / marketPrice) - 1) * 100;
@@ -383,6 +402,44 @@ class QualityLeaderShadowSuite {
     this.pendingEntries.delete(position.id);
     this.positions.set(position.id, position);
     this.metrics.opened += 1;
+    this._emitLiveSignal(position, trade, marketPrice, jumpPct, impactPct, replay);
+  }
+
+  _emitLiveSignal(position, trade, marketPrice, jumpPct, impactPct, replay) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    if (!this.onLiveSignal || !profile?.liveStrategyId
+      || position.exitProfileId !== 'QL_PROTECTED') return;
+    if (replay) {
+      this.metrics.replayLiveSignalsSuppressed += 1;
+      return;
+    }
+    try {
+      this.onLiveSignal({
+        strategyId: profile.liveStrategyId,
+        episodeId: `${position.mint}:${position.entryProfileId}:${position.exitProfileId}:${position.signalAt}`,
+        mint: position.mint,
+        symbol: position.symbol || trade.symbol || null,
+        price: marketPrice,
+        slot: trade.slot,
+        timestampMs: trade.timestampMs,
+        receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+        market: 'PUMP_BONDING_CURVE',
+        virtualSolReservesRaw: trade.virtualSolReservesRaw || null,
+        virtualTokenReservesRaw: trade.virtualTokenReservesRaw || null,
+        realSolReservesRaw: trade.realSolReservesRaw || null,
+        realTokenReservesRaw: trade.realTokenReservesRaw || null,
+        features: {
+          ...(position.liveFeatures || {}),
+          shadowEntryJumpPct: jumpPct,
+          shadowEntryImpactPct: impactPct,
+          shadowEntryPrice: position.entryPrice,
+          shadowCohortId: position.cohortId,
+        },
+      });
+      this.metrics.liveSignalsEmitted += 1;
+    } catch (error) {
+      this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
+    }
   }
 
   _normalizedPrice(position, trade, rawPrice) {
