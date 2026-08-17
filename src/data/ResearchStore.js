@@ -2,7 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const zlib = require('zlib');
 const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 
@@ -7070,30 +7069,6 @@ class ResearchStore {
       repeatedWithin30s: within30s,
       repeatedWithin30sPct: ratio(within30s, laterSignals),
     };
-  }
-
-  archiveExpiredRawTrades(now = Date.now(), limit = 100_000) {
-    this.flushRawTrades();
-    if (this.config.dbPath === ':memory:') return null;
-    const cutoff = now - this.config.rawRetentionHours * 3_600_000;
-    const rows = this.db.prepare(`
-      SELECT * FROM raw_trades WHERE timestamp_ms < ? ORDER BY id LIMIT ?
-    `).all(cutoff, limit);
-    if (rows.length === 0) return null;
-
-    fs.mkdirSync(this.config.archiveDir, { recursive: true });
-    const first = rows[0].timestamp_ms;
-    const last = rows[rows.length - 1].timestamp_ms;
-    const archivePath = path.join(
-      this.config.archiveDir,
-      `raw-trades-${first}-${last}-${now}.ndjson.gz`,
-    );
-    const body = rows.map((row) => JSON.stringify(row)).join('\n') + '\n';
-    fs.writeFileSync(archivePath, zlib.gzipSync(body, { level: 6 }));
-    const maxId = rows[rows.length - 1].id;
-    this.db.prepare('DELETE FROM raw_trades WHERE timestamp_ms < ? AND id <= ?').run(cutoff, maxId);
-    this.metrics.lastArchiveAt = now;
-    return { archivePath, rows: rows.length, first, last };
   }
 
   health() {

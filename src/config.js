@@ -3241,7 +3241,7 @@ const config = {
 
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
-    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 168, { min: 1 }),
+    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 72, { min: 24 }),
     archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
     flushMs: integerEnv('FLOW_DB_FLUSH_MS', 250, { min: 25 }),
     flushMax: integerEnv('FLOW_DB_FLUSH_MAX', 1_000, { min: 10 }),

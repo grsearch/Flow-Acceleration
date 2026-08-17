@@ -27,7 +27,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadOnlyPaths=@INSTALL_DIR@
-ReadWritePaths=@INSTALL_DIR@/data/exports
+ReadWritePaths=@INSTALL_DIR@/data
 TimeoutStartSec=6h
 
 [Install]

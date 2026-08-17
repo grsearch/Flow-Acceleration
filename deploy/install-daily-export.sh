@@ -36,6 +36,7 @@ chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR/data/exports"
 chmod 700 "$INSTALL_DIR/data/exports"
 chmod 700 "$INSTALL_DIR/data/exports/.coscli-home"
 chmod 700 "$INSTALL_DIR/scripts/export-last24h-cos.sh"
+chmod 700 "$INSTALL_DIR/scripts/cleanup-research-retention.js"
 
 render_unit() {
   local source="$1"

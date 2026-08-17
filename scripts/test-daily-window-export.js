@@ -95,6 +95,8 @@ function main() {
   assert.ok(backupScript.includes('FLOW_BACKUP_UPLOAD_TIMEOUT'));
   assert.ok(backupScript.includes('last-run.env'));
   assert.ok(backupScript.includes('write_state VERIFYING'));
+  assert.ok(backupScript.includes('write_state CLEANING'));
+  assert.ok(backupScript.includes('cleanup-research-retention.js'));
   assert.match(backupScript, /timeout --foreground "\$UPLOAD_TIMEOUT"/);
   assert.match(backupScript, /mktemp --suffix=\.yaml/);
   assert.match(backupScript, /--fail-output=false/);
@@ -102,6 +104,7 @@ function main() {
   assert.match(timer, /OnCalendar=\*-\*-\* 08:00:00 Asia\/Shanghai/);
   assert.match(timer, /Persistent=true/);
   assert.match(service, /Environment=HOME=@INSTALL_DIR@\/data\/exports\/\.coscli-home/);
+  assert.match(service, /ReadWritePaths=@INSTALL_DIR@\/data/);
   assert.match(installer, /remove_legacy_cron/);
   assert.match(installer, /cos-auto-upload-export\\\.sh/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_SECRET_ID=\r?\n/);

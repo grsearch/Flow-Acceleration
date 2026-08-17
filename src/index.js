@@ -169,7 +169,6 @@ function createRuntime(runtimeConfig = config) {
     }
   };
   let maintenanceTimer = null;
-  let archiveTimer = null;
   let stopping = false;
 
   const refreshAmmSubscriptions = (now = Date.now()) => {
@@ -498,16 +497,6 @@ function createRuntime(runtimeConfig = config) {
       refreshAmmSubscriptions(now);
     }, 1_000);
 
-    archiveTimer = setInterval(() => {
-      try {
-        const archived = store.archiveExpiredRawTrades();
-        if (archived) console.log(`[Archive] ${archived.rows} raw trades -> ${archived.archivePath}`);
-      } catch (error) {
-        console.error('[Archive] failed:', error.message);
-      }
-    }, 60 * 60_000);
-    if (archiveTimer.unref) archiveTimer.unref();
-
     refreshAmmSubscriptions();
     await stream.start();
   }
@@ -517,9 +506,7 @@ function createRuntime(runtimeConfig = config) {
     stopping = true;
     console.log(`[Flow] stopping: ${reason}`);
     if (maintenanceTimer) clearInterval(maintenanceTimer);
-    if (archiveTimer) clearInterval(archiveTimer);
     maintenanceTimer = null;
-    archiveTimer = null;
     await stream.stop();
     await trader.stop();
     signalShadow.stop();

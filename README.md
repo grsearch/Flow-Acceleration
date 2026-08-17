@@ -86,7 +86,7 @@ W3 = T-2s ~ T
 - `cya_early_pyramid_shadow_positions`：独立的 CYA Early Pyramid Shadow K；保存早期 Curve 订单流入场、分批加仓、两次减仓、尾仓退出及逐仓估算成本。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
-SQLite 使用 WAL 和批量写入。默认保留 168 小时热数据；超过 `FLOW_RAW_RETENTION_HOURS` 的 Raw Trade 会先压缩为 `data/archive/*.ndjson.gz`，成功写入归档后才从热库删除；Signals 与 Future Labels 不删除。
+SQLite 使用 WAL 和批量写入。Raw Trade 默认保留最近 72 小时热数据；主交易进程不再同步压缩或删除数据，避免阻塞 gRPC、策略计算与 Dashboard。每日 COS 导出完成、SHA256 上传且远端对象验证成功后，独立低优先级维护进程才会分批删除超过 `FLOW_RETENTION_HOT_RAW_HOURS` 的 Raw Trade。Signals、Future Labels、Shadow 仓位和实盘仓位不会被该任务删除。
 
 ## 运行
 
@@ -495,7 +495,9 @@ systemctl list-timers flow-acceleration-backup.timer --all
 
 Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，即使服务器位于硅谷也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予该 Bucket 前缀所需的上传和查询权限。
 
-安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传和验证均有独立超时与重试，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`DONE` 或 `FAILED`），COSCLI 卡住时不会无限占用下一次任务。
+远端验证通过后，状态会先进入 `CLEANING`，再运行 `scripts/cleanup-research-retention.js`。默认保留 72 小时 Raw Trade，每批删除 25,000 行、每日最多 5,000,000 行，并在批次间让出磁盘；上传失败、校验文件缺失、状态过期或数据库繁忙超过重试上限时均停止清理。报告写入 `data/exports/retention-last-run.json`。维护过程明确不执行 `wal_checkpoint` 或 `VACUUM`，所以 SQLite 文件不会立刻从磁盘缩小，但释放的页会被后续写入复用，数据库不再持续无上限增长。已有 23GB 文件如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
+
+安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传、验证与清理均有独立超时和失败保护，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`CLEANING`、`DONE` 或 `FAILED`），COSCLI 或清理任务卡住时不会无限占用下一次任务。
 
 ## 前向组合 Shadow（2026-08-17）
 

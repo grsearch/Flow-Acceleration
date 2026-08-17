@@ -18,6 +18,8 @@ LOG_LINES="${FLOW_BACKUP_LOG_LINES:-20000}"
 EXPORT_TIMEOUT="${FLOW_BACKUP_EXPORT_TIMEOUT:-2h}"
 UPLOAD_TIMEOUT="${FLOW_BACKUP_UPLOAD_TIMEOUT:-30m}"
 VERIFY_TIMEOUT="${FLOW_BACKUP_VERIFY_TIMEOUT:-5m}"
+RETENTION_ENABLED="${FLOW_RETENTION_CLEANUP_ENABLED:-true}"
+RETENTION_TIMEOUT="${FLOW_RETENTION_TIMEOUT:-1h}"
 
 for required in flock tar gzip sha256sum mktemp date tail find sort xargs sed nice systemctl journalctl sleep timeout; do
   command -v "$required" >/dev/null 2>&1 || { echo "Missing required command: $required" >&2; exit 1; }
@@ -170,13 +172,30 @@ write_state VERIFYING
 retry timeout --foreground "$VERIFY_TIMEOUT" "$COSCLI_BIN" -c "$COS_CONFIG" ls \
   "$REMOTE_OBJECT" >/dev/null
 
+ARCHIVE_SHA="$(cut -d' ' -f1 "$SHA_FILE")"
+case "${RETENTION_ENABLED,,}" in
+  1|true|yes|on)
+    echo "COS object verified; starting low-priority retention cleanup"
+    write_state CLEANING "sha256=$ARCHIVE_SHA"
+    timeout --foreground "$RETENTION_TIMEOUT" nice -n 15 "$NODE_BIN" \
+      "$PROJECT_DIR/scripts/cleanup-research-retention.js" \
+      "--db=$DB_PATH" \
+      "--state=$STATE_FILE" \
+      "--report=$EXPORT_DIR/retention-last-run.json"
+    RETENTION_RESULT=completed
+    ;;
+  *)
+    RETENTION_RESULT=disabled
+    ;;
+esac
+
 find "$EXPORT_DIR" -maxdepth 1 -type f \
   \( -name 'flow-acceleration-last24h-*.tar.gz' -o -name 'flow-acceleration-last24h-*.tar.gz.sha256' \) \
   -mtime "+$RETENTION_DAYS" -delete
 
 SUCCESS=1
-write_state DONE "sha256=$(cut -d' ' -f1 "$SHA_FILE")"
+write_state DONE "sha256=$ARCHIVE_SHA retention=$RETENTION_RESULT"
 echo "Daily export complete"
 echo "local=$ARCHIVE"
 echo "remote=$REMOTE_DIR/$BASE_NAME"
-echo "sha256=$(cut -d' ' -f1 "$SHA_FILE")"
+echo "sha256=$ARCHIVE_SHA"
