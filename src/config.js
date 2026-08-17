@@ -166,13 +166,13 @@ function shadowPositionEnv(name) {
   return numberEnv(name, defaultShadowPositionSol, { min: 0.000001 });
 }
 
-// The live strategy used 0.05 SOL as its former deployment default. Treat that
-// exact legacy value as inherited so upgrading an existing server moves the
-// active strategy to the new 1 SOL size without requiring a manual .env edit.
-// Other values remain explicit operator overrides.
-function livePositionEnv(name, fallback = 1, legacyName = null) {
+// Live strategies previously shipped with 0.05 SOL and then 1 SOL defaults.
+// Treat both historical values as inherited so an existing server moves to the
+// current 0.1 SOL default on a normal code upgrade. Other values remain explicit
+// operator overrides.
+function livePositionEnv(name, fallback = 0.1, legacyName = null) {
   const raw = process.env[name] ?? (legacyName ? process.env[legacyName] : undefined);
-  if (raw == null || raw === '' || Number(raw) === 0.05) return fallback;
+  if (raw == null || raw === '' || [0.05, 1].includes(Number(raw))) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) ? Math.max(0.000001, value) : fallback;
 }
@@ -381,7 +381,7 @@ const config = {
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL',
-          1,
+          0.1,
         ),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_MAX_SIGNAL_AGE_MS',
@@ -406,6 +406,78 @@ const config = {
         maxHoldMs: 120_000,
       },
       {
+        id: 'quality_leader_ql_strict_protected_live',
+        label: 'Quality Leader QL Strict · Protected Runner',
+        ruleVersion: 'quality_leader_ql_strict_protected_live_v1',
+        signalSource: 'QUALITY_LEADER_QL_STRICT_PROTECTED',
+        enabled: booleanEnv('FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_BONDING_CURVE',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_ENTRY_JUMP_PCT',
+          20,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'QUALITY_PROTECTED_RUNNER',
+        hardStopPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_HARD_STOP_PCT',
+          20,
+          { min: 0.1, max: 100 },
+        ),
+        strengthActivationPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_STRENGTH_PCT',
+          20,
+          { min: 0.1, max: 1_000 },
+        ),
+        noStrengthMs: integerEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_NO_STRENGTH_MS',
+          30_000,
+          { min: 1_000, max: 5 * 60_000 },
+        ),
+        maxHoldMs: integerEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_HOLD_MS',
+          5 * 60_000,
+          { min: 10_000, max: 30 * 60_000 },
+        ),
+        protectedFloors: [
+          { activationPct: 20, minFloorPct: 0, peakGivebackPct: 15 },
+          { activationPct: 50, minFloorPct: 15, peakGivebackPct: 25 },
+          { activationPct: 100, minFloorPct: 40, peakGivebackPct: 40 },
+          { activationPct: 200, minFloorPct: 100, peakGivebackPct: 80 },
+        ],
+        qualityCriteria: {
+          minReturn10Pct: 140,
+          maxDrawdown20Pct: 12,
+          minBuyerDelta: 8,
+          minNetFlowDeltaSol: 3,
+          minRetentionPct: 80,
+          maxCreatorSharePct: 3,
+          minCurvePct: 55,
+          maxCurvePct: 90,
+          maxSellBuyRatio: 0.55,
+          minVirtualSolReserves: 30,
+        },
+      },
+      {
         id: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
         label: 'Graduation Acceleration O · Curve80',
         ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v1',
@@ -416,7 +488,7 @@ const config = {
         // disabled after the weak daytime live sample; Shadow O is separate.
         entryEnabled: false,
         market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv('FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL', 1),
+        positionSizeSol: livePositionEnv('FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL', 0.1),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_MAX_SIGNAL_AGE_MS',
           1_500,
@@ -458,7 +530,7 @@ const config = {
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL',
-          1,
+          0.1,
           'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL',
         ),
         trackingAgeMs: integerEnv(
@@ -555,7 +627,7 @@ const config = {
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL',
-          1,
+          0.1,
           'FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL',
         ),
         trackingAgeMs: integerEnv(
@@ -652,7 +724,7 @@ const config = {
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_POST_GD25_35_F1_XLEG_POSITION_SOL',
-          1,
+          0.1,
           'FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL',
         ),
         trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_TRACKING_MS', 120_000, {
@@ -738,7 +810,7 @@ const config = {
         // legacy active position still has its original exit rules after restart.
         entryEnabled: false,
         market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 1),
+        positionSizeSol: livePositionEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 0.1),
         trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_TRACKING_MS', 120_000, {
           min: 30_000,
           max: 10 * 60_000,
@@ -3535,6 +3607,7 @@ const config = {
     entryProfiles: [
       {
         id: 'QL_STRICT',
+        liveStrategyId: 'quality_leader_ql_strict_protected_live',
         label: 'QL-A/B Strict · Retention≥80%',
         minReturn10Pct: 140,
         maxDrawdown20Pct: 12,
@@ -3840,6 +3913,7 @@ function validateConfig() {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
     if (!process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL
+      && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL
