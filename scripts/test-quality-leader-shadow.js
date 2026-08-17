@@ -32,6 +32,7 @@ function makeConfig() {
     entryProfiles: [
       {
         id: 'QL_STRICT', minReturn10Pct: 140, maxDrawdown20Pct: 12,
+        liveStrategyId: 'quality_leader_ql_strict_protected_live',
         minBuyerDelta: 8, minNetFlowDeltaSol: 3, minRetentionPct: 80,
         maxCreatorSharePct: 3, minCurvePct: 55, maxCurvePct: 90,
         maxSellBuyRatio: 0.55, minVirtualSolReserves: 30,
@@ -92,7 +93,13 @@ function run() {
   const store = makeStore();
   const base = 1_900_000_000_000;
   let now = base;
-  const suite = new QualityLeaderShadowSuite({ config: makeConfig(), store, now: () => now });
+  const liveSignals = [];
+  const suite = new QualityLeaderShadowSuite({
+    config: makeConfig(),
+    store,
+    now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
   suite.start();
 
   const mint = 'QualityLeader111111111111111111111111111111';
@@ -107,6 +114,11 @@ function run() {
   now = base + 20_250;
   suite.observeTrade(trade(mint, now, 1));
   assert.strictEqual(suite.health().activePositions, 3);
+  assert.strictEqual(liveSignals.length, 1,
+    'strict protected must emit exactly one live signal, not one per A/B exit row');
+  assert.strictEqual(liveSignals[0].strategyId, 'quality_leader_ql_strict_protected_live');
+  assert.strictEqual(liveSignals[0].features.retention20Pct, 85);
+  assert.strictEqual(liveSignals[0].features.shadowCohortId, 'QL_STRICT:QL_PROTECTED');
   now += 100;
   suite.observeTrade(trade(mint, now, 1.21));
   now += 250;
@@ -130,6 +142,17 @@ function run() {
   assert.ok(rows.filter((row) => row.exit_profile_id === 'QL_BARBELL')
     .every((row) => row.partial_stage === 2));
   assert.ok(rows.every((row) => row.net_return_pct > 80));
+
+  const replayMint = 'QualityLeaderReplay111111111111111111111111111';
+  recordToken(store, replayMint, base);
+  now = base + 35_000;
+  suite.onSnapshot(snapshot(replayMint, 10_000, now - 10_000));
+  suite.onSnapshot(snapshot(replayMint, 20_000, now));
+  now += 250;
+  suite.observeTrade(trade(replayMint, now, 1), { replay: true });
+  assert.strictEqual(liveSignals.length, 1,
+    'startup replay may restore Shadow rows but must never emit a live order signal');
+  assert.strictEqual(suite.health().replayLiveSignalsSuppressed, 1);
 
   const migrationMint = 'QualityLeaderMigration111111111111111111111111';
   recordToken(store, migrationMint, base);
