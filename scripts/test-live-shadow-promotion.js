@@ -58,6 +58,21 @@ async function main() {
         { activationPct: 40, drawdownPct: 15 },
       ],
     },
+    {
+      id: 'quality_leader_ql_strict_protected_live', enabled: true, entryEnabled: true,
+      signalSource: 'QUALITY_LEADER_QL_STRICT_PROTECTED', ruleVersion: 'ql-live-test',
+      market: 'PUMP_BONDING_CURVE', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 20,
+      maxEntrySelfImpactPct: 10, exitMode: 'QUALITY_PROTECTED_RUNNER',
+      hardStopPct: 20, strengthActivationPct: 20, noStrengthMs: 30_000,
+      maxHoldMs: 300_000,
+      protectedFloors: [
+        { activationPct: 20, minFloorPct: 0, peakGivebackPct: 15 },
+        { activationPct: 50, minFloorPct: 15, peakGivebackPct: 25 },
+        { activationPct: 100, minFloorPct: 40, peakGivebackPct: 40 },
+        { activationPct: 200, minFloorPct: 100, peakGivebackPct: 80 },
+      ],
+    },
   ];
   const manager = new LiveTradingManager({
     config: runtimeConfig(strategies), store, now: () => now,
@@ -115,6 +130,32 @@ async function main() {
   oDashboard = store.liveTradingDashboard({ strategyId: strategies[1].id });
   assert.strictEqual(oDashboard.positions[0].status, 'CLOSED');
   assert.strictEqual(oDashboard.positions[0].exit_reason, 'RUNNER_STAIR_T40_D15');
+
+  const qlMint = 'ql-live-mint';
+  store.recordCreate({
+    mint: qlMint, symbol: 'QL', name: null, uri: null, bondingCurve: null,
+    creator: 'creator-ql', createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[2].id, episodeId: 'ql:1', mint: qlMint,
+    symbol: 'QL', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { retention20Pct: 85, buyerDelta: 10, netFlowDeltaSol: 4 },
+  });
+  await waitForQueue();
+  now += 100;
+  manager.observeTrade({
+    mint: qlMint, market: 'PUMP_BONDING_CURVE', price: 1.25, timestampMs: now,
+  });
+  now += 100;
+  manager.observeTrade({
+    mint: qlMint, market: 'PUMP_BONDING_CURVE', price: 1.05, timestampMs: now,
+  });
+  await waitForQueue();
+  const qlPosition = store.liveTradingDashboard({ strategyId: strategies[2].id }).positions[0];
+  assert.strictEqual(qlPosition.status, 'CLOSED');
+  assert.strictEqual(qlPosition.exit_reason, 'PROTECTED_FLOOR_10');
 
   await manager.stop();
   store.close();
