@@ -24,6 +24,7 @@ const {
 const { GraduationHoldShadowSuite } = require('./core/GraduationHoldShadowSuite');
 const { HolderGrowthShadowSuite } = require('./core/HolderGrowthShadowSuite');
 const { QualityLeaderShadowSuite } = require('./core/QualityLeaderShadowSuite');
+const { BigWinnerShadowSuite } = require('./core/BigWinnerShadowSuite');
 const {
   GraduationAccelerationShadowSuite,
 } = require('./core/GraduationAccelerationShadowSuite');
@@ -98,6 +99,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   qualityLeaderShadow.start();
+  const bigWinnerShadow = new BigWinnerShadowSuite({
+    config: runtimeConfig.bigWinnerShadow,
+    store,
+  });
+  bigWinnerShadow.start();
   const launchQualityObserver = new LaunchQualityObserver({
     config: runtimeConfig.launchQualityObserver,
     store,
@@ -168,6 +174,7 @@ function createRuntime(runtimeConfig = config) {
     graduationHoldShadow,
     holderGrowthShadow,
     qualityLeaderShadow,
+    bigWinnerShadow,
     graduationAccelerationShadow,
   });
   const smartWallets = new Set([
@@ -208,6 +215,7 @@ function createRuntime(runtimeConfig = config) {
       ...graduationHoldShadow.trackedMints(),
       ...holderGrowthShadow.trackedMints(),
       ...qualityLeaderShadow.trackedMints(),
+      ...bigWinnerShadow.trackedMints(),
       ...graduationAccelerationShadow.trackedMints(),
     ])]);
   };
@@ -291,6 +299,7 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
           observeShadow('qualityLeaderGraduate', () => qualityLeaderShadow.onGraduated(token || event));
+          observeShadow('bigWinnerGraduate', () => bigWinnerShadow.onGraduated(token || event));
           observeShadow('graduationAccelerationGraduate', () => (
             graduationAccelerationShadow.onGraduated(token || event)
           ));
@@ -311,6 +320,7 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
           observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
           observeShadow('qualityLeaderGraduate', () => qualityLeaderShadow.onGraduated(token || event));
+          observeShadow('bigWinnerGraduate', () => bigWinnerShadow.onGraduated(token || event));
           observeShadow('graduationAccelerationGraduate', () => (
             graduationAccelerationShadow.onGraduated(token || event)
           ));
@@ -353,6 +363,7 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
         observeShadow('holderGrowth', () => holderGrowthShadow.observeTrade(trade));
         observeShadow('qualityLeader', () => qualityLeaderShadow.observeTrade(trade));
+        observeShadow('bigWinner', () => bigWinnerShadow.observeTrade(trade));
         observeShadow('graduationAcceleration', () => (
           graduationAccelerationShadow.observeTrade(trade)
         ));
@@ -524,6 +535,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
       observeShadow('holderGrowthAdvance', () => holderGrowthShadow.advanceTime(now));
       observeShadow('qualityLeaderAdvance', () => qualityLeaderShadow.advanceTime(now));
+      observeShadow('bigWinnerAdvance', () => bigWinnerShadow.advanceTime(now));
       observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
       observeShadow('migrationContinuityAdvance', () => migrationContinuityShadow.advanceTime(now));
       observeShadow('rangeScalperAdvance', () => rangeScalperShadow.advanceTime(now));
@@ -559,6 +571,7 @@ function createRuntime(runtimeConfig = config) {
     launchQualityObserver.stop();
     holderGrowthShadow.stop();
     qualityLeaderShadow.stop();
+    bigWinnerShadow.stop();
     migratedDropReboundShadow.stop();
     migrationContinuityShadow.stop();
     rangeScalperShadow.stop();
@@ -588,6 +601,7 @@ function createRuntime(runtimeConfig = config) {
       launchQualityObserver: launchQualityObserver.health(),
       holderGrowthShadow: holderGrowthShadow.health(),
       qualityLeaderShadow: qualityLeaderShadow.health(),
+      bigWinnerShadow: bigWinnerShadow.health(),
       migratedDropReboundShadow: migratedDropReboundShadow.health(),
       migrationContinuityShadow: migrationContinuityShadow.health(),
       rangeScalperShadow: rangeScalperShadow.health(),
@@ -603,7 +617,8 @@ function createRuntime(runtimeConfig = config) {
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     smartLikeEarlyShadow,
     launchPullbackShadow,
-    launchQualityObserver, holderGrowthShadow, qualityLeaderShadow, migratedDropReboundShadow,
+    launchQualityObserver, holderGrowthShadow, qualityLeaderShadow, bigWinnerShadow,
+    migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
     migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
     graduationAccelerationShadow,
