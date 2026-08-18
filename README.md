@@ -252,6 +252,21 @@ Smart Wallet 或 Shadow 结果。只有第二个或第三个**不同**监控钱�
 贡献、MFE/MAE 和 NO_EXIT。缺少可执行退出时收益保持空值，不伪造为-100%。接口为
 `GET /api/smart-resonance-shadow`，策略代码为 `SR-R0/R1/R2/R3`。
 
+## Public Flow Lead Shadow PFL
+
+`public_flow_lead_shadow_positions` 把 Smart Wallet 改为纯离线监督标签：入场只读取
+非监控钱包的公开 Bonding Curve 成交，不等待任何 Smart Wallet 交易，也不使用
+Smart Wallet 的成交金额或价格。后续首次 `OPEN` 只记录为5秒/15秒命中标签；所有
+`ADD` 明确忽略，既不触发入场，也不构成确认。
+
+四个独立入场组分别测试公共买家广度基线、偏大赢家的早期分散资金流、1秒资金
+重新加速，以及包含正常卖盘换手的广度需求。每次信号统一等待200ms后的下一笔
+同市场成交；同 Mint/同组30秒内只模拟一次。退出交叉测试20%/30%硬止损与
+120/180/240秒固定持有，不设固定止盈或移动止盈，以观察 Big50/Big100 右尾。
+Dashboard 同时显示未来 Smart OPEN 5秒/15秒覆盖率、PF、Top5利润贡献和
+MFE/MAE。接口为 `GET /api/public-flow-lead-shadow`，策略代码为
+`PFL-B0/PFL-B1/PFL-A1/PFL-R1`。
+
 ## Flow -> Smart Confirmation Shadow L
 
 该路径把 Smart Wallet 确认改成严格的前向实验：只接受 `primary_3w Rank 1`
