@@ -187,6 +187,11 @@ class ResearchStore {
         table: 'smart_resonance_shadow_positions',
         anchor: 'signal_at',
       },
+      'public-flow-lead': {
+        label: 'Public Flow Lead · PFL',
+        table: 'public_flow_lead_shadow_positions',
+        anchor: 'signal_at',
+      },
       'launch-pullback': {
         label: 'Launch 回踩 · F',
         table: 'launch_pullback_shadow_positions',
@@ -1823,47 +1828,58 @@ class ResearchStore {
         'ALTER TABLE flow_signals ADD COLUMN previous_signal_gap_ms INTEGER',
       ],
     ];
+    let signalEpisodeBackfillRequired = false;
     for (const [column, sql] of signalMigrations) {
-      if (!signalColumns.has(column)) this.db.exec(sql);
+      if (!signalColumns.has(column)) {
+        this.db.exec(sql);
+        if (['signal_episode_id', 'signal_rank_in_mint', 'previous_signal_gap_ms'].includes(column)) {
+          signalEpisodeBackfillRequired = true;
+        }
+      }
     }
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_flow_signals_variant_ts
       ON flow_signals(signal_variant, timestamp_ms)
     `);
-    this.db.exec('DROP INDEX IF EXISTS idx_flow_signals_episode_id');
-    this.db.exec(`
-      WITH gaps AS (
-        SELECT signal_id, mint, signal_variant, timestamp_ms,
-          ROW_NUMBER() OVER (
-            PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
-          ) AS signal_rank,
-          timestamp_ms - LAG(timestamp_ms) OVER (
-            PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
-          ) AS signal_gap
-        FROM flow_signals
-      ), grouped AS (
-        SELECT *, SUM(CASE WHEN signal_gap IS NULL OR signal_gap > 30000 THEN 1 ELSE 0 END)
-          OVER (
-            PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
-          ) AS episode_rank
-        FROM gaps
-      ), episodes AS (
-        SELECT *, MIN(timestamp_ms) OVER (
-          PARTITION BY mint, signal_variant, episode_rank
-        ) AS episode_started_at
-        FROM grouped
-      )
-      UPDATE flow_signals SET
-        signal_rank_in_mint = (
-          SELECT signal_rank FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
-        ),
-        previous_signal_gap_ms = (
-          SELECT signal_gap FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
-        ),
-        signal_episode_id = mint || ':' || signal_variant || ':' || (
-          SELECT episode_started_at FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
+    // Historical window-function backfills are expensive on a large research
+    // database. Run this only on the one startup that actually adds the episode
+    // columns; all new signals populate these fields in recordSignal(). A normal
+    // restart must never rescan and rewrite the full signal history.
+    if (signalEpisodeBackfillRequired) {
+      this.db.exec(`
+        WITH gaps AS (
+          SELECT signal_id, mint, signal_variant, timestamp_ms,
+            ROW_NUMBER() OVER (
+              PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
+            ) AS signal_rank,
+            timestamp_ms - LAG(timestamp_ms) OVER (
+              PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
+            ) AS signal_gap
+          FROM flow_signals
+        ), grouped AS (
+          SELECT *, SUM(CASE WHEN signal_gap IS NULL OR signal_gap > 30000 THEN 1 ELSE 0 END)
+            OVER (
+              PARTITION BY mint, signal_variant ORDER BY timestamp_ms, signal_id
+            ) AS episode_rank
+          FROM gaps
+        ), episodes AS (
+          SELECT *, MIN(timestamp_ms) OVER (
+            PARTITION BY mint, signal_variant, episode_rank
+          ) AS episode_started_at
+          FROM grouped
         )
-    `);
+        UPDATE flow_signals SET
+          signal_rank_in_mint = (
+            SELECT signal_rank FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
+          ),
+          previous_signal_gap_ms = (
+            SELECT signal_gap FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
+          ),
+          signal_episode_id = mint || ':' || signal_variant || ':' || (
+            SELECT episode_started_at FROM episodes WHERE episodes.signal_id = flow_signals.signal_id
+          )
+      `);
+    }
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_flow_signals_episode_id
       ON flow_signals(signal_episode_id) WHERE signal_episode_id IS NOT NULL
@@ -1887,8 +1903,18 @@ class ResearchStore {
         'ALTER TABLE smart_wallet_events ADD COLUMN token_balance_after REAL',
       ],
     ];
+    let smartEventBackfillRequired = false;
+    let smartPositionBackfillRequired = false;
     for (const [column, sql] of smartEventMigrations) {
-      if (!smartEventColumns.has(column)) this.db.exec(sql);
+      if (!smartEventColumns.has(column)) {
+        this.db.exec(sql);
+        if (['received_at_ms', 'market', 'token_amount'].includes(column)) {
+          smartEventBackfillRequired = true;
+        }
+        if (['position_phase', 'token_balance_before', 'token_balance_after'].includes(column)) {
+          smartPositionBackfillRequired = true;
+        }
+      }
     }
     const liveOrderColumns = new Set(
       this.db.prepare('PRAGMA table_info(live_orders)').all().map((column) => column.name),
@@ -1896,35 +1922,39 @@ class ResearchStore {
     if (!liveOrderColumns.has('execution_json')) {
       this.db.exec('ALTER TABLE live_orders ADD COLUMN execution_json TEXT');
     }
-    this.db.exec(`
-      UPDATE smart_wallet_events AS event SET
-        received_at_ms = COALESCE(received_at_ms, (
-          SELECT trade.received_at_ms FROM raw_trades AS trade
-          WHERE trade.signature = event.signature
-            AND trade.event_index = event.event_index
-            AND trade.mint = event.mint
-            AND trade.wallet = event.wallet
-          ORDER BY trade.id LIMIT 1
-        ), timestamp_ms),
-        market = COALESCE(market, (
-          SELECT trade.market FROM raw_trades AS trade
-          WHERE trade.signature = event.signature
-            AND trade.event_index = event.event_index
-            AND trade.mint = event.mint
-            AND trade.wallet = event.wallet
-          ORDER BY trade.id LIMIT 1
-        )),
-        token_amount = COALESCE(token_amount, (
-          SELECT trade.token_amount FROM raw_trades AS trade
-          WHERE trade.signature = event.signature
-            AND trade.event_index = event.event_index
-            AND trade.mint = event.mint
-            AND trade.wallet = event.wallet
-          ORDER BY trade.id LIMIT 1
-        ))
-      WHERE received_at_ms IS NULL OR market IS NULL OR token_amount IS NULL
-    `);
-    const needsSmartPositionRebuild = this.db.prepare(`
+    // The legacy lookup touches raw_trades. It is a one-time schema migration,
+    // not startup maintenance, so never repeat it after the columns exist.
+    if (smartEventBackfillRequired) {
+      this.db.exec(`
+        UPDATE smart_wallet_events AS event SET
+          received_at_ms = COALESCE(received_at_ms, (
+            SELECT trade.received_at_ms FROM raw_trades AS trade
+            WHERE trade.signature = event.signature
+              AND trade.event_index = event.event_index
+              AND trade.mint = event.mint
+              AND trade.wallet = event.wallet
+            ORDER BY trade.id LIMIT 1
+          ), timestamp_ms),
+          market = COALESCE(market, (
+            SELECT trade.market FROM raw_trades AS trade
+            WHERE trade.signature = event.signature
+              AND trade.event_index = event.event_index
+              AND trade.mint = event.mint
+              AND trade.wallet = event.wallet
+            ORDER BY trade.id LIMIT 1
+          )),
+          token_amount = COALESCE(token_amount, (
+            SELECT trade.token_amount FROM raw_trades AS trade
+            WHERE trade.signature = event.signature
+              AND trade.event_index = event.event_index
+              AND trade.mint = event.mint
+              AND trade.wallet = event.wallet
+            ORDER BY trade.id LIMIT 1
+          ))
+        WHERE received_at_ms IS NULL OR market IS NULL OR token_amount IS NULL
+      `);
+    }
+    const needsSmartPositionRebuild = smartPositionBackfillRequired && this.db.prepare(`
       SELECT EXISTS(
         SELECT 1 FROM smart_wallet_events
         WHERE token_balance_before IS NULL OR token_balance_after IS NULL
@@ -1975,31 +2005,33 @@ class ResearchStore {
       }
     });
     if (needsSmartPositionRebuild) rebuildSmartPositions();
-    this.db.exec(`
-      INSERT OR IGNORE INTO smart_wallet_positions (wallet, mint, token_balance, updated_at)
-      SELECT event.wallet, event.mint, COALESCE(event.token_balance_after, 0), event.timestamp_ms
-      FROM smart_wallet_events AS event
-      WHERE event.id = (
-        SELECT latest.id FROM smart_wallet_events AS latest
-        WHERE latest.wallet = event.wallet AND latest.mint = event.mint
-        ORDER BY latest.timestamp_ms DESC, latest.id DESC LIMIT 1
-      )
-    `);
-    this.db.exec(`
-      DELETE FROM smart_signal_confirmations
-      WHERE smart_event_id IN (
-        SELECT id FROM smart_wallet_events WHERE position_phase != 'OPEN'
-      );
-      INSERT OR IGNORE INTO smart_signal_confirmations (
-        signal_id, smart_event_id, wallet, mint, open_timestamp_ms, delay_ms, open_sol
-      )
-      SELECT nearest_flow_signal, id, wallet, mint, timestamp_ms,
-        time_from_flow_signal_ms, sol_amount
-      FROM smart_wallet_events
-      WHERE position_phase = 'OPEN'
-        AND nearest_flow_signal IS NOT NULL
-        AND time_from_flow_signal_ms BETWEEN 0 AND 30000
-    `);
+    if (smartPositionBackfillRequired) {
+      this.db.exec(`
+        INSERT OR IGNORE INTO smart_wallet_positions (wallet, mint, token_balance, updated_at)
+        SELECT event.wallet, event.mint, COALESCE(event.token_balance_after, 0), event.timestamp_ms
+        FROM smart_wallet_events AS event
+        WHERE event.id = (
+          SELECT latest.id FROM smart_wallet_events AS latest
+          WHERE latest.wallet = event.wallet AND latest.mint = event.mint
+          ORDER BY latest.timestamp_ms DESC, latest.id DESC LIMIT 1
+        )
+      `);
+      this.db.exec(`
+        DELETE FROM smart_signal_confirmations
+        WHERE smart_event_id IN (
+          SELECT id FROM smart_wallet_events WHERE position_phase != 'OPEN'
+        );
+        INSERT OR IGNORE INTO smart_signal_confirmations (
+          signal_id, smart_event_id, wallet, mint, open_timestamp_ms, delay_ms, open_sol
+        )
+        SELECT nearest_flow_signal, id, wallet, mint, timestamp_ms,
+          time_from_flow_signal_ms, sol_amount
+        FROM smart_wallet_events
+        WHERE position_phase = 'OPEN'
+          AND nearest_flow_signal IS NOT NULL
+          AND time_from_flow_signal_ms BETWEEN 0 AND 30000
+      `);
+    }
 
     const returnColumns = new Set(
       this.db.prepare('PRAGMA table_info(signal_returns)').all().map((column) => column.name),
@@ -2020,66 +2052,60 @@ class ResearchStore {
         'ALTER TABLE signal_returns ADD COLUMN horizon_observation_lags_json TEXT',
       ],
     ];
+    let returnLabelBackfillRequired = false;
     for (const [column, sql] of returnMigrations) {
-      if (!returnColumns.has(column)) this.db.exec(sql);
+      if (!returnColumns.has(column)) {
+        this.db.exec(sql);
+        if (['label_status', 'censor_reason', 'missing_horizons_json'].includes(column)) {
+          returnLabelBackfillRequired = true;
+        }
+      }
     }
-    this.db.exec(`
-      UPDATE signal_returns SET
-        label_status = CASE
-          WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
-            AND return_3s IS NOT NULL AND return_5s IS NOT NULL
-            AND return_8s IS NOT NULL AND return_10s IS NOT NULL
-            AND return_15s IS NOT NULL AND return_20s IS NOT NULL
-            AND return_30s IS NOT NULL AND return_60s IS NOT NULL
-            THEN 'COMPLETE'
-          ELSE 'RIGHT_CENSORED'
-        END,
-        censor_reason = CASE
-          WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
-            AND return_3s IS NOT NULL AND return_5s IS NOT NULL
-            AND return_8s IS NOT NULL AND return_10s IS NOT NULL
-            AND return_15s IS NOT NULL AND return_20s IS NOT NULL
-            AND return_30s IS NOT NULL AND return_60s IS NOT NULL
-            THEN NULL
-          ELSE COALESCE(censor_reason, 'LEGACY_MISSING_HORIZON')
-        END,
-        missing_horizons_json = CASE
-          WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
-            AND return_3s IS NOT NULL AND return_5s IS NOT NULL
-            AND return_8s IS NOT NULL AND return_10s IS NOT NULL
-            AND return_15s IS NOT NULL AND return_20s IS NOT NULL
-            AND return_30s IS NOT NULL AND return_60s IS NOT NULL
-            THEN '[]'
-          ELSE '[' || rtrim(
-            CASE WHEN return_1s IS NULL THEN '1,' ELSE '' END
-            || CASE WHEN return_2s IS NULL THEN '2,' ELSE '' END
-            || CASE WHEN return_3s IS NULL THEN '3,' ELSE '' END
-            || CASE WHEN return_5s IS NULL THEN '5,' ELSE '' END
-            || CASE WHEN return_8s IS NULL THEN '8,' ELSE '' END
-            || CASE WHEN return_10s IS NULL THEN '10,' ELSE '' END
-            || CASE WHEN return_15s IS NULL THEN '15,' ELSE '' END
-            || CASE WHEN return_20s IS NULL THEN '20,' ELSE '' END
-            || CASE WHEN return_30s IS NULL THEN '30,' ELSE '' END
-            || CASE WHEN return_60s IS NULL THEN '60,' ELSE '' END,
-            ','
-          ) || ']'
-        END
-      WHERE finalized_at IS NOT NULL
-    `);
-    this.db.exec(`
-      UPDATE flow_signals SET flow_accel = CASE
-        WHEN flow_accel_1 IS NULL THEN flow_accel_2
-        WHEN flow_accel_2 IS NULL THEN flow_accel_1
-        WHEN flow_accel_1 <= flow_accel_2 THEN flow_accel_1
-        ELSE flow_accel_2
-      END
-      WHERE flow_accel IS NOT CASE
-        WHEN flow_accel_1 IS NULL THEN flow_accel_2
-        WHEN flow_accel_2 IS NULL THEN flow_accel_1
-        WHEN flow_accel_1 <= flow_accel_2 THEN flow_accel_1
-        ELSE flow_accel_2
-      END
-    `);
+    if (returnLabelBackfillRequired) {
+      this.db.exec(`
+        UPDATE signal_returns SET
+          label_status = CASE
+            WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
+              AND return_3s IS NOT NULL AND return_5s IS NOT NULL
+              AND return_8s IS NOT NULL AND return_10s IS NOT NULL
+              AND return_15s IS NOT NULL AND return_20s IS NOT NULL
+              AND return_30s IS NOT NULL AND return_60s IS NOT NULL
+              THEN 'COMPLETE'
+            ELSE 'RIGHT_CENSORED'
+          END,
+          censor_reason = CASE
+            WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
+              AND return_3s IS NOT NULL AND return_5s IS NOT NULL
+              AND return_8s IS NOT NULL AND return_10s IS NOT NULL
+              AND return_15s IS NOT NULL AND return_20s IS NOT NULL
+              AND return_30s IS NOT NULL AND return_60s IS NOT NULL
+              THEN NULL
+            ELSE COALESCE(censor_reason, 'LEGACY_MISSING_HORIZON')
+          END,
+          missing_horizons_json = CASE
+            WHEN return_1s IS NOT NULL AND return_2s IS NOT NULL
+              AND return_3s IS NOT NULL AND return_5s IS NOT NULL
+              AND return_8s IS NOT NULL AND return_10s IS NOT NULL
+              AND return_15s IS NOT NULL AND return_20s IS NOT NULL
+              AND return_30s IS NOT NULL AND return_60s IS NOT NULL
+              THEN '[]'
+            ELSE '[' || rtrim(
+              CASE WHEN return_1s IS NULL THEN '1,' ELSE '' END
+              || CASE WHEN return_2s IS NULL THEN '2,' ELSE '' END
+              || CASE WHEN return_3s IS NULL THEN '3,' ELSE '' END
+              || CASE WHEN return_5s IS NULL THEN '5,' ELSE '' END
+              || CASE WHEN return_8s IS NULL THEN '8,' ELSE '' END
+              || CASE WHEN return_10s IS NULL THEN '10,' ELSE '' END
+              || CASE WHEN return_15s IS NULL THEN '15,' ELSE '' END
+              || CASE WHEN return_20s IS NULL THEN '20,' ELSE '' END
+              || CASE WHEN return_30s IS NULL THEN '30,' ELSE '' END
+              || CASE WHEN return_60s IS NULL THEN '60,' ELSE '' END,
+              ','
+            ) || ']'
+          END
+        WHERE finalized_at IS NOT NULL
+      `);
+    }
   }
 
   _migrateLiveTradingSchema() {
