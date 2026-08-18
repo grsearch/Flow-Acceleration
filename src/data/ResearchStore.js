@@ -182,6 +182,11 @@ class ResearchStore {
         table: 'smart_like_early_shadow_positions',
         anchor: 'signal_at',
       },
+      'smart-resonance': {
+        label: 'Smart Resonance Right-Tail · SR',
+        table: 'smart_resonance_shadow_positions',
+        anchor: 'signal_at',
+      },
       'launch-pullback': {
         label: 'Launch 回踩 · F',
         table: 'launch_pullback_shadow_positions',
