@@ -28,6 +28,7 @@ class ResearchServer {
     flowSmartConfirmShadow = null,
     smartLikeEarlyShadow = null,
     smartResonanceShadow = null,
+    publicFlowLeadShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migratedDropReboundShadow = null,
     migrationContinuityShadow = null,
@@ -53,6 +54,7 @@ class ResearchServer {
     this.flowSmartConfirmShadow = flowSmartConfirmShadow;
     this.smartLikeEarlyShadow = smartLikeEarlyShadow;
     this.smartResonanceShadow = smartResonanceShadow;
+    this.publicFlowLeadShadow = publicFlowLeadShadow;
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
@@ -500,6 +502,25 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/public-flow-lead-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.publicFlowLeadShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_PFL',
+          sendsTransactions: false,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        timeSessions: this.publicFlowLeadShadow
+          ? this.store.shadowTimeSessionDashboard('public-flow-lead')
+          : { sessions: [] },
+        ...(this.publicFlowLeadShadow?.dashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+        }) || { cohorts: [], positions: [] }),
+      });
+    });
+
     this.app.get('/api/cya-early-pyramid-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -589,6 +610,7 @@ class ResearchServer {
         flowSmartConfirmShadow: this.flowSmartConfirmShadow?.health() || null,
         smartLikeEarlyShadow: this.smartLikeEarlyShadow?.health() || null,
         smartResonanceShadow: this.smartResonanceShadow?.health() || null,
+        publicFlowLeadShadow: this.publicFlowLeadShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         holderGrowthShadow: this.holderGrowthShadow?.health() || null,
