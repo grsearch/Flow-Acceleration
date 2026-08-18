@@ -164,3 +164,77 @@ function run() {
 }
 
 run();
+
+function runParticipation() {
+  const db = store();
+  const base = 1_900_200_000_000;
+  let now = base;
+  const cfg = config();
+  const baseProfile = {
+    family: 'PARTICIPATION', minAgeMs: 10_000, maxAgeMs: 60_000,
+    qualificationMaxAgeMs: 30_000,
+    minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
+    maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
+    minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
+    exitProfileIds: ['XFIX120_H15_PP'], capacityAware: true,
+    positionSols: [0.05, 0.1, 0.25],
+  };
+  cfg.entryProfiles = [
+    { id: 'PP_DIRECT_10', mode: 'DIRECT', ...baseProfile },
+    {
+      id: 'PP_PULLBACK_8_20', mode: 'PULLBACK', ...baseProfile,
+      minPullbackPct: 8, maxPullbackPct: 20,
+      minReboundPct: 2, maxReboundPct: 8,
+      minNetFlow3sSol: 2, minBuyers3s: 4, requireFlowAcceleration: true,
+    },
+  ];
+  cfg.exitProfiles = [{
+    id: 'XFIX120_H15_PP', entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20'],
+    mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
+    trailingTiers: [], profitFloors: [], maxHoldMs: 120_000,
+  }];
+  const suite = new BigWinnerShadowSuite({ config: cfg, store: db, now: () => now });
+  suite.start();
+  const mint = 'ParticipationPersistence111111111111111111111111';
+  suite.onGraduated({ mint, migratedAt: base, symbol: 'PP' });
+  let sequence = 0;
+  const emit = (offset, side, sol, wallet, price) => {
+    now = base + offset;
+    sequence += 1;
+    suite.observeTrade({
+      mint, symbol: 'PP', timestampMs: now, market: 'PUMP_AMM', side,
+      solAmount: sol, tokenAmount: sol / price, wallet, price, reservePrice: price,
+      signature: `pp-${sequence}`, eventIndex: 0,
+    });
+  };
+  for (let index = 0; index < 40; index += 1) {
+    emit(250 + index * 250, 'BUY', 0.2, `buyer-${index % 20}`, 1 + index * 0.001);
+  }
+  assert.strictEqual(suite.health().pendingEntries, 3,
+    'direct participation confirmation must create one row per capacity');
+  emit(10_250, 'BUY', 0.2, 'direct-fill', 1.04);
+  emit(11_000, 'BUY', 0.2, 'peak-after-quality', 1.4);
+  emit(12_000, 'SELL', 0.2, 'healthy-pullback', 1.15);
+  emit(12_200, 'BUY', 2, 'reaccel-1', 1.155);
+  emit(12_400, 'BUY', 2, 'reaccel-2', 1.16);
+  emit(12_600, 'BUY', 2, 'reaccel-3', 1.17);
+  emit(12_800, 'BUY', 2, 'reaccel-4', 1.18);
+  assert.strictEqual(suite.health().pendingEntries, 3,
+    'pullback profile must wait for a fresh executable fill');
+  emit(13_050, 'BUY', 0.2, 'pullback-fill', 1.185);
+  const rows = db.db.prepare(`
+    SELECT entry_profile_id, position_sol, status
+    FROM big_winner_shadow_positions WHERE mint=? ORDER BY cohort_id
+  `).all(mint);
+  assert.strictEqual(rows.length, 6);
+  assert.deepStrictEqual(
+    [...new Set(rows.map((row) => row.position_sol))],
+    [0.05, 0.1, 0.25],
+  );
+  assert.ok(rows.every((row) => row.status === 'OPEN'));
+  assert.strictEqual(db.db.prepare('SELECT COUNT(*) AS n FROM live_positions').get().n, 0);
+  db.close();
+  console.log('big winner participation tests passed');
+}
+
+runParticipation();
