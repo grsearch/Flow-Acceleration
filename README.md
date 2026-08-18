@@ -14,6 +14,14 @@ Rows are stored only in `big_winner_shadow_positions`; `NO_EXIT` remains censore
 null return and cannot be aggregated as a -100% loss. Daily research exports include the
 new table automatically.
 
+2026-08-18 起新增三组完全独立的参与度持续 cohort：`PP_DIRECT_10` 要求毕业后
+10–30秒的最近10秒至少40笔成交、20名独立买家和3 SOL净流入，同时最近5秒买家与
+资金流不能明显衰减；`PP_PULLBACK_8_20` 在同一质量确认后等待首次8%–20%回踩和
+2%–8%反弹，并要求3秒资金流重新加速；`PP_PULLBACK_8_30` 是更宽的频率对照。
+三组分别模拟0.05/0.1/0.25 SOL，买卖均按已采集的PumpSwap储备估算自身冲击，
+只交叉固定120秒、固定240秒和25% Core + 75% Runner三种新退出。旧PBR/FLOW cohort
+的ID、规则和历史统计不变，也不会因为新增退出而产生混合样本。
+
 The same exit hypothesis is tested without changing entry rules in two other promising
 families. Smart-Like Early adds BASE-only `FIX60_H20` / `FIX120_H20` exits (no pyramiding,
 partial profit, flow-decay exit, or trailing stop). Launch First Pullback adds
@@ -431,7 +439,7 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 新 V2 入场除继续与 X3、X8、XLEG 对照外，还独立测试 `V2_R2_H10/H15`（2秒弱势确认、10%/15%硬止损）和 `V2_B75_H20/H60`（25%按XLEG退出，75% runner固定持有20/60秒）。后两组专门检验“保住主体收益，同时提高大赢家捕获率”。模拟入场和退出均使用200ms执行延迟后的对应市场真实成交，新样本收益扣除默认1 SOL仓位的确定性成本；MFE、MAE和实际入场跳价一并保存。兼容接口仍为 `GET /api/migrated-drop-rebound-shadow`。该策略没有执行器、不读取私钥，永不签名或发送交易。
 
-2026-08-16 起新增的 G 组优化全部使用新 ID，不回填旧数据。`GE30_R23_F1_EXEC` 对同一首次机会并行模拟 0.05/0.1/0.25/0.5/1 SOL，利用已经随 PumpSwap 成交保存的真实储备计算各仓位买入和卖出的 AMM 曲线平均成交价与自身冲击；它不增加 RPC/API 请求。`GE30_R23_F2_ONLY` 只记录同 Mint 第二次独立跌落反弹，`GE30_R23_F1_NIGHT/DAY` 分别冻结北京时间18:00–08:00和08:00–18:00样本，避免事后切时段。
+2026-08-16 起新增的 G 组优化全部使用新 ID，不回填旧数据。`GE30_R23_F1_EXEC` 对同一首次机会并行模拟 0.05/0.1/0.25/0.5/1 SOL，利用已经随 PumpSwap 成交保存的真实储备计算各仓位买入和卖出的 AMM 曲线平均成交价与自身冲击；它不增加 RPC/API 请求。`GE30_R23_F2_ONLY` 只记录同 Mint 第二次独立跌落反弹，`GE30_R23_F1_NIGHT/DAY` 分别冻结北京时间18:00–08:00和08:00–18:00样本，避免事后切时段。2026-08-18 又增加 `GE30_R23_F3_EXEC` 与 `GE30_R23_F2_ONLY_EXEC`，在不改变原 F3/F2 记录的前提下，分别对前三次机会和第二次机会按0.05/0.1/0.25 SOL做容量感知的XLEG对照。
 
 同一 F1 入场还新增三类独立退出：`G1_E2_H6/G1_E2_H8/G1_E3_H8` 对照2/3秒弱势检查与6%/8%硬止损；`G1_B75_H30/G1_B50_H60` 让75%/50%核心按XLEG退出、其余尾仓持有30/60秒，并在整体跌15%时强制清仓；`G1_STAIR_H60/H120` 在峰值达到20%/40%/80%后分别使用8%/12%/18%回撤，测试更长时间捕获大赢家。容量、时段、入场序号和退出方式均编码进 cohort，不会混入 `GE30_R23_F1/F3` 历史。
 
