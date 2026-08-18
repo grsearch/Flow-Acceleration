@@ -387,7 +387,7 @@
               <b>Quality Leader · QL</b><small>10s强势 + 20s质量确认，Barbell / 长尾退出</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="big-winner">
-              <b>Big Winner Pullback + Flow · BW</b><small>PBR-A/B/C + FLOW-R; Core/Runner + fixed-hold controls</small>
+              <b>Big Winner + Participation · BW/PP</b><small>PBR/FLOW + 毕业后参与度持续与首次回踩</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first">
               <b>Flow-First · C（已停）</b><small>负期望，历史数据保留</small>
@@ -735,10 +735,10 @@
           <div class="strategy-pane" data-live-strategy-pane="big-winner" hidden>
             <article class="card record-section">
               <div class="section-title">
-                <h2>Big Winner Pullback + Flow Shadow BW</h2>
+                <h2>Big Winner + Participation Persistence Shadow BW/PP</h2>
                 <p>Post-graduation PumpSwap only; independent table; never signs or sends transactions.</p>
               </div>
-              <div class="strategy-expression" id="big-winner-expression">PBR-A/B/C and FLOW-R crossed with four Core/Runner exits.</div>
+              <div class="strategy-expression" id="big-winner-expression">PBR/FLOW旧组不变；PP独立测试毕业后参与度持续、首次回踩再加速与容量。</div>
               <div class="strategy-metric-groups" id="big-winner-metrics"></div>
               <div class="strategy-metric-groups" id="big-winner-time-sessions"></div>
               <div class="section-title"><h3>Cohort performance</h3><p>NO_EXIT is censored and never counted as -100%.</p></div>
@@ -746,7 +746,7 @@
                 <thead><tr><th>Entry / Exit</th><th>Samples / Mints</th><th>Resolved / Win</th><th>Average / Median</th><th>PF / ex Top5</th><th>Big20 / 50 / 100</th><th>MFE50 / 100 capture</th><th>Entry quality</th></tr></thead>
                 <tbody id="big-winner-cohort-rows"></tbody>
               </table></div>
-              <div class="section-title"><h3>Recent simulated positions</h3><p>1 SOL entry impact is recorded when pool reserves are available.</p></div>
+              <div class="section-title"><h3>Recent simulated positions</h3><p>PP组分别记录0.05/0.1/0.25 SOL的买卖自身冲击。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>Signal</th><th>Entry / Exit / Status</th><th>Mint</th><th>Wave / Pullback / Rebound</th><th>Flow / Buyers</th><th>Signal / Entry / High / Exit</th><th>Net / MFE / MAE</th><th>Hold / Reason</th></tr></thead>
                 <tbody id="big-winner-position-rows"></tbody>
@@ -1751,27 +1751,31 @@
       const profileLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
       const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
       document.querySelector('#big-winner-expression').textContent =
-        'PBR-A: Wave>=40%, Pullback 12-25%, NF3>=3; PBR-B: Wave>=50%, Pullback 18-30%, NF3>=2; PBR-C: frequency control; FLOW-R: AGE 5-60s, NF8>=20, Buyers>=12. Every entry is crossed with X50-15, X50-12, X50-Ratchet and X40-Ratchet.';
+        '旧PBR/FLOW组保持不变。PP-Direct: 毕业后10-30秒内，10秒成交>=40、买家>=20、净流入>=3 SOL且最近5秒不衰减；PP-Pullback在确认后等待首次8-20/30%回踩与3秒资金重新加速。PP按0.05/0.1/0.25 SOL分别模拟。';
       renderMetricGroups('#big-winner-metrics', [
         ['Mode', runtime.enabled ? 'SHADOW BW' : 'OFF', 'No chain transaction path'],
         ['Qualified / opened', `${number(runtime.qualifiedSignals)} / ${number(runtime.opened)}`, `Evaluations ${number(runtime.evaluated)}`],
         ['Pending / active', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `Closed ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
-        ['Independent cohorts', number(strategy.cohortCount), `${number(strategy.positionSizeSol,2)} SOL · ${number(strategy.entryDelayMs)}ms fill delay`],
+        ['Independent cohorts', number(strategy.cohortCount), `旧组 ${number(strategy.positionSizeSol,2)} SOL · PP 0.05/0.1/0.25 SOL · ${number(strategy.entryDelayMs)}ms`],
         ['Data guard', number(runtime.priceScaleRows), `${research.sameMarketOnly || 'PUMP_AMM'} only · NO_EXIT censored`],
       ], []);
       renderTimeSessions('#big-winner-time-sessions', data.timeSessions);
       const cohorts = data.cohorts || [];
       document.querySelector('#big-winner-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
-        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.attempts)} / ${number(row.independent_mints)}<br><span class="table-note">Jump ${number(row.price_jump)} · no entry ${number(row.no_entry)} · active ${number(row.active)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.average_net_return_ex_top5_pct)}<br><span class="table-note">Top5 PnL ${rate(row.top_5_total_pnl_contribution_pct)}</span></td><td>${rate(row.big20_rate_pct)} / ${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${rate(row.big50_capture_pct)} / ${rate(row.big100_capture_pct)}<br><span class="table-note">MFE50 ${rate(row.mfe50_rate_pct)} · MFE100 ${rate(row.mfe100_rate_pct)}</span></td><td>Jump ${pct(row.average_entry_jump_pct)} · impact ${pct(row.average_entry_impact_pct)}<br><span class="table-note">MFE ${pct(row.average_mfe_pct)} · MAE ${pct(row.average_mae_pct)}</span></td></tr>`
+        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)} · ${escapeHtml(row.cohort_id)}</span></td><td>${number(row.attempts)} / ${number(row.independent_mints)}<br><span class="table-note">Jump ${number(row.price_jump)} · no entry ${number(row.no_entry)} · active ${number(row.active)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.average_net_return_ex_top5_pct)}<br><span class="table-note">Top5 PnL ${rate(row.top_5_total_pnl_contribution_pct)}</span></td><td>${rate(row.big20_rate_pct)} / ${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${rate(row.big50_capture_pct)} / ${rate(row.big100_capture_pct)}<br><span class="table-note">MFE50 ${rate(row.mfe50_rate_pct)} · MFE100 ${rate(row.mfe100_rate_pct)}</span></td><td>Jump ${pct(row.average_entry_jump_pct)} · impact ${pct(row.average_entry_impact_pct)}<br><span class="table-note">MFE ${pct(row.average_mfe_pct)} · MAE ${pct(row.average_mae_pct)}</span></td></tr>`
       )).join('') : '<tr><td colspan="8" class="empty">Waiting for post-graduation Pullback / Flow signals.</td></tr>';
       const rows = data.positions || [];
       document.querySelector('#big-winner-position-rows').innerHTML = rows.length ? rows.map(row => {
         const reason = row.exit_reason || row.rejection_reason || '—';
-        const flow = row.entry_profile_id === 'FLOW_R'
-          ? `${number(row.net_flow_8s,2)} SOL / ${number(row.buyers_8s)}`
-          : `${number(row.net_flow_3s,2)} SOL / ${number(row.buyers_3s)}`;
+        let features = {};
+        try { features = JSON.parse(row.features_json || '{}'); } catch (_) {}
+        const flow = row.entry_profile_id?.startsWith('PP_')
+          ? `${number(features.netFlow10s,2)} SOL / ${number(features.buyers10s)} buyers / ${number(features.trades10s)} tx`
+          : row.entry_profile_id === 'FLOW_R'
+            ? `${number(row.net_flow_8s,2)} SOL / ${number(row.buyers_8s)}`
+            : `${number(row.net_flow_3s,2)} SOL / ${number(row.buyers_3s)}`;
         const priced = row.status === 'NO_EXIT' ? '—' : pct(row.net_return_pct);
-        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)}</b> / ${escapeHtml(row.exit_profile_id)}<br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${pct(row.first_wave_pct)} / ${pct(row.pullback_pct)} / ${pct(row.rebound_pct)}</td><td>${flow}<br><span class="table-note">Runup ${pct(row.runup_pct)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">Impact ${pct(row.entry_impact_pct)} · Core ${pct(row.core_return_pct)}</span></td><td class="${row.status === 'NO_EXIT' ? '' : tone(row.net_return_pct)}">${priced} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)}</b> / ${escapeHtml(row.exit_profile_id)}<br>${statusChip(row.status)} · ${number(row.position_sol,2)} SOL</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${pct(row.first_wave_pct)} / ${pct(row.pullback_pct)} / ${pct(row.rebound_pct)}</td><td>${flow}<br><span class="table-note">Runup ${pct(row.runup_pct)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">Impact ${pct(row.entry_impact_pct)} · Core ${pct(row.core_return_pct)}</span></td><td class="${row.status === 'NO_EXIT' ? '' : tone(row.net_return_pct)}">${priced} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="8" class="empty">No Big Winner Shadow positions yet.</td></tr>';
     }
 
