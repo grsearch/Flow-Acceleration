@@ -55,6 +55,7 @@ const EXPLICIT_FILTERS = Object.freeze({
   },
   smart_like_early_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   smart_resonance_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
+  public_flow_lead_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   launch_pullback_shadow_positions: { where: 'reference_at >= ? AND reference_at < ?', anchor: 'reference_at' },
   migrated_drop_rebound_shadow_positions: { where: 'rebound_at >= ? AND rebound_at < ?', anchor: 'rebound_at' },
   migration_continuity_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
