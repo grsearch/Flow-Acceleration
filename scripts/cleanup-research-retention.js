@@ -5,7 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 
 const DEFAULTS = Object.freeze({
-  hotRawHours: 72,
+  hotRawHours: 48,
   batchRows: 25_000,
   maxRows: 5_000_000,
   maxRunMs: 45 * 60_000,
@@ -154,6 +154,8 @@ async function cleanupResearchRetention(options = {}) {
   let beforePages;
   let afterPages;
   let oldestExpired = null;
+  let optimizeExecuted = false;
+  let optimizeError = null;
   try {
     db.pragma(`busy_timeout = ${busyTimeoutMs}`);
     db.pragma('foreign_keys = ON');
@@ -200,6 +202,15 @@ async function cleanupResearchRetention(options = {}) {
         if (pauseMs > 0) await sleep(pauseMs);
       }
     }
+    if (!dryRun) {
+      try {
+        db.pragma('analysis_limit = 400');
+        db.pragma('optimize');
+        optimizeExecuted = true;
+      } catch (error) {
+        optimizeError = error.message;
+      }
+    }
     afterPages = readPageStats(db);
   } finally {
     db.close();
@@ -221,6 +232,11 @@ async function cleanupResearchRetention(options = {}) {
     busyRetries,
     stopReason,
     oldestExpired,
+    optimize: {
+      executed: optimizeExecuted,
+      error: optimizeError,
+      movedOutOfServiceStartup: true,
+    },
     pages: { before: beforePages, after: afterPages },
     cosGate: {
       remote: gate.REMOTE,
@@ -236,6 +252,7 @@ async function cleanupResearchRetention(options = {}) {
       shadowPositionsDeleted: false,
       walCheckpointExecuted: false,
       vacuumExecuted: false,
+      optimizeExecuted,
       databaseFileShrunk: false,
       freedPagesRemainReusableBySqlite: true,
     },
