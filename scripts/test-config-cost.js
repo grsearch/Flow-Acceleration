@@ -130,8 +130,8 @@ assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
 assert.strictEqual(config.liveTrading.expiredEntryReleaseMs, 10 * 60_000);
 assert.strictEqual(config.liveTrading.readCommitment, 'processed');
 assert.strictEqual(config.liveTrading.confirmationCommitment, 'confirmed');
-assert.strictEqual(config.liveTrading.contextSlotRetryCount, 2);
-assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 25);
+assert.strictEqual(config.liveTrading.contextSlotRetryCount, 6);
+assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
   config.signalShadow.profiles.map((profile) => [
@@ -323,6 +323,8 @@ assert.deepStrictEqual(
     ['GE30_R23_F3', 30_000, 3],
     ['GE30_R23_F1_EXEC', 30_000, 1],
     ['GE30_R23_F2_ONLY', 30_000, 2],
+    ['GE30_R23_F3_EXEC', 30_000, 3],
+    ['GE30_R23_F2_ONLY_EXEC', 30_000, 2],
     ['GE30_R23_F1_NIGHT', 30_000, 1],
     ['GE30_R23_F1_DAY', 30_000, 1],
     ['GE30_D25_32_R24_F1', 30_000, 1],
@@ -343,7 +345,7 @@ assert.deepStrictEqual(
   config.migratedDropReboundShadow.exitProfiles.map((profile) => profile.id),
   [
     'X3', 'X8', 'XLEG',
-    'GEXEC_XLEG', 'G2_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+    'GEXEC_XLEG', 'G2_XLEG', 'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
     'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
     'G1_B75_H30', 'G1_B50_H60',
     'G1_STAIR_H60', 'G1_STAIR_H120',
@@ -362,6 +364,16 @@ const gqProfile = config.migratedDropReboundShadow.entryProfiles
   .find((profile) => profile.id === 'GE30_D25_32_R23_F1_FAST200');
 assert.strictEqual(gqProfile.maxReboundFromLowMs, 200);
 assert.deepStrictEqual(gqProfile.positionSols, [0.05, 0.25, 0.5, 1]);
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.entryProfiles
+    .find((profile) => profile.id === 'GE30_R23_F3_EXEC').positionSols,
+  [0.05, 0.1, 0.25],
+);
+assert.deepStrictEqual(
+  config.bigWinnerShadow.entryProfiles.filter((profile) => profile.family === 'PARTICIPATION')
+    .map((profile) => profile.id),
+  ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
+);
 assert.strictEqual(config.migrationContinuityShadow.enabled, true);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
 assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
