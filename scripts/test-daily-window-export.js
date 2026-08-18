@@ -31,6 +31,9 @@ function main() {
     CREATE TABLE flow_smart_confirm_shadow_positions (
       id INTEGER PRIMARY KEY, smart_open_at INTEGER NOT NULL, mint TEXT
     );
+    CREATE TABLE public_flow_lead_shadow_positions (
+      id INTEGER PRIMARY KEY, signal_at INTEGER NOT NULL, mint TEXT
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -47,6 +50,10 @@ function main() {
     .run(20, startMs + 20, 'confirmed-inside');
   db.prepare('INSERT INTO flow_smart_confirm_shadow_positions VALUES (?, ?, ?)')
     .run(21, endMs + 20, 'confirmed-future');
+  db.prepare('INSERT INTO public_flow_lead_shadow_positions VALUES (?, ?, ?)')
+    .run(30, startMs + 30, 'public-flow-inside');
+  db.prepare('INSERT INTO public_flow_lead_shadow_positions VALUES (?, ?, ?)')
+    .run(31, endMs + 30, 'public-flow-future');
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
@@ -78,6 +85,11 @@ function main() {
     exported.prepare('SELECT id FROM flow_first_shadow_positions ORDER BY id')
       .all().map((row) => row.id),
     [12],
+  );
+  assert.deepStrictEqual(
+    exported.prepare('SELECT id FROM public_flow_lead_shadow_positions ORDER BY id')
+      .all().map((row) => row.id),
+    [30],
   );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();
