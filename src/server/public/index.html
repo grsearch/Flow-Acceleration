@@ -356,6 +356,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-like-early" data-strategy-code="SLE">
               <b><span class="strategy-code">SLE</span>Smart-Like Early</b><small>早期不追涨入场、顺势加仓、分批止盈与长尾退出</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
+              <b><span class="strategy-code">SR-R0/R1/R2/R3</span>Smart 多钱包共振右尾</b><small>第二/第三个不同钱包确认后入场；硬止损 + 60–240秒固定持有</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback" data-strategy-code="F/FT/FD/FO/FC/FA/FR">
               <b><span class="strategy-code">F/FT/FD/FO/FC/FA/FR</span>Launch 回踩</b><small>旧组保留；新增前置 Flow 共振与多退出对照</small>
             </button>
@@ -718,6 +721,28 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>来源 / 状态</th><th>Mint / 钱包</th><th>AGE / Curve</th><th>5秒资金流 / 涨幅</th><th>信号 / 均价 / 出场</th><th>投入 / 加仓 / 止盈</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="smart-like-early-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="smart-resonance" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Smart Wallet Resonance Right-Tail Shadow SR</h2>
+                <p>严格因果：第二/第三个不同监控钱包 BUY 到达后才触发；200ms 后按下一笔真实成交模拟入场，永不签名或发链。</p>
+              </div>
+              <div class="strategy-expression" id="smart-resonance-expression">SR-R0/R1/R2/R3 入场 × H20/H30 × 60/120/180/240秒固定持有</div>
+              <div class="strategy-metric-groups" id="smart-resonance-metrics"></div>
+              <div class="strategy-metric-groups" id="smart-resonance-time-sessions"></div>
+              <div class="section-title"><h2>共振入场 × 右尾退出</h2><p>NO_EXIT 单独右删失；Big50/Big100 和 Top5 盈利贡献用于判断大赢家能力。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / Big100</th><th>共振 / 公共流</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="smart-resonance-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>保留触发钱包集合、触发前公共订单流、真实模拟成交价和退出原因。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint / 触发钱包</th><th>共振</th><th>AGE / Curve</th><th>公共 Buyers / Flow / Top1</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="smart-resonance-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1225,6 +1250,30 @@
         const reason = row.exit_reason || row.rejection_reason || '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.source_type)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(wallet)}</span></td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.net_flow_5s,2)} SOL / ${pct(row.return_5s_pct)}<br><span class="table-note">buyers ${number(row.buyers_5s)} · sells1 ${number(row.sell_tx_1s)}</span></td><td>${number(row.signal_price,10)} / ${number(row.average_entry_price,10)} / ${number(row.exit_price,10)}</td><td>${number(row.total_invested_sol ?? row.position_sol,3)} SOL / ${number(row.add_count)} / ${number(row.partial_exit_count)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart-Like Early 模拟仓位。</td></tr>';
+    }
+
+    function renderSmartResonanceShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#smart-resonance-expression').textContent = `${(runtime.entryProfiles || []).map(row => row.id).join(' / ')}：第二/第三个不同钱包的 BUY 到达后触发；公共订单流窗口 ${age(strategy.featureWindowMs)}；延迟 ${age(strategy.entryDelayMs)} 后成交；退出只使用硬止损和固定最长持有。`;
+      renderMetricGroups('#smart-resonance-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW SR' : '关闭', '独立表；不回填未来钱包或未来成交价'],
+        ['Smart BUY / 共振边沿', `${number(runtime.observedSmartBuys)} / ${number(runtime.resonanceEdges)}`, `监控钱包 ${number(strategy.smartWalletCount)} 个`],
+        ['合格 / 拒绝信号', `${number(runtime.qualifiedSignals)} / ${number(runtime.rejectedSignals)}`, `跳价 ${number(runtime.priceJump)} · 无入场 ${number(runtime.noEntry)}`],
+        ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
+      ], []);
+      renderTimeSessions('#smart-resonance-time-sessions', data.timeSessions);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#smart-resonance-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 拒绝 ${number(row.rule_rejected)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td><td>${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${number(row.average_distinct_wallets,1)}钱包 / ${age(row.average_resonance_span_ms)}<br><span class="table-note">Buyers ${number(row.average_public_buyers_5s,1)} · Buy ${number(row.average_public_buy_flow_5s,2)} SOL · Top1 ${rate(row.average_largest_buyer_share_pct)}</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待新的多钱包共振样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#smart-resonance-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.trigger_wallet || '')}</span></td><td>${number(row.distinct_wallets)} 钱包 / ${age(row.resonance_span_ms)}<br><span class="table-note">窗口 ${age(row.resonance_window_ms)}</span></td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_5s)} / ${number(row.public_buy_flow_5s,2)} SOL / ${rate(row.largest_buyer_share_pct)}<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL · Sell ${number(row.public_sell_tx_5s)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart Resonance 模拟仓位。</td></tr>';
     }
 
     function renderFlowSmartConfirmShadow(data) {
@@ -2071,6 +2120,9 @@
         ],
         'smart-like-early': requestContext => [
           loadDashboard('/api/smart-like-early-shadow?positionLimit=50', renderSmartLikeEarlyShadow, requestContext),
+        ],
+        'smart-resonance': requestContext => [
+          loadDashboard('/api/smart-resonance-shadow?positionLimit=50', renderSmartResonanceShadow, requestContext),
         ],
         'launch-pullback': requestContext => [
           loadDashboard('/api/launch-pullback-shadow?positionLimit=30', renderLaunchPullbackShadow, requestContext),
