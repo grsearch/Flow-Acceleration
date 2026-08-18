@@ -39,6 +39,11 @@ async function main() {
   assert.ok(dashboard.includes('id="live-position-rows"'));
   assert.ok(dashboard.includes('id="live-order-rows"'));
   assert.ok(dashboard.includes('id="live-decision-rows"'));
+  assert.ok(dashboard.includes('id="active-strategy-code"'));
+  const staticStrategyButtons = [...dashboard.matchAll(/<button class="strategy-nav-item"[^>]*data-live-strategy="[^"]+"[^>]*>/g)];
+  assert.ok(staticStrategyButtons.length >= 20);
+  assert.ok(staticStrategyButtons.every(([button]) => button.includes('data-strategy-code=')));
+  assert.ok(dashboard.includes('item.code || item.id'));
   assert.ok(dashboard.includes("['每日开仓额度', '不设上限']"));
   assert.ok(!dashboard.includes('每日开仓上限'));
   assert.ok(dashboard.includes('id="signal-shadow-position-rows"'));
@@ -67,12 +72,12 @@ async function main() {
   assert.ok(dashboard.includes('data-live-strategy-pane="migrated-rebound"'));
   assert.ok(dashboard.includes('id="migrated-rebound-cohort-rows"'));
   assert.ok(dashboard.includes('id="migrated-rebound-position-rows"'));
-  assert.ok(dashboard.includes('生命周期超跌反弹 · G'));
+  assert.ok(dashboard.includes('data-strategy-code="G/GQ"'));
   assert.ok(dashboard.includes('毕业前 Curve / 毕业后 PumpSwap 分层'));
   assert.ok(dashboard.includes('每个新入口/退出/容量均使用全新 cohort，不混入历史'));
   assert.ok(dashboard.includes('FO_F2_J2_3S'));
   assert.ok(dashboard.includes('第1波只预热，仅交易第2/3波'));
-  assert.ok(dashboard.includes('CYA Early Pyramid · K（已停）'));
+  assert.ok(dashboard.includes('data-strategy-code="K"'));
   assert.ok(dashboard.includes("loadDashboard('/api/migrated-drop-rebound-shadow?positionLimit=30'"));
   assert.ok(dashboard.includes('data-live-strategy="migration-continuity"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="migration-continuity"'));
@@ -95,20 +100,20 @@ async function main() {
   assert.ok(dashboard.includes('id="bonding-momentum-cohort-rows"'));
   assert.ok(dashboard.includes('id="bonding-momentum-position-rows"'));
   assert.ok(dashboard.includes('id="bonding-momentum-snapshot-rows"'));
-  assert.ok(dashboard.includes('Bonding Curve 动量 · H'));
+  assert.ok(dashboard.includes('data-strategy-code="H"'));
   assert.ok(dashboard.includes("loadDashboard('/api/bonding-curve-momentum-shadow?positionLimit=30&snapshotLimit=30'"));
   assert.ok(dashboard.includes('data-live-strategy="graduation-hold"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="graduation-hold"'));
   assert.ok(dashboard.includes('id="graduation-hold-cohort-rows"'));
   assert.ok(dashboard.includes('id="graduation-hold-position-rows"'));
   assert.ok(dashboard.includes('id="graduation-hold-time-sessions"'));
-  assert.ok(dashboard.includes('毕业概率持仓 · I'));
+  assert.ok(dashboard.includes('data-strategy-code="I0/I1/I2"'));
   assert.ok(dashboard.includes("loadDashboard('/api/graduation-hold-shadow?positionLimit=30'"));
   assert.ok(dashboard.includes('data-live-strategy="graduation-acceleration"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="graduation-acceleration"'));
   assert.ok(dashboard.includes('id="graduation-acceleration-cohort-rows"'));
   assert.ok(dashboard.includes('id="graduation-acceleration-position-rows"'));
-  assert.ok(dashboard.includes('毕业加速 · O'));
+  assert.ok(dashboard.includes('data-strategy-code="O/O90-M5"'));
   assert.ok(dashboard.includes("loadDashboard('/api/graduation-acceleration-shadow?positionLimit=30'"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
@@ -152,6 +157,32 @@ async function main() {
     },
   };
   const runtime = createRuntime(runtimeConfig);
+  const startupReplay = runtime.store.startupTradeReplayHealth();
+  assert.strictEqual(startupReplay.primed, true);
+  assert.strictEqual(startupReplay.active, false);
+  assert.ok(startupReplay.cacheHits >= 3, 'Shadow startup should reuse the shared replay cache');
+  const replayNow = Date.now();
+  for (const [timestampMs, market, mint] of [
+    [replayNow - 1_000, 'PUMP_BONDING_CURVE', 'cached-old'],
+    [replayNow - 100, 'PUMP_BONDING_CURVE', 'cached-new'],
+    [replayNow - 50, 'PUMP_AMM', 'cached-amm'],
+  ]) {
+    runtime.store.queueRawTrade({
+      timestampMs, receivedAtMs: timestampMs, market, mint,
+      side: 'BUY', solAmount: 1, tokenAmount: 1, price: 1,
+    });
+  }
+  runtime.store.flushRawTrades();
+  runtime.store.primeStartupTradeReplay(replayNow - 2_000);
+  assert.deepStrictEqual(
+    runtime.store.recentCurveTrades(replayNow - 500).map((row) => row.mint),
+    ['cached-new'],
+  );
+  assert.deepStrictEqual(
+    runtime.store.recentAmmTrades(replayNow - 500).map((row) => row.mint),
+    ['cached-amm'],
+  );
+  runtime.store.releaseStartupTradeReplay();
   let dashboardCacheComputations = 0;
   const cachedDashboardValue = () => {
     dashboardCacheComputations += 1;
@@ -225,6 +256,7 @@ async function main() {
       '/api/graduation-hold-shadow',
       '/api/graduation-acceleration-shadow',
       '/api/launch-quality-observer',
+      '/health',
       '/api/health',
     ];
 
@@ -233,6 +265,11 @@ async function main() {
       assert.strictEqual(response.status, 200, `${route} should return 200`);
       assert.ok((await response.text()).length > 0, `${route} should return a body`);
     }
+    const lightweightHealth = await (await fetch(
+      `http://127.0.0.1:${port}/health`,
+    )).json();
+    assert.strictEqual(lightweightHealth.ready, true);
+    assert.ok(['waiting', 'streaming'].includes(lightweightHealth.status));
     const liveTrading = await (await fetch(
       `http://127.0.0.1:${port}/api/live-trading`,
     )).json();
@@ -253,10 +290,12 @@ async function main() {
     const gd25F1 = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'post_gd25_35_f1_xleg_live_v1'
     ));
-    assert.strictEqual(continuity.entryEnabled, true);
+    assert.strictEqual(continuity.entryEnabled, false);
+    assert.strictEqual(continuity.code, 'M-C5-E120');
     assert.strictEqual(graduationAccel.entryEnabled, false);
     assert.strictEqual(retiredV3.entryEnabled, false);
-    assert.strictEqual(gd25F1.entryEnabled, true);
+    assert.strictEqual(gd25F1.entryEnabled, false);
+    assert.strictEqual(gd25F1.code, 'GD25-35-F1-XLEG');
     assert.strictEqual(gd25F1.maxSignalsPerMint, 1);
     assert.strictEqual(gd25F1.positionSizeSol, 0.1);
     assert.strictEqual(continuity.market, 'PUMP_AMM');
@@ -265,6 +304,7 @@ async function main() {
     assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
     assert.strictEqual(qualityLeader.positionSizeSol, 0.1);
     assert.strictEqual(qualityLeader.entryEnabled, true);
+    assert.strictEqual(qualityLeader.code, 'QL-STRICT-PR');
     assert.strictEqual(qualityLeader.exitMode, 'QUALITY_PROTECTED_RUNNER');
     assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
     assert.strictEqual(liveTrading.runtime.priorityFeeMicroLamports, 2_000_000);
