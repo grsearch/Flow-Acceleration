@@ -25,6 +25,10 @@ function returnPct(price, base) {
   return price > 0 && base > 0 ? ((price / base) - 1) * 100 : null;
 }
 
+function capacityId(positionSol) {
+  return `${String(positionSol).replace('.', '_')}SOL`;
+}
+
 function camelRow(row) {
   return {
     id: row.id,
@@ -90,6 +94,7 @@ class BigWinnerShadowSuite {
       replaySignalsSuppressed: 0,
       priceJump: 0,
       noEntry: 0,
+      participationQualified: 0,
       opened: 0,
       coreExits: 0,
       closed: 0,
@@ -261,6 +266,15 @@ class BigWinnerShadowSuite {
   }
 
   health() {
+    const cohortCount = [...this.entryProfiles.values()].reduce((total, profile) => {
+      const exits = [...this.exitProfiles.values()].filter((exit) => (
+        (!Array.isArray(exit.entryProfileIds) || exit.entryProfileIds.includes(profile.id))
+        && (!Array.isArray(profile.exitProfileIds) || profile.exitProfileIds.includes(exit.id))
+      )).length;
+      const capacities = Array.isArray(profile.positionSols) && profile.positionSols.length
+        ? profile.positionSols.length : 1;
+      return total + exits * capacities;
+    }, 0);
     return {
       enabled: this.config.enabled,
       mode: 'SHADOW_BW',
@@ -270,14 +284,15 @@ class BigWinnerShadowSuite {
       entryProfiles: [...this.entryProfiles.values()],
       exitProfiles: [...this.exitProfiles.values()],
       strategy: {
-        name: 'Big Winner Pullback + Flow Runner',
-        cohortCount: this.entryProfiles.size * this.exitProfiles.size,
+        name: 'Big Winner + Participation Persistence',
+        cohortCount,
         entryDelayMs: this.config.entryDelayMs,
         entryTimeoutMs: this.config.entryTimeoutMs,
         positionSizeSol: this.config.positionSizeSol,
         research: {
           isolatedTable: 'big_winner_shadow_positions',
           historicalBacktest: '2026-08-11..2026-08-17 train/test split',
+          participationCapacitiesSol: [0.05, 0.1, 0.25],
           noExitPricedAsTotalLoss: false,
           sameMarketOnly: 'PUMP_AMM',
           sendsTransactions: false,
@@ -324,7 +339,8 @@ class BigWinnerShadowSuite {
       return;
     }
     for (const profile of this.entryProfiles.values()) {
-      if (state.fired.has(profile.id) || !this._matches(profile, features)) continue;
+      if (state.fired.has(profile.id)
+        || !this._matches(profile, features, state, trade.timestampMs, price)) continue;
       state.fired.add(profile.id);
       this.metrics.qualifiedSignals += 1;
       this._recordSignal(profile, state, trade, price, features);
@@ -358,7 +374,8 @@ class BigWinnerShadowSuite {
     }
     const cutoff = now - this.config.stateRetentionMs;
     for (const [mint, state] of this.states) {
-      if (state.lastAt < cutoff && !this.rowsByMint.has(mint)) this.states.delete(mint);
+      const activityAt = Math.max(state.lastAt || 0, state.graduatedAt || 0);
+      if (activityAt < cutoff && !this.rowsByMint.has(mint)) this.states.delete(mint);
     }
   }
 
@@ -375,6 +392,7 @@ class BigWinnerShadowSuite {
         peakAt: null,
         pullbackLowPrice: null,
         events: [],
+        participation: new Map(),
         fired: new Set(),
         lastAt: 0,
       };
@@ -432,6 +450,9 @@ class BigWinnerShadowSuite {
       sellSol,
       netFlow: buySol - sellSol,
       buyers: byWallet.size,
+      trades: rows.length,
+      buyTx: buys.length,
+      sellTx: sells.length,
       maxSell: sells.reduce((max, row) => Math.max(max, row.solAmount), 0),
       concentration: buySol > 0 ? Math.max(0, ...byWallet.values()) / buySol : 1,
       high: rows.reduce((max, row) => Math.max(max, row.price), 0),
@@ -441,8 +462,10 @@ class BigWinnerShadowSuite {
 
   _features(state, timestampMs, price) {
     const w3 = this._window(state, timestampMs, 3_000);
+    const w5 = this._window(state, timestampMs, 5_000);
+    const previous5 = this._window(state, timestampMs, 10_000, 5_000);
     const previous3 = this._window(state, timestampMs, 6_000, 3_000);
-    const previous5 = this._window(state, timestampMs, 8_000, 3_000);
+    const previousFlow5 = this._window(state, timestampMs, 8_000, 3_000);
     const w8 = this._window(state, timestampMs, 8_000);
     const w10 = this._window(state, timestampMs, 10_000);
     const w2 = this._window(state, timestampMs, 2_000);
@@ -460,7 +483,7 @@ class BigWinnerShadowSuite {
       reboundPct,
       netFlow3s: w3.netFlow,
       previousNetFlow3s: previous3.netFlow,
-      previousNetFlow5s: previous5.netFlow,
+      previousNetFlow5s: previousFlow5.netFlow,
       buyers3s: w3.buyers,
       maxSell3s: w3.maxSell,
       netFlow8s: w8.netFlow,
@@ -469,10 +492,74 @@ class BigWinnerShadowSuite {
       runupPct,
       drawdown10sPct,
       jump2sPct,
+      trades10s: w10.trades,
+      buyers10s: w10.buyers,
+      netFlow10s: w10.netFlow,
+      largestBuyerShare10s: w10.concentration,
+      recentTrades5s: w5.trades,
+      recentBuyers5s: w5.buyers,
+      recentNetFlow5s: w5.netFlow,
+      previousParticipationTrades5s: previous5.trades,
+      previousParticipationBuyers5s: previous5.buyers,
+      previousParticipationNetFlow5s: previous5.netFlow,
     };
   }
 
-  _matches(profile, f) {
+  _participationBaseMatches(profile, f) {
+    if (f.ageMs < profile.minAgeMs
+      || f.ageMs > (profile.qualificationMaxAgeMs ?? profile.maxAgeMs)) return false;
+    const flowPersists = f.previousParticipationNetFlow5s <= 0
+      || f.recentNetFlow5s
+        >= f.previousParticipationNetFlow5s * profile.minRecentFlowRetentionRatio;
+    return f.trades10s >= profile.minTrades10s
+      && f.buyers10s >= profile.minBuyers10s
+      && f.netFlow10s >= profile.minNetFlow10sSol
+      && f.largestBuyerShare10s <= profile.maxLargestBuyerShare10s
+      && f.recentBuyers5s >= profile.minRecentBuyers5s
+      && f.recentNetFlow5s >= profile.minRecentNetFlow5sSol
+      && flowPersists;
+  }
+
+  _participationMatches(profile, state, f, timestampMs, price) {
+    let tracker = state.participation.get(profile.id);
+    let justQualified = false;
+    if (!tracker && this._participationBaseMatches(profile, f)) {
+      tracker = {
+        qualifiedAt: timestampMs,
+        qualifiedPrice: price,
+        peakPrice: price,
+        lowPrice: price,
+      };
+      state.participation.set(profile.id, tracker);
+      this.metrics.participationQualified += 1;
+      justQualified = true;
+    }
+    if (!tracker || timestampMs > state.graduatedAt + profile.maxAgeMs) return false;
+    if (price > tracker.peakPrice) {
+      tracker.peakPrice = price;
+      tracker.lowPrice = price;
+    } else {
+      tracker.lowPrice = Math.min(tracker.lowPrice, price);
+    }
+    if (profile.mode === 'DIRECT') return justQualified;
+    if (timestampMs <= tracker.qualifiedAt) return false;
+    const pullbackPct = tracker.peakPrice > 0
+      ? (1 - tracker.lowPrice / tracker.peakPrice) * 100 : null;
+    const reboundPct = returnPct(price, tracker.lowPrice);
+    f.participationQualifiedAt = tracker.qualifiedAt;
+    f.participationQualifiedPrice = tracker.qualifiedPrice;
+    f.participationPullbackPct = pullbackPct;
+    f.participationReboundPct = reboundPct;
+    return pullbackPct >= profile.minPullbackPct
+      && pullbackPct <= profile.maxPullbackPct
+      && reboundPct >= profile.minReboundPct
+      && reboundPct <= profile.maxReboundPct
+      && f.netFlow3s >= profile.minNetFlow3sSol
+      && f.buyers3s >= profile.minBuyers3s
+      && (!profile.requireFlowAcceleration || f.netFlow3s > f.previousNetFlow3s);
+  }
+
+  _matches(profile, f, state, timestampMs, price) {
     this.metrics.evaluated += 1;
     if (profile.family === 'PULLBACK') {
       return f.ageMs >= profile.minAgeMs && f.ageMs <= profile.maxAgeMs
@@ -501,6 +588,9 @@ class BigWinnerShadowSuite {
         && f.jump2sPct <= profile.maxJump2sPct
         && flowContinuous;
     }
+    if (profile.family === 'PARTICIPATION') {
+      return this._participationMatches(profile, state, f, timestampMs, price);
+    }
     return false;
   }
 
@@ -508,48 +598,57 @@ class BigWinnerShadowSuite {
     const episodeId = `${trade.mint}:${profile.id}:${trade.timestampMs}`;
     const now = this.now();
     for (const exit of this.exitProfiles.values()) {
-      const result = this.insert.run({
-        cohortId: `${profile.id}:${exit.id}`,
-        entryProfileId: profile.id,
-        exitProfileId: exit.id,
-        episodeId,
-        mint: trade.mint,
-        symbol: state.symbol,
-        status: STATUS.PENDING_ENTRY,
-        rejectionReason: null,
-        positionSol: this.config.positionSizeSol,
-        configuredCostPct: this.costs.deterministicCostPct,
-        graduatedAt: state.graduatedAt,
-        baselinePrice: state.baselinePrice,
-        signalAt: trade.timestampMs,
-        signalPrice: price,
-        signalAgeMs: features.ageMs,
-        firstWavePct: features.firstWavePct,
-        pullbackPct: features.pullbackPct,
-        reboundPct: features.reboundPct,
-        netFlow3s: features.netFlow3s,
-        previousNetFlow3s: features.previousNetFlow3s,
-        buyers3s: features.buyers3s,
-        maxSell3s: features.maxSell3s,
-        netFlow8s: features.netFlow8s,
-        buyers8s: features.buyers8s,
-        largestBuyerShare8s: features.largestBuyerShare8s,
-        runupPct: features.runupPct,
-        drawdown10sPct: features.drawdown10sPct,
-        jump2sPct: features.jump2sPct,
-        featuresJson: JSON.stringify(features),
-        entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
-        entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs,
-        coreWeightPct: exit.coreWeightPct,
-        createdAt: now,
-        updatedAt: now,
-      });
-      if (!result.changes) continue;
-      const row = this.store.db.prepare('SELECT * FROM big_winner_shadow_positions WHERE id=?')
-        .get(Number(result.lastInsertRowid));
-      const position = camelRow(row);
-      this.pendingEntries.set(position.id, position);
-      this._index(position);
+      if (Array.isArray(exit.entryProfileIds) && !exit.entryProfileIds.includes(profile.id)) continue;
+      if (Array.isArray(profile.exitProfileIds) && !profile.exitProfileIds.includes(exit.id)) continue;
+      const positionSols = Array.isArray(profile.positionSols) && profile.positionSols.length
+        ? profile.positionSols : [this.config.positionSizeSol];
+      for (const positionSol of positionSols) {
+        const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: positionSol });
+        const capacitySuffix = positionSols.length > 1 ? `:${capacityId(positionSol)}` : '';
+        const result = this.insert.run({
+          cohortId: `${profile.id}:${exit.id}${capacitySuffix}`,
+          entryProfileId: profile.id,
+          exitProfileId: exit.id,
+          episodeId,
+          mint: trade.mint,
+          symbol: state.symbol,
+          status: STATUS.PENDING_ENTRY,
+          rejectionReason: null,
+          positionSol,
+          configuredCostPct: costs.deterministicCostPct
+            - (profile.capacityAware ? costs.priceImpactPct : 0),
+          graduatedAt: state.graduatedAt,
+          baselinePrice: state.baselinePrice,
+          signalAt: trade.timestampMs,
+          signalPrice: price,
+          signalAgeMs: features.ageMs,
+          firstWavePct: features.firstWavePct,
+          pullbackPct: features.participationPullbackPct ?? features.pullbackPct,
+          reboundPct: features.participationReboundPct ?? features.reboundPct,
+          netFlow3s: features.netFlow3s,
+          previousNetFlow3s: features.previousNetFlow3s,
+          buyers3s: features.buyers3s,
+          maxSell3s: features.maxSell3s,
+          netFlow8s: features.netFlow8s,
+          buyers8s: features.buyers8s,
+          largestBuyerShare8s: features.largestBuyerShare8s,
+          runupPct: features.runupPct,
+          drawdown10sPct: features.drawdown10sPct,
+          jump2sPct: features.jump2sPct,
+          featuresJson: JSON.stringify(features),
+          entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
+          entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs,
+          coreWeightPct: exit.coreWeightPct,
+          createdAt: now,
+          updatedAt: now,
+        });
+        if (!result.changes) continue;
+        const row = this.store.db.prepare('SELECT * FROM big_winner_shadow_positions WHERE id=?')
+          .get(Number(result.lastInsertRowid));
+        const position = camelRow(row);
+        this.pendingEntries.set(position.id, position);
+        this._index(position);
+      }
     }
     this.metrics.lastActionAt = now;
   }
@@ -566,7 +665,7 @@ class BigWinnerShadowSuite {
       }
       const position = this.positions.get(id);
       if (!position || position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt) continue;
-      this._observeOpen(position, trade.timestampMs, marketPrice);
+      this._observeOpen(position, trade, marketPrice);
     }
   }
 
@@ -580,6 +679,25 @@ class BigWinnerShadowSuite {
       const outputRaw = baseRaw - ((baseRaw * quoteRaw) / (quoteRaw + inputRaw));
       const outputTokens = Number(outputRaw) / 1e6;
       return outputTokens > 0 ? positionSol / outputTokens : marketPrice;
+    } catch (_) {
+      return marketPrice;
+    }
+  }
+
+  _simulatedExitPrice(trade, position, marketPrice, weight = 1) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    if (!profile?.capacityAware) return marketPrice;
+    try {
+      const baseRaw = BigInt(trade.poolBaseReservesRaw || 0);
+      const quoteRaw = BigInt(trade.poolQuoteReservesRaw || 0)
+        + BigInt(trade.virtualQuoteReservesRaw || 0);
+      const tokenUnits = (position.positionSol / position.entryPrice) * Math.max(0, weight);
+      const inputRaw = BigInt(Math.max(1, Math.round(tokenUnits * 1e6)));
+      if (baseRaw <= 0n || quoteRaw <= 0n || !(tokenUnits > 0)) return marketPrice;
+      const quoteOutRaw = quoteRaw * inputRaw / (baseRaw + inputRaw);
+      const solOut = Number(quoteOutRaw) / 1e9;
+      const exitPrice = solOut / tokenUnits;
+      return exitPrice > 0 ? exitPrice : marketPrice;
     } catch (_) {
       return marketPrice;
     }
@@ -638,7 +756,8 @@ class BigWinnerShadowSuite {
     this.metrics.opened += 1;
   }
 
-  _observeOpen(position, timestampMs, price) {
+  _observeOpen(position, trade, price) {
+    const timestampMs = trade.timestampMs;
     position.highestPrice = Math.max(position.highestPrice || price, price);
     position.lowestPrice = Math.min(position.lowestPrice || price, price);
     position.lastObservedAt = timestampMs;
@@ -655,9 +774,15 @@ class BigWinnerShadowSuite {
     const exit = this.exitProfiles.get(position.exitProfileId);
     const fixedHold = exit.mode === 'FIXED_HOLD';
     if (!fixedHold && !position.coreExitAt && gross >= exit.coreActivationPct) {
+      const coreExitPrice = this._simulatedExitPrice(
+        trade,
+        position,
+        price,
+        position.coreWeight,
+      );
       position.coreExitAt = timestampMs;
-      position.coreExitPrice = price;
-      position.coreReturnPct = gross;
+      position.coreExitPrice = coreExitPrice;
+      position.coreReturnPct = returnPct(coreExitPrice, position.entryPrice);
       this.metrics.coreExits += 1;
     }
     const runnerStop = fixedHold
@@ -684,7 +809,11 @@ class BigWinnerShadowSuite {
       reason = runnerStop.reason;
     }
     else if (timestampMs >= position.entryAt + exit.maxHoldMs) reason = 'MAX_HOLD';
-    if (reason) this._close(position, timestampMs, price, reason);
+    if (reason) {
+      const remainingWeight = position.coreExitAt ? 1 - position.coreWeight : 1;
+      const exitPrice = this._simulatedExitPrice(trade, position, price, remainingWeight);
+      this._close(position, timestampMs, exitPrice, reason);
+    }
   }
 
   _runnerStop(position, exit) {
@@ -718,7 +847,11 @@ class BigWinnerShadowSuite {
     const coreReturn = position.coreExitAt ? position.coreReturnPct : runnerReturn;
     const grossReturnPct = coreReturn * position.coreWeight
       + runnerReturn * (1 - position.coreWeight);
-    const extraFixedCostSol = position.coreExitAt ? this.costs.totalFixedCostSol : 0;
+    const positionCosts = costBreakdown({
+      ...this.config.costModel,
+      positionSizeSol: position.positionSol,
+    });
+    const extraFixedCostSol = position.coreExitAt ? positionCosts.totalFixedCostSol : 0;
     const estimatedCostSol = position.positionSol * position.configuredCostPct / 100
       + extraFixedCostSol;
     const netReturnPct = grossReturnPct - (estimatedCostSol / position.positionSol) * 100;
