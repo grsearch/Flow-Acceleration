@@ -532,6 +532,21 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/health', (_request, response) => {
+      const now = Date.now();
+      const engine = this.engine.stats();
+      const stream = this.stream.health();
+      response.set('Cache-Control', 'no-store');
+      response.json({
+        status: stream.regions.some((region) => region.state === 'connected')
+          ? 'streaming'
+          : 'waiting',
+        ready: true,
+        uptimeMs: now - this.startedAt,
+        dataLatencyMs: engine.lastTradeAt ? Math.max(0, now - engine.lastTradeAt) : null,
+      });
+    });
+
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
