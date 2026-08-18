@@ -115,6 +115,12 @@ async function main() {
   assert.ok(dashboard.includes('id="graduation-acceleration-position-rows"'));
   assert.ok(dashboard.includes('data-strategy-code="O/O90-M5"'));
   assert.ok(dashboard.includes("loadDashboard('/api/graduation-acceleration-shadow?positionLimit=30'"));
+  assert.ok(dashboard.includes('data-live-strategy="smart-resonance"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="smart-resonance"'));
+  assert.ok(dashboard.includes('id="smart-resonance-cohort-rows"'));
+  assert.ok(dashboard.includes('id="smart-resonance-position-rows"'));
+  assert.ok(dashboard.includes('data-strategy-code="SR-R0/R1/R2/R3"'));
+  assert.ok(dashboard.includes("loadDashboard('/api/smart-resonance-shadow?positionLimit=50'"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -248,6 +254,7 @@ async function main() {
       '/api/flow-first-shadow',
       '/api/smart-pullback-shadow',
       '/api/smart-open-shadow',
+      '/api/smart-resonance-shadow',
       '/api/launch-pullback-shadow',
       '/api/migrated-drop-rebound-shadow',
       '/api/migration-continuity-shadow',
@@ -408,6 +415,18 @@ async function main() {
     );
     assert.ok(Array.isArray(flowSmartConfirm.cohorts));
     assert.ok(Array.isArray(flowSmartConfirm.positions));
+    const smartResonance = await (await fetch(
+      `http://127.0.0.1:${port}/api/smart-resonance-shadow`,
+    )).json();
+    assert.strictEqual(smartResonance.runtime.mode, 'SHADOW_SR');
+    assert.strictEqual(smartResonance.runtime.sendsTransactions, false);
+    assert.deepStrictEqual(
+      smartResonance.runtime.entryProfiles.map((profile) => profile.id),
+      ['SR_R0', 'SR_R1', 'SR_R2', 'SR_R3'],
+    );
+    assert.strictEqual(smartResonance.runtime.exitProfiles.length, 8);
+    assert.ok(Array.isArray(smartResonance.cohorts));
+    assert.ok(Array.isArray(smartResonance.positions));
     const launchPullback = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-pullback-shadow`,
     )).json();
