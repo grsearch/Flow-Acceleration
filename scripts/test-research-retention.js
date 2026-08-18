@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const {
+  DEFAULTS,
   cleanupResearchRetention,
   validateCosGate,
 } = require('./cleanup-research-retention');
@@ -59,8 +60,8 @@ async function main() {
   `);
   const insertTrade = db.prepare('INSERT INTO raw_trades(timestamp_ms, mint) VALUES (?, ?)');
   insertTrade.run(now - 100 * 60 * 60_000, 'old-100');
-  insertTrade.run(now - 80 * 60 * 60_000, 'old-80');
-  insertTrade.run(now - 71 * 60 * 60_000, 'hot-71');
+  insertTrade.run(now - 50 * 60 * 60_000, 'old-50');
+  insertTrade.run(now - 47 * 60 * 60_000, 'hot-47');
   insertTrade.run(now - 1 * 60 * 60_000, 'hot-1');
   db.prepare('INSERT INTO flow_signals VALUES (?, ?)').run(1, now - 100 * 60 * 60_000);
   db.prepare('INSERT INTO live_positions VALUES (?, ?, ?)').run(1, 'OPEN', now - 100 * 60 * 60_000);
@@ -76,7 +77,7 @@ async function main() {
     statePath: gate.statePath,
     reportPath,
     now,
-    hotRawHours: 72,
+    hotRawHours: DEFAULTS.hotRawHours,
     batchRows: 100,
     maxRows: 100,
     pauseMs: 0,
@@ -90,7 +91,7 @@ async function main() {
     statePath: gate.statePath,
     reportPath,
     now,
-    hotRawHours: 72,
+    hotRawHours: DEFAULTS.hotRawHours,
     batchRows: 100,
     maxRows: 100,
     pauseMs: 0,
@@ -101,11 +102,14 @@ async function main() {
   assert.strictEqual(result.safety.shadowPositionsDeleted, false);
   assert.strictEqual(result.safety.walCheckpointExecuted, false);
   assert.strictEqual(result.safety.vacuumExecuted, false);
+  assert.strictEqual(result.hotRawHours, 48);
+  assert.strictEqual(result.optimize.executed, true);
+  assert.strictEqual(result.optimize.error, null);
 
   const verify = new Database(dbPath, { readonly: true });
   assert.deepStrictEqual(
     verify.prepare('SELECT mint FROM raw_trades ORDER BY timestamp_ms').all().map((row) => row.mint),
-    ['hot-71', 'hot-1'],
+    ['hot-47', 'hot-1'],
   );
   assert.strictEqual(verify.prepare('SELECT COUNT(*) AS n FROM flow_signals').get().n, 1);
   assert.strictEqual(verify.prepare('SELECT COUNT(*) AS n FROM live_positions').get().n, 1);
