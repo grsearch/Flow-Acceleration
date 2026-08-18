@@ -245,6 +245,28 @@ assert.deepStrictEqual(
     ['H30_T180', 30, 180_000], ['H30_T240', 30, 240_000],
   ],
 );
+assert.strictEqual(config.publicFlowLeadShadow.enabled, true);
+assert.strictEqual(config.publicFlowLeadShadow.positionSizeSol, 1);
+assert.strictEqual(config.publicFlowLeadShadow.smartLabelWindowMs, 15_000);
+assert.deepStrictEqual(
+  config.publicFlowLeadShadow.entryProfiles.map((profile) => profile.id),
+  ['PFL_B0', 'PFL_B1', 'PFL_A1', 'PFL_R1'],
+);
+assert.deepStrictEqual(
+  config.publicFlowLeadShadow.exitProfiles.map((profile) => [
+    profile.id, profile.hardStopPct, profile.maxHoldMs,
+  ]),
+  [
+    ['H20_T120', 20, 120_000], ['H20_T180', 20, 180_000],
+    ['H20_T240', 20, 240_000], ['H30_T120', 30, 120_000],
+    ['H30_T180', 30, 180_000], ['H30_T240', 30, 240_000],
+  ],
+);
+assert.strictEqual(
+  config.publicFlowLeadShadow.entryProfiles.find((profile) => profile.id === 'PFL_A1')
+    .minFlowAccelerationRatio,
+  1.5,
+);
 assert.strictEqual(config.launchPullbackShadow.enabled, true);
 assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 1);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
