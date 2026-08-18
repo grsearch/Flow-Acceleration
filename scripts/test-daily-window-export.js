@@ -93,6 +93,7 @@ function main() {
   assert.ok(backupScript.includes('sha256sums.txt'));
   assert.ok(backupScript.includes('[REDACTED]'));
   assert.ok(backupScript.includes('FLOW_BACKUP_UPLOAD_TIMEOUT'));
+  assert.match(backupScript, /FLOW_BACKUP_LOCAL_RETENTION_DAYS:-2/);
   assert.ok(backupScript.includes('last-run.env'));
   assert.ok(backupScript.includes('write_state VERIFYING'));
   assert.ok(backupScript.includes('write_state CLEANING'));
@@ -109,6 +110,7 @@ function main() {
   assert.match(installer, /cos-auto-upload-export\\\.sh/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_SECRET_ID=\r?\n/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_SECRET_KEY=\r?\n/);
+  assert.match(credentialTemplate, /FLOW_BACKUP_LOCAL_RETENTION_DAYS=2/);
   db.close();
   fs.rmSync(directory, { recursive: true, force: true });
   console.log('test-daily-window-export: ok');
