@@ -359,6 +359,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
               <b><span class="strategy-code">SR-R0/R1/R2/R3</span>Smart 多钱包共振右尾</b><small>第二/第三个不同钱包确认后入场；硬止损 + 60–240秒固定持有</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="public-flow-lead" data-strategy-code="PFL-B0/B1/A1/R1">
+              <b><span class="strategy-code">PFL-B0/B1/A1/R1</span>Public Flow Lead</b><small>只用非监控钱包公共流提前入场；Smart OPEN仅作未来标签，ADD忽略</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback" data-strategy-code="F/FT/FD/FO/FC/FA/FR">
               <b><span class="strategy-code">F/FT/FD/FO/FC/FA/FR</span>Launch 回踩</b><small>旧组保留；新增前置 Flow 共振与多退出对照</small>
             </button>
@@ -743,6 +746,28 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint / 触发钱包</th><th>共振</th><th>AGE / Curve</th><th>公共 Buyers / Flow / Top1</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="smart-resonance-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="public-flow-lead" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Public Flow Lead Shadow PFL</h2>
+                <p>完全由非监控钱包公共订单流触发；不等待 Smart Wallet。后续首次 OPEN 只作5/15秒标签，ADD 永久忽略。</p>
+              </div>
+              <div class="strategy-expression" id="public-flow-lead-expression">PFL-B0/B1/A1/R1 入场 × H20/H30 × 120/180/240秒固定持有</div>
+              <div class="strategy-metric-groups" id="public-flow-lead-metrics"></div>
+              <div class="strategy-metric-groups" id="public-flow-lead-time-sessions"></div>
+              <div class="section-title"><h2>公共流入场 × 右尾退出</h2><p>同时观察未来 Smart OPEN 覆盖、Big50/Big100、PF 和 Top5 盈利贡献。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>Smart OPEN 5s / 15s</th><th>公共流</th><th>Big50 / Big100</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="public-flow-lead-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>Smart 钱包成交不会进入特征；信号后200ms的下一笔真实成交才作为模拟入场。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Curve</th><th>Buyers 1s / 5s</th><th>Flow 1s / 5s / Accel</th><th>Top1 / Sell÷Buy</th><th>Smart标签</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="public-flow-lead-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1274,6 +1299,31 @@
         const reason = row.exit_reason || row.rejection_reason || '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.trigger_wallet || '')}</span></td><td>${number(row.distinct_wallets)} 钱包 / ${age(row.resonance_span_ms)}<br><span class="table-note">窗口 ${age(row.resonance_window_ms)}</span></td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_5s)} / ${number(row.public_buy_flow_5s,2)} SOL / ${rate(row.largest_buyer_share_pct)}<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL · Sell ${number(row.public_sell_tx_5s)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart Resonance 模拟仓位。</td></tr>';
+    }
+
+    function renderPublicFlowLeadShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#public-flow-lead-expression').textContent = `${(runtime.entryProfiles || []).map(row => row.id).join(' / ')}：只用公开订单流；窗口 ${age(strategy.featureWindowMs)}，延迟 ${age(strategy.entryDelayMs)} 后成交；Smart OPEN 只作未来 ${age(strategy.smartLabelWindowMs)} 标签，ADD 忽略。`;
+      renderMetricGroups('#public-flow-lead-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW PFL' : '关闭', '独立表；永不签名或发送交易'],
+        ['公开交易 / 排除Smart', `${number(runtime.observedPublicTrades)} / ${number(runtime.excludedSmartTrades)}`, `评估状态 ${number(runtime.evaluatedStates)}`],
+        ['合格信号 / Smart标签', `${number(runtime.qualifiedSignals)} / ${number(runtime.smartOpenLabels)}`, `忽略ADD ${number(runtime.ignoredSmartAdds)} · 跳价 ${number(runtime.priceJump)}`],
+        ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
+      ], []);
+      renderTimeSessions('#public-flow-lead-time-sessions', data.timeSessions);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#public-flow-lead-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 跳价 ${number(row.price_jump)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td><td>${rate(row.smart_open_5s_rate_pct)} / ${rate(row.smart_open_15s_rate_pct)}</td><td>Buyers ${number(row.average_public_buyers_5s,1)} · Buy ${number(row.average_public_buy_flow_5s,2)} SOL<br><span class="table-note">Net ${number(row.average_public_net_flow_5s,2)} · Top1 ${rate(row.average_largest_buyer_share_pct)} · Accel ${number(row.average_flow_acceleration_ratio,2)}x</span></td><td>${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="9" class="empty">等待公共订单流提前信号样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#public-flow-lead-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const smartLabel = row.smart_open_at ? `${age(row.smart_open_delay_ms)}<br><span class="table-note">${escapeHtml(row.smart_open_wallet || '')}</span>` : '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_1s)} / ${number(row.public_buyers_5s)}</td><td>${number(row.public_buy_flow_1s,2)} / ${number(row.public_buy_flow_5s,2)} SOL / ${number(row.flow_acceleration_ratio,2)}x<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL</span></td><td>${rate(row.largest_buyer_share_pct)} / ${number(row.sell_buy_ratio,2)}</td><td>${smartLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="11" class="empty">暂无 Public Flow Lead 模拟仓位。</td></tr>';
     }
 
     function renderFlowSmartConfirmShadow(data) {
@@ -2123,6 +2173,9 @@
         ],
         'smart-resonance': requestContext => [
           loadDashboard('/api/smart-resonance-shadow?positionLimit=50', renderSmartResonanceShadow, requestContext),
+        ],
+        'public-flow-lead': requestContext => [
+          loadDashboard('/api/public-flow-lead-shadow?positionLimit=50', renderPublicFlowLeadShadow, requestContext),
         ],
         'launch-pullback': requestContext => [
           loadDashboard('/api/launch-pullback-shadow?positionLimit=30', renderLaunchPullbackShadow, requestContext),
