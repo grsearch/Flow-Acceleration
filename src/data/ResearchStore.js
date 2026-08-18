@@ -100,8 +100,20 @@ class ResearchStore {
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
     this._initSchema();
-    this.db.pragma('optimize');
     this._prepare();
+
+    this.startupTradeReplayCache = null;
+    this.startupTradeReplayStats = {
+      primed: false,
+      active: false,
+      sinceMs: null,
+      curveRows: 0,
+      ammRows: 0,
+      dbReads: 0,
+      cacheHits: 0,
+      primeDurationMs: null,
+      releasedAt: null,
+    };
 
     this.tokens = new Map();
     for (const token of this.stmts.allTokens.all()) this.tokens.set(token.mint, token);
@@ -3868,7 +3880,52 @@ class ResearchStore {
   }
 
   recentCurveTrades(sinceMs) {
+    const cached = this._startupReplayRows('curve', sinceMs);
+    if (cached) return cached;
+    this.startupTradeReplayStats.dbReads += 1;
     return this.stmts.recentCurveTrades.all(sinceMs);
+  }
+
+  primeStartupTradeReplay(sinceMs) {
+    const normalizedSince = Math.max(0, Number(sinceMs) || 0);
+    const startedAt = Date.now();
+    const curve = this.stmts.recentCurveTrades.all(normalizedSince);
+    const amm = this.stmts.recentAmmTrades.all(normalizedSince);
+    this.startupTradeReplayCache = { sinceMs: normalizedSince, curve, amm };
+    this.startupTradeReplayStats = {
+      primed: true,
+      active: true,
+      sinceMs: normalizedSince,
+      curveRows: curve.length,
+      ammRows: amm.length,
+      dbReads: 2,
+      cacheHits: 0,
+      primeDurationMs: Date.now() - startedAt,
+      releasedAt: null,
+    };
+    return this.startupTradeReplayHealth();
+  }
+
+  releaseStartupTradeReplay() {
+    this.startupTradeReplayCache = null;
+    this.startupTradeReplayStats.active = false;
+    this.startupTradeReplayStats.releasedAt = Date.now();
+    return this.startupTradeReplayHealth();
+  }
+
+  startupTradeReplayHealth() {
+    return { ...this.startupTradeReplayStats };
+  }
+
+  _startupReplayRows(market, sinceMs) {
+    const cache = this.startupTradeReplayCache;
+    const normalizedSince = Number(sinceMs) || 0;
+    if (!cache || normalizedSince < cache.sinceMs) return null;
+    const rows = market === 'curve' ? cache.curve : cache.amm;
+    this.startupTradeReplayStats.cacheHits += 1;
+    return rows
+      .filter((row) => Number(row.timestampMs ?? row.timestamp_ms) >= normalizedSince)
+      .map((row) => ({ ...row }));
   }
 
   launchMarketRegimeSnapshot({ startAt, cutoffAt, observedAt }) {
@@ -3876,6 +3933,9 @@ class ResearchStore {
   }
 
   recentAmmTrades(sinceMs) {
+    const cached = this._startupReplayRows('amm', sinceMs);
+    if (cached) return cached;
+    this.startupTradeReplayStats.dbReads += 1;
     return this.stmts.recentAmmTrades.all(sinceMs);
   }
 
