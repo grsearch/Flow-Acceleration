@@ -233,6 +233,25 @@ Smart Wallet 事件按 Token 余额保存 `OPEN / ADD / REDUCE / CLOSE / SELL` �
 
 F9/FAic 被标记为同一操作集群，短时间重复 OPEN 不会重复触发。预测式入场的后续 Smart OPEN 只写入确认标签，不会回填历史入场价。缺少可执行退出成交时记录为 `NO_EXIT`，收益字段保持空值，不按 -100% 污染统计。Dashboard 接口为 `GET /api/smart-like-early-shadow`。
 
+## Smart Wallet Resonance Right-Tail Shadow SR
+
+`smart_resonance_shadow_positions` 是独立的多钱包共振前向实验表，不修改任何旧
+Smart Wallet 或 Shadow 结果。只有第二个或第三个**不同**监控钱包的 BUY 已经到达后
+才产生信号；信号前5秒公共订单流会排除全部监控钱包，避免把跟踪对象自己的买单误当成
+市场确认。信号价只作参考，模拟入场统一使用200ms后的第一笔同市场真实成交。
+
+四组入场彼此独立：
+
+- `SR-R0`：5秒内2个不同 Smart Wallet，作为无公共流过滤的基线。
+- `SR-R1`：R0 + 公共 Buyers≥20、Buy Flow≥15 SOL、最大单一买家占比≤25%。
+- `SR-R2`：60秒内3个不同 Smart Wallet + 公共 Buyers≥20、最大单一买家占比≤20%。
+- `SR-R3`：60秒内2个不同 Smart Wallet，且尚未毕业、AGE≤25秒、Curve 60–80%、公共 Buyers≥20。
+
+每个入场同时运行8个右尾退出：20%/30%硬止损分别交叉固定60/120/180/240秒
+最长持有；没有固定止盈或移动止盈。Dashboard 重点显示 Big50、Big100、Top5赢家
+贡献、MFE/MAE 和 NO_EXIT。缺少可执行退出时收益保持空值，不伪造为-100%。接口为
+`GET /api/smart-resonance-shadow`，策略代码为 `SR-R0/R1/R2/R3`。
+
 ## Flow -> Smart Confirmation Shadow L
 
 该路径把 Smart Wallet 确认改成严格的前向实验：只接受 `primary_3w Rank 1`
