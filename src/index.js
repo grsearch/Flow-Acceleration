@@ -31,9 +31,17 @@ const {
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
+const { launchStartupDashboard } = require('./server/startup-dashboard');
 
 function createRuntime(runtimeConfig = config) {
   const store = new ResearchStore(runtimeConfig.storage, runtimeConfig.labels);
+  const startupReplayCacheMs = Math.max(
+    0,
+    Number(runtimeConfig.storage.startupReplayCacheMs) || 0,
+  );
+  if (startupReplayCacheMs > 0) {
+    store.primeStartupTradeReplay(Date.now() - startupReplayCacheMs);
+  }
   const engine = new FlowAccelerationEngine(runtimeConfig.strategy);
   engine.hydrateTokens(store.allTokens());
   engine.hydrateTrades(store.recentCurveTrades(Date.now() - runtimeConfig.strategy.bufferMs));
@@ -152,6 +160,7 @@ function createRuntime(runtimeConfig = config) {
     onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   graduationAccelerationShadow.start();
+  store.releaseStartupTradeReplay();
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
@@ -635,7 +644,23 @@ async function main() {
     return;
   }
 
-  const runtime = createRuntime(config);
+  let startupDashboard = null;
+  try {
+    startupDashboard = await launchStartupDashboard(config.server);
+    console.log(
+      `Startup Dashboard: http://127.0.0.1:${config.server.port} `
+      + `(pid ${startupDashboard.pid}; waiting for database and strategy restore).`,
+    );
+  } catch (error) {
+    console.warn(`[Startup Dashboard] unavailable; continuing startup: ${error.message}`);
+  }
+  let runtime;
+  try {
+    runtime = createRuntime(config);
+  } catch (error) {
+    await startupDashboard?.stop();
+    throw error;
+  }
   const shutdown = async (signal) => {
     try {
       await runtime.stop(signal);
@@ -647,6 +672,7 @@ async function main() {
   };
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
+  await startupDashboard?.stop();
   await runtime.start();
 }
 
