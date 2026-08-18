@@ -220,6 +220,31 @@ assert.deepStrictEqual(
   config.flowSmartConfirmShadow.cohorts.map((cohort) => [cohort.id, cohort.maxConfirmationDelayMs]),
   [['L5_F5', 5_000], ['L15_F5', 15_000], ['L5_T15', 5_000], ['L15_T20', 15_000]],
 );
+assert.strictEqual(config.smartResonanceShadow.enabled, true);
+assert.strictEqual(config.smartResonanceShadow.positionSizeSol, 1);
+assert.strictEqual(config.smartResonanceShadow.entryDelayMs, 200);
+assert.deepStrictEqual(
+  config.smartResonanceShadow.entryProfiles.map((profile) => [
+    profile.id, profile.requiredWallets, profile.resonanceWindowMs,
+  ]),
+  [
+    ['SR_R0', 2, 5_000],
+    ['SR_R1', 2, 5_000],
+    ['SR_R2', 3, 60_000],
+    ['SR_R3', 2, 60_000],
+  ],
+);
+assert.deepStrictEqual(
+  config.smartResonanceShadow.exitProfiles.map((profile) => [
+    profile.id, profile.hardStopPct, profile.maxHoldMs,
+  ]),
+  [
+    ['H20_T60', 20, 60_000], ['H20_T120', 20, 120_000],
+    ['H20_T180', 20, 180_000], ['H20_T240', 20, 240_000],
+    ['H30_T60', 30, 60_000], ['H30_T120', 30, 120_000],
+    ['H30_T180', 30, 180_000], ['H30_T240', 30, 240_000],
+  ],
+);
 assert.strictEqual(config.launchPullbackShadow.enabled, true);
 assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 1);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
