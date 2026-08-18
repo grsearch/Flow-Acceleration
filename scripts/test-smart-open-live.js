@@ -244,6 +244,8 @@ async function main() {
   });
   assert.strictEqual(synchronizedState.contextSlot, 123_460);
   assert.strictEqual(synchronizedState.contextRetries, 1);
+  assert.strictEqual(synchronizedState.contextReads, 2);
+  assert.strictEqual(synchronizedState.contextRpcSource, 'PRIMARY');
   assert.strictEqual(stateReadCalls, 2);
   assert.ok(synchronizedState.tokenProgram.equals(TOKEN_PROGRAM_ID));
   assert.strictEqual(synchronizedState.balanceBefore, 42n);
@@ -257,6 +259,20 @@ async function main() {
     stateExecutor._buyStateAtSignalSlot(stateMint, 123_500),
     (error) => error.code === 'RPC_CONTEXT_BEHIND' && error.contextRetries === 0,
   );
+  let fallbackReads = 0;
+  stateExecutor.contextFallbackConnection = {
+    async getMultipleAccountsInfoAndContext() {
+      fallbackReads += 1;
+      return {
+        context: { slot: 123_501 },
+        value: [stateMintInfo, stateCurveInfo, stateAtaInfo, null],
+      };
+    },
+  };
+  const fallbackState = await stateExecutor._buyStateAtSignalSlot(stateMint, 123_500);
+  assert.strictEqual(fallbackState.contextRpcSource, 'FALLBACK');
+  assert.strictEqual(fallbackState.contextReads, 2);
+  assert.strictEqual(fallbackReads, 1);
 
   const sellExecutor = Object.create(PumpTradeExecutor.prototype);
   const sellMint = PublicKey.unique();
@@ -274,13 +290,13 @@ async function main() {
   sellExecutor.confirmationCommitment = 'confirmed';
   sellExecutor.signer = { publicKey: PublicKey.unique() };
   sellExecutor._tokenProgram = async () => TOKEN_PROGRAM_ID;
-  sellExecutor._tokenBalanceRaw = async (mint, tokenProgram, commitment) => {
+  sellExecutor._tokenBalanceSnapshot = async (mint, tokenProgram, commitment) => {
     assert.ok(mint.equals(sellMint));
     assert.ok(tokenProgram.equals(TOKEN_PROGRAM_ID));
     sellBalanceReads += 1;
-    if (sellBalanceReads === 1) return 1_005_000n;
+    if (sellBalanceReads === 1) return { amount: 1_005_000n, observed: true };
     assert.strictEqual(commitment, 'confirmed');
-    return 0n;
+    return { amount: 0n, observed: true };
   };
   sellExecutor._protocolState = async () => ({
     global: { feeBasisPoints: new BN(0), creatorFeeBasisPoints: new BN(0) },
@@ -300,7 +316,6 @@ async function main() {
   sellExecutor._send = async () => 'sell-all-signature';
   const sellAll = await sellExecutor.sell({
     mint: sellMint.toBase58(),
-    tokenAmountRaw: '1000000',
   });
   assert.strictEqual(instructionSellRaw, '1005000',
     'sell must use the complete live wallet balance, not the stale entry amount');
@@ -326,7 +341,7 @@ async function main() {
   assert.strictEqual(classifyBuyReconciliation({
     err: null,
     confirmationStatus: 'finalized',
-  }, 0n).state, 'EMPTY');
+  }, 0n).state, 'UNKNOWN');
   assert.strictEqual(classifyBuyReconciliation(null, 0n).state, 'UNKNOWN');
 
   const exact = evaluatePrimarySignal({
