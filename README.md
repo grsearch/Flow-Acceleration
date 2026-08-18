@@ -34,7 +34,7 @@ never sign or send transactions. Proven-negative entry families remain disabled.
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
 
-全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前实盘只使用毕业后 PumpSwap 深跌反弹规则，不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、Holder 变化、KOL 或 AI 评分；默认 `DISABLED`，不会读取私钥或提交交易。
+全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前只有 `QL-STRICT-PR` 允许产生新实盘仓位；其余实盘定义只保留历史展示和存量退出。该规则不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、KOL 或 AI 评分；全局默认 `DISABLED`，不会读取私钥或提交交易。
 
 ## 数据链路
 
@@ -116,7 +116,7 @@ W3 = T-2s ~ T
 - `cya_early_pyramid_shadow_positions`：独立的 CYA Early Pyramid Shadow K；保存早期 Curve 订单流入场、分批加仓、两次减仓、尾仓退出及逐仓估算成本。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
-SQLite 使用 WAL 和批量写入。Raw Trade 默认保留最近 72 小时热数据；主交易进程不再同步压缩或删除数据，避免阻塞 gRPC、策略计算与 Dashboard。每日 COS 导出完成、SHA256 上传且远端对象验证成功后，独立低优先级维护进程才会分批删除超过 `FLOW_RETENTION_HOT_RAW_HOURS` 的 Raw Trade。Signals、Future Labels、Shadow 仓位和实盘仓位不会被该任务删除。
+SQLite 使用 WAL 和批量写入。Raw Trade 默认保留最近 48 小时热数据；主交易进程不再同步压缩、删除或执行 `PRAGMA optimize`，避免阻塞 gRPC、策略计算与 Dashboard。每日 COS 导出完成、SHA256 上传且远端对象验证成功后，独立低优先级维护进程才会分批删除超过 `FLOW_RETENTION_HOT_RAW_HOURS` 的 Raw Trade，并执行受限的数据库优化。Signals、Future Labels、Shadow 仓位和实盘仓位不会被该任务删除。启动期间由独立轻量进程显示“系统正在启动”页面；各 Shadow 共用一次近期交易回放，避免重复读取大型数据库。
 
 ## 运行
 
@@ -457,18 +457,18 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-旧的 Primary Early、Graduation Acceleration O 与 XLEG-V3 实盘入口已经停止新开仓，相关历史数据继续保留用于研究及存量仓位退出。当前所有实盘策略的默认单笔仓位统一为 `0.1 SOL`；旧服务器 `.env` 中历史默认值 `0.05` 或 `1` 会在升级后自动继承为 `0.1 SOL`：
+旧的 Primary Early、Graduation Acceleration O、Migration Continuity M、GD25 F1 与各 XLEG 历史版本均已停止新开仓，相关历史数据继续保留用于研究及存量仓位退出。当前仍允许新开仓的是 `QL-STRICT-PR`。所有实盘策略的默认单笔仓位统一为 `0.1 SOL`；旧服务器 `.env` 中历史默认值 `0.05` 或 `1` 会在升级后自动继承为 `0.1 SOL`：
 
 ```text
-M / migration_continuity_mc_c5_e120_live
+M-C5-E120 / migration_continuity_mc_c5_e120_live（停止新开仓）
 毕业后5秒 Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6
 → PumpSwap买入0.1 SOL → 20%硬止损或固定120秒卖出
 
-QL Strict Protected / quality_leader_ql_strict_protected_live
+QL-STRICT-PR / quality_leader_ql_strict_protected_live
 10秒涨幅≥140%、20秒回撤≤12%、Retention≥80%，且买家/净流入继续增长
 → Bonding Curve买入0.1 SOL → 不分批的阶梯保护Runner，30秒未走强退出、5分钟兜底
 
-GD25 F1 / post_gd25_35_f1_xleg_live_v1
+GD25-35-F1-XLEG / post_gd25_35_f1_xleg_live_v1（停止新开仓）
 毕业后120秒内，1秒跌25%–35%，低点1秒内反弹2%–5%
 → 每Mint只消费首次合格机会 → PumpSwap买入0.1 SOL
 → 5秒内+18%快速止盈；否则+8%激活、峰值回撤3%；6秒仍亏损退出；15秒兜底
@@ -477,7 +477,7 @@ O / graduation_accel_o_c80_d5_b2_s0_nc_live（停止新开仓）
 保留历史展示与存量仓位退出；Graduation Acceleration Shadow O 继续独立观察
 ```
 
-M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_strategy_decisions`，仓位和订单保存各自 `strategy_id`，不会混入原 Shadow 统计。GD25 F1 使用全新的策略 ID，不会混入旧 `post_gd25_35_xleg` 的两次开仓历史。首次机会计数保存在 SQLite：即使首次链上尝试被风控拒绝或执行失败，后续反弹也不会替换样本；服务重启同样不会重置。O 与三个历史 XLEG 版本继续加载用于历史展示和存量仓位退出，但 O 和 V3 均停止新开仓。
+M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_strategy_decisions`，仓位和订单保存各自 `strategy_id`，不会混入原 Shadow 统计。M 与 GD25 F1 的实盘定义继续加载，以便历史展示和存量仓位退出，但 `entryEnabled` 在代码中固定为 `false`，旧服务器 `.env` 无法意外重新开启。Dashboard 左侧列表与右侧详情统一显示策略编号，方便按编号核对实盘和 Shadow 样本。
 
 执行模块有三种模式：
 
@@ -487,7 +487,7 @@ M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_s
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-M 与 GD25 F1 使用官方 PumpSwap SDK，O 的历史存量仓位仍可在毕业前使用 Pump Bonding Curve、毕业后使用 PumpSwap。买入均为固定 SOL 输入，默认 `0.1 SOL` 是单笔硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、GD25 F1 每 Mint 只取首次匹配机会、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
+QL-STRICT-PR 使用 Bonding Curve 固定 SOL 输入；M 与 GD25 F1 仅为存量退出继续使用官方 PumpSwap SDK。默认 `0.1 SOL` 是单笔硬上限；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
 
 M 的卖出规则与 Shadow E120 一致：20%硬止损，否则从真实成交时间起固定120秒后卖出全部余额。如 O 仍有存量仓位，则继续沿用原退出规则：毕业后首笔可执行 PumpSwap 行情卖出50%核心仓位，剩余50%按 `+20/40/80/150/300%` 对应 `10/15/20/25/30%` 峰值回撤退出；毕业前和毕业后各有5分钟兜底，整体保留30%硬止损。最终卖出失败会按配置重试并保留 `EXIT_FAILED`，防止同 Mint 再开仓；紧急开关和单策略停开都只阻止新开仓，不阻止存量退出。
 
@@ -543,7 +543,7 @@ INSTALL_DAILY_EXPORT=1 sudo -E bash deploy/install.sh /opt/flow-acceleration
 - Region：`na-siliconvalley`
 - Endpoint：`cos.na-siliconvalley.myqcloud.com`
 - COS 路径：`flow-acceleration/daily/YYYY/MM/DD/`
-- 本地保留：7 天
+- 本地保留：2 天（COS 远端验证成功后清理更旧的本地归档）
 
 填写 `FLOW_BACKUP_COS_SECRET_ID` 与 `FLOW_BACKUP_COS_SECRET_KEY` 后，先手动验证一次，再查看下一次计划时间：
 
@@ -555,7 +555,7 @@ systemctl list-timers flow-acceleration-backup.timer --all
 
 Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，即使服务器位于硅谷也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予该 Bucket 前缀所需的上传和查询权限。
 
-远端验证通过后，状态会先进入 `CLEANING`，再运行 `scripts/cleanup-research-retention.js`。默认保留 72 小时 Raw Trade，每批删除 25,000 行、每日最多 5,000,000 行，并在批次间让出磁盘；上传失败、校验文件缺失、状态过期或数据库繁忙超过重试上限时均停止清理。报告写入 `data/exports/retention-last-run.json`。维护过程明确不执行 `wal_checkpoint` 或 `VACUUM`，所以 SQLite 文件不会立刻从磁盘缩小，但释放的页会被后续写入复用，数据库不再持续无上限增长。已有 23GB 文件如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
+远端验证通过后，状态会先进入 `CLEANING`，再运行 `scripts/cleanup-research-retention.js`。默认保留 48 小时 Raw Trade，每批删除 25,000 行、每日最多 5,000,000 行，并在批次间让出磁盘；上传失败、校验文件缺失、状态过期或数据库繁忙超过重试上限时均停止清理。原本位于实时服务启动路径的 `PRAGMA optimize` 已移动到此低优先级维护任务，并设置较小的分析上限。报告写入 `data/exports/retention-last-run.json`。维护过程明确不执行 `wal_checkpoint` 或 `VACUUM`，所以 SQLite 文件不会立刻从磁盘缩小，但释放的页会被后续写入复用，数据库不再持续无上限增长。已有大型数据库如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
 
 安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传、验证与清理均有独立超时和失败保护，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`CLEANING`、`DONE` 或 `FAILED`），COSCLI 或清理任务卡住时不会无限占用下一次任务。
 
