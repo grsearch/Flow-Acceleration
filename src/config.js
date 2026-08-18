@@ -1242,6 +1242,88 @@ const config = {
     }),
   },
 
+  // Strictly causal multi-wallet resonance study. A signal exists only when the
+  // second or third distinct monitored wallet BUY has actually been observed.
+  // The signal price is never treated as a fill: every cohort waits for the
+  // first comparable market trade after the configured execution delay.
+  smartResonanceShadow: {
+    enabled: booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
+    featureWindowMs: integerEnv('FLOW_SMART_RESONANCE_FEATURE_WINDOW_MS', 5_000, {
+      min: 1_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_SMART_RESONANCE_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_SMART_RESONANCE_EPISODE_COOLDOWN_MS', 60_000, {
+      min: 1_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_SMART_RESONANCE_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_RESONANCE_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_RESONANCE_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_RESONANCE_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_RESONANCE_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_SMART_RESONANCE_MAX_ENTRY_DROP_PCT', 30, {
+      min: 0, max: 100,
+    }),
+    maxCrossMarketPriceJumpPct: numberEnv(
+      'FLOW_SMART_RESONANCE_MAX_CROSS_MARKET_JUMP_PCT',
+      50,
+      { min: 0, max: 1_000 },
+    ),
+    entryProfiles: [
+      {
+        id: 'SR_R0',
+        label: 'SR-R0 · 2 Smart Wallet / 5s baseline',
+        resonanceWindowMs: 5_000,
+        requiredWallets: 2,
+      },
+      {
+        id: 'SR_R1',
+        label: 'SR-R1 · 2 Wallet/5s + public Buyers20 + BuyFlow15 + Top1<=25%',
+        resonanceWindowMs: 5_000,
+        requiredWallets: 2,
+        minPublicBuyers5s: 20,
+        minPublicBuyFlow5sSol: 15,
+        maxLargestBuyerSharePct: 25,
+      },
+      {
+        id: 'SR_R2',
+        label: 'SR-R2 · 3 Wallet/60s + public Buyers20 + Top1<=20%',
+        resonanceWindowMs: 60_000,
+        requiredWallets: 3,
+        minPublicBuyers5s: 20,
+        maxLargestBuyerSharePct: 20,
+      },
+      {
+        id: 'SR_R3',
+        label: 'SR-R3 · 2 Wallet/60s + pre-grad AGE25s + Curve60-80 + Buyers20',
+        resonanceWindowMs: 60_000,
+        requiredWallets: 2,
+        minPublicBuyers5s: 20,
+        requirePreGraduation: true,
+        requiredMarket: 'PUMP_BONDING_CURVE',
+        maxAgeMs: 25_000,
+        minCurvePct: 60,
+        maxCurvePct: 80,
+      },
+    ],
+    exitProfiles: [20, 30].flatMap((hardStopPct) => (
+      [60, 120, 180, 240].map((holdSeconds) => ({
+        id: `H${hardStopPct}_T${holdSeconds}`,
+        label: `Hard stop ${hardStopPct}% / fixed ${holdSeconds}s`,
+        hardStopPct,
+        maxHoldMs: holdSeconds * 1_000,
+      }))
+    )),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
+    }),
+  },
+
   // Independent right-tail study. It consumes the existing PumpSwap trade stream,
   // opens no real positions, and never treats an unobservable exit as a total loss.
   bigWinnerShadow: {
