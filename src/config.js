@@ -306,6 +306,7 @@ const config = {
   liveTrading: {
     ...guardedLiveTrading,
     rpcUrl: process.env.FLOW_RPC_URL || '',
+    contextFallbackRpcUrl: process.env.FLOW_LIVE_CONTEXT_FALLBACK_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
     maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 3, { min: 1, max: 20 }),
@@ -332,11 +333,11 @@ const config = {
     confirmationCommitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
       || process.env.FLOW_LIVE_COMMITMENT
       || 'confirmed',
-    contextSlotRetryCount: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRIES', 2, {
+    contextSlotRetryCount: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRIES', 6, {
       min: 0,
       max: 10,
     }),
-    contextSlotRetryDelayMs: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRY_DELAY_MS', 25, {
+    contextSlotRetryDelayMs: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRY_DELAY_MS', 50, {
       min: 0,
       max: 500,
     }),
@@ -1294,6 +1295,56 @@ const config = {
         maxRunupPct: 40, maxDistanceFromHigh10sPct: 10, maxJump2sPct: 20,
         minRecentFlowRatio: 0.5,
       },
+      {
+        id: 'PP_DIRECT_10',
+        label: 'PP-Direct · 毕业后10–30秒 · 参与度持续确认',
+        family: 'PARTICIPATION', mode: 'DIRECT', minAgeMs: 10_000, maxAgeMs: 30_000,
+        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
+        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
+        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
+        exitProfileIds: ['XFIX120_H15_PP', 'XFIX240_H15_PP', 'X25_RATCHET_PP'],
+        capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
+          ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
+        id: 'PP_PULLBACK_8_20',
+        label: 'PP-Pullback · 参与度确认后首次回踩8–20% + 二次加速',
+        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
+        qualificationMaxAgeMs: 30_000,
+        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
+        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
+        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
+        minPullbackPct: 8, maxPullbackPct: 20,
+        minReboundPct: 2, maxReboundPct: 8,
+        minNetFlow3sSol: 2, minBuyers3s: 4, requireFlowAcceleration: true,
+        exitProfileIds: ['XFIX120_H15_PP', 'XFIX240_H15_PP', 'X25_RATCHET_PP'],
+        capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
+          ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
+        id: 'PP_PULLBACK_8_30',
+        label: 'PP-Pullback Broad · 回踩8–30% + 温和二次加速',
+        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 75_000,
+        qualificationMaxAgeMs: 30_000,
+        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
+        maxLargestBuyerShare10s: 0.6, minRecentBuyers5s: 7,
+        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.25,
+        minPullbackPct: 8, maxPullbackPct: 30,
+        minReboundPct: 1.5, maxReboundPct: 10,
+        minNetFlow3sSol: 1, minBuyers3s: 3, requireFlowAcceleration: true,
+        exitProfileIds: ['XFIX120_H15_PP', 'XFIX240_H15_PP', 'X25_RATCHET_PP'],
+        capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
+          ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
     ],
     exitProfiles: [
       {
@@ -1351,6 +1402,32 @@ const config = {
         id: 'XFIX120_H15', label: '-15% hard stop / otherwise fixed 120s',
         mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
         trailingTiers: [], profitFloors: [], maxHoldMs: 120_000,
+      },
+      {
+        id: 'XFIX120_H15_PP', label: 'PP · -15% hard stop / otherwise fixed 120s',
+        entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
+        mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
+        trailingTiers: [], profitFloors: [], maxHoldMs: 120_000,
+      },
+      {
+        id: 'XFIX240_H15_PP', label: 'PP · -15% hard stop / otherwise fixed 240s',
+        entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
+        mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
+        trailingTiers: [], profitFloors: [], maxHoldMs: 240_000,
+      },
+      {
+        id: 'X25_RATCHET_PP', label: 'PP · 25% Core + 75% protected runner',
+        entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
+        coreActivationPct: 20, coreWeightPct: 25, hardStopPct: 15,
+        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+        trailingTiers: [],
+        profitFloors: [
+          { activationPct: 50, lockPct: 20 },
+          { activationPct: 100, lockPct: 60 },
+          { activationPct: 150, lockPct: 100 },
+          { activationPct: 250, lockPct: 170 },
+        ],
+        maxHoldMs: 300_000,
       },
     ],
     costModel: normalizeCostModel({
@@ -2650,6 +2727,43 @@ const config = {
         exitProfileIds: ['G2_XLEG'],
       },
       {
+        id: 'GE30_R23_F3_EXEC',
+        label: 'G-F3-EXEC · 前三次机会 · 真实AMM容量冲击',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 3,
+        exitProfileIds: ['G3EXEC_XLEG'],
+        capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_MIGRATED_REBOUND_F23_EXEC_CAPACITY_SOLS',
+          ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
+        id: 'GE30_R23_F2_ONLY_EXEC',
+        label: 'G-F2-EXEC · 只取第二次机会 · 真实AMM容量冲击',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        minSignalOrdinal: 2,
+        maxSignalsPerMint: 2,
+        exitProfileIds: ['G2EXEC_XLEG'],
+        capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_MIGRATED_REBOUND_F23_EXEC_CAPACITY_SOLS',
+          ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
         id: 'GE30_R23_F1_NIGHT',
         label: 'G-TIME夜间 · 18:00–08:00 · 首次',
         windowMs: 1_000,
@@ -2764,6 +2878,8 @@ const config = {
       ...[
         ['GEXEC_XLEG', ['GE30_R23_F1_EXEC'], '容量感知 XLEG'],
         ['G2_XLEG', ['GE30_R23_F2_ONLY'], '第二次机会 XLEG'],
+        ['G3EXEC_XLEG', ['GE30_R23_F3_EXEC'], '前三次机会容量感知 XLEG'],
+        ['G2EXEC_XLEG', ['GE30_R23_F2_ONLY_EXEC'], '第二次机会容量感知 XLEG'],
         ['GTIME_XLEG', ['GE30_R23_F1_NIGHT', 'GE30_R23_F1_DAY'], '分时段 XLEG'],
       ].map(([id, entryProfileIds, label]) => ({
         id,
