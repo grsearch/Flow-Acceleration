@@ -12,6 +12,9 @@ const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
 const { SmartOpenShadowSuite } = require('./core/SmartOpenShadowSuite');
 const { FlowSmartConfirmShadowSuite } = require('./core/FlowSmartConfirmShadowSuite');
 const { SmartLikeEarlyShadowSuite } = require('./core/SmartLikeEarlyShadowSuite');
+const {
+  SmartResonanceRightTailShadowSuite,
+} = require('./core/SmartResonanceRightTailShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
@@ -62,6 +65,12 @@ function createRuntime(runtimeConfig = config) {
     executor,
   });
   trader.start();
+  const smartWallets = new Set([
+    ...runtimeConfig.smartWallets,
+    ...(runtimeConfig.smartLikeEarlyShadow.priorityWallets || []),
+    ...(runtimeConfig.smartLikeEarlyShadow.walletClusters || [])
+      .flatMap((cluster) => cluster.wallets || []),
+  ]);
   const signalShadow = new PrimarySignalShadowSuite({
     config: runtimeConfig.signalShadow,
     store,
@@ -92,6 +101,14 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   smartLikeEarlyShadow.start();
+  const smartResonanceShadow = new SmartResonanceRightTailShadowSuite({
+    config: {
+      ...runtimeConfig.smartResonanceShadow,
+      smartWallets: [...smartWallets],
+    },
+    store,
+  });
+  smartResonanceShadow.start();
   const launchPullbackShadow = new LaunchPullbackShadowSuite({
     config: runtimeConfig.launchPullbackShadow,
     store,
@@ -174,6 +191,7 @@ function createRuntime(runtimeConfig = config) {
     smartOpenShadow,
     flowSmartConfirmShadow,
     smartLikeEarlyShadow,
+    smartResonanceShadow,
     launchPullbackShadow,
     launchQualityObserver,
     migratedDropReboundShadow,
@@ -187,12 +205,6 @@ function createRuntime(runtimeConfig = config) {
     bigWinnerShadow,
     graduationAccelerationShadow,
   });
-  const smartWallets = new Set([
-    ...runtimeConfig.smartWallets,
-    ...(runtimeConfig.smartLikeEarlyShadow.priorityWallets || []),
-    ...(runtimeConfig.smartLikeEarlyShadow.walletClusters || [])
-      .flatMap((cluster) => cluster.wallets || []),
-  ]);
   const runtimeMetrics = {
     parsedEvents: 0,
     parseErrors: 0,
@@ -221,6 +233,7 @@ function createRuntime(runtimeConfig = config) {
       ...rangeScalperShadow.trackedMints(now),
       ...cyaEarlyPyramidShadow.trackedMints(),
       ...smartLikeEarlyShadow.trackedMints(),
+      ...smartResonanceShadow.trackedMints(),
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
       ...holderGrowthShadow.trackedMints(),
@@ -364,6 +377,7 @@ function createRuntime(runtimeConfig = config) {
           : null;
         store.queueRawTrade(trade);
         observeShadow('smartLikeEarly', () => smartLikeEarlyShadow.observeTrade(trade));
+        observeShadow('smartResonance', () => smartResonanceShadow.observeTrade(trade));
         observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
         observeShadow('migrationContinuity', () => migrationContinuityShadow.observeTrade(trade));
         observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
@@ -395,6 +409,9 @@ function createRuntime(runtimeConfig = config) {
             ));
             observeShadow('smartLikeEarlyEvent', () => (
               smartLikeEarlyShadow.onSmartWalletEvent(normalizedSmartEvent)
+            ));
+            observeShadow('smartResonanceEvent', () => (
+              smartResonanceShadow.onSmartWalletEvent(normalizedSmartEvent)
             ));
             if (trade.side === 'BUY') {
               observeShadow('smartPullbackEvent', () => (
@@ -458,6 +475,11 @@ function createRuntime(runtimeConfig = config) {
       + `${runtimeConfig.smartLikeEarlyShadow.addProfiles.length} add policies x `
       + `${runtimeConfig.smartLikeEarlyShadow.exitProfiles.length} exits; isolated table; `
       + 'causal fills only; sends transactions=false.',
+    );
+    console.log(
+      `Smart Resonance Right-Tail Shadow SR: ${runtimeConfig.smartResonanceShadow.entryProfiles.length} `
+      + `causal entries x ${runtimeConfig.smartResonanceShadow.exitProfiles.length} fixed-hold exits; `
+      + 'distinct-wallet edge only; sends transactions=false.',
     );
     console.log(
       `Launch Quality Observer: snapshots=${runtimeConfig.launchQualityObserver.snapshotHorizonsMs
@@ -541,6 +563,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('smartOpenAdvance', () => smartOpenShadow.advanceTime(now));
       observeShadow('flowSmartConfirmAdvance', () => flowSmartConfirmShadow.advanceTime(now));
       observeShadow('smartLikeEarlyAdvance', () => smartLikeEarlyShadow.advanceTime(now));
+      observeShadow('smartResonanceAdvance', () => smartResonanceShadow.advanceTime(now));
       observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
       observeShadow('holderGrowthAdvance', () => holderGrowthShadow.advanceTime(now));
@@ -577,6 +600,7 @@ function createRuntime(runtimeConfig = config) {
     smartOpenShadow.stop();
     flowSmartConfirmShadow.stop();
     smartLikeEarlyShadow.stop();
+    smartResonanceShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     holderGrowthShadow.stop();
@@ -607,6 +631,7 @@ function createRuntime(runtimeConfig = config) {
       smartOpenShadow: smartOpenShadow.health(),
       flowSmartConfirmShadow: flowSmartConfirmShadow.health(),
       smartLikeEarlyShadow: smartLikeEarlyShadow.health(),
+      smartResonanceShadow: smartResonanceShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       holderGrowthShadow: holderGrowthShadow.health(),
@@ -625,7 +650,7 @@ function createRuntime(runtimeConfig = config) {
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
-    smartLikeEarlyShadow,
+    smartLikeEarlyShadow, smartResonanceShadow,
     launchPullbackShadow,
     launchQualityObserver, holderGrowthShadow, qualityLeaderShadow, bigWinnerShadow,
     migratedDropReboundShadow,
