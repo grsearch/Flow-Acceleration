@@ -358,6 +358,13 @@ class PumpTradeExecutor {
       commitment: this.readCommitment,
       confirmTransactionInitialTimeout: 20_000,
     });
+    this.contextFallbackConnection = config.contextFallbackRpcUrl
+      && config.contextFallbackRpcUrl !== config.rpcUrl
+      ? new Connection(config.contextFallbackRpcUrl, {
+        commitment: this.readCommitment,
+        confirmTransactionInitialTimeout: 20_000,
+      })
+      : null;
     const secret = secretBytes(config.privateKey);
     if (secret.length === 32) this.signer = Keypair.fromSeed(secret);
     else if (secret.length === 64) this.signer = Keypair.fromSecretKey(secret);
@@ -463,33 +470,52 @@ class PumpTradeExecutor {
       TOKEN_2022_PROGRAM_ID,
     );
     const accountKeys = [mint, bondingCurvePda(mint), legacyAta, token2022Ata];
-    const retryLimit = Math.max(0, Number(this.config?.contextSlotRetryCount ?? 2));
-    const retryDelayMs = Math.max(0, Number(this.config?.contextSlotRetryDelayMs ?? 25));
+    const retryLimit = Math.max(0, Number(this.config?.contextSlotRetryCount ?? 6));
+    const retryDelayMs = Math.max(0, Number(this.config?.contextSlotRetryDelayMs ?? 50));
+    const sources = [
+      { name: 'PRIMARY', connection: this.connection },
+      ...(this.contextFallbackConnection
+        ? [{ name: 'FALLBACK', connection: this.contextFallbackConnection }]
+        : []),
+    ];
     let response;
     let contextRetries = 0;
-    while (true) {
-      try {
-        response = await this.connection.getMultipleAccountsInfoAndContext(
-          accountKeys,
-          commitmentConfig(this.readCommitment, signalSlot),
-        );
-        break;
-      } catch (error) {
-        if (!isMinimumContextSlotError(error)) throw error;
-        if (contextRetries >= retryLimit) {
-          const contextError = errorWithCode(
-            `RPC did not reach signal slot ${normalizedSlot(signalSlot)} after ${contextRetries + 1} reads`,
-            'RPC_CONTEXT_BEHIND',
+    let contextRpcSource = 'PRIMARY';
+    let lastContextError = null;
+    let totalReads = 0;
+    for (const source of sources) {
+      let sourceRetries = 0;
+      while (true) {
+        totalReads += 1;
+        try {
+          response = await source.connection.getMultipleAccountsInfoAndContext(
+            accountKeys,
+            commitmentConfig(this.readCommitment, signalSlot),
           );
-          contextError.contextRetries = contextRetries;
-          contextError.cause = error;
-          throw contextError;
-        }
-        contextRetries += 1;
-        if (retryDelayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          contextRpcSource = source.name;
+          break;
+        } catch (error) {
+          if (!isMinimumContextSlotError(error)) throw error;
+          lastContextError = error;
+          if (sourceRetries >= retryLimit) break;
+          sourceRetries += 1;
+          contextRetries += 1;
+          if (retryDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          }
         }
       }
+      if (response) break;
+    }
+    if (!response) {
+      const contextError = errorWithCode(
+        `RPC did not reach signal slot ${normalizedSlot(signalSlot)} after ${totalReads} reads`,
+        'RPC_CONTEXT_BEHIND',
+      );
+      contextError.contextRetries = contextRetries;
+      contextError.contextReads = totalReads;
+      contextError.cause = lastContextError;
+      throw contextError;
     }
     const [mintAccountInfo, bondingCurveAccountInfo, legacyAtaInfo, token2022AtaInfo]
       = response.value;
@@ -527,6 +553,8 @@ class PumpTradeExecutor {
       associatedUserAccountInfo,
       contextSlot: response.context.slot,
       contextRetries,
+      contextReads: totalReads,
+      contextRpcSource,
     };
   }
 
@@ -668,6 +696,8 @@ class PumpTradeExecutor {
         ? null
         : state.contextSlot - minimumContextSlot;
       execution.contextRetries = state.contextRetries;
+      execution.contextReads = state.contextReads;
+      execution.contextRpcSource = state.contextRpcSource;
       execution.rpcSlots = {
         minimumContextSlot,
         quoteContextSlot: state.contextSlot,
@@ -778,6 +808,7 @@ class PumpTradeExecutor {
       if (Number.isFinite(error.contextRetries)) {
         execution.contextRetries = error.contextRetries;
       }
+      if (Number.isFinite(error.contextReads)) execution.contextReads = error.contextReads;
       error.execution = execution;
       throw error;
     }
