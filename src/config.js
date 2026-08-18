@@ -371,14 +371,14 @@ const config = {
     strategies: [
       {
         id: 'migration_continuity_mc_c5_e120_live',
+        code: 'M-C5-E120',
         label: 'Migration Continuity M · 固定120秒',
         ruleVersion: 'migration_continuity_mc_c5_e120_live_v1',
         signalSource: 'MIGRATION_CONTINUITY_MC_C5',
         enabled: booleanEnv('FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_ENTRY_ENABLED',
-          true,
-        ),
+        // Historical display and already-open exits stay loaded, but this rule
+        // is no longer allowed to create a new live position.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL',
@@ -408,6 +408,7 @@ const config = {
       },
       {
         id: 'quality_leader_ql_strict_protected_live',
+        code: 'QL-STRICT-PR',
         label: 'Quality Leader QL Strict · Protected Runner',
         ruleVersion: 'quality_leader_ql_strict_protected_live_v1',
         signalSource: 'QUALITY_LEADER_QL_STRICT_PROTECTED',
@@ -480,6 +481,7 @@ const config = {
       },
       {
         id: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
+        code: 'O-C80-D5-B2',
         label: 'Graduation Acceleration O · Curve80',
         ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v1',
         signalSource: 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC',
@@ -518,6 +520,7 @@ const config = {
       },
       {
         id: 'post_gd20_35_r1_5_5_age60_xleg_v3',
+        code: 'G20-35-R1.5-A60-V3',
         label: '毕业后宽幅深跌反弹 · XLEG-V3（停止新开仓）',
         ruleVersion: 'post_migration_age60_drop20_35_rebound1_5_5_xleg_v3',
         enabled: booleanEnv('FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_ENABLED', true),
@@ -619,6 +622,7 @@ const config = {
       },
       {
         id: 'post_gd25_32_r2_4_age30_xleg_v2',
+        code: 'G25-32-R2-4-A30-V2',
         label: '毕业后精选深跌反弹 · XLEG-V2（停止新开仓）',
         ruleVersion: 'post_migration_age30_drop25_32_rebound2_4_xleg_v2',
         enabled: booleanEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_ENABLED', true),
@@ -718,10 +722,13 @@ const config = {
       },
       {
         id: 'post_gd25_35_f1_xleg_live_v1',
+        code: 'GD25-35-F1-XLEG',
         label: '毕业后深跌反弹 · GD25 F1 XLEG',
         ruleVersion: 'post_migration_gd25_35_first_xleg_live_v1',
         enabled: booleanEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_ENABLED', true),
-        entryEnabled: booleanEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_ENTRY_ENABLED', true),
+        // Preserve the complete live sample and any outstanding exit handling,
+        // while permanently stopping new entries for this version.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_POST_GD25_35_F1_XLEG_POSITION_SOL',
@@ -804,6 +811,7 @@ const config = {
       },
       {
         id: 'post_gd25_35_xleg',
+        code: 'GD25-35-XLEG-V1',
         label: '毕业后深跌反弹 · XLEG（旧版停止新开仓）',
         ruleVersion: 'post_migration_gd25_35_xleg_reentry2_v2',
         enabled: true,
@@ -3925,10 +3933,14 @@ const config = {
 
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
-    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 72, { min: 24 }),
+    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 48, { min: 24 }),
     archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
     flushMs: integerEnv('FLOW_DB_FLUSH_MS', 250, { min: 25 }),
     flushMax: integerEnv('FLOW_DB_FLUSH_MAX', 1_000, { min: 10 }),
+    startupReplayCacheMs: integerEnv('FLOW_STARTUP_REPLAY_CACHE_MS', 15 * 60_000, {
+      min: 0,
+      max: 60 * 60_000,
+    }),
   },
 
   server: {
