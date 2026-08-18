@@ -145,6 +145,9 @@
     .strategy-nav-item b, .strategy-nav-item small { display: block; }
     .strategy-nav-item b { margin-bottom: 4px; font-size: 13px; }
     .strategy-nav-item small { color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .strategy-code { display: inline-flex; align-items: center; margin: 0 6px 3px 0; padding: 2px 6px; border: 1px solid rgba(85,216,208,.45); border-radius: 999px; color: var(--cyan); font-size: 10px; font-weight: 850; letter-spacing: .04em; vertical-align: middle; }
+    .strategy-code-bar { display: flex; align-items: center; gap: 10px; min-height: 38px; margin-bottom: 12px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--muted); background: rgba(85,216,208,.035); }
+    .strategy-code-bar b { color: var(--cyan); font-size: 13px; letter-spacing: .04em; }
     .strategy-content { min-width: 0; }
     .strategy-pane { position: relative; min-height: 120px; }
     .strategy-pane[hidden], .strategy-load-status[hidden] { display: none; }
@@ -338,70 +341,71 @@
           <p>每次只加载右侧选中的策略，历史数据与新实验彼此独立。</p>
           <div class="strategy-nav-heading">实盘策略</div>
           <div class="strategy-selector" id="live-execution-strategy-selector">
-            <button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution" data-live-execution-strategy="post_gd25_35_f1_xleg_live_v1">
-              <b>毕业后深跌反弹 · GD25 F1 XLEG</b><small>PumpSwap · AGE≤120s · 跌25–35% · 反弹2–5% · 首次机会</small>
+            <button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution" data-live-execution-strategy="quality_leader_ql_strict_protected_live" data-strategy-code="QL-STRICT-PR">
+              <b><span class="strategy-code">QL-STRICT-PR</span>Quality Leader Protected Runner</b><small>Bonding Curve · Strict质量确认 · 0.1 SOL</small>
             </button>
           </div>
           <div class="strategy-nav-heading">Shadow 策略</div>
           <div class="strategy-selector">
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-open">
-              <b>Smart OPEN · D（已停）</b><small>历史保留，不再生成新仓位</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-open" data-strategy-code="D0/D1/D2">
+              <b><span class="strategy-code">D0/D1/D2</span>Smart OPEN（已停）</b><small>历史保留，不再生成新仓位</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-smart-confirm">
-              <b>Flow → Smart 确认 · L</b><small>Primary Rank 1 后 Smart OPEN，再按下一笔成交入场</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-smart-confirm" data-strategy-code="L">
+              <b><span class="strategy-code">L</span>Flow → Smart 确认</b><small>Primary Rank 1 后 Smart OPEN，再按下一笔成交入场</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-like-early">
-              <b>Smart-Like Early · SLE</b><small>早期不追涨入场、顺势加仓、分批止盈与长尾退出</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-like-early" data-strategy-code="SLE">
+              <b><span class="strategy-code">SLE</span>Smart-Like Early</b><small>早期不追涨入场、顺势加仓、分批止盈与长尾退出</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback">
-              <b>Launch 回踩 · F / FT / FD / FO / FC / FA / FR</b><small>旧组保留；新增前置 Flow 共振与多退出对照</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-pullback" data-strategy-code="F/FT/FD/FO/FC/FA/FR">
+              <b><span class="strategy-code">F/FT/FD/FO/FC/FA/FR</span>Launch 回踩</b><small>旧组保留；新增前置 Flow 共振与多退出对照</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migrated-rebound">
-              <b>生命周期超跌反弹 · G / GQ</b><small>新增200ms极速反弹与0.05～1 SOL容量分层</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migrated-rebound" data-strategy-code="G/GQ">
+              <b><span class="strategy-code">G/GQ</span>生命周期超跌反弹</b><small>新增200ms极速反弹与0.05～1 SOL容量分层</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migration-continuity">
-              <b>Migration Continuity · M</b><small>毕业后5秒质量确认，60～300秒退出组合</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migration-continuity" data-strategy-code="M">
+              <b><span class="strategy-code">M</span>Migration Continuity</b><small>毕业后5秒质量确认，60～300秒退出组合</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="range-scalper">
-              <b>PumpSwap 区间波段 · J（已停）</b><small>负期望，历史数据保留</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="range-scalper" data-strategy-code="J">
+              <b><span class="strategy-code">J</span>PumpSwap 区间波段（已停）</b><small>负期望，历史数据保留</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="cya-early-pyramid">
-              <b>CYA Early Pyramid · K（已停）</b><small>负期望，历史数据保留</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="cya-early-pyramid" data-strategy-code="K">
+              <b><span class="strategy-code">K</span>CYA Early Pyramid（已停）</b><small>负期望，历史数据保留</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="bonding-momentum">
-              <b>Bonding Curve 动量 · H（已停）</b><small>负期望，历史数据保留</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="bonding-momentum" data-strategy-code="H">
+              <b><span class="strategy-code">H</span>Bonding Curve 动量（已停）</b><small>负期望，历史数据保留</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="graduation-hold">
-              <b>毕业概率持仓 · I（已停）</b><small>负期望，历史数据保留</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="graduation-hold" data-strategy-code="I0/I1/I2">
+              <b><span class="strategy-code">I0/I1/I2</span>毕业概率持仓（已停）</b><small>负期望，历史数据保留</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="graduation-acceleration">
-              <b>毕业加速 · O / O90→M5</b><small>Curve90后以首个PumpSwap 5秒质量决定尾仓</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="graduation-acceleration" data-strategy-code="O/O90-M5">
+              <b><span class="strategy-code">O/O90-M5</span>毕业加速</b><small>Curve90后以首个PumpSwap 5秒质量决定尾仓</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-quality">
-              <b>Launch Quality · E</b><small>只观察选币、存活与首次回踩</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-quality" data-strategy-code="E">
+              <b><span class="strategy-code">E</span>Launch Quality</b><small>只观察选币、存活与首次回踩</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="holder-growth">
-              <b>Observed Holder Growth · N</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="holder-growth" data-strategy-code="N/NQ">
+              <b><span class="strategy-code">N/NQ</span>Observed Holder Growth</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="quality-leader">
-              <b>Quality Leader · QL</b><small>10s强势 + 20s质量确认，Barbell / 长尾退出</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="quality-leader" data-strategy-code="QL">
+              <b><span class="strategy-code">QL</span>Quality Leader</b><small>10s强势 + 20s质量确认，Barbell / 长尾退出</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="big-winner">
-              <b>Big Winner + Participation · BW/PP</b><small>PBR/FLOW + 毕业后参与度持续与首次回踩</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="big-winner" data-strategy-code="BW/PP">
+              <b><span class="strategy-code">BW/PP</span>Big Winner + Participation</b><small>PBR/FLOW + 毕业后参与度持续与首次回踩</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first">
-              <b>Flow-First · C（已停）</b><small>负期望，历史数据保留</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="flow-first" data-strategy-code="C5/C7.5/C12.5">
+              <b><span class="strategy-code">C5/C7.5/C12.5</span>Flow-First（已停）</b><small>负期望，历史数据保留</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-pullback">
-              <b>Smart 回踩 · A/B</b><small>旧回踩实验，规则保持不变</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="smart-pullback" data-strategy-code="A/B">
+              <b><span class="strategy-code">A/B</span>Smart 回踩</b><small>旧回踩实验，规则保持不变</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="primary-shadow">
-              <b>Primary Early（已停）</b><small>负期望，历史数据保留</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="primary-shadow" data-strategy-code="PE-3/3-5/4-7/5">
+              <b><span class="strategy-code">PE-3/3-5/4-7/5</span>Primary Early（已停）</b><small>负期望，历史数据保留</small>
             </button>
           </div>
         </aside>
 
         <div class="strategy-content">
+          <div class="strategy-code-bar"><span>当前策略编号</span><b id="active-strategy-code">QL-STRICT-PR</b></div>
           <div class="strategy-load-status" id="strategy-load-status" role="status" aria-live="polite" hidden></div>
           <div class="strategy-pane" data-live-strategy-pane="execution">
             <div class="grid live-summary">
@@ -895,6 +899,13 @@
       status.className = `strategy-load-status${kind ? ` ${kind}` : ''}`;
       status.textContent = message;
     }
+    function syncActiveStrategyCode() {
+      const selector = activeLiveStrategyId === 'execution' && activeExecutionStrategyId
+        ? `[data-live-strategy="execution"][data-live-execution-strategy="${CSS.escape(activeExecutionStrategyId)}"]`
+        : `[data-live-strategy="${CSS.escape(activeLiveStrategyId)}"]`;
+      const selected = document.querySelector(selector);
+      document.querySelector('#active-strategy-code').textContent = selected?.dataset.strategyCode || '—';
+    }
     function renderCachedStrategyView() {
       const cached = strategyViewCache.get(activeViewKey());
       if (!cached) return false;
@@ -933,6 +944,7 @@
       document.querySelectorAll('[data-live-strategy-pane]').forEach(pane => {
         pane.hidden = pane.dataset.liveStrategyPane !== id;
       });
+      syncActiveStrategyCode();
       if (activeTabId === 'live-trading') {
         if (!renderCachedStrategyView()) setStrategyLoadStatus('正在加载所选策略…');
         void refresh(true);
@@ -1033,8 +1045,9 @@
         activeExecutionStrategyId = data.strategyId || liveStrategies[0]?.id || null;
       }
       document.querySelector('#live-execution-strategy-selector').innerHTML = liveStrategies.length
-        ? liveStrategies.map(item => `<button class="strategy-nav-item" type="button" aria-current="${activeLiveStrategyId === 'execution' && item.id === activeExecutionStrategyId}" data-live-strategy="execution" data-live-execution-strategy="${escapeHtml(item.id)}"><b>${escapeHtml(item.label || item.id)}</b><small>${escapeHtml(item.market || '—')} · ${number(item.positionSizeSol,4)} SOL${item.entryEnabled === false ? ' · 停止新开仓' : ''}</small></button>`).join('')
-        : '<button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution"><b>未配置实盘策略</b><small>完整研究采集不受影响</small></button>';
+        ? liveStrategies.map(item => `<button class="strategy-nav-item" type="button" aria-current="${activeLiveStrategyId === 'execution' && item.id === activeExecutionStrategyId}" data-live-strategy="execution" data-live-execution-strategy="${escapeHtml(item.id)}" data-strategy-code="${escapeHtml(item.code || item.id)}"><b><span class="strategy-code">${escapeHtml(item.code || item.id)}</span>${escapeHtml(item.label || item.id)}</b><small>${escapeHtml(item.market || '—')} · ${number(item.positionSizeSol,4)} SOL${item.entryEnabled === false ? ' · 停止新开仓' : ''}</small></button>`).join('')
+        : '<button class="strategy-nav-item" type="button" aria-current="true" data-live-strategy="execution" data-strategy-code="—"><b><span class="strategy-code">—</span>未配置实盘策略</b><small>完整研究采集不受影响</small></button>';
+      syncActiveStrategyCode();
       const strategy = (runtime.strategies || []).find(item => item.id === data.strategyId)
         || (runtime.strategies || [])[0] || {};
       const execution = {
@@ -1108,19 +1121,19 @@
         ? `${execution.readCommitment} → ${execution.confirmationCommitment}`
         : execution.commitment || '—';
       const liveEntryRows = isContinuityLive ? [
-        ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '毕业后5秒延续质量'], ['市场', 'PUMP_AMM'],
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '毕业后5秒延续质量'], ['市场', 'PUMP_AMM'],
         ['独立买家', '≥20'], ['净流入', '≥5 SOL'], ['毕业后涨幅', '≥5%'], ['Sell / Buy', '≤0.6'],
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
       ] : isQualityLeaderLive ? [
-        ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'QL Strict 两阶段质量确认'], ['市场', 'PUMP_BONDING_CURVE'],
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'QL Strict 两阶段质量确认'], ['市场', 'PUMP_BONDING_CURVE'],
         ['10秒涨幅 / 20秒回撤', '≥140% / ≤12%'], ['Retention', '≥80%'], ['买家增量 / 净流入增量', '≥8 / ≥3 SOL'], ['Creator / Curve', '≤3% / 55%–90%'],
         ['Sell / Buy', '≤0.55'], ['virtual SOL', '≥30'], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
       ] : isGraduationAccelLive ? [
-        ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '首次Curve80加速'], ['市场', 'PUMP_BONDING_CURVE'],
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '首次Curve80加速'], ['市场', 'PUMP_BONDING_CURVE'],
         ['Curve阈值', '首次≥80%'], ['最近5秒ΔCurve', '≥5%'], ['独立买家', '≥2'], ['卖单 / Creator卖出', '0 / 否'],
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)],
       ] : [
-        ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止（历史/存量退出）' : '启用'], ['信号类型', '毕业后独立深跌反弹周期'], ['市场', strategy.market || 'PUMP_AMM'],
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止（历史/存量退出）' : '启用'], ['信号类型', '毕业后独立深跌反弹周期'], ['市场', strategy.market || 'PUMP_AMM'],
         ['跌幅范围', `${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}%`], ['反弹范围', `${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}%`],
         ['毕业后窗口', age(strategy.trackingAgeMs)], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)],
         ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)], ['机会限制', mintOpportunityCopy],
@@ -1998,7 +2011,7 @@
         ['Graduation Hold I', [['模式', graduationHold.enabled ? 'SHADOW I' : '关闭'], ['早期Primary', number(graduationHold.signalsSeen)], ['合格入场信号', number(graduationHold.eligibleSignals)], ['待入场', number(graduationHold.pendingEntries)], ['活动仓位', number(graduationHold.activePositions)], ['检查点通过 / 失败', `${number(graduationHold.gatesPassed)} / ${number(graduationHold.gatesFailed)}`], ['毕业就绪', number(graduationHold.graduationReady)], ['链上交易', '永不发送']]],
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['旧7.5%参考', number(launchQuality.referencePullbacks)], ['FD深回踩参考 / 过深拒绝', `${number(launchQuality.deepReferences)} / ${number(launchQuality.deepRejected)}`], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
         ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N · 15秒控制 + NQ质量组' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 留存 + Curve + 峰后资金流'], ['数据表', '历史全保留，新 cohort 独立'], ['链上交易', '永不发送']]],
-        ['Scope Guard', [['实盘入场', 'M 延续质量 + GD25 F1 首次深跌反弹'], ['实盘出场', '固定120秒 / PumpSwap XLEG'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓；GD25 F1 仅首次机会'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
+        ['Scope Guard', [['实盘入场', '仅 QL-STRICT-PR'], ['已停新开仓', 'M-C5-E120 / GD25-35-F1-XLEG / O / 历史XLEG'], ['存量退出', '继续按各自原规则执行'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const live = data.status === 'streaming';
