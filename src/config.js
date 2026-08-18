@@ -1324,6 +1324,95 @@ const config = {
     }),
   },
 
+  // Public-order-flow lead study derived from the pre-buy structure observed
+  // around profitable Smart Wallet entries. Entry never waits for or consumes a
+  // Smart Wallet event. A later Smart OPEN is stored only as a future label;
+  // ADD events are intentionally ignored because repeated small adds can be
+  // promotional rather than incremental conviction.
+  publicFlowLeadShadow: {
+    enabled: booleanEnv('FLOW_PUBLIC_FLOW_LEAD_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
+    featureWindowMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_FEATURE_WINDOW_MS', 5_000, {
+      min: 2_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_EPISODE_COOLDOWN_MS', 30_000, {
+      min: 1_000,
+    }),
+    smartLabelWindowMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_SMART_LABEL_WINDOW_MS', 15_000, {
+      min: 5_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_PUBLIC_FLOW_LEAD_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_PUBLIC_FLOW_LEAD_MAX_ENTRY_DROP_PCT', 30, {
+      min: 0, max: 100,
+    }),
+    maxCrossMarketPriceJumpPct: numberEnv(
+      'FLOW_PUBLIC_FLOW_LEAD_MAX_CROSS_MARKET_JUMP_PCT',
+      50,
+      { min: 0, max: 1_000 },
+    ),
+    entryProfiles: [
+      {
+        id: 'PFL_B0',
+        label: 'PFL-B0 · broad public breadth baseline',
+        minAgeMs: 10_000, maxAgeMs: 35_000,
+        minCurvePct: 55, maxCurvePct: 85,
+        minPublicBuyers5s: 20, minPublicBuyFlow5sSol: 12,
+        minPublicNetFlow5sSol: 0, maxLargestBuyerSharePct: 30,
+        maxReturn5sPct: 40,
+      },
+      {
+        id: 'PFL_B1',
+        label: 'PFL-B1 · big-winner analogue / early diversified flow',
+        minAgeMs: 5_000, maxAgeMs: 25_000,
+        minCurvePct: 60, maxCurvePct: 80,
+        minPublicBuyers5s: 25, minPublicBuyFlow5sSol: 15,
+        minPublicNetFlow5sSol: 2.5, maxLargestBuyerSharePct: 20,
+        maxReturn5sPct: 30,
+      },
+      {
+        id: 'PFL_A1',
+        label: 'PFL-A1 · 1s public-flow re-acceleration',
+        minAgeMs: 5_000, maxAgeMs: 30_000,
+        minCurvePct: 55, maxCurvePct: 85,
+        minPublicBuyers1s: 5, minPublicBuyers5s: 20,
+        minPublicBuyFlow1sSol: 3, minPublicBuyFlow5sSol: 12,
+        minPublicNetFlow5sSol: 0, maxLargestBuyerSharePct: 25,
+        minFlowAccelerationRatio: 1.5, maxReturn5sPct: 35,
+      },
+      {
+        id: 'PFL_R1',
+        label: 'PFL-R1 · healthy two-way rotation / broad demand',
+        minAgeMs: 10_000, maxAgeMs: 35_000,
+        minCurvePct: 60, maxCurvePct: 85,
+        minPublicBuyers5s: 20, minPublicBuyFlow5sSol: 12,
+        minPublicNetFlow5sSol: 0, maxLargestBuyerSharePct: 25,
+        minSellBuyRatio: 0.35, maxSellBuyRatio: 0.9,
+        maxReturn5sPct: 30,
+      },
+    ],
+    exitProfiles: [20, 30].flatMap((hardStopPct) => (
+      [120, 180, 240].map((holdSeconds) => ({
+        id: `H${hardStopPct}_T${holdSeconds}`,
+        label: `Hard stop ${hardStopPct}% / fixed ${holdSeconds}s`,
+        hardStopPct,
+        maxHoldMs: holdSeconds * 1_000,
+      }))
+    )),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
+    }),
+  },
+
   // Independent right-tail study. It consumes the existing PumpSwap trade stream,
   // opens no real positions, and never treats an unobservable exit as a total loss.
   bigWinnerShadow: {
