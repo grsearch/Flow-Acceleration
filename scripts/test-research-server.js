@@ -121,6 +121,13 @@ async function main() {
   assert.ok(dashboard.includes('id="smart-resonance-position-rows"'));
   assert.ok(dashboard.includes('data-strategy-code="SR-R0/R1/R2/R3"'));
   assert.ok(dashboard.includes("loadDashboard('/api/smart-resonance-shadow?positionLimit=50'"));
+  assert.ok(dashboard.includes('data-live-strategy="public-flow-lead"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="public-flow-lead"'));
+  assert.ok(dashboard.includes('id="public-flow-lead-cohort-rows"'));
+  assert.ok(dashboard.includes('id="public-flow-lead-position-rows"'));
+  assert.ok(dashboard.includes('data-strategy-code="PFL-B0/B1/A1/R1"'));
+  assert.ok(dashboard.includes("loadDashboard('/api/public-flow-lead-shadow?positionLimit=50'"));
+  assert.ok(dashboard.includes('Smart OPEN 只作未来'));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -207,6 +214,7 @@ async function main() {
     'range-scalper',
     'bonding-momentum',
     'graduation-hold',
+    'public-flow-lead',
   ]) {
     const timeSessions = runtime.store.shadowTimeSessionDashboard(strategyId);
     assert.strictEqual(timeSessions.timezone, 'Asia/Shanghai');
@@ -255,6 +263,7 @@ async function main() {
       '/api/smart-pullback-shadow',
       '/api/smart-open-shadow',
       '/api/smart-resonance-shadow',
+      '/api/public-flow-lead-shadow',
       '/api/launch-pullback-shadow',
       '/api/migrated-drop-rebound-shadow',
       '/api/migration-continuity-shadow',
@@ -427,6 +436,20 @@ async function main() {
     assert.strictEqual(smartResonance.runtime.exitProfiles.length, 8);
     assert.ok(Array.isArray(smartResonance.cohorts));
     assert.ok(Array.isArray(smartResonance.positions));
+    const publicFlowLead = await (await fetch(
+      `http://127.0.0.1:${port}/api/public-flow-lead-shadow`,
+    )).json();
+    assert.strictEqual(publicFlowLead.runtime.mode, 'SHADOW_PFL');
+    assert.strictEqual(publicFlowLead.runtime.sendsTransactions, false);
+    assert.strictEqual(publicFlowLead.runtime.strategy.research.entryUsesSmartWallet, false);
+    assert.strictEqual(publicFlowLead.runtime.strategy.research.smartAddsIgnored, true);
+    assert.deepStrictEqual(
+      publicFlowLead.runtime.entryProfiles.map((profile) => profile.id),
+      ['PFL_B0', 'PFL_B1', 'PFL_A1', 'PFL_R1'],
+    );
+    assert.strictEqual(publicFlowLead.runtime.exitProfiles.length, 6);
+    assert.ok(Array.isArray(publicFlowLead.cohorts));
+    assert.ok(Array.isArray(publicFlowLead.positions));
     const launchPullback = await (await fetch(
       `http://127.0.0.1:${port}/api/launch-pullback-shadow`,
     )).json();
