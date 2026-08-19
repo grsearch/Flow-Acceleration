@@ -1094,6 +1094,7 @@ class ResearchStore {
         symbol TEXT,
         status TEXT NOT NULL,
         rejection_reason TEXT,
+        confirmation_json TEXT,
         position_sol REAL NOT NULL,
         configured_cost_pct REAL NOT NULL,
         migrated_at INTEGER NOT NULL,
@@ -1975,6 +1976,7 @@ class ResearchStore {
       ['core_exit_at', 'INTEGER'],
       ['core_exit_price', 'REAL'],
       ['core_exit_reason', 'TEXT'],
+      ['confirmation_json', 'TEXT'],
     ];
     for (const [column, definition] of reboundMigrations) {
       if (!reboundColumns.has(column)) {
@@ -3204,7 +3206,8 @@ class ResearchStore {
       insertMigratedDropReboundShadowPosition: this.db.prepare(`
         INSERT OR IGNORE INTO migrated_drop_rebound_shadow_positions (
           cohort_id, lifecycle_stage, entry_profile_id, exit_profile_id, episode_id,
-          mint, symbol, status, rejection_reason, position_sol, configured_cost_pct,
+          mint, symbol, status, rejection_reason, confirmation_json,
+          position_sol, configured_cost_pct,
           migrated_at, migration_age_ms, window_ms, drop_min_pct, drop_max_pct,
           rebound_min_pct, rebound_max_pct, rebound_timeout_ms,
           peak_at, peak_price, low_at, low_price, drop_pct,
@@ -3216,7 +3219,8 @@ class ResearchStore {
           core_weight_pct, runner_hold_ms, created_at, updated_at
         ) VALUES (
           @cohortId, @lifecycleStage, @entryProfileId, @exitProfileId, @episodeId,
-          @mint, @symbol, @status, @rejectionReason, @positionSol, @configuredCostPct,
+          @mint, @symbol, @status, @rejectionReason, @confirmationJson,
+          @positionSol, @configuredCostPct,
           @migratedAt, @migrationAgeMs, @windowMs, @dropMinPct, @dropMaxPct,
           @reboundMinPct, @reboundMaxPct, @reboundTimeoutMs,
           @peakAt, @peakPrice, @lowAt, @lowPrice, @dropPct,
@@ -3236,6 +3240,7 @@ class ResearchStore {
         UPDATE migrated_drop_rebound_shadow_positions SET
           status = COALESCE(@status, status),
           rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          confirmation_json = COALESCE(@confirmationJson, confirmation_json),
           entry_at = COALESCE(@entryAt, entry_at),
           entry_market = COALESCE(@entryMarket, entry_market),
           entry_price = COALESCE(@entryPrice, entry_price),
@@ -4998,6 +5003,7 @@ class ResearchStore {
       symbol: position.symbol || null,
       status: position.status,
       rejectionReason: position.rejectionReason || null,
+      confirmationJson: position.confirmationJson || null,
       positionSol: position.positionSol,
       configuredCostPct: position.configuredCostPct,
       migratedAt: Math.trunc(position.migratedAt),
@@ -5052,6 +5058,7 @@ class ResearchStore {
       id,
       status: value('status'),
       rejectionReason: value('rejectionReason'),
+      confirmationJson: value('confirmationJson'),
       entryAt: value('entryAt'),
       entryMarket: value('entryMarket'),
       entryPrice: finiteOrNull(value('entryPrice')),
@@ -6460,6 +6467,16 @@ class ResearchStore {
           AVG(entry_jump_pct) AS average_entry_jump_pct,
           AVG(entry_impact_pct) AS average_entry_impact_pct,
           AVG(exit_impact_pct) AS average_exit_impact_pct,
+          AVG(json_extract(confirmation_json, '$.uniqueBuyers'))
+            AS average_confirmation_buyers,
+          AVG(json_extract(confirmation_json, '$.netFlowSol'))
+            AS average_confirmation_net_flow_sol,
+          AVG(json_extract(confirmation_json, '$.netFlowAccelerationSol'))
+            AS average_confirmation_net_flow_accel_sol,
+          AVG(json_extract(confirmation_json, '$.topBuyerSharePct'))
+            AS average_confirmation_top_buyer_share_pct,
+          AVG(json_extract(confirmation_json, '$.roundTripImpactPct'))
+            AS average_confirmation_round_trip_impact_pct,
           AVG(migration_age_ms) AS average_migration_age_ms,
           AVG(drop_pct) AS average_drop_pct,
           AVG(rebound_pct) AS average_rebound_pct,
