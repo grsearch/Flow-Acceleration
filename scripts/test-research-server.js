@@ -350,7 +350,7 @@ async function main() {
     assert.strictEqual(qualityLeader.exitMode, 'QUALITY_PROTECTED_RUNNER');
     assert.strictEqual(qualityLeader.maxShadowEntryImpactPct, 12);
     assert.strictEqual(launchPullbackLive.positionSizeSol, 0.1);
-    assert.strictEqual(launchPullbackLive.entryEnabled, true);
+    assert.strictEqual(launchPullbackLive.entryEnabled, false);
     assert.strictEqual(launchPullbackLive.code, 'F-FO-RB10-X30');
     assert.strictEqual(launchPullbackLive.fixedHoldMs, 30_000);
     assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
@@ -541,12 +541,19 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 11);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 14);
+    assert.deepStrictEqual(
+      migratedRebound.runtime.entryProfiles
+        .filter((profile) => profile.id.startsWith('GFR_'))
+        .map((profile) => [profile.id, profile.fastConfirmation.confirmationMs]),
+      [['GFR_300', 300], ['GFR_600', 600], ['GFR_1000', 1_000]],
+    );
     assert.deepStrictEqual(
       migratedRebound.runtime.exitProfiles.map((profile) => profile.id),
       [
         'X3', 'X8', 'XLEG',
         'GEXEC_XLEG', 'G2_XLEG', 'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+        'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
         'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
         'G1_B75_H30', 'G1_B50_H60',
         'G1_STAIR_H60', 'G1_STAIR_H120',
