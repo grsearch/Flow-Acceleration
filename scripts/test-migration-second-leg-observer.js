@@ -39,6 +39,11 @@ function main() {
   const store = makeStore();
   const migrationAt = 1_000_000;
   let now = migrationAt;
+  store.createMigrationSecondLegObservation({
+    mint: 'interrupted-observer-mint',
+    migrationAt: migrationAt - 1_000,
+    migrationSource: 'MIGRATION',
+  });
   const observer = new MigrationSecondLegObserver({
     config: {
       enabled: true,
@@ -53,6 +58,19 @@ function main() {
     store,
     now: () => now,
   });
+  const originalAllTokens = store.allTokens.bind(store);
+  const originalRecentAmmTrades = store.recentAmmTrades.bind(store);
+  store.allTokens = () => { throw new Error('startup must not scan all tokens'); };
+  store.recentAmmTrades = () => { throw new Error('startup must not replay AMM history'); };
+  assert.doesNotThrow(() => observer.start());
+  store.allTokens = originalAllTokens;
+  store.recentAmmTrades = originalRecentAmmTrades;
+  assert.strictEqual(
+    store.getMigrationSecondLegObservation('interrupted-observer-mint').status,
+    'RIGHT_CENSORED',
+  );
+  assert.strictEqual(observer.health().startupReplaySkipped, true);
+  assert.strictEqual(observer.health().startupRowsCensored, 1);
   observer.onGraduated({
     mint: 'm2f-observer-mint',
     symbol: 'M2F',
@@ -71,7 +89,8 @@ function main() {
   feed(migrationAt + 4_100, 1.22, { wallet: 'd', solAmount: 0.01 });
 
   let dashboard = store.migrationSecondLegDashboard();
-  assert.strictEqual(dashboard.summary.observations, 1);
+  assert.strictEqual(dashboard.summary.observations, 2);
+  assert.strictEqual(dashboard.summary.right_censored, 1);
   assert.strictEqual(dashboard.summary.snapshots, 5);
   assert.strictEqual(dashboard.summary.first_pullbacks, 1);
   assert.strictEqual(dashboard.summary.rebounds, 1);
