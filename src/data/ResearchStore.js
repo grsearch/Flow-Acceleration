@@ -1495,6 +1495,97 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_launch_quality_snapshots_horizon
         ON launch_quality_snapshots(horizon_ms, observed_at DESC);
 
+      -- M2F-OBS is deliberately isolated from all position tables. These are
+      -- small append-only observer tables; no ALTER is performed on the large
+      -- historical trade tables during startup.
+      CREATE TABLE IF NOT EXISTS migration_second_leg_observations (
+        mint TEXT PRIMARY KEY,
+        symbol TEXT,
+        creator TEXT,
+        migration_at INTEGER NOT NULL,
+        migration_source TEXT,
+        status TEXT NOT NULL DEFAULT 'OBSERVING',
+        first_amm_trade_at INTEGER,
+        baseline_price REAL,
+        last_trade_at INTEGER,
+        last_price REAL,
+        peak_at INTEGER,
+        peak_price REAL,
+        max_return_pct REAL,
+        first_pullback_at INTEGER,
+        pullback_low_at INTEGER,
+        pullback_low_price REAL,
+        max_pullback_pct REAL,
+        rebound_at INTEGER,
+        snapshot_count INTEGER NOT NULL DEFAULT 0,
+        boost_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        mayhem_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        cashback_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        canonical_pool_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        entity_cluster_status TEXT NOT NULL DEFAULT 'UNAVAILABLE',
+        quote_reserve_status TEXT NOT NULL DEFAULT 'UNAVAILABLE',
+        completed_at INTEGER,
+        completion_reason TEXT,
+        record_created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_m2f_observations_status
+        ON migration_second_leg_observations(status, migration_at DESC);
+
+      CREATE TABLE IF NOT EXISTS migration_second_leg_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mint TEXT NOT NULL REFERENCES migration_second_leg_observations(mint) ON DELETE CASCADE,
+        second_bucket INTEGER NOT NULL,
+        age_ms INTEGER NOT NULL,
+        observed_at INTEGER NOT NULL,
+        last_trade_at INTEGER,
+        observation_lag_ms INTEGER,
+        slot INTEGER,
+        price REAL,
+        baseline_price REAL,
+        peak_price REAL,
+        opening_impulse_pct REAL,
+        pullback_pct REAL,
+        pullback_duration_ms INTEGER,
+        rebound_pct REAL,
+        micro_high_break INTEGER NOT NULL DEFAULT 0,
+        buy_sol_3s REAL,
+        sell_sol_3s REAL,
+        net_flow_3s REAL,
+        buy_sol_10s REAL,
+        sell_sol_10s REAL,
+        net_flow_10s REAL,
+        buy_sol_prev_20s REAL,
+        sell_sol_prev_20s REAL,
+        net_flow_prev_20s REAL,
+        buyers_3s INTEGER,
+        buyers_10s INTEGER,
+        largest_buyer_share_10s_pct REAL,
+        buy_speed_ratio REAL,
+        net_flow_acceleration REAL,
+        sell_deceleration_ratio REAL,
+        observed_retained_buyers INTEGER,
+        observed_exited_buyers INTEGER,
+        observed_holder_diffusion_index INTEGER,
+        quote_reserve_sol REAL,
+        onfi_10_pct REAL,
+        estimated_impact_005_pct REAL,
+        estimated_impact_01_pct REAL,
+        estimated_impact_025_pct REAL,
+        boost_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        mayhem_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        cashback_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        canonical_pool_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        entity_cluster_status TEXT NOT NULL DEFAULT 'UNAVAILABLE',
+        feature_completeness_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(mint, second_bucket)
+      );
+      CREATE INDEX IF NOT EXISTS idx_m2f_snapshots_observed
+        ON migration_second_leg_snapshots(observed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_m2f_snapshots_mint_age
+        ON migration_second_leg_snapshots(mint, age_ms);
+
       CREATE TABLE IF NOT EXISTS holder_growth_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cohort_id TEXT NOT NULL,
@@ -3641,6 +3732,80 @@ class ResearchStore {
           @depthAdjustedSellImpact, @sellDecayRatio, @curvePct,
           @virtualSolReserves, @createdAt
         )
+      `),
+      insertMigrationSecondLegObservation: this.db.prepare(`
+        INSERT OR IGNORE INTO migration_second_leg_observations (
+          mint, symbol, creator, migration_at, migration_source, status,
+          record_created_at, updated_at
+        ) VALUES (
+          @mint, @symbol, @creator, @migrationAt, @migrationSource, 'OBSERVING',
+          @recordCreatedAt, @updatedAt
+        )
+      `),
+      getMigrationSecondLegObservation: this.db.prepare(`
+        SELECT * FROM migration_second_leg_observations WHERE mint = ?
+      `),
+      updateMigrationSecondLegObservation: this.db.prepare(`
+        UPDATE migration_second_leg_observations SET
+          first_amm_trade_at = COALESCE(@firstAmmTradeAt, first_amm_trade_at),
+          baseline_price = COALESCE(@baselinePrice, baseline_price),
+          last_trade_at = COALESCE(@lastTradeAt, last_trade_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          peak_at = COALESCE(@peakAt, peak_at),
+          peak_price = COALESCE(@peakPrice, peak_price),
+          max_return_pct = COALESCE(@maxReturnPct, max_return_pct),
+          first_pullback_at = COALESCE(@firstPullbackAt, first_pullback_at),
+          pullback_low_at = COALESCE(@pullbackLowAt, pullback_low_at),
+          pullback_low_price = COALESCE(@pullbackLowPrice, pullback_low_price),
+          max_pullback_pct = COALESCE(@maxPullbackPct, max_pullback_pct),
+          rebound_at = COALESCE(@reboundAt, rebound_at),
+          updated_at = @updatedAt
+        WHERE mint = @mint AND status = 'OBSERVING'
+      `),
+      completeMigrationSecondLegObservation: this.db.prepare(`
+        UPDATE migration_second_leg_observations SET
+          status = @status,
+          completed_at = @completedAt,
+          completion_reason = @completionReason,
+          updated_at = @updatedAt
+        WHERE mint = @mint AND status = 'OBSERVING'
+      `),
+      insertMigrationSecondLegSnapshot: this.db.prepare(`
+        INSERT OR IGNORE INTO migration_second_leg_snapshots (
+          mint, second_bucket, age_ms, observed_at, last_trade_at,
+          observation_lag_ms, slot, price, baseline_price, peak_price,
+          opening_impulse_pct, pullback_pct, pullback_duration_ms, rebound_pct,
+          micro_high_break, buy_sol_3s, sell_sol_3s, net_flow_3s,
+          buy_sol_10s, sell_sol_10s, net_flow_10s, buy_sol_prev_20s,
+          sell_sol_prev_20s, net_flow_prev_20s, buyers_3s, buyers_10s,
+          largest_buyer_share_10s_pct, buy_speed_ratio, net_flow_acceleration,
+          sell_deceleration_ratio, observed_retained_buyers,
+          observed_exited_buyers, observed_holder_diffusion_index,
+          quote_reserve_sol, onfi_10_pct, estimated_impact_005_pct,
+          estimated_impact_01_pct, estimated_impact_025_pct, boost_status,
+          mayhem_status, cashback_status, canonical_pool_status,
+          entity_cluster_status, feature_completeness_json, created_at
+        ) VALUES (
+          @mint, @secondBucket, @ageMs, @observedAt, @lastTradeAt,
+          @observationLagMs, @slot, @price, @baselinePrice, @peakPrice,
+          @openingImpulsePct, @pullbackPct, @pullbackDurationMs, @reboundPct,
+          @microHighBreak, @buySol3s, @sellSol3s, @netFlow3s,
+          @buySol10s, @sellSol10s, @netFlow10s, @buySolPrev20s,
+          @sellSolPrev20s, @netFlowPrev20s, @buyers3s, @buyers10s,
+          @largestBuyerShare10sPct, @buySpeedRatio, @netFlowAcceleration,
+          @sellDecelerationRatio, @observedRetainedBuyers,
+          @observedExitedBuyers, @observedHolderDiffusionIndex,
+          @quoteReserveSol, @onfi10Pct, @estimatedImpact005Pct,
+          @estimatedImpact01Pct, @estimatedImpact025Pct, @boostStatus,
+          @mayhemStatus, @cashbackStatus, @canonicalPoolStatus,
+          @entityClusterStatus, @featureCompletenessJson, @createdAt
+        )
+      `),
+      incrementMigrationSecondLegSnapshotCount: this.db.prepare(`
+        UPDATE migration_second_leg_observations SET
+          snapshot_count = snapshot_count + 1,
+          updated_at = @updatedAt
+        WHERE mint = @mint
       `),
       recentSmartWalletEvents: this.db.prepare(`
         SELECT * FROM smart_wallet_events
@@ -5805,6 +5970,186 @@ class ResearchStore {
     return { ...row, inserted: result.changes > 0 };
   }
 
+  createMigrationSecondLegObservation(token) {
+    const now = Date.now();
+    const migrationAt = Number(token.migrationAt ?? token.graduated_at ?? token.graduatedAt);
+    if (!token.mint || !Number.isFinite(migrationAt)) return null;
+    const row = {
+      mint: token.mint,
+      symbol: token.symbol || null,
+      creator: token.creator || null,
+      migrationAt: Math.trunc(migrationAt),
+      migrationSource: token.migrationSource || null,
+      recordCreatedAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertMigrationSecondLegObservation.run(row);
+    return { ...row, inserted: result.changes > 0 };
+  }
+
+  getMigrationSecondLegObservation(mint) {
+    return mint ? this.stmts.getMigrationSecondLegObservation.get(mint) || null : null;
+  }
+
+  updateMigrationSecondLegObservation(mint, patch = {}) {
+    if (!mint) return null;
+    const value = (key) => {
+      const number = Number(patch[key]);
+      return Number.isFinite(number) ? number : null;
+    };
+    return this.stmts.updateMigrationSecondLegObservation.run({
+      mint,
+      firstAmmTradeAt: value('firstAmmTradeAt'),
+      baselinePrice: value('baselinePrice'),
+      lastTradeAt: value('lastTradeAt'),
+      lastPrice: value('lastPrice'),
+      peakAt: value('peakAt'),
+      peakPrice: value('peakPrice'),
+      maxReturnPct: value('maxReturnPct'),
+      firstPullbackAt: value('firstPullbackAt'),
+      pullbackLowAt: value('pullbackLowAt'),
+      pullbackLowPrice: value('pullbackLowPrice'),
+      maxPullbackPct: value('maxPullbackPct'),
+      reboundAt: value('reboundAt'),
+      updatedAt: Date.now(),
+    });
+  }
+
+  completeMigrationSecondLegObservation(mint, patch = {}) {
+    if (!mint) return null;
+    return this.stmts.completeMigrationSecondLegObservation.run({
+      mint,
+      status: patch.status || 'COMPLETE',
+      completedAt: Number.isFinite(Number(patch.completedAt))
+        ? Math.trunc(Number(patch.completedAt)) : Date.now(),
+      completionReason: patch.completionReason || null,
+      updatedAt: Date.now(),
+    });
+  }
+
+  recordMigrationSecondLegSnapshot(snapshot) {
+    const numberOrNull = (value) => (
+      value == null || (typeof value === 'string' && value.trim() === '')
+        ? null
+        : finiteOrNull(Number(value))
+    );
+    const integer = (value, fallback = 0) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? Math.trunc(number) : fallback;
+    };
+    const row = {
+      mint: snapshot.mint,
+      secondBucket: Math.max(0, integer(snapshot.secondBucket)),
+      ageMs: Math.max(0, integer(snapshot.ageMs)),
+      observedAt: integer(snapshot.observedAt, Date.now()),
+      lastTradeAt: numberOrNull(snapshot.lastTradeAt),
+      observationLagMs: Math.max(0, integer(snapshot.observationLagMs)),
+      slot: numberOrNull(snapshot.slot),
+      price: numberOrNull(snapshot.price),
+      baselinePrice: numberOrNull(snapshot.baselinePrice),
+      peakPrice: numberOrNull(snapshot.peakPrice),
+      openingImpulsePct: numberOrNull(snapshot.openingImpulsePct),
+      pullbackPct: numberOrNull(snapshot.pullbackPct),
+      pullbackDurationMs: numberOrNull(snapshot.pullbackDurationMs),
+      reboundPct: numberOrNull(snapshot.reboundPct),
+      microHighBreak: snapshot.microHighBreak ? 1 : 0,
+      buySol3s: numberOrNull(snapshot.buySol3s),
+      sellSol3s: numberOrNull(snapshot.sellSol3s),
+      netFlow3s: numberOrNull(snapshot.netFlow3s),
+      buySol10s: numberOrNull(snapshot.buySol10s),
+      sellSol10s: numberOrNull(snapshot.sellSol10s),
+      netFlow10s: numberOrNull(snapshot.netFlow10s),
+      buySolPrev20s: numberOrNull(snapshot.buySolPrev20s),
+      sellSolPrev20s: numberOrNull(snapshot.sellSolPrev20s),
+      netFlowPrev20s: numberOrNull(snapshot.netFlowPrev20s),
+      buyers3s: Math.max(0, integer(snapshot.buyers3s)),
+      buyers10s: Math.max(0, integer(snapshot.buyers10s)),
+      largestBuyerShare10sPct: numberOrNull(snapshot.largestBuyerShare10sPct),
+      buySpeedRatio: numberOrNull(snapshot.buySpeedRatio),
+      netFlowAcceleration: numberOrNull(snapshot.netFlowAcceleration),
+      sellDecelerationRatio: numberOrNull(snapshot.sellDecelerationRatio),
+      observedRetainedBuyers: Math.max(0, integer(snapshot.observedRetainedBuyers)),
+      observedExitedBuyers: Math.max(0, integer(snapshot.observedExitedBuyers)),
+      observedHolderDiffusionIndex: integer(snapshot.observedHolderDiffusionIndex),
+      quoteReserveSol: numberOrNull(snapshot.quoteReserveSol),
+      onfi10Pct: numberOrNull(snapshot.onfi10Pct),
+      estimatedImpact005Pct: numberOrNull(snapshot.estimatedImpact005Pct),
+      estimatedImpact01Pct: numberOrNull(snapshot.estimatedImpact01Pct),
+      estimatedImpact025Pct: numberOrNull(snapshot.estimatedImpact025Pct),
+      boostStatus: snapshot.boostStatus || 'UNKNOWN',
+      mayhemStatus: snapshot.mayhemStatus || 'UNKNOWN',
+      cashbackStatus: snapshot.cashbackStatus || 'UNKNOWN',
+      canonicalPoolStatus: snapshot.canonicalPoolStatus || 'UNKNOWN',
+      entityClusterStatus: snapshot.entityClusterStatus || 'UNAVAILABLE',
+      featureCompletenessJson: JSON.stringify(snapshot.featureCompleteness || {}),
+      createdAt: Date.now(),
+    };
+    const result = this.stmts.insertMigrationSecondLegSnapshot.run(row);
+    if (result.changes > 0) {
+      this.stmts.incrementMigrationSecondLegSnapshotCount.run({
+        mint: row.mint,
+        updatedAt: Date.now(),
+      });
+    }
+    return { ...row, inserted: result.changes > 0 };
+  }
+
+  migrationSecondLegDashboard({ observationLimit = 40, snapshotLimit = 100 } = {}) {
+    const observationsLimit = Math.min(200, Math.max(1, Math.trunc(Number(observationLimit) || 40)));
+    const snapshotsLimit = Math.min(500, Math.max(1, Math.trunc(Number(snapshotLimit) || 100)));
+    const summary = this.db.prepare(`
+      SELECT COUNT(*) AS observations,
+        COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
+        COALESCE(SUM(status = 'COMPLETE'), 0) AS complete,
+        COALESCE(SUM(status = 'RIGHT_CENSORED'), 0) AS right_censored,
+        COALESCE(SUM(first_pullback_at IS NOT NULL), 0) AS first_pullbacks,
+        COALESCE(SUM(rebound_at IS NOT NULL), 0) AS rebounds,
+        COALESCE(SUM(snapshot_count), 0) AS snapshots,
+        AVG(max_return_pct) AS average_max_return_pct,
+        MAX(max_return_pct) AS maximum_return_pct
+      FROM migration_second_leg_observations
+    `).get();
+    const publicCandidates = this.db.prepare(`
+      SELECT COUNT(*) AS snapshots,
+        COUNT(DISTINCT mint) AS mints
+      FROM migration_second_leg_snapshots
+      WHERE age_ms BETWEEN 75000 AND 300000
+        AND net_flow_10s > 0
+        AND buyers_10s >= 3
+        AND (largest_buyer_share_10s_pct IS NULL OR largest_buyer_share_10s_pct <= 60)
+        AND pullback_pct BETWEEN 8 AND 35
+    `).get();
+    const observations = this.db.prepare(`
+      SELECT * FROM migration_second_leg_observations
+      ORDER BY CASE WHEN status = 'OBSERVING' THEN 0 ELSE 1 END,
+        updated_at DESC, migration_at DESC
+      LIMIT ?
+    `).all(observationsLimit);
+    const snapshots = this.db.prepare(`
+      SELECT s.*, o.symbol, o.migration_at, o.status AS observation_status
+      FROM migration_second_leg_snapshots s
+      JOIN migration_second_leg_observations o ON o.mint = s.mint
+      ORDER BY s.observed_at DESC, s.id DESC
+      LIMIT ?
+    `).all(snapshotsLimit).map((row) => ({
+      ...row,
+      feature_completeness: (() => {
+        try { return JSON.parse(row.feature_completeness_json || '{}'); } catch (_) { return {}; }
+      })(),
+    }));
+    return {
+      summary,
+      publicCandidates,
+      missingArticleFeatures: [
+        'quoteReserve/onfi10',
+        'BOOST/Mayhem/cashback/canonical pool flags',
+        'entity/funding/bot clusters',
+      ],
+      observations,
+      snapshots,
+    };
+  }
+
   launchPullbackShadowDashboard({ positionLimit = 200, bigWinnerPct = 50, cacheStats = false } = {}) {
     const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 200)));
     const threshold = Math.max(1, Number(bigWinnerPct) || 50);
@@ -7665,6 +8010,14 @@ class ResearchStore {
         COALESCE(SUM(label_status = 'NO_REFERENCE'), 0) AS no_reference
       FROM launch_quality_observations
     `).get();
+    const migrationSecondLegObservations = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
+        COALESCE(SUM(status = 'COMPLETE'), 0) AS complete,
+        COALESCE(SUM(status = 'RIGHT_CENSORED'), 0) AS right_censored,
+        COALESCE(SUM(snapshot_count), 0) AS snapshots
+      FROM migration_second_leg_observations
+    `).get();
     const labelRows = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -7706,6 +8059,7 @@ class ResearchStore {
       holderGrowthShadowPositions,
       qualityLeaderShadowPositions,
       launchQualityObservations,
+      migrationSecondLegObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
     };
