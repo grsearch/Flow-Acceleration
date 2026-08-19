@@ -498,10 +498,9 @@ const config = {
         ruleVersion: 'launch_pullback_fo_rb10_30s_live_v1',
         signalSource: 'LAUNCH_PULLBACK_FO_RB10_30S',
         enabled: booleanEnv('FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_ENTRY_ENABLED',
-          true,
-        ),
+        // Retain the strategy definition for historical display and safe exit
+        // handling, but prevent an older production .env from reopening it.
+        entryEnabled: false,
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_POSITION_SOL',
