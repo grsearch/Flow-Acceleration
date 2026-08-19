@@ -30,6 +30,7 @@ class ResearchServer {
     smartResonanceShadow = null,
     publicFlowLeadShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
+    migrationSecondLegObserver = null,
     migratedDropReboundShadow = null,
     migrationContinuityShadow = null,
     rangeScalperShadow = null,
@@ -57,6 +58,7 @@ class ResearchServer {
     this.publicFlowLeadShadow = publicFlowLeadShadow;
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
+    this.migrationSecondLegObserver = migrationSecondLegObserver;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
     this.migrationContinuityShadow = migrationContinuityShadow;
     this.rangeScalperShadow = rangeScalperShadow;
@@ -298,6 +300,24 @@ class ResearchServer {
         ...this.store.launchQualityDashboard({
           observationLimit: numeric(request.query.observationLimit, 30),
           snapshotLimit: numeric(request.query.snapshotLimit, 60),
+        }),
+      });
+    });
+
+    this.app.get('/api/migration-second-leg-observer', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.migrationSecondLegObserver?.health() || {
+          enabled: false,
+          mode: 'M2F_OBSERVER_ONLY',
+          code: 'M2F-OBS',
+          sendsTransactions: false,
+          opensSimulatedPositions: false,
+          addsRpcRequests: false,
+        },
+        ...this.store.migrationSecondLegDashboard({
+          observationLimit: numeric(request.query.observationLimit, 40),
+          snapshotLimit: numeric(request.query.snapshotLimit, 100),
         }),
       });
     });
@@ -613,6 +633,7 @@ class ResearchServer {
         publicFlowLeadShadow: this.publicFlowLeadShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
+        migrationSecondLegObserver: this.migrationSecondLegObserver?.health() || null,
         holderGrowthShadow: this.holderGrowthShadow?.health() || null,
         qualityLeaderShadow: this.qualityLeaderShadow?.health() || null,
         bigWinnerShadow: this.bigWinnerShadow?.health() || null,
