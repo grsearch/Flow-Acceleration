@@ -806,6 +806,21 @@ function testFastReversalContinuationConfirmation() {
     entryProfileIds: ['GFR_300'],
     exitMode: 'FIXED_HOLD',
     fixedHoldMs: 8_000,
+  }, {
+    id: 'GFR_X15',
+    label: 'fast reversal 15s',
+    entryProfileIds: ['GFR_300'],
+    exitMode: 'FIXED_HOLD',
+    fixedHoldMs: 15_000,
+  }, {
+    id: 'GFR_HS20_H30',
+    label: 'fast reversal hard stop / hold',
+    entryProfileIds: ['GFR_300'],
+    exitMode: 'TAIL',
+    hardStopPct: 20,
+    trailingActivationPct: 1_000,
+    trailingStopPct: 100,
+    maxHoldMs: 30_000,
   }]);
   config.entryProfiles = [{
     id: 'GFR_300',
@@ -819,7 +834,7 @@ function testFastReversalContinuationConfirmation() {
     maxLifecycleAgeMs: 30_000,
     maxSignalsPerMint: 1,
     maxEntryPriceJumpPct: 15,
-    exitProfileIds: ['GFR_X8'],
+    exitProfileIds: ['GFR_X8', 'GFR_X15', 'GFR_HS20_H30'],
     capacityAware: true,
     positionSols: [0.05, 0.1],
     fastConfirmation: {
@@ -861,12 +876,19 @@ function testFastReversalContinuationConfirmation() {
     FROM migrated_drop_rebound_shadow_positions
     WHERE mint=? ORDER BY position_sol
   `).all(fastMint);
-  assert.deepStrictEqual(opened.map((row) => row.status), ['OPEN', 'OPEN']);
-  assert.deepStrictEqual(opened.map((row) => row.position_sol), [0.05, 0.1]);
+  assert.deepStrictEqual(opened.map((row) => row.status), Array(6).fill('OPEN'));
+  assert.deepStrictEqual(opened.map((row) => row.position_sol), [0.05, 0.05, 0.05, 0.1, 0.1, 0.1]);
   const confirmation = JSON.parse(opened[0].confirmation_json);
   assert.strictEqual(confirmation.uniqueBuyers, 3);
   assert(confirmation.netFlowAccelerationSol > 0);
   assert(confirmation.roundTripImpactPct < 5);
+  const fastState = suite.detectors.get('POST_MIGRATION:GFR_300').states.get(fastMint);
+  assert.strictEqual(Object.hasOwn(fastState, 'flowTrades'), false,
+    'G-FR flow must use the shared per-mint buffer, not one copy per profile');
+  assert.strictEqual(suite.health().fastConfirmationFeatureComputations, 1,
+    'all exit/capacity rows for one confirmation instant must share one feature scan');
+  assert.strictEqual(suite.health().fastConfirmationCapacityComputations, 2,
+    'the two capacity sizes should each be quoted once');
 
   const slowMint = 'SlowContinuation111111111111111111111111111111';
   recordCreate(store, slowMint, base);
@@ -893,8 +915,33 @@ function testFastReversalContinuationConfirmation() {
   assert(rejected.every((row) => row.status === 'NO_ENTRY'));
   assert(rejected.every((row) => row.rejection_reason === 'FAST_CONFIRM_PRICE_NOT_CONTINUING'));
   assert(rejected.every((row) => JSON.parse(row.confirmation_json).uniqueBuyers === 1));
-  assert.strictEqual(suite.health().fastConfirmationPassed, 2);
-  assert.strictEqual(suite.health().fastConfirmationRejected, 2);
+  assert.strictEqual(suite.health().fastConfirmationPassed, 6);
+  assert.strictEqual(suite.health().fastConfirmationRejected, 6);
+  assert.strictEqual(suite.health().fastConfirmationFeatureComputations, 2);
+  assert.strictEqual(suite.health().fastConfirmationCapacityComputations, 2,
+    'a failed public-flow check must skip unnecessary AMM capacity quotes');
+
+  const boundedMint = 'BoundedFastFlow1111111111111111111111111111111';
+  recordCreate(store, boundedMint, base);
+  store.recordComplete({ mint: boundedMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(boundedMint));
+  suite.observeTrade(fastFlowTrade(boundedMint, base + 4_800, 0.000001, {
+    wallet: 'bounded-peak',
+    solAmount: 0.01,
+  }));
+  suite.observeTrade(fastFlowTrade(boundedMint, base + 4_900, 0.0000007, {
+    wallet: 'bounded-low',
+    solAmount: 0.01,
+  }));
+  for (let index = 0; index < 600; index += 1) {
+    suite.observeTrade(fastFlowTrade(boundedMint, base + 5_000 + index, 0.0000007, {
+      wallet: `bounded-${index}`,
+      solAmount: 0.01,
+    }));
+  }
+  const boundedBuffer = suite.fastFlowByMint.get(boundedMint);
+  assert.ok(boundedBuffer.rows.length - boundedBuffer.start <= 512,
+    'shared G-FR buffers must remain hard bounded during a trade burst');
   store.close();
 }
 
