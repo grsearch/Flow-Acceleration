@@ -389,6 +389,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="launch-quality" data-strategy-code="E">
               <b><span class="strategy-code">E</span>Launch Quality</b><small>只观察选币、存活与首次回踩</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migration-second-leg" data-strategy-code="M2F-OBS">
+              <b><span class="strategy-code">M2F-OBS</span>迁移后二段资金扩散</b><small>只记录75～480秒首回撤与公共订单流，不建仓、不增加RPC</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="holder-growth" data-strategy-code="N/NQ">
               <b><span class="strategy-code">N/NQ</span>Observed Holder Growth</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
             </button>
@@ -680,6 +683,29 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>时间</th><th>Mint</th><th>窗口</th><th>Buyers / 新增</th><th>Top1 / Top3</th><th>Retention / Creator</th><th>Buy / Sell / Net</th><th>回撤 / Sell Impact / 深度标准化</th></tr></thead>
                 <tbody id="launch-quality-snapshot-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="migration-second-leg" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Migration Second-Leg Flow Diffusion Observer M2F-OBS</h2>
+                <p>迁移后公共订单流观察器；不建立模拟仓位、不调用额外RPC、永不签名或发送交易</p>
+              </div>
+              <div class="strategy-expression" id="m2f-observer-expression">等待 M2F-OBS 配置…</div>
+              <div class="strategy-metric-groups" id="m2f-observer-metrics"></div>
+              <div class="section-title"><h2>最近迁移观察</h2><p>缺失的储备、活动标记和实体聚类明确保留为 UNKNOWN / UNAVAILABLE</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>迁移时间</th><th>状态</th><th>Mint</th><th>首个AMM / 快照</th><th>峰值收益</th><th>首回撤 / 低点</th><th>反弹</th><th>完成原因</th></tr></thead>
+                <tbody id="m2f-observation-rows"></tbody>
+              </table></div>
+            </article>
+            <article class="card record-section">
+              <div class="section-title"><h2>最新二段快照</h2><p>只在真实 PumpSwap 成交到达时写入，避免用陈旧价格补造时间点</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>时间 / AGE</th><th>Mint</th><th>价格结构</th><th>3秒 Buy / Sell / Net</th><th>10秒 Buy / Sell / Net</th><th>Buyers / 集中度</th><th>速度 / 净流加速</th><th>可观测留存 / 缺失字段</th></tr></thead>
+                <tbody id="m2f-snapshot-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1134,7 +1160,9 @@
       const isContinuityLive = strategy.signalSource === 'MIGRATION_CONTINUITY_MC_C5';
       const isGraduationAccelLive = strategy.signalSource === 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC';
       const isQualityLeaderLive = strategy.signalSource === 'QUALITY_LEADER_QL_STRICT_PROTECTED';
-      const isBondingCurveLive = isGraduationAccelLive || isQualityLeaderLive;
+      const isLaunchPullbackLive = strategy.signalSource === 'LAUNCH_PULLBACK_FO_RB10_30S';
+      const isBondingCurveLive = isGraduationAccelLive || isQualityLeaderLive
+        || isLaunchPullbackLive;
       const mintOpportunityCopy = strategy.maxSignalsPerMint
         ? `每Mint只取首次机会（最多${number(strategy.maxSignalsPerMint)}个匹配信号）`
         : `每Mint最多成功开仓${number(strategy.maxEntriesPerMint || 1)}次`;
@@ -1146,12 +1174,16 @@
       if (isQualityLeaderLive) {
         strategyExpression = 'QL Strict：10秒涨幅≥140%、20秒回撤≤12%、Retention≥80%、买家与净流入继续增长 → 首笔可执行 Bonding Curve 成交入场 → 全仓阶梯保护 Runner';
       }
+      if (isLaunchPullbackLive) {
+        strategyExpression = '首轮上涨后首次回踩参考 + Creator≤5% + 最近买家≥10 + NetFlow≥5 SOL → 200ms后首笔可执行 Bonding Curve 成交 → 固定持有30秒';
+      }
       document.querySelector('#live-strategy-expression').textContent = strategyExpression;
       const wallets = data.monitoredWallets || [];
       let venueCopy = isGraduationAccelLive
         ? '毕业前使用 Bonding Curve 买入；毕业后使用 PumpSwap 分批卖出'
         : '使用 PumpSwap 固定 SOL 买入与卖出';
       if (isQualityLeaderLive) venueCopy = '毕业前使用 Bonding Curve 买入；毕业前后均卖出全部链上余额';
+      if (isLaunchPullbackLive) venueCopy = '毕业前使用 Bonding Curve 买入；到期按所在市场卖出全部链上余额';
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>${venueCopy}</b><br>单笔 ${number(strategy.positionSizeSol,4)} SOL；Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究。`;
 
       const matchRate = stats.decisions > 0 ? stats.matched / stats.decisions * 100 : null;
@@ -1178,6 +1210,10 @@
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'QL Strict 两阶段质量确认'], ['市场', 'PUMP_BONDING_CURVE'],
         ['10秒涨幅 / 20秒回撤', '≥140% / ≤12%'], ['Retention', '≥80%'], ['买家增量 / 净流入增量', '≥8 / ≥3 SOL'], ['Creator / Curve', '≤3% / 55%–90%'],
         ['Sell / Buy', '≤0.55'], ['virtual SOL', '≥30'], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isLaunchPullbackLive ? [
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'Launch 首轮回踩 FO-RB10'], ['市场', 'PUMP_BONDING_CURVE'],
+        ['参考回踩 / 反弹', '7.5% / 3%'], ['净流入', '≥5 SOL'], ['Creator份额', '≤5%'], ['最近买家', '≥10'],
+        ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
       ] : isGraduationAccelLive ? [
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '首次Curve80加速'], ['市场', 'PUMP_BONDING_CURVE'],
         ['Curve阈值', '首次≥80%'], ['最近5秒ΔCurve', '≥5%'], ['独立买家', '≥2'], ['卖单 / Creator卖出', '0 / 否'],
@@ -1196,6 +1232,10 @@
         ['强势激活', rate(strategy.strengthActivationPct)], ['30秒未走强', '退出全部余额'],
         ['峰值20%–50%', '保护峰值−15%（最低0%）'], ['峰值50%–100%', '保护峰值−25%（最低+15%）'],
         ['峰值100%–200%', '保护峰值−40%（最低+40%）'], ['峰值≥200%', '保护峰值−80%（最低+100%）'],
+        ['最大持仓兜底', age(strategy.maxHoldMs)],
+      ] : isLaunchPullbackLive ? [
+        ['策略模式', '固定持有'], ['固定持仓', age(strategy.fixedHoldMs)],
+        ['固定止盈', '无'], ['移动止盈', '无'], ['硬止损', '无'],
         ['最大持仓兜底', age(strategy.maxHoldMs)],
       ] : isGraduationAccelLive ? [
         ['策略模式', '毕业核心 + Runner'], ['毕业时核心卖出', rate(strategy.coreExitPct)],
@@ -1774,6 +1814,37 @@
       )).join('') : '<tr><td colspan="8" class="empty">等待5/10/20/30/60秒 Launch快照</td></tr>';
     }
 
+    function renderMigrationSecondLegObserver(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const summary = data.summary || {};
+      const candidates = data.publicCandidates || {};
+      const missing = data.missingArticleFeatures || [];
+      document.querySelector('#m2f-observer-expression').textContent = `迁移 → PumpSwap真实成交驱动的${age(strategy.snapshotIntervalMs || 1000)}快照 → 最长${age(strategy.maxAgeMs || 480000)}；首回撤参考${pct(strategy.pullbackArmPct)}、可观测钱包留存底线${pct(strategy.retentionFloorPct)}。当前不产生入场或收益结论。`;
+      renderMetricGroups('#m2f-observer-metrics', [
+        ['运行模式', runtime.enabled ? 'M2F-OBS' : '关闭', '观察型 Shadow；没有仓位表或交易回调'],
+        ['迁移 / 活动', `${number(summary.observations)} / ${number(summary.active)}`, `本次进程观察 ${number(runtime.migrationsObserved)}`],
+        ['快照', number(summary.snapshots), `本次进程写入 ${number(runtime.snapshotsWritten)}`],
+        ['首回撤 / 反弹', `${number(summary.first_pullbacks)} / ${number(summary.rebounds)}`, `完整 ${number(summary.complete)} · 截尾 ${number(summary.right_censored)}`],
+        ['公共特征候选', `${number(candidates.snapshots)} 快照 / ${number(candidates.mints)} Mint`, '75～300秒、正净流、Buyers≥3、Top1≤60%、回撤8～35%'],
+        ['文章字段完整性', '部分缺失', missing.join('；') || '等待检测'],
+        ['额外 API 消耗', runtime.addsRpcRequests ? '有' : '无', '只复用现有 PumpSwap 数据流'],
+        ['交易路径', '无', '不建模拟仓位、不签名、不发送交易'],
+      ]);
+
+      const observations = data.observations || [];
+      document.querySelector('#m2f-observation-rows').innerHTML = observations.length ? observations.map(row => (
+        `<tr><td>${dateTime(row.migration_at)}</td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${row.first_amm_trade_at ? age(row.first_amm_trade_at - row.migration_at) : '—'} / ${number(row.snapshot_count)}</td><td class="${tone(row.max_return_pct)}">${pct(row.max_return_pct)}</td><td>${row.first_pullback_at ? age(row.first_pullback_at - row.migration_at) : '—'} / ${number(row.pullback_low_price, 10)}<br><span class="table-note">最大 ${pct(row.max_pullback_pct)}</span></td><td>${row.rebound_at ? age(row.rebound_at - row.migration_at) : '—'}</td><td>${escapeHtml(row.completion_reason || '—')}</td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待新的毕业迁移；M2F-OBS 不会创建模拟或实盘仓位</td></tr>';
+
+      const snapshots = data.snapshots || [];
+      document.querySelector('#m2f-snapshot-rows').innerHTML = snapshots.length ? snapshots.map(row => {
+        const incomplete = row.feature_completeness || {};
+        const missingCount = Object.values(incomplete).filter(value => value === false).length;
+        return `<tr><td>${dateTime(row.observed_at)}<br><span class="table-note">AGE ${age(row.age_ms)}</span></td><td>${mintLink(row.mint)}</td><td>${pct(row.opening_impulse_pct)} / 回撤 ${pct(row.pullback_pct)} / 反弹 ${pct(row.rebound_pct)}<br><span class="table-note">峰值 ${number(row.peak_price, 10)} · 突破 ${row.micro_high_break ? '是' : '否'}</span></td><td>${number(row.buy_sol_3s,2)} / ${number(row.sell_sol_3s,2)} / ${number(row.net_flow_3s,2)} SOL</td><td>${number(row.buy_sol_10s,2)} / ${number(row.sell_sol_10s,2)} / ${number(row.net_flow_10s,2)} SOL</td><td>${number(row.buyers_3s)} / ${number(row.buyers_10s)}<br><span class="table-note">Top1 ${pct(row.largest_buyer_share_10s_pct)}</span></td><td>${number(row.buy_speed_ratio,2)}x / ${number(row.net_flow_acceleration,2)} SOL<br><span class="table-note">Sell衰减 ${number(row.sell_deceleration_ratio,2)}</span></td><td>${number(row.observed_retained_buyers)} / ${number(row.observed_exited_buyers)} / DI ${number(row.observed_holder_diffusion_index)}<br><span class="table-note">缺失 ${number(missingCount)} 类文章字段</span></td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">等待迁移后 PumpSwap 实际成交快照</td></tr>';
+    }
+
     function renderHolderGrowthShadow(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -2082,6 +2153,7 @@
       const flowSmartConfirm = data.flowSmartConfirmShadow || { mode: 'SHADOW_L', enabled: false, activePositions: 0, pendingEntries: 0, confirmed: 0, rejected: 0 };
       const launchPullback = data.launchPullbackShadow || { mode: 'SHADOW_F', enabled: false, activePositions: 0, pendingEntries: 0, referencesSeen: 0, qualifiedReferences: 0 };
       const launchQuality = data.launchQualityObserver || { mode: 'OBSERVER_ONLY', enabled: false, activeLaunches: 0, launchesObserved: 0, snapshotsWritten: 0, referencePullbacks: 0 };
+      const migrationSecondLeg = data.migrationSecondLegObserver || { mode: 'M2F_OBSERVER_ONLY', enabled: false, activeMigrations: 0, migrationsObserved: 0, snapshotsWritten: 0 };
       const holderGrowth = data.holderGrowthShadow || { mode: 'SHADOW_N', enabled: false, activePositions: 0, pendingEntries: 0, evaluated: 0, matched: 0, opened: 0, closed: 0 };
       const migratedRebound = data.migratedDropReboundShadow || { mode: 'SHADOW_G', enabled: false, trackedMints: 0, activePositions: 0, pendingEntries: 0, candidates: 0, signals: 0 };
       const rangeScalper = data.rangeScalperShadow || { mode: 'SHADOW_J', enabled: false, trackedMints: 0, rangeActive: 0, activePositions: 0, pendingEntries: 0, candidates: 0, signals: 0 };
@@ -2097,7 +2169,7 @@
         ['Range Scalper J', [['模式', rangeScalper.enabled ? 'SHADOW J（人工重新启用）' : '已停，仅保留历史'], ['订阅 Mint', number(rangeScalper.trackedMints)], ['区间有效', number(rangeScalper.rangeActive)], ['候选 / 信号', `${number(rangeScalper.candidates)} / ${number(rangeScalper.signals)}`], ['待入场', number(rangeScalper.pendingEntries)], ['活动仓位', number(rangeScalper.activePositions)], ['延长订阅', number(rangeScalper.extendedMints)], ['数据库仓位', number(data.database.rangeScalperShadowPositions?.total)], ['链上交易', '永不发送']]],
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Holder Growth N仓位', number(data.database.holderGrowthShadowPositions?.total)], ['Quality Leader QL仓位', number(data.database.qualityLeaderShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
+        ['Database', [['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Holder Growth N仓位', number(data.database.holderGrowthShadowPositions?.total)], ['Quality Leader QL仓位', number(data.database.qualityLeaderShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['M2F观察 / 快照', `${number(data.database.migrationSecondLegObservations?.total)} / ${number(data.database.migrationSecondLegObservations?.snapshots)}`], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['策略', escapeHtml(activeLiveStrategy.label || '未启用')], ['规则', `毕业后≤${age(liveEntry.trackingAgeMs)} · 1秒跌${number(liveEntry.dropMinPct)}–${number(liveEntry.dropMaxPct)}% · 反弹${number(liveEntry.reboundMinPct)}–${number(liveEntry.reboundMaxPct)}%`], ['单笔', `${number(activeLiveStrategy.positionSizeSol,4)} SOL`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Flow-First C', [['模式', flowFirst.enabled ? 'SHADOW C' : '关闭'], ['Primary信号', number(flowFirst.signalsSeen)], ['独立Episode', number(flowFirst.episodes)], ['重复行去重', number(flowFirst.deduplicated)], ['待入场', number(flowFirst.pendingEntries)], ['活动模拟仓位', number(flowFirst.activePositions)], ['C组退出', '5秒 / 7.5% / 12.5%'], ['链上交易', '永不发送']]],
@@ -2109,6 +2181,7 @@
         ['Bonding Momentum H', [['模式', bondingMomentum.enabled ? 'SHADOW H' : '关闭'], ['订单流信号', number(bondingMomentum.signals)], ['待入场', number(bondingMomentum.pendingEntries)], ['活动仓位', number(bondingMomentum.activePositions)], ['因果快照', number(bondingMomentum.snapshotsWritten)], ['无成交快照', number(bondingMomentum.snapshotsMissed)], ['组合', '四组入场 × 三组退出'], ['链上交易', '永不发送']]],
         ['Graduation Hold I', [['模式', graduationHold.enabled ? 'SHADOW I' : '关闭'], ['早期Primary', number(graduationHold.signalsSeen)], ['合格入场信号', number(graduationHold.eligibleSignals)], ['待入场', number(graduationHold.pendingEntries)], ['活动仓位', number(graduationHold.activePositions)], ['检查点通过 / 失败', `${number(graduationHold.gatesPassed)} / ${number(graduationHold.gatesFailed)}`], ['毕业就绪', number(graduationHold.graduationReady)], ['链上交易', '永不发送']]],
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['旧7.5%参考', number(launchQuality.referencePullbacks)], ['FD深回踩参考 / 过深拒绝', `${number(launchQuality.deepReferences)} / ${number(launchQuality.deepRejected)}`], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
+        ['M2F-OBS', [['模式', migrationSecondLeg.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动迁移', number(migrationSecondLeg.activeMigrations)], ['本次迁移', number(migrationSecondLeg.migrationsObserved)], ['本次快照', number(migrationSecondLeg.snapshotsWritten)], ['额外RPC', '无'], ['模拟仓位', '不创建'], ['缺失文章字段', 'NULL / UNKNOWN'], ['链上交易', '无执行路径']]],
         ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N · 15秒控制 + NQ质量组' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 留存 + Curve + 峰后资金流'], ['数据表', '历史全保留，新 cohort 独立'], ['链上交易', '永不发送']]],
         ['Scope Guard', [['实盘入场', '仅 QL-STRICT-PR'], ['已停新开仓', 'M-C5-E120 / GD25-35-F1-XLEG / O / 历史XLEG'], ['存量退出', '继续按各自原规则执行'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
@@ -2203,6 +2276,9 @@
         ],
         'launch-quality': requestContext => [
           loadDashboard('/api/launch-quality-observer?observationLimit=30&snapshotLimit=30', renderLaunchQualityObserver, requestContext),
+        ],
+        'migration-second-leg': requestContext => [
+          loadDashboard('/api/migration-second-leg-observer?observationLimit=40&snapshotLimit=100', renderMigrationSecondLegObserver, requestContext),
         ],
         'holder-growth': requestContext => [
           loadDashboard('/api/holder-growth-shadow?positionLimit=30', renderHolderGrowthShadow, requestContext),
