@@ -403,6 +403,9 @@ assert.deepStrictEqual(
     ['GE30_R23_F1_DAY', 30_000, 1],
     ['GE30_D25_32_R24_F1', 30_000, 1],
     ['GE30_D25_32_R23_F1_FAST200', 30_000, 1],
+    ['GFR_300', 30_000, 1],
+    ['GFR_600', 30_000, 1],
+    ['GFR_1000', 30_000, 1],
   ],
 );
 assert.deepStrictEqual(
@@ -420,6 +423,7 @@ assert.deepStrictEqual(
   [
     'X3', 'X8', 'XLEG',
     'GEXEC_XLEG', 'G2_XLEG', 'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+    'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
     'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
     'G1_B75_H30', 'G1_B50_H60',
     'G1_STAIR_H60', 'G1_STAIR_H120',
@@ -443,6 +447,27 @@ assert.deepStrictEqual(
     .find((profile) => profile.id === 'GE30_R23_F3_EXEC').positionSols,
   [0.05, 0.1, 0.25],
 );
+const gfrProfiles = config.migratedDropReboundShadow.entryProfiles
+  .filter((profile) => profile.id.startsWith('GFR_'));
+assert.deepStrictEqual(
+  gfrProfiles.map((profile) => [
+    profile.id,
+    profile.fastConfirmation.confirmationMs,
+    profile.fastConfirmation.maxRoundTripImpactPct,
+  ]),
+  [
+    ['GFR_300', 300, 5],
+    ['GFR_600', 600, 5],
+    ['GFR_1000', 1_000, 5],
+  ],
+);
+assert.ok(gfrProfiles.every((profile) => (
+  profile.fastConfirmation.minBuyTx === 2
+  && profile.fastConfirmation.minUniqueBuyers === 2
+  && profile.fastConfirmation.minNetFlowSol === 0.5
+  && profile.fastConfirmation.maxTopBuyerSharePct === 60
+  && profile.positionSols.join(',') === '0.05,0.1'
+)));
 assert.deepStrictEqual(
   config.bigWinnerShadow.entryProfiles.filter((profile) => profile.family === 'PARTICIPATION')
     .map((profile) => profile.id),
