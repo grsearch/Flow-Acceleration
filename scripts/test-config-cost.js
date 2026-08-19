@@ -449,6 +449,9 @@ assert.deepStrictEqual(
 );
 const gfrProfiles = config.migratedDropReboundShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('GFR_'));
+assert.strictEqual(config.migratedDropReboundShadow.gfrEnabled, true);
+assert.strictEqual(config.migratedDropReboundShadow.fastFlowMaxTradesPerMint, 512);
+assert.strictEqual(config.migratedDropReboundShadow.fastFlowSweepMs, 5_000);
 assert.deepStrictEqual(
   gfrProfiles.map((profile) => [
     profile.id,
