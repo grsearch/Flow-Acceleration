@@ -73,6 +73,12 @@ const EXPLICIT_FILTERS = Object.freeze({
     bind: (startMs, endMs) => [startMs, endMs, startMs, endMs],
   },
   launch_quality_snapshots: { where: 'observed_at >= ? AND observed_at < ?', anchor: 'observed_at' },
+  migration_second_leg_observations: {
+    where: 'migration_at >= ? AND migration_at < ?', anchor: 'migration_at',
+  },
+  migration_second_leg_snapshots: {
+    where: 'observed_at >= ? AND observed_at < ?', anchor: 'observed_at',
+  },
   holder_growth_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   quality_leader_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   big_winner_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
