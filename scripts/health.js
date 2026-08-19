@@ -3,7 +3,9 @@
 require('dotenv').config();
 const { config } = require('../src/config');
 
-const url = `http://127.0.0.1:${config.server.port}/api/health`;
+// Operational readiness must stay O(1). Detailed /api/health statistics are
+// served from a background database snapshot and are not a liveness probe.
+const url = `http://127.0.0.1:${config.server.port}/health`;
 fetch(url)
   .then(async (response) => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);

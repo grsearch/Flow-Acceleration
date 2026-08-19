@@ -529,6 +529,53 @@ function testFixedHoldHardStop() {
   store.close();
 }
 
+function testExactCohortLiveSignalAndReplayGuard() {
+  const store = makeStore();
+  let now = 5_950_000;
+  const signals = [];
+  const config = makeConfig();
+  config.profiles = [];
+  config.holds = [];
+  config.optimizationCohorts = [{
+    id: 'FO_RB10_30S', label: 'FO-RB10', profileId: 'FO_RB10',
+    referenceProfileId: 'LEGACY_7_5_R3', referencePullbackPct: 7.5,
+    referenceReboundPct: 3, minNetFlowSol: 5, maxCreatorSharePct: 5,
+    minRecentBuyers: 10, maxTop3SharePct: 100,
+    maxEntryPriceJumpPct: 10, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 30_000,
+    liveStrategyId: 'launch_pullback_fo_rb10_30s_live',
+  }];
+  const suite = new LaunchPullbackShadowSuite({
+    config, store, now: () => now, onLiveSignal: (signal) => signals.push(signal),
+  });
+  suite.start();
+  const first = reference('fo-live', now, 8, 4);
+  first.features.recentBuyers = 10;
+  suite.onReference(first);
+  suite.observeTrade({
+    ...trade('fo-live', now + 200, 1.02), slot: 123,
+    receivedAtMs: now + 201, virtualSolReservesRaw: '1000',
+    virtualTokenReservesRaw: '2000',
+  });
+  assert.strictEqual(signals.length, 1);
+  assert.deepStrictEqual([
+    signals[0].strategyId, signals[0].market,
+    signals[0].features.shadowCohortId,
+  ], ['launch_pullback_fo_rb10_30s_live', 'PUMP_BONDING_CURVE', 'FO_RB10_30S']);
+  assert.ok(Math.abs(signals[0].features.shadowEntryJumpPct - 2) < 1e-9);
+
+  now += 1_000;
+  const replayed = reference('fo-replay', now, 8, 4);
+  replayed.features.recentBuyers = 10;
+  suite.onReference(replayed);
+  suite.observeTrade(trade('fo-replay', now + 200, 1.01), { replay: true });
+  assert.strictEqual(signals.length, 1, 'startup replay must never emit a live entry');
+  const health = suite.health().cohorts[0];
+  assert.strictEqual(health.liveSignalsEmitted, 1);
+  assert.strictEqual(health.replayLiveSignalsSuppressed, 1);
+  assert.strictEqual(store.db.prepare('SELECT COUNT(*) AS n FROM live_positions').get().n, 0);
+  store.close();
+}
+
 function reference(mint, at, netFlowSol = 20, creatorSharePct = 4) {
   return {
     mint,
@@ -662,6 +709,7 @@ testTrailingCohorts();
 testDeepCohortsStayIsolated();
 testOptimizationCohortsStayIsolated();
 testFixedHoldHardStop();
+testExactCohortLiveSignalAndReplayGuard();
 
 function testFlowConsensusAndExitVariants() {
   const store = makeStore();

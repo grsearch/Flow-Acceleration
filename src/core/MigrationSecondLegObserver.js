@@ -1,5 +1,11 @@
 'use strict';
 
+const { PublicKey } = require('@solana/web3.js');
+const { NATIVE_MINT } = require('@solana/spl-token');
+const { canonicalPumpPoolPda } = require('@pump-fun/pump-swap-sdk');
+
+const LAMPORTS_PER_SOL = 1_000_000_000;
+
 function finite(value, fallback = null) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -17,6 +23,44 @@ function observedPrice(trade = {}) {
   return reservePrice > 0 ? reservePrice : finite(trade.price);
 }
 
+function effectiveQuoteReserveSol(trade = {}) {
+  try {
+    if (trade.poolQuoteReservesRaw == null) return null;
+    const poolQuote = BigInt(trade.poolQuoteReservesRaw);
+    const virtualQuote = BigInt(trade.virtualQuoteReservesRaw || 0);
+    const effective = poolQuote + virtualQuote;
+    if (effective <= 0n) return null;
+    const value = Number(effective) / LAMPORTS_PER_SOL;
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function fixedInputImpactPct(quoteReserveSol, inputSol) {
+  if (!(quoteReserveSol > 0) || !(inputSol > 0)) return null;
+  return inputSol / (quoteReserveSol + inputSol) * 100;
+}
+
+function canonicalPoolAddress(mint) {
+  if (!mint) return null;
+  try {
+    return canonicalPumpPoolPda(new PublicKey(mint), NATIVE_MINT).toBase58();
+  } catch (_) {
+    return null;
+  }
+}
+
+function canonicalPoolStatus(expectedPool, observedPool) {
+  if (!expectedPool || !observedPool) return 'UNKNOWN';
+  return String(expectedPool) === String(observedPool) ? 'CANONICAL' : 'NON_CANONICAL';
+}
+
+function rawPositive(value) {
+  if (value == null) return null;
+  try { return BigInt(value) > 0n; } catch (_) { return null; }
+}
+
 function normalizedToken(token = {}) {
   return {
     mint: token.mint,
@@ -24,10 +68,12 @@ function normalizedToken(token = {}) {
     creator: token.creator || null,
     migrationAt: migrationTime(token),
     migrationSource: token.migratedAt || token.migration_pool ? 'MIGRATION' : 'COMPLETE',
+    migrationPool: token.migration_pool || token.migrationPool || token.pool || null,
   };
 }
 
 function newState(token) {
+  const expectedCanonicalPool = canonicalPoolAddress(token.mint);
   return {
     ...token,
     firstAmmTradeAt: null,
@@ -45,6 +91,12 @@ function newState(token) {
     lastSnapshotBucket: -1,
     events: [],
     wallets: new Map(),
+    latestQuoteReserveSol: null,
+    quoteReserveStatus: 'UNAVAILABLE',
+    boostStatus: 'UNKNOWN',
+    cashbackStatus: 'UNKNOWN',
+    expectedCanonicalPool,
+    canonicalPoolStatus: canonicalPoolStatus(expectedCanonicalPool, token.migrationPool),
   };
 }
 
@@ -168,12 +220,12 @@ class MigrationSecondLegObserver {
         retentionFloorPct: this.config.retentionFloorPct,
         effectiveBuyMinSol: this.config.effectiveBuyMinSol,
         exactArticleFeatures: {
-          quoteReserve: 'UNAVAILABLE',
-          onfi10: 'UNAVAILABLE',
-          boost: 'UNKNOWN',
+          quoteReserve: 'OBSERVED_FROM_SWAP_EVENT',
+          onfi10: 'PROVISIONAL_GROSS_FLOW_ONLY',
+          boost: 'CAN_BOOST_HINT_ONLY',
           mayhem: 'UNKNOWN',
-          cashback: 'UNKNOWN',
-          canonicalPool: 'UNKNOWN',
+          cashback: 'TRADE_EVENT_HINT_ONLY',
+          canonicalPool: 'LOCALLY_VERIFIED',
           entityClusters: 'UNAVAILABLE',
         },
         isolatedTables: [
@@ -249,7 +301,30 @@ class MigrationSecondLegObserver {
     const solAmount = Math.max(0, finite(trade.solAmount, 0));
     const tokenAmount = Math.max(0, finite(trade.tokenAmount, 0));
     const wallet = String(trade.wallet || '');
-    state.events.push({ timestampMs, side, solAmount, tokenAmount, wallet, price });
+    const quoteReserveSol = effectiveQuoteReserveSol(trade);
+    if (quoteReserveSol != null) {
+      state.latestQuoteReserveSol = quoteReserveSol;
+      state.quoteReserveStatus = 'OBSERVED';
+    }
+    if (typeof trade.canBoost === 'boolean') {
+      if (trade.canBoost) state.boostStatus = 'CAN_BOOST_HINT';
+      else if (state.boostStatus === 'UNKNOWN') state.boostStatus = 'NOT_BOOST_CAPABLE_HINT';
+    }
+    const hasCashback = rawPositive(trade.cashbackRaw);
+    if (hasCashback === true) state.cashbackStatus = 'TRADE_CASHBACK_OBSERVED';
+    else if (hasCashback === false && state.cashbackStatus === 'UNKNOWN') {
+      state.cashbackStatus = 'NO_TRADE_CASHBACK_OBSERVED';
+    }
+    const poolStatus = canonicalPoolStatus(
+      state.expectedCanonicalPool,
+      trade.pool || state.migrationPool,
+    );
+    if (poolStatus === 'NON_CANONICAL' || state.canonicalPoolStatus === 'UNKNOWN') {
+      state.canonicalPoolStatus = poolStatus;
+    }
+    state.events.push({
+      timestampMs, side, solAmount, tokenAmount, wallet, price, quoteReserveSol,
+    });
     const eventFloor = timestampMs - 35_000;
     while (state.events.length && state.events[0].timestampMs < eventFloor) state.events.shift();
     if (wallet) {
@@ -298,17 +373,20 @@ class MigrationSecondLegObserver {
     const pullbackPct = (1 - price / state.peakPrice) * 100;
     const reboundPct = state.pullbackLowPrice > 0
       ? (price / state.pullbackLowPrice - 1) * 100 : null;
+    const quoteReserveSol = effectiveQuoteReserveSol(trade) ?? state.latestQuoteReserveSol;
+    const provisionalOnfi10Pct = quoteReserveSol > 0
+      ? current10.netFlow / quoteReserveSol * 100 : null;
     const featureCompleteness = {
       publicOrderFlow: true,
       observedWalletDiffusion: true,
-      quoteReserve: false,
-      onfi10: false,
-      boost: false,
+      quoteReserve: quoteReserveSol != null,
+      onfi10: provisionalOnfi10Pct == null ? false : 'PROVISIONAL_GROSS',
+      boost: state.boostStatus === 'UNKNOWN' ? false : 'HINT_ONLY',
       mayhem: false,
-      cashback: false,
-      canonicalPool: false,
+      cashback: state.cashbackStatus === 'UNKNOWN' ? false : 'HINT_ONLY',
+      canonicalPool: state.canonicalPoolStatus === 'UNKNOWN' ? false : true,
       entityClusters: false,
-      note: 'Missing article features remain NULL/UNKNOWN; no RPC enrichment is performed.',
+      note: 'ONFI is provisional gross flow until BOOST/wash/entity filtering is available.',
     };
     const snapshot = {
       mint: state.mint,
@@ -346,15 +424,15 @@ class MigrationSecondLegObserver {
       observedRetainedBuyers: retained,
       observedExitedBuyers: exited,
       observedHolderDiffusionIndex: retained - exited,
-      quoteReserveSol: null,
-      onfi10Pct: null,
-      estimatedImpact005Pct: null,
-      estimatedImpact01Pct: null,
-      estimatedImpact025Pct: null,
-      boostStatus: 'UNKNOWN',
+      quoteReserveSol,
+      onfi10Pct: provisionalOnfi10Pct,
+      estimatedImpact005Pct: fixedInputImpactPct(quoteReserveSol, 0.05),
+      estimatedImpact01Pct: fixedInputImpactPct(quoteReserveSol, 0.1),
+      estimatedImpact025Pct: fixedInputImpactPct(quoteReserveSol, 0.25),
+      boostStatus: state.boostStatus,
       mayhemStatus: 'UNKNOWN',
-      cashbackStatus: 'UNKNOWN',
-      canonicalPoolStatus: 'UNKNOWN',
+      cashbackStatus: state.cashbackStatus,
+      canonicalPoolStatus: state.canonicalPoolStatus,
       entityClusterStatus: 'UNAVAILABLE',
       featureCompleteness,
     };
@@ -376,6 +454,10 @@ class MigrationSecondLegObserver {
       pullbackLowPrice: state.pullbackLowPrice,
       maxPullbackPct: state.maxPullbackPct,
       reboundAt: state.reboundAt,
+      boostStatus: state.boostStatus,
+      cashbackStatus: state.cashbackStatus,
+      canonicalPoolStatus: state.canonicalPoolStatus,
+      quoteReserveStatus: state.quoteReserveStatus,
     });
     if (!replay) this.metrics.lastActionAt = this.now();
   }

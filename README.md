@@ -118,6 +118,8 @@ W3 = T-2s ~ T
 
 SQLite 使用 WAL 和批量写入。Raw Trade 默认保留最近 48 小时热数据；主交易进程不再同步压缩、删除或执行 `PRAGMA optimize`，避免阻塞 gRPC、策略计算与 Dashboard。每日 COS 导出完成、SHA256 上传且远端对象验证成功后，独立低优先级维护进程才会分批删除超过 `FLOW_RETENTION_HOT_RAW_HOURS` 的 Raw Trade，并执行受限的数据库优化。Signals、Future Labels、Shadow 仓位和实盘仓位不会被该任务删除。启动期间由独立轻量进程显示“系统正在启动”页面；各 Shadow 共用一次近期交易回放，避免重复读取大型数据库。
 
+Dashboard 的详细数据库行数不再由 `/api/health` 在主线程即时扫描。独立只读 Worker 在启动稳定30秒后按 `FLOW_DB_HEALTH_REFRESH_MS`（默认15分钟）生成统计快照，HTTP 只读取缓存；部署与 systemd 存活检查统一使用 O(1) 的 `/health`。Shadow 定时维护拆成四组、每250ms错开一组，但每个策略仍保持每秒推进一次；AMM订阅集合每5秒刷新，并对超过100ms的运行任务及超过250ms的HTTP接口输出节流后的慢日志，便于准确定位剩余阻塞而不影响交易主循环。
+
 ## 运行
 
 需要 Node.js 22+。`better-sqlite3` 直接使用包内自带的 Windows/Linux 预编译文件，不需要额外安装 C++ 编译工具链。
@@ -623,10 +625,16 @@ PumpSwap 数据流，以真实成交驱动 1 秒快照，记录首波价格、�
 - `migration_second_leg_observations`
 - `migration_second_leg_snapshots`
 
-当前数据流不能可靠证明的 quote reserve / ONFI10、BOOST、Mayhem、
-cashback、canonical pool 以及实体/资金图聚类字段，会明确保存为
-`NULL`、`UNKNOWN` 或 `UNAVAILABLE`，绝不以 0 冒充已观测值。积累至少
-3～5 天后再根据这些观察数据决定是否建立正式的交易型 Shadow cohort。
+更新后的 PumpSwap 事件已经能直接提供 pool quote reserve 与 virtual quote
+reserve；M2F 会据此保存有效 Quote Reserve、0.05/0.1/0.25 SOL 的恒定乘积
+容量冲击，并在本地校验 canonical pool，不增加 RPC。10 秒资金流也会保存为
+`Gross-NFI10` 临时值，但它尚未剔除 BOOST、洗量和关联实体，因此不会冒充
+文章定义的 organic ONFI10。`canBoost` 与成交 cashback 只作为事件提示保存。
+
+目前仍不能可靠证明的精确 BOOST 交易分类、Mayhem 权威标记及实体/资金/
+机器人聚类字段，会明确保存为 `UNKNOWN` 或 `UNAVAILABLE`。历史快照不会
+伪造回填；上述新增字段只从升级后真实收到的 PumpSwap 成交开始生效。积累
+至少 3～5 天后再根据这些观察数据决定是否建立正式的交易型 Shadow cohort。
 
 为避免大型历史库冷启动阻塞，`M2F-OBS` 启动时不回放历史 AMM 成交：
 上次进程中断的 `OBSERVING` 记录会标记为 `RIGHT_CENSORED`，新一轮只从

@@ -48,10 +48,11 @@ function restoredPosition(row) {
 }
 
 class LaunchPullbackShadowManager {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
     this.pendingEntries = new Map();
     this.positions = new Map();
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
@@ -63,6 +64,8 @@ class LaunchPullbackShadowManager {
       priceJump: 0,
       opened: 0,
       closed: 0,
+      liveSignalsEmitted: 0,
+      replayLiveSignalsSuppressed: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -301,7 +304,7 @@ class LaunchPullbackShadowManager {
     return saved;
   }
 
-  observeTrade(trade) {
+  observeTrade(trade, { replay = false } = {}) {
     const price = shadowPrice(trade);
     const timestampMs = finite(trade?.timestampMs);
     if (!this.config.enabled || !trade?.mint || !(price > 0) || !(timestampMs > 0)) return;
@@ -350,6 +353,7 @@ class LaunchPullbackShadowManager {
         this.positions.set(trade.mint, pending);
         this.metrics.opened += 1;
         this.metrics.lastActionAt = this.now();
+        this._emitLiveSignal(pending, trade, price, replay);
         position = pending;
       }
     }
@@ -358,6 +362,40 @@ class LaunchPullbackShadowManager {
     if (position?.status === STATUS.OPEN && this._eligibleExitTrade(position, trade, price)) {
       this._updatePeak(position, price);
       this._evaluateTrailingExit(position, price, timestampMs);
+    }
+  }
+
+  _emitLiveSignal(position, trade, marketPrice, replay) {
+    if (!this.onLiveSignal || !this.config.liveStrategyId) return;
+    if (replay) {
+      this.metrics.replayLiveSignalsSuppressed += 1;
+      return;
+    }
+    try {
+      this.onLiveSignal({
+        strategyId: this.config.liveStrategyId,
+        episodeId: `${position.mint}:${position.cohortId}:${position.referenceAt}`,
+        mint: position.mint,
+        symbol: position.symbol || null,
+        price: marketPrice,
+        slot: trade.slot,
+        timestampMs: trade.timestampMs,
+        receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+        market: 'PUMP_BONDING_CURVE',
+        virtualSolReservesRaw: trade.virtualSolReservesRaw || null,
+        virtualTokenReservesRaw: trade.virtualTokenReservesRaw || null,
+        realSolReservesRaw: trade.realSolReservesRaw || null,
+        realTokenReservesRaw: trade.realTokenReservesRaw || null,
+        features: {
+          shadowCohortId: position.cohortId,
+          shadowReferenceAt: position.referenceAt,
+          shadowReferencePrice: position.referencePrice,
+          shadowEntryJumpPct: position.entryJumpPct,
+        },
+      });
+      this.metrics.liveSignalsEmitted += 1;
+    } catch (error) {
+      this.metrics.lastError = error.message;
     }
   }
 

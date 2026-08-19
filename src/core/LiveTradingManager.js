@@ -653,6 +653,13 @@ class LiveTradingManager {
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
+    const shadowEntryImpactPct = Number(event.features?.shadowEntryImpactPct);
+    const maxShadowEntryImpactPct = Number(strategy.maxShadowEntryImpactPct);
+    if (Number.isFinite(shadowEntryImpactPct)
+      && Number.isFinite(maxShadowEntryImpactPct)
+      && shadowEntryImpactPct > maxShadowEntryImpactPct) {
+      return 'SHADOW_ENTRY_IMPACT';
+    }
     const maxSignalAgeMs = strategy?.maxSignalAgeMs || this.config.maxSignalAgeMs;
     if (Number.isFinite(receivedAt)
       && this.now() - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';

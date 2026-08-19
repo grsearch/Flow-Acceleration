@@ -240,12 +240,29 @@ function createRuntime(runtimeConfig = config) {
     ignoredEvents: 0,
     shadowModuleErrors: {},
   };
+  const slowTaskLastLoggedAt = new Map();
+  const runTimed = (name, callback, thresholdMs = 100) => {
+    const startedAt = process.hrtime.bigint();
+    try {
+      return callback();
+    } finally {
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      if (durationMs >= thresholdMs) {
+        const now = Date.now();
+        if (now - (slowTaskLastLoggedAt.get(name) || 0) >= 30_000) {
+          slowTaskLastLoggedAt.set(name, now);
+          console.warn(`[Runtime:slow] ${name} ${durationMs.toFixed(1)}ms`);
+        }
+      }
+    }
+  };
   const observeShadow = (name, callback) => {
     try {
-      callback();
+      return runTimed(`shadow:${name}`, callback);
     } catch (error) {
       runtimeMetrics.shadowModuleErrors[name] = (runtimeMetrics.shadowModuleErrors[name] || 0) + 1;
       console.error(`[Shadow:${name}] isolated failure:`, error.message);
+      return undefined;
     }
   };
   let maintenanceTimer = null;
@@ -605,39 +622,63 @@ function createRuntime(runtimeConfig = config) {
       + `ratio>=${runtimeConfig.strategy.minAccelerationRatio}x when defined`,
     );
 
+    const shadowMaintenanceGroups = [
+      [
+        ['primarySignalAdvance', signalShadow],
+        ['flowFirstAdvance', flowFirstShadow],
+        ['smartPullbackAdvance', smartPullbackShadow],
+        ['smartOpenAdvance', smartOpenShadow],
+        ['flowSmartConfirmAdvance', flowSmartConfirmShadow],
+      ],
+      [
+        ['smartLikeEarlyAdvance', smartLikeEarlyShadow],
+        ['smartResonanceAdvance', smartResonanceShadow],
+        ['publicFlowLeadAdvance', publicFlowLeadShadow],
+        ['launchPullbackAdvance', launchPullbackShadow],
+        ['launchQualityAdvance', launchQualityObserver],
+      ],
+      [
+        ['migrationSecondLegAdvance', migrationSecondLegObserver],
+        ['holderGrowthAdvance', holderGrowthShadow],
+        ['qualityLeaderAdvance', qualityLeaderShadow],
+        ['bigWinnerAdvance', bigWinnerShadow],
+        ['migratedDropReboundAdvance', migratedDropReboundShadow],
+      ],
+      [
+        ['migrationContinuityAdvance', migrationContinuityShadow],
+        ['rangeScalperAdvance', rangeScalperShadow],
+        ['cyaEarlyPyramidAdvance', cyaEarlyPyramidShadow],
+        ['bondingCurveMomentumAdvance', bondingCurveMomentumShadow],
+        ['graduationHoldAdvance', graduationHoldShadow],
+        ['graduationAccelerationAdvance', graduationAccelerationShadow],
+      ],
+    ];
+    let maintenanceTick = 0;
+    let lastSubscriptionRefreshAt = 0;
     maintenanceTimer = setInterval(() => {
       const now = Date.now();
-      engine.cleanup(now);
-      labeler.advanceTime(now);
-      observeShadow('primarySignalAdvance', () => signalShadow.advanceTime(now));
-      observeShadow('flowFirstAdvance', () => flowFirstShadow.advanceTime(now));
-      observeShadow('smartPullbackAdvance', () => smartPullbackShadow.advanceTime(now));
-      observeShadow('smartOpenAdvance', () => smartOpenShadow.advanceTime(now));
-      observeShadow('flowSmartConfirmAdvance', () => flowSmartConfirmShadow.advanceTime(now));
-      observeShadow('smartLikeEarlyAdvance', () => smartLikeEarlyShadow.advanceTime(now));
-      observeShadow('smartResonanceAdvance', () => smartResonanceShadow.advanceTime(now));
-      observeShadow('publicFlowLeadAdvance', () => publicFlowLeadShadow.advanceTime(now));
-      observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
-      observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
-      observeShadow('migrationSecondLegAdvance', () => migrationSecondLegObserver.advanceTime(now));
-      observeShadow('holderGrowthAdvance', () => holderGrowthShadow.advanceTime(now));
-      observeShadow('qualityLeaderAdvance', () => qualityLeaderShadow.advanceTime(now));
-      observeShadow('bigWinnerAdvance', () => bigWinnerShadow.advanceTime(now));
-      observeShadow('migratedDropReboundAdvance', () => migratedDropReboundShadow.advanceTime(now));
-      observeShadow('migrationContinuityAdvance', () => migrationContinuityShadow.advanceTime(now));
-      observeShadow('rangeScalperAdvance', () => rangeScalperShadow.advanceTime(now));
-      observeShadow('cyaEarlyPyramidAdvance', () => cyaEarlyPyramidShadow.advanceTime(now));
-      observeShadow('bondingCurveMomentumAdvance', () => bondingCurveMomentumShadow.advanceTime(now));
-      observeShadow('graduationHoldAdvance', () => graduationHoldShadow.advanceTime(now));
-      observeShadow('graduationAccelerationAdvance', () => (
-        graduationAccelerationShadow.advanceTime(now)
-      ));
-      trader.advanceTime(now);
-      refreshAmmSubscriptions(now);
-    }, 1_000);
+      const groupIndex = maintenanceTick % shadowMaintenanceGroups.length;
+      maintenanceTick += 1;
+      if (groupIndex === 0) {
+        runTimed('maintenance:engineCleanup', () => engine.cleanup(now));
+        runTimed('maintenance:labelAdvance', () => labeler.advanceTime(now));
+      }
+      const group = shadowMaintenanceGroups[groupIndex];
+      for (const [name, target] of group) {
+        observeShadow(name, () => target.advanceTime(now));
+      }
+      if (groupIndex === 0) {
+        runTimed('maintenance:traderAdvance', () => trader.advanceTime(now));
+      }
+      if (now - lastSubscriptionRefreshAt >= 5_000) {
+        lastSubscriptionRefreshAt = now;
+        runTimed('maintenance:refreshAmmSubscriptions', () => refreshAmmSubscriptions(now));
+      }
+    }, 250);
 
     refreshAmmSubscriptions();
     await stream.start();
+    store.startHealthSampler(runtimeConfig.storage.healthRefreshMs);
   }
 
   async function stop(reason = 'shutdown') {
@@ -679,7 +720,7 @@ function createRuntime(runtimeConfig = config) {
       engine: engine.stats(),
       labels: labeler.stats(),
       stream: stream.health(),
-      database: store.health(),
+      database: store.healthSnapshot(),
       trading: trader.health(),
       signalShadow: signalShadow.health(),
       flowFirstShadow: flowFirstShadow.health(),

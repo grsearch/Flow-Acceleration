@@ -50,6 +50,7 @@ assert.strictEqual(config.backtest.exitExecutionDelayMs, 200);
 assert.strictEqual(config.backtest.signalCooldownMs, 5_000);
 assert.strictEqual(config.backtest.singlePositionPerMint, true);
 assert.strictEqual(config.storage.rawRetentionHours, 48);
+assert.strictEqual(config.storage.healthRefreshMs, 15 * 60_000);
 assert.strictEqual(config.storage.startupReplayCacheMs, 15 * 60_000);
 assert.strictEqual(config.liveTrading.enabled, false);
 assert.strictEqual(config.liveTrading.requestedEnabled, false);
@@ -67,6 +68,9 @@ const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
 ));
 const liveQualityLeader = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'quality_leader_ql_strict_protected_live'
+));
+const liveLaunchPullback = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'launch_pullback_fo_rb10_30s_live'
 ));
 const liveV3 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
@@ -88,6 +92,15 @@ assert.strictEqual(liveQualityLeader.hardStopPct, 20);
 assert.strictEqual(liveQualityLeader.noStrengthMs, 30_000);
 assert.strictEqual(liveQualityLeader.maxHoldMs, 300_000);
 assert.strictEqual(liveQualityLeader.protectedFloors.length, 4);
+assert.strictEqual(liveQualityLeader.maxEntryPriceJumpPct, 10);
+assert.strictEqual(liveQualityLeader.maxShadowEntryImpactPct, 12);
+assert.strictEqual(liveLaunchPullback.positionSizeSol, 0.1);
+assert.strictEqual(liveLaunchPullback.entryEnabled, true);
+assert.strictEqual(liveLaunchPullback.code, 'F-FO-RB10-X30');
+assert.strictEqual(liveLaunchPullback.market, 'PUMP_BONDING_CURVE');
+assert.strictEqual(liveLaunchPullback.exitMode, 'FIXED_HOLD');
+assert.strictEqual(liveLaunchPullback.fixedHoldMs, 30_000);
+assert.strictEqual(liveLaunchPullback.sourceShadowCohortId, 'FO_RB10_30S');
 assert.strictEqual(liveGraduationAccel.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationAccel.entryEnabled, false);
 assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
@@ -176,7 +189,7 @@ assert.ok(
   Math.abs(costBreakdown(config.flowFirstShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
-assert.strictEqual(config.smartPullbackShadow.enabled, true);
+assert.strictEqual(config.smartPullbackShadow.enabled, false);
 assert.strictEqual(config.smartPullbackShadow.minSmartBuySol, 0.1);
 assert.strictEqual(config.smartPullbackShadow.confirmationWindowMs, 15_000);
 assert.strictEqual(config.smartPullbackShadow.pullbackPct, 2.5);
@@ -220,7 +233,8 @@ assert.deepStrictEqual(
   config.flowSmartConfirmShadow.cohorts.map((cohort) => [cohort.id, cohort.maxConfirmationDelayMs]),
   [['L5_F5', 5_000], ['L15_F5', 15_000], ['L5_T15', 5_000], ['L15_T20', 15_000]],
 );
-assert.strictEqual(config.smartResonanceShadow.enabled, true);
+assert.strictEqual(config.smartResonanceShadow.enabled, false);
+assert.strictEqual(config.smartLikeEarlyShadow.enabled, false);
 assert.strictEqual(config.smartResonanceShadow.positionSizeSol, 1);
 assert.strictEqual(config.smartResonanceShadow.entryDelayMs, 200);
 assert.deepStrictEqual(
@@ -250,7 +264,7 @@ assert.strictEqual(config.publicFlowLeadShadow.positionSizeSol, 1);
 assert.strictEqual(config.publicFlowLeadShadow.smartLabelWindowMs, 15_000);
 assert.deepStrictEqual(
   config.publicFlowLeadShadow.entryProfiles.map((profile) => profile.id),
-  ['PFL_B0', 'PFL_B1', 'PFL_A1', 'PFL_R1'],
+  ['PFL_B2'],
 );
 assert.deepStrictEqual(
   config.publicFlowLeadShadow.exitProfiles.map((profile) => [
@@ -262,11 +276,14 @@ assert.deepStrictEqual(
     ['H30_T180', 30, 180_000], ['H30_T240', 30, 240_000],
   ],
 );
-assert.strictEqual(
-  config.publicFlowLeadShadow.entryProfiles.find((profile) => profile.id === 'PFL_A1')
-    .minFlowAccelerationRatio,
-  1.5,
-);
+const pflB2 = config.publicFlowLeadShadow.entryProfiles[0];
+assert.deepStrictEqual([
+  pflB2.minAgeMs, pflB2.maxAgeMs, pflB2.minPublicBuyers1s,
+  pflB2.maxPublicBuyers1s, pflB2.minPublicBuyers5s,
+  pflB2.minPublicBuyFlow5sSol, pflB2.maxPublicBuyFlow5sSol,
+  pflB2.minReturn5sPct, pflB2.maxReturn5sPct,
+  pflB2.minFlowAccelerationRatio, pflB2.maxFlowAccelerationRatio,
+], [8_000, 12_000, 9, 12, 45, 26, 35, 10, 25, 1, 2.5]);
 assert.strictEqual(config.launchPullbackShadow.enabled, true);
 assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 1);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
@@ -310,6 +327,11 @@ assert.strictEqual(
 assert.strictEqual(
   config.launchPullbackShadow.optimizationCohorts[0].maxEntryPriceJumpPct,
   3,
+);
+assert.strictEqual(
+  config.launchPullbackShadow.optimizationCohorts
+    .find((cohort) => cohort.id === 'FO_RB10_30S').liveStrategyId,
+  'launch_pullback_fo_rb10_30s_live',
 );
 const flowConsensus = config.launchPullbackShadow.optimizationCohorts
   .find((cohort) => cohort.id === 'FC_BASE_X12');
@@ -437,6 +459,7 @@ assert.deepStrictEqual(
   config.migrationContinuityShadow.exitProfiles.map((profile) => profile.id),
   ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER'],
 );
+assert.strictEqual(config.holderGrowthShadow.enabled, false);
 assert.deepStrictEqual(
   config.holderGrowthShadow.entryProfiles.map((profile) => [profile.id, profile.horizonMs]),
   [

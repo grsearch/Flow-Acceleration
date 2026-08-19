@@ -282,6 +282,11 @@ function decodeAmmBuy(data, context) {
   const pool = reader.pubkey();
   const wallet = reader.pubkey();
   let virtualQuoteReservesRaw = 0n;
+  let cashbackFeeBasisPoints = null;
+  let cashbackRaw = null;
+  let buybackFeeBasisPoints = null;
+  let buybackRaw = null;
+  let canBoost = null;
   if (reader.remaining() > 0) {
     reader.pubkey(); // user_base_token_account
     reader.pubkey(); // user_quote_token_account
@@ -297,12 +302,12 @@ function decodeAmmBuy(data, context) {
     reader.i64(); // last_update_timestamp
     reader.u64(); // min_base_amount_out
     reader.string(); // ix_name
-    reader.u64(); // cashback_fee_basis_points
-    reader.u64(); // cashback
-    reader.u64(); // buyback_fee_basis_points
-    reader.u64(); // buyback_fee
+    cashbackFeeBasisPoints = numberOf(reader.u64());
+    cashbackRaw = reader.u64();
+    buybackFeeBasisPoints = numberOf(reader.u64());
+    buybackRaw = reader.u64();
     virtualQuoteReservesRaw = reader.i128();
-    reader.bool(); // can_boost
+    canBoost = reader.bool();
   }
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
@@ -325,6 +330,11 @@ function decodeAmmBuy(data, context) {
     poolBaseReservesRaw: poolBaseReservesRaw.toString(),
     poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
     virtualQuoteReservesRaw: virtualQuoteReservesRaw.toString(),
+    cashbackFeeBasisPoints,
+    cashbackRaw: cashbackRaw == null ? null : cashbackRaw.toString(),
+    buybackFeeBasisPoints,
+    buybackRaw: buybackRaw == null ? null : buybackRaw.toString(),
+    canBoost,
   };
 }
 
@@ -347,6 +357,11 @@ function decodeAmmSell(data, context) {
   const pool = reader.pubkey();
   const wallet = reader.pubkey();
   let virtualQuoteReservesRaw = 0n;
+  let cashbackFeeBasisPoints = null;
+  let cashbackRaw = null;
+  let buybackFeeBasisPoints = null;
+  let buybackRaw = null;
+  let canBoost = null;
   if (reader.remaining() > 0) {
     reader.pubkey(); // user_base_token_account
     reader.pubkey(); // user_quote_token_account
@@ -355,12 +370,12 @@ function decodeAmmSell(data, context) {
     reader.pubkey(); // coin_creator
     reader.u64(); // coin_creator_fee_basis_points
     reader.u64(); // coin_creator_fee
-    reader.u64(); // cashback_fee_basis_points
-    reader.u64(); // cashback
-    reader.u64(); // buyback_fee_basis_points
-    reader.u64(); // buyback_fee
+    cashbackFeeBasisPoints = numberOf(reader.u64());
+    cashbackRaw = reader.u64();
+    buybackFeeBasisPoints = numberOf(reader.u64());
+    buybackRaw = reader.u64();
     virtualQuoteReservesRaw = reader.i128();
-    reader.bool(); // can_boost
+    canBoost = reader.bool();
   }
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
@@ -383,6 +398,11 @@ function decodeAmmSell(data, context) {
     poolBaseReservesRaw: poolBaseReservesRaw.toString(),
     poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
     virtualQuoteReservesRaw: virtualQuoteReservesRaw.toString(),
+    cashbackFeeBasisPoints,
+    cashbackRaw: cashbackRaw == null ? null : cashbackRaw.toString(),
+    buybackFeeBasisPoints,
+    buybackRaw: buybackRaw == null ? null : buybackRaw.toString(),
+    canBoost,
   };
 }
 

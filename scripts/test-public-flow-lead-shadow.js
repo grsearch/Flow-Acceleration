@@ -57,6 +57,36 @@ function main() {
   };
   const suite = new PublicFlowLeadShadowSuite({ config, store, now: () => now });
   suite.start();
+  const boundedProfile = {
+    minAgeMs: 8_000, maxAgeMs: 12_000,
+    minCurvePct: 60, maxCurvePct: 75,
+    minPublicBuyers1s: 9, maxPublicBuyers1s: 12,
+    minPublicBuyers5s: 45,
+    minPublicBuyFlow5sSol: 26, maxPublicBuyFlow5sSol: 35,
+    minPublicNetFlow5sSol: 2, maxLargestBuyerSharePct: 15,
+    minReturn5sPct: 10, maxReturn5sPct: 25,
+    minFlowAccelerationRatio: 1, maxFlowAccelerationRatio: 2.5,
+  };
+  const boundedFeatures = {
+    ageMs: 10_000, curvePct: 70, publicBuyers1s: 10, publicBuyers5s: 50,
+    publicBuyFlow1s: 6, publicBuyFlow5s: 30, publicNetFlow5s: 4,
+    largestBuyerSharePct: 12, sellBuyRatio: 0.5, return5sPct: 18,
+    flowAccelerationRatio: 1.5,
+  };
+  assert.deepStrictEqual(suite._entryReasons(boundedProfile, boundedFeatures), []);
+  assert.ok(suite._entryReasons(boundedProfile, {
+    ...boundedFeatures, publicBuyers1s: 13, publicBuyFlow5s: 36,
+    return5sPct: 9, flowAccelerationRatio: 3,
+  }).includes('BUYERS_1S_ABOVE_MAX'));
+  assert.ok(suite._entryReasons(boundedProfile, {
+    ...boundedFeatures, publicBuyFlow5s: 36,
+  }).includes('BUY_FLOW_5S_ABOVE_MAX'));
+  assert.ok(suite._entryReasons(boundedProfile, {
+    ...boundedFeatures, return5sPct: 9,
+  }).includes('RETURN_5S_BELOW_MIN'));
+  assert.ok(suite._entryReasons(boundedProfile, {
+    ...boundedFeatures, flowAccelerationRatio: 3,
+  }).includes('FLOW_ACCEL_ABOVE_MAX'));
   const mint = 'PublicFlowLead111111111111111111111111111';
   store.recordCreate({
     mint, symbol: 'PFL', name: null, uri: null, bondingCurve: null, creator: null,

@@ -3,7 +3,7 @@
 const { LaunchPullbackShadowManager } = require('./LaunchPullbackShadowManager');
 
 class LaunchPullbackShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.managers = new Map();
     this.flowSignals = new Map();
@@ -35,6 +35,7 @@ class LaunchPullbackShadowSuite {
           },
           store,
           now,
+          onLiveSignal,
         }));
       }
     }
@@ -66,6 +67,7 @@ class LaunchPullbackShadowSuite {
         },
         store,
         now,
+        onLiveSignal,
       }));
     }
 
@@ -92,6 +94,7 @@ class LaunchPullbackShadowSuite {
         },
         store,
         now,
+        onLiveSignal,
       }));
     }
 
@@ -117,6 +120,7 @@ class LaunchPullbackShadowSuite {
         },
         store,
         now,
+        onLiveSignal,
       }));
     }
   }
@@ -188,8 +192,8 @@ class LaunchPullbackShadowSuite {
     }
   }
 
-  observeTrade(trade) {
-    for (const manager of this.managers.values()) manager.observeTrade(trade);
+  observeTrade(trade, options) {
+    for (const manager of this.managers.values()) manager.observeTrade(trade, options);
   }
 
   advanceTime(now) {

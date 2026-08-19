@@ -72,6 +72,7 @@ class ResearchServer {
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
+    this.slowRouteLastLoggedAt = new Map();
     this._routes();
   }
 
@@ -79,6 +80,19 @@ class ResearchServer {
     const publicDir = path.join(__dirname, 'public');
     this.app.disable('x-powered-by');
     this.app.use(express.json({ limit: '64kb' }));
+    this.app.use((request, response, next) => {
+      const startedAt = process.hrtime.bigint();
+      response.once('finish', () => {
+        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+        if (durationMs < 250) return;
+        const routeKey = `${request.method} ${request.path}`;
+        const now = Date.now();
+        if (now - (this.slowRouteLastLoggedAt.get(routeKey) || 0) < 30_000) return;
+        this.slowRouteLastLoggedAt.set(routeKey, now);
+        console.warn(`[Dashboard:slow] ${routeKey} ${durationMs.toFixed(1)}ms`);
+      });
+      next();
+    });
 
     this.app.get('/api/overview', (_request, response) => {
       response.json(this.store.overview(Date.now(), this.engine.stats().candidateCount));
@@ -621,7 +635,7 @@ class ResearchServer {
         engine,
         labels: this.labeler.stats(),
         stream: this.stream.health(),
-        database: this.store.health(),
+        database: this.store.healthSnapshot(),
         trading: this.trader?.health() || null,
         signalShadow: this.signalShadow?.health() || null,
         flowFirstShadow: this.flowFirstShadow?.health() || null,

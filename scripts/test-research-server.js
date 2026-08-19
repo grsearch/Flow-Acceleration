@@ -43,6 +43,12 @@ async function main() {
   const staticStrategyButtons = [...dashboard.matchAll(/<button class="strategy-nav-item"[^>]*data-live-strategy="[^"]+"[^>]*>/g)];
   assert.ok(staticStrategyButtons.length >= 20);
   assert.ok(staticStrategyButtons.every(([button]) => button.includes('data-strategy-code=')));
+  assert.ok(staticStrategyButtons.every(([button]) => button.includes('data-strategy-state=')));
+  assert.ok(dashboard.includes('id="shadow-strategy-selector"'));
+  assert.ok(dashboard.includes("sortStrategySelector('#shadow-strategy-selector')"));
+  assert.ok(dashboard.includes('Number(left.entryEnabled === false) - Number(right.entryEnabled === false)'));
+  assert.ok(dashboard.includes('.strategy-nav-item[data-strategy-state="active"] > b'));
+  assert.ok(dashboard.includes('.strategy-nav-item[data-strategy-state="stopped"] > b'));
   assert.ok(dashboard.includes('item.code || item.id'));
   assert.ok(dashboard.includes("['每日开仓额度', '不设上限']"));
   assert.ok(!dashboard.includes('每日开仓上限'));
@@ -133,6 +139,16 @@ async function main() {
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
   assert.ok(dashboard.includes('id="launch-quality-snapshot-rows"'));
   assert.ok(dashboard.includes("loadDashboard('/api/launch-quality-observer?observationLimit=30&snapshotLimit=30'"));
+  assert.ok(dashboard.includes('data-live-strategy="migration-second-leg"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="migration-second-leg"'));
+  assert.ok(dashboard.includes('id="m2f-observer-metrics"'));
+  assert.ok(dashboard.includes('id="m2f-observation-rows"'));
+  assert.ok(dashboard.includes('id="m2f-snapshot-rows"'));
+  assert.ok(dashboard.includes('已观测字段'));
+  assert.ok(dashboard.includes('临时计算'));
+  assert.ok(dashboard.includes('Gross-NFI10'));
+  assert.ok(dashboard.includes('仍不可用'));
+  assert.ok(dashboard.includes("loadDashboard('/api/migration-second-leg-observer?observationLimit=40&snapshotLimit=100'"));
   assert.ok(dashboard.includes('function renderMetricGroups('));
   assert.ok(dashboard.includes('function renderTimeSessions('));
   assert.ok(dashboard.includes('北京时间分时观察'));
@@ -247,6 +263,13 @@ async function main() {
     'live order dashboard should use the recent-order index',
   );
 
+  // Detailed HTTP health must never invoke synchronous full-table aggregates.
+  // Warm the in-memory snapshot, then make accidental calls fail the test.
+  runtime.store.healthSnapshot();
+  const synchronousHealth = runtime.store.health;
+  runtime.store.health = () => {
+    throw new Error('synchronous store.health() reached from an HTTP route');
+  };
   try {
     await runtime.server.start();
     const { port } = runtime.server.httpServer.address();
@@ -300,6 +323,9 @@ async function main() {
     const qualityLeader = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'quality_leader_ql_strict_protected_live'
     ));
+    const launchPullbackLive = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'launch_pullback_fo_rb10_30s_live'
+    ));
     const retiredV3 = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
     ));
@@ -322,6 +348,11 @@ async function main() {
     assert.strictEqual(qualityLeader.entryEnabled, true);
     assert.strictEqual(qualityLeader.code, 'QL-STRICT-PR');
     assert.strictEqual(qualityLeader.exitMode, 'QUALITY_PROTECTED_RUNNER');
+    assert.strictEqual(qualityLeader.maxShadowEntryImpactPct, 12);
+    assert.strictEqual(launchPullbackLive.positionSizeSol, 0.1);
+    assert.strictEqual(launchPullbackLive.entryEnabled, true);
+    assert.strictEqual(launchPullbackLive.code, 'F-FO-RB10-X30');
+    assert.strictEqual(launchPullbackLive.fixedHoldMs, 30_000);
     assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
     assert.strictEqual(liveTrading.runtime.priorityFeeMicroLamports, 2_000_000);
     assert.strictEqual(continuity.fixedHoldMs, 120_000);
@@ -445,7 +476,7 @@ async function main() {
     assert.strictEqual(publicFlowLead.runtime.strategy.research.smartAddsIgnored, true);
     assert.deepStrictEqual(
       publicFlowLead.runtime.entryProfiles.map((profile) => profile.id),
-      ['PFL_B0', 'PFL_B1', 'PFL_A1', 'PFL_R1'],
+      ['PFL_B2'],
     );
     assert.strictEqual(publicFlowLead.runtime.exitProfiles.length, 6);
     assert.ok(Array.isArray(publicFlowLead.cohorts));
@@ -763,6 +794,7 @@ async function main() {
     assert.strictEqual(layered.parameters.flowExitNetFlowThresholdSol, 0);
     assert.strictEqual(layered.parameters.exitOnSmartWalletSell, true);
   } finally {
+    runtime.store.health = synchronousHealth;
     await runtime.stop('server-smoke-test');
   }
 

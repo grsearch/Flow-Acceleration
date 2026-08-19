@@ -63,7 +63,8 @@ async function main() {
       signalSource: 'QUALITY_LEADER_QL_STRICT_PROTECTED', ruleVersion: 'ql-live-test',
       market: 'PUMP_BONDING_CURVE', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
       maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 20,
-      maxEntrySelfImpactPct: 10, exitMode: 'QUALITY_PROTECTED_RUNNER',
+      maxEntrySelfImpactPct: 10, maxShadowEntryImpactPct: 12,
+      exitMode: 'QUALITY_PROTECTED_RUNNER',
       hardStopPct: 20, strengthActivationPct: 20, noStrengthMs: 30_000,
       maxHoldMs: 300_000,
       protectedFloors: [
@@ -72,6 +73,14 @@ async function main() {
         { activationPct: 100, minFloorPct: 40, peakGivebackPct: 40 },
         { activationPct: 200, minFloorPct: 100, peakGivebackPct: 80 },
       ],
+    },
+    {
+      id: 'launch_pullback_fo_rb10_30s_live', enabled: true, entryEnabled: true,
+      signalSource: 'LAUNCH_PULLBACK_FO_RB10_30S', ruleVersion: 'fo-live-test',
+      market: 'PUMP_BONDING_CURVE', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 10,
+      maxEntrySelfImpactPct: 10, exitMode: 'FIXED_HOLD', fixedHoldMs: 30_000,
+      hardStopPct: 0, maxHoldMs: 30_000,
     },
   ];
   const manager = new LiveTradingManager({
@@ -131,6 +140,18 @@ async function main() {
   assert.strictEqual(oDashboard.positions[0].status, 'CLOSED');
   assert.strictEqual(oDashboard.positions[0].exit_reason, 'RUNNER_STAIR_T40_D15');
 
+  manager.onExternalStrategySignal({
+    strategyId: strategies[2].id, episodeId: 'ql-impact:1', mint: 'ql-impact-mint',
+    symbol: 'QLI', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { shadowEntryImpactPct: 13 },
+  });
+  await waitForQueue();
+  assert.deepStrictEqual(store.db.prepare(`
+    SELECT action_status, action_reason FROM live_strategy_decisions
+    WHERE mint='ql-impact-mint'
+  `).get(), { action_status: 'RISK_REJECTED', action_reason: 'SHADOW_ENTRY_IMPACT' });
+
   const qlMint = 'ql-live-mint';
   store.recordCreate({
     mint: qlMint, symbol: 'QL', name: null, uri: null, bondingCurve: null,
@@ -141,7 +162,10 @@ async function main() {
     strategyId: strategies[2].id, episodeId: 'ql:1', mint: qlMint,
     symbol: 'QL', price: 1, market: 'PUMP_BONDING_CURVE',
     timestampMs: now, receivedAtMs: now,
-    features: { retention20Pct: 85, buyerDelta: 10, netFlowDeltaSol: 4 },
+    features: {
+      retention20Pct: 85, buyerDelta: 10, netFlowDeltaSol: 4,
+      shadowEntryImpactPct: 10,
+    },
   });
   await waitForQueue();
   now += 100;
@@ -156,6 +180,29 @@ async function main() {
   const qlPosition = store.liveTradingDashboard({ strategyId: strategies[2].id }).positions[0];
   assert.strictEqual(qlPosition.status, 'CLOSED');
   assert.strictEqual(qlPosition.exit_reason, 'PROTECTED_FLOOR_10');
+
+  const foMint = 'fo-live-mint';
+  store.recordCreate({
+    mint: foMint, symbol: 'FO', name: null, uri: null, bondingCurve: null,
+    creator: 'creator-fo', createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[3].id, episodeId: 'fo:1', mint: foMint,
+    symbol: 'FO', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { shadowCohortId: 'FO_RB10_30S', shadowEntryJumpPct: 2 },
+  });
+  await waitForQueue();
+  assert.strictEqual(store.liveTradingDashboard({ strategyId: strategies[3].id }).stats.positions, 1);
+  now += 30_001;
+  manager.observeTrade({
+    mint: foMint, market: 'PUMP_BONDING_CURVE', price: 1.4, timestampMs: now,
+  });
+  await waitForQueue();
+  const foPosition = store.liveTradingDashboard({ strategyId: strategies[3].id }).positions[0];
+  assert.strictEqual(foPosition.status, 'CLOSED');
+  assert.strictEqual(foPosition.exit_reason, 'FIXED_HOLD_30000MS');
 
   await manager.stop();
   store.close();

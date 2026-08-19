@@ -4209,6 +4209,10 @@ const config = {
     archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
     flushMs: integerEnv('FLOW_DB_FLUSH_MS', 250, { min: 25 }),
     flushMax: integerEnv('FLOW_DB_FLUSH_MAX', 1_000, { min: 10 }),
+    healthRefreshMs: integerEnv('FLOW_DB_HEALTH_REFRESH_MS', 15 * 60_000, {
+      min: 60_000,
+      max: 60 * 60_000,
+    }),
     startupReplayCacheMs: integerEnv('FLOW_STARTUP_REPLAY_CACHE_MS', 15 * 60_000, {
       min: 0,
       max: 60 * 60_000,

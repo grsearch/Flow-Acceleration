@@ -1,8 +1,17 @@
 'use strict';
 
 const assert = require('assert');
+const { PublicKey } = require('@solana/web3.js');
+const { NATIVE_MINT } = require('@solana/spl-token');
+const { canonicalPumpPoolPda } = require('@pump-fun/pump-swap-sdk');
 const { MigrationSecondLegObserver } = require('../src/core/MigrationSecondLegObserver');
 const { ResearchStore } = require('../src/data/ResearchStore');
+
+const OBSERVED_MINT = new PublicKey(Buffer.alloc(32, 8)).toBase58();
+const OBSERVED_POOL = canonicalPumpPoolPda(
+  new PublicKey(OBSERVED_MINT),
+  NATIVE_MINT,
+).toBase58();
 
 function makeStore() {
   return new ResearchStore({
@@ -18,7 +27,7 @@ function trade(timestampMs, price, {
   side = 'BUY', wallet = `wallet-${timestampMs}`, solAmount = 1, tokenAmount = 1_000,
 } = {}) {
   return {
-    mint: 'm2f-observer-mint',
+    mint: OBSERVED_MINT,
     symbol: 'M2F',
     timestampMs,
     receivedAtMs: timestampMs,
@@ -32,6 +41,12 @@ function trade(timestampMs, price, {
     tokenAmount,
     price,
     reservePrice: price,
+    pool: OBSERVED_POOL,
+    poolQuoteReservesRaw: '100000000000',
+    virtualQuoteReservesRaw: '20000000000',
+    cashbackFeeBasisPoints: 0,
+    cashbackRaw: '0',
+    canBoost: true,
   };
 }
 
@@ -72,10 +87,11 @@ function main() {
   assert.strictEqual(observer.health().startupReplaySkipped, true);
   assert.strictEqual(observer.health().startupRowsCensored, 1);
   observer.onGraduated({
-    mint: 'm2f-observer-mint',
+    mint: OBSERVED_MINT,
     symbol: 'M2F',
     creator: 'creator',
     graduated_at: migrationAt,
+    migration_pool: OBSERVED_POOL,
   });
 
   const feed = (timestampMs, price, options) => {
@@ -98,9 +114,36 @@ function main() {
   assert.strictEqual(dashboard.snapshots[0].buyers_10s, 3,
     'sub-minimum buy must add flow but not an effective buyer');
   assert.strictEqual(dashboard.snapshots[0].feature_completeness.publicOrderFlow, true);
-  assert.strictEqual(dashboard.snapshots[0].feature_completeness.quoteReserve, false);
-  assert.strictEqual(dashboard.snapshots[0].quote_reserve_sol, null);
-  assert.strictEqual(dashboard.snapshots[0].boost_status, 'UNKNOWN');
+  assert.strictEqual(dashboard.snapshots[0].feature_completeness.quoteReserve, true);
+  assert.strictEqual(
+    dashboard.snapshots[0].feature_completeness.onfi10,
+    'PROVISIONAL_GROSS',
+  );
+  assert.strictEqual(dashboard.snapshots[0].feature_completeness.boost, 'HINT_ONLY');
+  assert.strictEqual(dashboard.snapshots[0].feature_completeness.cashback, 'HINT_ONLY');
+  assert.strictEqual(dashboard.snapshots[0].feature_completeness.canonicalPool, true);
+  assert.strictEqual(dashboard.snapshots[0].quote_reserve_sol, 120);
+  assert.ok(Math.abs(dashboard.snapshots[0].onfi_10_pct - (4.01 / 120 * 100)) < 1e-9);
+  assert.ok(Math.abs(
+    dashboard.snapshots[0].estimated_impact_005_pct - (0.05 / 120.05 * 100),
+  ) < 1e-9);
+  assert.ok(Math.abs(
+    dashboard.snapshots[0].estimated_impact_01_pct - (0.1 / 120.1 * 100),
+  ) < 1e-9);
+  assert.ok(Math.abs(
+    dashboard.snapshots[0].estimated_impact_025_pct - (0.25 / 120.25 * 100),
+  ) < 1e-9);
+  assert.strictEqual(dashboard.snapshots[0].boost_status, 'CAN_BOOST_HINT');
+  assert.strictEqual(
+    dashboard.snapshots[0].cashback_status,
+    'NO_TRADE_CASHBACK_OBSERVED',
+  );
+  assert.strictEqual(dashboard.snapshots[0].canonical_pool_status, 'CANONICAL');
+  assert.ok(dashboard.featureAvailability.observed.includes('effective quote reserve'));
+  assert.ok(dashboard.featureAvailability.provisional.some((value) => value.includes('normalized')));
+  assert.ok(dashboard.featureAvailability.unavailable.includes('Mayhem authoritative flag'));
+  assert.strictEqual(dashboard.observations[0].quote_reserve_status, 'OBSERVED');
+  assert.strictEqual(dashboard.observations[0].canonical_pool_status, 'CANONICAL');
 
   const health = observer.health();
   assert.strictEqual(health.mode, 'M2F_OBSERVER_ONLY');

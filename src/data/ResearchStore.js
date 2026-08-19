@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { Worker } = require('worker_threads');
 const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 
@@ -131,6 +132,17 @@ class ResearchStore {
     this.returnUpdateStatements = new Map();
     this.launchQualityUpdateStatements = new Map();
     this.dashboardStatsCache = new Map();
+    this.databaseHealthSnapshot = null;
+    this.databaseHealthWorker = null;
+    this.databaseHealthStartTimer = null;
+    this.databaseHealthTimer = null;
+    this.databaseHealthState = {
+      status: storageConfig.dbPath === ':memory:' ? 'IN_MEMORY' : 'PENDING',
+      generatedAt: null,
+      durationMs: null,
+      lastError: null,
+      refreshes: 0,
+    };
     this.metrics = {
       tradesQueued: 0,
       tradesWritten: 0,
@@ -158,6 +170,102 @@ class ResearchStore {
     const value = compute();
     this.dashboardStatsCache.set(key, { createdAt: now, value });
     return value;
+  }
+
+  startHealthSampler(refreshMs = this.config.healthRefreshMs || 15 * 60_000) {
+    if (
+      this.config.dbPath === ':memory:'
+      || this.databaseHealthStartTimer
+      || this.databaseHealthTimer
+    ) return;
+    const intervalMs = Math.max(60_000, Number(refreshMs) || 15 * 60_000);
+    const sample = () => void this.refreshHealthSnapshot();
+    this.databaseHealthStartTimer = setTimeout(() => {
+      this.databaseHealthStartTimer = null;
+      sample();
+      this.databaseHealthTimer = setInterval(sample, intervalMs);
+      if (this.databaseHealthTimer.unref) this.databaseHealthTimer.unref();
+    }, Math.min(30_000, intervalMs));
+    if (this.databaseHealthStartTimer.unref) this.databaseHealthStartTimer.unref();
+  }
+
+  refreshHealthSnapshot() {
+    if (this.config.dbPath === ':memory:') {
+      const startedAt = Date.now();
+      this.databaseHealthSnapshot = this.health();
+      this.databaseHealthState = {
+        status: 'READY',
+        generatedAt: Date.now(),
+        durationMs: Date.now() - startedAt,
+        lastError: null,
+        refreshes: this.databaseHealthState.refreshes + 1,
+      };
+      return Promise.resolve(this.databaseHealthSnapshot);
+    }
+    if (this.databaseHealthWorker) return this.databaseHealthWorker.promise;
+
+    const startedAt = Date.now();
+    this.databaseHealthState = {
+      ...this.databaseHealthState,
+      status: this.databaseHealthSnapshot ? 'REFRESHING' : 'PENDING',
+      lastError: null,
+    };
+    const worker = new Worker(path.join(__dirname, 'database-health-worker.js'), {
+      workerData: { dbPath: path.resolve(this.config.dbPath) },
+    });
+    let settle;
+    const promise = new Promise((resolve) => { settle = resolve; });
+    this.databaseHealthWorker = { worker, promise };
+
+    const finish = ({ snapshot = null, error = null } = {}) => {
+      if (this.databaseHealthWorker?.worker !== worker) return;
+      if (snapshot) this.databaseHealthSnapshot = snapshot;
+      this.databaseHealthState = {
+        status: snapshot ? 'READY' : (this.databaseHealthSnapshot ? 'STALE' : 'ERROR'),
+        generatedAt: snapshot ? Date.now() : this.databaseHealthState.generatedAt,
+        durationMs: Date.now() - startedAt,
+        lastError: error ? String(error) : null,
+        refreshes: this.databaseHealthState.refreshes + (snapshot ? 1 : 0),
+      };
+      this.databaseHealthWorker = null;
+      settle(this.databaseHealthSnapshot);
+    };
+    worker.once('message', (message) => {
+      if (message?.ok) finish({ snapshot: message.snapshot });
+      else finish({ error: message?.error || 'database health worker failed' });
+    });
+    worker.once('error', (error) => finish({ error: error.message }));
+    worker.once('exit', (code) => {
+      if (this.databaseHealthWorker?.worker === worker && code !== 0) {
+        finish({ error: `database health worker exited with code ${code}` });
+      }
+    });
+    return promise;
+  }
+
+  healthSnapshot() {
+    if (this.config.dbPath === ':memory:' && !this.databaseHealthSnapshot) {
+      this.databaseHealthSnapshot = this.health();
+      this.databaseHealthState = {
+        status: 'READY',
+        generatedAt: Date.now(),
+        durationMs: 0,
+        lastError: null,
+        refreshes: 1,
+      };
+    }
+    return {
+      ...(this.databaseHealthSnapshot || {}),
+      ...this.metrics,
+      pendingWrites: this.rawBuffer.length,
+      dbPath: path.resolve(this.config.dbPath),
+      statsSnapshot: {
+        ...this.databaseHealthState,
+        staleMs: this.databaseHealthState.generatedAt
+          ? Math.max(0, Date.now() - this.databaseHealthState.generatedAt)
+          : null,
+      },
+    };
   }
 
   shadowTimeSessionDashboard(strategyId) {
@@ -336,7 +444,7 @@ class ResearchStore {
       timezone: 'Asia/Shanghai',
       observationOnly: true,
       countingUnit: 'resolved cohort positions',
-      sessions: this._cachedDashboardStats(`shadow-time-sessions:${strategyId}`, 15_000, compute),
+      sessions: this._cachedDashboardStats(`shadow-time-sessions:${strategyId}`, 60_000, compute),
     };
   }
 
@@ -3769,6 +3877,10 @@ class ResearchStore {
           pullback_low_price = COALESCE(@pullbackLowPrice, pullback_low_price),
           max_pullback_pct = COALESCE(@maxPullbackPct, max_pullback_pct),
           rebound_at = COALESCE(@reboundAt, rebound_at),
+          boost_status = COALESCE(@boostStatus, boost_status),
+          cashback_status = COALESCE(@cashbackStatus, cashback_status),
+          canonical_pool_status = COALESCE(@canonicalPoolStatus, canonical_pool_status),
+          quote_reserve_status = COALESCE(@quoteReserveStatus, quote_reserve_status),
           updated_at = @updatedAt
         WHERE mint = @mint AND status = 'OBSERVING'
       `),
@@ -6029,6 +6141,16 @@ class ResearchStore {
       pullbackLowPrice: value('pullbackLowPrice'),
       maxPullbackPct: value('maxPullbackPct'),
       reboundAt: value('reboundAt'),
+      boostStatus: patch.boostStatus && patch.boostStatus !== 'UNKNOWN'
+        ? String(patch.boostStatus) : null,
+      cashbackStatus: patch.cashbackStatus && patch.cashbackStatus !== 'UNKNOWN'
+        ? String(patch.cashbackStatus) : null,
+      canonicalPoolStatus: patch.canonicalPoolStatus
+        && patch.canonicalPoolStatus !== 'UNKNOWN'
+        ? String(patch.canonicalPoolStatus) : null,
+      quoteReserveStatus: patch.quoteReserveStatus
+        && patch.quoteReserveStatus !== 'UNAVAILABLE'
+        ? String(patch.quoteReserveStatus) : null,
       updatedAt: Date.now(),
     });
   }
@@ -6168,9 +6290,25 @@ class ResearchStore {
     return {
       summary,
       publicCandidates,
+      featureAvailability: {
+        observed: [
+          'effective quote reserve',
+          '0.05/0.1/0.25 SOL constant-product impact',
+          'canonical pool local verification',
+        ],
+        provisional: [
+          'gross normalized 10s net flow (BOOST/wash/entity not removed)',
+          'canBoost and trade cashback event hints',
+        ],
+        unavailable: [
+          'exact BOOST transaction classification',
+          'Mayhem authoritative flag',
+          'entity/funding/bot clusters',
+        ],
+      },
       missingArticleFeatures: [
-        'quoteReserve/onfi10',
-        'BOOST/Mayhem/cashback/canonical pool flags',
+        'exact organic ONFI10',
+        'exact BOOST / Mayhem classification',
         'entity/funding/bot clusters',
       ],
       observations,
@@ -6267,7 +6405,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`launch-pullback-shadow:${threshold}`, 15_000, computeCohorts)
+      ? this._cachedDashboardStats(`launch-pullback-shadow:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -6386,7 +6524,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`migrated-drop-rebound:${threshold}`, 15_000, computeCohorts)
+      ? this._cachedDashboardStats(`migrated-drop-rebound:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
     const entryProfiles = this.db.prepare(`
       SELECT lifecycle_stage, entry_profile_id,
@@ -6464,7 +6602,7 @@ class ResearchStore {
       };
     });
     const cohorts = cacheStats
-      ? this._cachedDashboardStats('migration-continuity-shadow', 15_000, computeCohorts)
+      ? this._cachedDashboardStats('migration-continuity-shadow', 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -6542,7 +6680,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats('range-scalper-shadow', 15_000, computeCohorts)
+      ? this._cachedDashboardStats('range-scalper-shadow', 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -6613,7 +6751,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats('cya-early-pyramid-shadow', 15_000, computeCohorts)
+      ? this._cachedDashboardStats('cya-early-pyramid-shadow', 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -6712,7 +6850,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`bonding-momentum:${threshold}`, 15_000, computeCohorts)
+      ? this._cachedDashboardStats(`bonding-momentum:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
     const snapshots = this.db.prepare(`
       SELECT * FROM bonding_curve_momentum_shadow_snapshots
@@ -6899,7 +7037,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`graduation-accel:${threshold}`, 15_000, computeCohorts)
+      ? this._cachedDashboardStats(`graduation-accel:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -7020,7 +7158,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats('holder-growth-shadow', 15_000, compute)
+      ? this._cachedDashboardStats('holder-growth-shadow', 60_000, compute)
       : compute();
     return { cohorts, positions };
   }
@@ -7186,7 +7324,7 @@ class ResearchStore {
       FROM primary_signal_shadow_positions
     `).get();
     const stats = cacheStats
-      ? this._cachedDashboardStats('primary-signal-shadow:stats', 15_000, computeStats)
+      ? this._cachedDashboardStats('primary-signal-shadow:stats', 60_000, computeStats)
       : computeStats();
     const computeProfiles = () => this.db.prepare(`
       SELECT
@@ -7212,7 +7350,7 @@ class ResearchStore {
       };
     });
     const profiles = cacheStats
-      ? this._cachedDashboardStats('primary-signal-shadow:profiles', 15_000, computeProfiles)
+      ? this._cachedDashboardStats('primary-signal-shadow:profiles', 60_000, computeProfiles)
       : computeProfiles();
     const resolved = Number(stats.closed_positions || 0) + Number(stats.no_exit || 0);
     return {
@@ -7316,7 +7454,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`flow-first-shadow:${threshold}`, 15_000, computeCohorts)
+      ? this._cachedDashboardStats(`flow-first-shadow:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -7410,7 +7548,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`smart-pullback-shadow:${threshold}`, 15_000, computeCohorts)
+      ? this._cachedDashboardStats(`smart-pullback-shadow:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -7530,7 +7668,7 @@ class ResearchStore {
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`smart-open-shadow:${threshold}`, 15_000, computeCohorts)
+      ? this._cachedDashboardStats(`smart-open-shadow:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -7591,7 +7729,7 @@ class ResearchStore {
       };
     });
     const cohorts = cacheStats
-      ? this._cachedDashboardStats('flow-smart-confirm-shadow', 15_000, computeCohorts)
+      ? this._cachedDashboardStats('flow-smart-confirm-shadow', 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -8104,6 +8242,14 @@ class ResearchStore {
   close() {
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = null;
+    if (this.databaseHealthStartTimer) clearTimeout(this.databaseHealthStartTimer);
+    this.databaseHealthStartTimer = null;
+    if (this.databaseHealthTimer) clearInterval(this.databaseHealthTimer);
+    this.databaseHealthTimer = null;
+    if (this.databaseHealthWorker?.worker) {
+      void this.databaseHealthWorker.worker.terminate().catch(() => {});
+    }
+    this.databaseHealthWorker = null;
     this.flushRawTrades();
     this.db.close();
   }

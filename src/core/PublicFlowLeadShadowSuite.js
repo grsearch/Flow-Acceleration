@@ -451,18 +451,26 @@ class PublicFlowLeadShadowSuite {
     if (below(features.curvePct, profile.minCurvePct)) reasons.push('CURVE_BELOW_MIN');
     if (above(features.curvePct, profile.maxCurvePct)) reasons.push('CURVE_ABOVE_MAX');
     if (below(features.publicBuyers1s, profile.minPublicBuyers1s)) reasons.push('BUYERS_1S_BELOW_MIN');
+    if (above(features.publicBuyers1s, profile.maxPublicBuyers1s)) reasons.push('BUYERS_1S_ABOVE_MAX');
     if (below(features.publicBuyers5s, profile.minPublicBuyers5s)) reasons.push('BUYERS_5S_BELOW_MIN');
     if (below(features.publicBuyFlow1s, profile.minPublicBuyFlow1sSol)) reasons.push('BUY_FLOW_1S_BELOW_MIN');
     if (below(features.publicBuyFlow5s, profile.minPublicBuyFlow5sSol)) reasons.push('BUY_FLOW_5S_BELOW_MIN');
+    if (above(features.publicBuyFlow5s, profile.maxPublicBuyFlow5sSol)) reasons.push('BUY_FLOW_5S_ABOVE_MAX');
     if (below(features.publicNetFlow5s, profile.minPublicNetFlow5sSol)) reasons.push('NET_FLOW_5S_BELOW_MIN');
     if (above(features.largestBuyerSharePct, profile.maxLargestBuyerSharePct)) reasons.push('TOP1_ABOVE_MAX');
     if (below(features.sellBuyRatio, profile.minSellBuyRatio)) reasons.push('SELL_BUY_RATIO_BELOW_MIN');
     if (above(features.sellBuyRatio, profile.maxSellBuyRatio)) reasons.push('SELL_BUY_RATIO_ABOVE_MAX');
+    if (below(features.return5sPct, profile.minReturn5sPct)) reasons.push('RETURN_5S_BELOW_MIN');
     if (above(features.return5sPct, profile.maxReturn5sPct)) reasons.push('RETURN_5S_ABOVE_MAX');
     if (profile.minFlowAccelerationRatio != null
       && (features.flowAccelerationRatio == null
         || features.flowAccelerationRatio < profile.minFlowAccelerationRatio)) {
       reasons.push('FLOW_ACCEL_BELOW_MIN');
+    }
+    if (profile.maxFlowAccelerationRatio != null
+      && (features.flowAccelerationRatio == null
+        || features.flowAccelerationRatio > profile.maxFlowAccelerationRatio)) {
+      reasons.push('FLOW_ACCEL_ABOVE_MAX');
     }
     return reasons;
   }

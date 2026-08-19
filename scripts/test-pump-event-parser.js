@@ -114,6 +114,11 @@ const boostedAmmBuy = parser.parseTransaction({
   },
 }, 126000)[0];
 assert.strictEqual(boostedAmmBuy.virtualQuoteReservesRaw, '20000000000');
+assert.strictEqual(boostedAmmBuy.cashbackFeeBasisPoints, 0);
+assert.strictEqual(boostedAmmBuy.cashbackRaw, '0');
+assert.strictEqual(boostedAmmBuy.buybackFeeBasisPoints, 0);
+assert.strictEqual(boostedAmmBuy.buybackRaw, '0');
+assert.strictEqual(boostedAmmBuy.canBoost, true);
 assert.ok(Math.abs(boostedAmmBuy.reservePrice - 0.00014) < 1e-15);
 
 const boostedAmmSellData = Buffer.concat([
@@ -135,6 +140,11 @@ const boostedAmmSell = parser.parseTransaction({
 }, 127000)[0];
 assert.strictEqual(boostedAmmSell.side, 'SELL');
 assert.strictEqual(boostedAmmSell.virtualQuoteReservesRaw, '20000000000');
+assert.strictEqual(boostedAmmSell.cashbackFeeBasisPoints, 0);
+assert.strictEqual(boostedAmmSell.cashbackRaw, '0');
+assert.strictEqual(boostedAmmSell.buybackFeeBasisPoints, 0);
+assert.strictEqual(boostedAmmSell.buybackRaw, '0');
+assert.strictEqual(boostedAmmSell.canBoost, true);
 assert.ok(Math.abs(boostedAmmSell.reservePrice - 0.00014) < 1e-15);
 
 console.log('test-pump-event-parser: ok');
