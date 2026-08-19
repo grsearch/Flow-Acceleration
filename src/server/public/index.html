@@ -1539,7 +1539,7 @@
       lifecycleLabels.PRE_MIGRATION ||= '毕业前';
       lifecycleLabels.POST_MIGRATION ||= '毕业后';
       const detectorStates = runtime.detectorStates || {};
-      document.querySelector('#migrated-rebound-expression').textContent = `旧组保持不变；GQ 独立测试毕业后≤30秒、1秒跌25～32%、低点后200ms内反弹2～3%、首次机会，并分0.05/0.25/0.5/1 SOL容量。GE30 F1原容量、分时与退出组合继续保留。${age(runtime.strategy?.entryDelayMs)}后模拟入场。`;
+      document.querySelector('#migrated-rebound-expression').textContent = '旧组保持不变；G-FR 独立测试急跌反弹后的300/600/1000ms快速延续，只接受 Buyers、净流入加速度、资金分散和0.05/0.1 SOL往返容量同时通过的机会。GQ 与原GE30组继续保留。';
       renderMetricGroups('#migrated-rebound-metrics', [
         ['运行模式', runtime.enabled ? 'SHADOW G' : '关闭', `独立表 ${research.isolatedTable || 'migrated_drop_rebound_shadow_positions'}`],
         ['毕业后AMM订阅', number(runtime.trackedMints), `新毕业 Mint 追踪 ${age(runtime.strategy?.trackingAgeMs)}`],
@@ -1567,7 +1567,10 @@
               : '';
         const executionNote = row.average_entry_impact_pct != null
           ? ` · ${number(row.average_position_sol,2)} SOL买/卖冲击 ${pct(row.average_entry_impact_pct)} / ${pct(row.average_exit_impact_pct)}` : '';
-        return `<tr><td><b>${escapeHtml(lifecycle)}</b><br><span class="table-note">${escapeHtml(row.entry_profile_id)} ${escapeHtml(entry)} · ${escapeHtml(exit)}</span></td><td>${thresholds}${exitTuning || executionNote ? `<br><span class="table-note">${exitTuning}${executionNote}</span>` : ''}</td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.average_net_return_ex_top5_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td><td>${number(row.big_winners_realized)} / ${number(row.big_winner_opportunities)}<br><span class="table-note">兑现 ${rate(row.big_winner_realization_rate_pct)} · 捕获 ${rate(row.average_big_winner_capture_pct)}</span></td></tr>`;
+        const confirmationNote = row.average_confirmation_buyers != null
+          ? ` · 确认 ${number(row.average_confirmation_buyers,1)} Buyers / ${number(row.average_confirmation_net_flow_sol,2)} SOL / 加速 ${number(row.average_confirmation_net_flow_accel_sol,2)} / Top1 ${rate(row.average_confirmation_top_buyer_share_pct)} / 往返冲击 ${pct(row.average_confirmation_round_trip_impact_pct)}`
+          : '';
+        return `<tr><td><b>${escapeHtml(lifecycle)}</b><br><span class="table-note">${escapeHtml(row.entry_profile_id)} ${escapeHtml(entry)} · ${escapeHtml(exit)}</span></td><td>${thresholds}${exitTuning || executionNote || confirmationNote ? `<br><span class="table-note">${exitTuning}${executionNote}${confirmationNote}</span>` : ''}</td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.average_net_return_ex_top5_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td><td>${number(row.big_winners_realized)} / ${number(row.big_winner_opportunities)}<br><span class="table-note">兑现 ${rate(row.big_winner_realization_rate_pct)} · 捕获 ${rate(row.average_big_winner_capture_pct)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="8" class="empty">等待毕业前 Curve 或毕业后 PumpSwap 出现15%–35%超跌及首次反弹信号</td></tr>';
 
       const rows = data.positions || [];
@@ -1578,7 +1581,12 @@
         const lifecycle = lifecycleLabels[row.lifecycle_stage] || row.lifecycle_stage || '毕业后';
         const impact = row.entry_impact_pct != null
           ? ` · ${number(row.position_sol,2)} SOL买/卖冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}` : '';
-        return `<tr><td>${dateTime(row.rebound_at)}</td><td><b>${escapeHtml(lifecycle)}</b><br><span class="table-note">${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)} · ${escapeHtml(exitLabels[row.exit_profile_id] || '')}</span></td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${age(row.migration_age_ms)}</td><td>${pct(row.drop_pct)} / +${number(row.rebound_pct,2)}% / ${age(row.rebound_elapsed_ms)}<br><span class="table-note">低点后 ${age(row.rebound_from_low_ms)}</span></td><td>${prices}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)}${impact}${coreExit}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
+        let confirmation = {};
+        try { confirmation = JSON.parse(row.confirmation_json || '{}'); } catch (_) {}
+        const confirmationNote = confirmation.confirmationMs != null
+          ? `<br><span class="table-note">确认 ${age(confirmation.confirmationMs)} · ${number(confirmation.uniqueBuyers)} Buyers · 净流 ${number(confirmation.netFlowSol,2)} SOL · 加速 ${number(confirmation.netFlowAccelerationSol,2)} · Top1 ${rate(confirmation.topBuyerSharePct)} · 往返冲击 ${pct(confirmation.roundTripImpactPct)}</span>`
+          : '';
+        return `<tr><td>${dateTime(row.rebound_at)}</td><td><b>${escapeHtml(lifecycle)}</b><br><span class="table-note">${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)} · ${escapeHtml(exitLabels[row.exit_profile_id] || '')}</span></td><td>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${age(row.migration_age_ms)}</td><td>${pct(row.drop_pct)} / +${number(row.rebound_pct,2)}% / ${age(row.rebound_elapsed_ms)}<br><span class="table-note">低点后 ${age(row.rebound_from_low_ms)}</span></td><td>${prices}<br><span class="table-note">入场跳价 ${pct(row.entry_jump_pct)}${impact}${coreExit}</span>${confirmationNote}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
       }).join('') : '<tr><td colspan="10" class="empty">暂无 Shadow G 仓位；毕业前 Curve 与订阅期内毕业后 PumpSwap 成交仍持续写入，供离线回测</td></tr>';
     }
 
@@ -1944,6 +1952,7 @@
         ['运行模式', runtime.enabled ? 'SHADOW QL' : '关闭', '独立表，永不签名或发送交易'],
         ['快照评估 / 命中', `${number(runtime.evaluated)} / ${number(runtime.matched)}`, `回放抑制 ${number(runtime.replayMatchesSuppressed)}`],
         ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
+        ['G-FR 快速确认', `${number(runtime.fastConfirmationPassed)} / ${number(runtime.fastConfirmationRejected)}`, '确认通过 / 慢反弹、集中拉升或容量不足拒绝'],
         ['独立 Cohort', number(strategy.cohortCount), '严格Barbell / 严格长尾 / 宽松Barbell'],
         ['仓位 / 确定性成本', `${number(research.simulatedPositionSol,2)} SOL / ${rate(research.configuredCostPct)}`, '分批退出另扣额外执行固定成本'],
       ], []);
