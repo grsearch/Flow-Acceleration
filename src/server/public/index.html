@@ -390,7 +390,7 @@
               <b><span class="strategy-code">E</span>Launch Quality</b><small>只观察选币、存活与首次回踩</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="migration-second-leg" data-strategy-code="M2F-OBS">
-              <b><span class="strategy-code">M2F-OBS</span>迁移后二段资金扩散</b><small>只记录75～480秒首回撤与公共订单流，不建仓、不增加RPC</small>
+              <b><span class="strategy-code">M2F-OBS</span>迁移后二段资金扩散</b><small>只跟踪本次进程新迁移；启动不回放历史，不建仓、不增加RPC</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-live-strategy="holder-growth" data-strategy-code="N/NQ">
               <b><span class="strategy-code">N/NQ</span>Observed Holder Growth</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
@@ -1826,6 +1826,7 @@
         ['迁移 / 活动', `${number(summary.observations)} / ${number(summary.active)}`, `本次进程观察 ${number(runtime.migrationsObserved)}`],
         ['快照', number(summary.snapshots), `本次进程写入 ${number(runtime.snapshotsWritten)}`],
         ['首回撤 / 反弹', `${number(summary.first_pullbacks)} / ${number(summary.rebounds)}`, `完整 ${number(summary.complete)} · 截尾 ${number(summary.right_censored)}`],
+        ['启动恢复', runtime.startupReplaySkipped ? '不回放历史' : '—', `中断样本右删失 ${number(runtime.startupRowsCensored)}`],
         ['公共特征候选', `${number(candidates.snapshots)} 快照 / ${number(candidates.mints)} Mint`, '75～300秒、正净流、Buyers≥3、Top1≤60%、回撤8～35%'],
         ['文章字段完整性', '部分缺失', missing.join('；') || '等待检测'],
         ['额外 API 消耗', runtime.addsRpcRequests ? '有' : '无', '只复用现有 PumpSwap 数据流'],
