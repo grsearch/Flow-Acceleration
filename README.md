@@ -34,7 +34,7 @@ never sign or send transactions. Proven-negative entry families remain disabled.
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
 
-全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前只有 `QL-STRICT-PR` 允许产生新实盘仓位；其余实盘定义只保留历史展示和存量退出。该规则不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、KOL 或 AI 评分；全局默认 `DISABLED`，不会读取私钥或提交交易。
+全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前仅 `QL-STRICT-PR` 与从精确 Shadow cohort 提升的 `F-FO-RB10-X30` 允许产生新实盘仓位；其余实盘定义只保留历史展示和存量退出。两条规则都不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、KOL 或 AI 评分；全局默认 `DISABLED`，不会读取私钥或提交交易。
 
 ## 数据链路
 
@@ -259,13 +259,15 @@ Smart Wallet 或 Shadow 结果。只有第二个或第三个**不同**监控钱�
 Smart Wallet 的成交金额或价格。后续首次 `OPEN` 只记录为5秒/15秒命中标签；所有
 `ADD` 明确忽略，既不触发入场，也不构成确认。
 
-四个独立入场组分别测试公共买家广度基线、偏大赢家的早期分散资金流、1秒资金
-重新加速，以及包含正常卖盘换手的广度需求。每次信号统一等待200ms后的下一笔
+旧的 B0/B1/A1/R1 宽口径组已停止产生新样本，历史行仍完整保留。前向组仅启用
+`PFL-B2`：AGE 8–12秒、Curve 60%–75%、最近1秒买家9–12、最近5秒买家至少45、
+5秒公共买入26–35 SOL、最大单一买家不超过15%、5秒涨幅10%–25%，且资金加速
+比处于1–2.5。每次信号统一等待200ms后的下一笔
 同市场成交；同 Mint/同组30秒内只模拟一次。退出交叉测试20%/30%硬止损与
 120/180/240秒固定持有，不设固定止盈或移动止盈，以观察 Big50/Big100 右尾。
 Dashboard 同时显示未来 Smart OPEN 5秒/15秒覆盖率、PF、Top5利润贡献和
-MFE/MAE。接口为 `GET /api/public-flow-lead-shadow`，策略代码为
-`PFL-B0/PFL-B1/PFL-A1/PFL-R1`。
+MFE/MAE。接口为 `GET /api/public-flow-lead-shadow`，新策略代码为 `PFL-B2`。
+设置 `FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED=true` 才会有意恢复旧四组。
 
 ## Flow -> Smart Confirmation Shadow L
 
@@ -389,7 +391,7 @@ QL 是基于非重叠历史日样本筛选出的两阶段强势质量实验，�
 
 入场使用信号后 200ms 的首笔 Bonding Curve 成交，并按 1 SOL 对虚拟储备的冲击计算平均成交价。迁移后的 PumpSwap 价格以最后 Curve 价格作边界锚定，避免跨市场价格尺度制造虚假大赢家。所有记录仅写入独立表 `quality_leader_shadow_positions`，接口为 `GET /api/quality-leader-shadow`；该路径没有执行器、不会读取私钥，也不会签名或发送交易。
 
-`QL_STRICT:QL_PROTECTED` 另有独立实盘提升策略 `quality_leader_ql_strict_protected_live`。它只在 Strict + Protected 的200ms可执行入场通过跳价检查后发出一次实盘信号，不会因 Barbell/Protected 两条 Shadow 记录重复下单；Shadow QL 仍按原三组继续写入。实盘默认0.1 SOL，不分批卖出：+20%前硬止损20%，30秒未达到+20%退出；走强后按峰值20/50/100/200%分层保护，最长5分钟，并可跨毕业阶段卖出当前全部链上余额。
+`QL_STRICT:QL_PROTECTED` 另有独立实盘提升策略 `quality_leader_ql_strict_protected_live`。它只在 Strict + Protected 的200ms可执行入场通过跳价检查后发出一次实盘信号，不会因 Barbell/Protected 两条 Shadow 记录重复下单；Shadow QL 仍按原三组继续写入。实盘默认0.1 SOL，并额外拒绝1 SOL Shadow 模拟成交冲击超过12%的低流动性样本；市场跳价上限收紧到10%。卖出不分批：+20%前硬止损20%，30秒未达到+20%退出；走强后按峰值20/50/100/200%分层保护，最长5分钟，并可跨毕业阶段卖出当前全部链上余额。
 
 ## PumpSwap Range Scalper Shadow J
 
@@ -399,7 +401,7 @@ Shadow J 对每个新毕业 Mint 先订阅 PumpSwap 成交120秒，用滚动60�
 
 ## CYA Early Pyramid Shadow K
 
-Shadow K 已由大样本证明为负期望，默认停止产生新仓位，历史数据仍完整保留。只有显式设置 `FLOW_PROVEN_NEGATIVE_SHADOWS_ENABLED=true` 且同时开启 K 自身开关时才会复现旧实验。Smart Pullback A/B 不受该总开关影响，仍继续前向测试。
+Shadow K 已由大样本证明为负期望，默认停止产生新仓位，历史数据仍完整保留。只有显式设置 `FLOW_PROVEN_NEGATIVE_SHADOWS_ENABLED=true` 且同时开启 K 自身开关时才会复现旧实验。Smart Pullback A/B、Smart-Like Early、Smart Resonance 与 Holder Growth 也已默认停止新开仓；原始成交、标签和历史策略行不会因此删除。
 
 K 原实验把钱包分析结论转成独立的公开订单流实验，不读取目标钱包动作作为信号。`K5_30` 测试 AGE 5–30秒、Curve 20–60%的较严格窗口；`K3_30` 放宽到 AGE 3–30秒。两组都限制5秒买家数、净流入和2秒涨幅，避免在订单流已经拥挤时追入。信号后使用200ms后的真实 Bonding Curve 成交模拟入场。
 
@@ -445,22 +447,20 @@ Creator ceiling to 3%. `FO_D12_R3_Q_T10_H30` reuses Q entry and independently te
 activation, 10% peak drawdown, -20% hard stop and a 30-second maximum. All three use new
 cohort IDs, the 1 SOL cost model and 200ms causal fills; none signs or sends a transaction.
 
-Range Scalper J is now behind the proven-negative override and therefore stops creating new
-positions by default while all historical rows remain queryable. Holder Growth N keeps its
-complete history and preserves `HG30_BAL × X15_FIXED` as the unchanged control. The old
-5-second control and the absolute-flow Strong A/B/C cohorts stop creating new positions.
+Range Scalper J is behind the proven-negative override and therefore stops creating new
+positions by default while all historical rows remain queryable. Holder Growth N also stops
+all new entries by default after the forward quality cohorts remained negative; its complete
+history, including `HG30_BAL × X15_FIXED`, remains queryable.
 
-Three isolated forward-only quality entries are enabled by default. `HG30_NQ_A_R75_C40_75`
+The retained forward-only quality definitions are `HG30_NQ_A_R75_C40_75`
 requires retention >=75% and Curve 40-75%; `HG30_NQ_B_R80_C45_70` requires retention >=80%
 and Curve 45-70%. Both use the fixed 15-second exit. `HG30_NQ_C_POST_PEAK` adds the causal
 requirement that buy SOL since the observed peak is at least sell SOL since that peak, and
 independently tests fixed 12/15/18-second exits. These filters were positive after the 1 SOL
 cost model in two non-overlapping 24-hour windows. Entry profiles explicitly list their exit
-IDs, so new rows never leak into historical cohort IDs. Set
-`FLOW_HOLDER_GROWTH_QUALITY_ENABLED=false` to stop only the new quality cohorts, or
-`FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED=true` only when intentionally resuming the old full
-matrix. Smart Pullback A/B, lifecycle G, migration continuity M and live strategies are
-unchanged.
+IDs, so historical cohorts remain isolated. Intentionally resuming N requires
+`FLOW_HOLDER_GROWTH_SHADOW_ENABLED=true`; the full historical matrix additionally requires
+`FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED=true`.
 
 
 Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION` 只用毕业前 `PUMP_BONDING_CURVE` 成交触发信号和入场，AGE 从 Token 创建时间计算；`POST_MIGRATION` 只用毕业后的 `PUMP_AMM` 成交触发信号和入场，AGE 从毕业时间计算。两层拥有独立检测状态、Episode 与 cohort，统计时不会把两种市场结构混在一起。此前已经积累的毕业后记录会通过数据库默认值保留为 `POST_MIGRATION`。
@@ -491,7 +491,7 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-旧的 Primary Early、Graduation Acceleration O、Migration Continuity M、GD25 F1 与各 XLEG 历史版本均已停止新开仓，相关历史数据继续保留用于研究及存量仓位退出。当前仍允许新开仓的是 `QL-STRICT-PR`。所有实盘策略的默认单笔仓位统一为 `0.1 SOL`；旧服务器 `.env` 中历史默认值 `0.05` 或 `1` 会在升级后自动继承为 `0.1 SOL`：
+旧的 Primary Early、Graduation Acceleration O、Migration Continuity M、GD25 F1 与各 XLEG 历史版本均已停止新开仓，相关历史数据继续保留用于研究及存量仓位退出。当前允许新开仓的是 `QL-STRICT-PR` 与 `F-FO-RB10-X30`。所有实盘策略的默认单笔仓位统一为 `0.1 SOL`；旧服务器 `.env` 中历史默认值 `0.05` 或 `1` 会在升级后自动继承为 `0.1 SOL`：
 
 ```text
 M-C5-E120 / migration_continuity_mc_c5_e120_live（停止新开仓）
@@ -500,7 +500,14 @@ M-C5-E120 / migration_continuity_mc_c5_e120_live（停止新开仓）
 
 QL-STRICT-PR / quality_leader_ql_strict_protected_live
 10秒涨幅≥140%、20秒回撤≤12%、Retention≥80%，且买家/净流入继续增长
-→ Bonding Curve买入0.1 SOL → 不分批的阶梯保护Runner，30秒未走强退出、5分钟兜底
+→ 1 SOL Shadow冲击≤12%，市场跳价≤10% → Bonding Curve买入0.1 SOL
+→ 不分批的阶梯保护Runner，30秒未走强退出、5分钟兜底
+
+F-FO-RB10-X30 / launch_pullback_fo_rb10_30s_live
+首轮回踩参考，Creator≤5%、最近买家≥10、NetFlow≥5 SOL
+→ 只在 FO_RB10_30S 的200ms模拟入场真正成立时发出一次实盘信号
+→ Bonding Curve买入0.1 SOL → 无固定止盈/移动止盈/硬止损，固定30秒退出
+→ 启动历史回放只恢复 Shadow 状态，永不补发实盘订单
 
 GD25-35-F1-XLEG / post_gd25_35_f1_xleg_live_v1（停止新开仓）
 毕业后120秒内，1秒跌25%–35%，低点1秒内反弹2%–5%
@@ -604,3 +611,19 @@ Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，�
 - `O90_M5_X60` / `O90_M5_X120` / `O90_M5_STAIR120`：首次 Curve `>=90%` 且 5 秒推进 `>=5%`、买家 `>=1`、卖单 `<=1`、Creator 未卖。毕业时退出 50% Core；只有首个 PumpSwap 5 秒买家 `>=25` 且净流入非负才保留 Runner，再分别测试固定 60 秒、固定 120 秒与阶梯 120 秒。
 
 FC 的 Flow 证据使用“信号时间不晚于回踩参考时间”的因果约束，未来信号不能反向使历史参考点合格。O90→M5 的 PumpSwap 门槛只决定毕业后的 Runner，失败时不会把未成交或不可定价样本伪记为盈利。
+
+## M2F-OBS 迁移后二段资金扩散观察器（2026-08-19）
+
+`M2F-OBS` 是独立的观察型 Shadow，不创建模拟仓位，也没有签名、RPC
+补数或链上发送路径。它在每次毕业/迁移后继续订阅最多 480 秒的现有
+PumpSwap 数据流，以真实成交驱动 1 秒快照，记录首波价格、首次回撤、
+反弹、3/10/前20秒资金流、买家扩散、单钱包集中度、买速变化和可观测
+钱包留存。每日 08:00 导出会自动包含两张独立表：
+
+- `migration_second_leg_observations`
+- `migration_second_leg_snapshots`
+
+当前数据流不能可靠证明的 quote reserve / ONFI10、BOOST、Mayhem、
+cashback、canonical pool 以及实体/资金图聚类字段，会明确保存为
+`NULL`、`UNKNOWN` 或 `UNAVAILABLE`，绝不以 0 冒充已观测值。积累至少
+3～5 天后再根据这些观察数据决定是否建立正式的交易型 Shadow cohort。
