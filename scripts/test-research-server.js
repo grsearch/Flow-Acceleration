@@ -538,6 +538,9 @@ async function main() {
     )).json();
     assert.strictEqual(migratedRebound.runtime.mode, 'SHADOW_G');
     assert.strictEqual(migratedRebound.runtime.sendsTransactions, false);
+    assert.strictEqual(migratedRebound.runtime.gfrEnabled, true);
+    assert.strictEqual(migratedRebound.runtime.fastFlowBuffers, 0);
+    assert.strictEqual(migratedRebound.runtime.fastFlowRows, 0);
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
