@@ -95,7 +95,7 @@ assert.strictEqual(liveQualityLeader.protectedFloors.length, 4);
 assert.strictEqual(liveQualityLeader.maxEntryPriceJumpPct, 10);
 assert.strictEqual(liveQualityLeader.maxShadowEntryImpactPct, 12);
 assert.strictEqual(liveLaunchPullback.positionSizeSol, 0.1);
-assert.strictEqual(liveLaunchPullback.entryEnabled, true);
+assert.strictEqual(liveLaunchPullback.entryEnabled, false);
 assert.strictEqual(liveLaunchPullback.code, 'F-FO-RB10-X30');
 assert.strictEqual(liveLaunchPullback.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveLaunchPullback.exitMode, 'FIXED_HOLD');
