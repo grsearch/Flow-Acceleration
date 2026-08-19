@@ -39,19 +39,26 @@ const ResearchServer = require('./server/server');
 const { launchStartupDashboard } = require('./server/startup-dashboard');
 
 function createRuntime(runtimeConfig = config) {
+  const runtimeStartedAt = Date.now();
+  console.log('[Startup] creating research store');
   const store = new ResearchStore(runtimeConfig.storage, runtimeConfig.labels);
   const startupReplayCacheMs = Math.max(
     0,
     Number(runtimeConfig.storage.startupReplayCacheMs) || 0,
   );
   if (startupReplayCacheMs > 0) {
+    const replayStartedAt = Date.now();
+    console.log(`[Startup] priming ${startupReplayCacheMs}ms trade replay cache`);
     store.primeStartupTradeReplay(Date.now() - startupReplayCacheMs);
+    console.log(`[Startup] trade replay cache ready in ${Date.now() - replayStartedAt}ms`);
   }
+  console.log('[Startup] restoring engine and pending labels');
   const engine = new FlowAccelerationEngine(runtimeConfig.strategy);
   engine.hydrateTokens(store.allTokens());
   engine.hydrateTrades(store.recentCurveTrades(Date.now() - runtimeConfig.strategy.bufferMs));
   const labeler = new SignalLabeler({ store, config: runtimeConfig.labels });
   labeler.restore(store.restorePendingSignals());
+  console.log(`[Startup] engine and labels ready in ${Date.now() - runtimeStartedAt}ms`);
   const parser = new PumpEventParser({
     pumpProgramId: runtimeConfig.pump.programId,
     pumpAmmProgramId: runtimeConfig.pump.ammProgramId,
@@ -155,7 +162,10 @@ function createRuntime(runtimeConfig = config) {
     config: runtimeConfig.migrationSecondLegObserver,
     store,
   });
+  const m2fStartedAt = Date.now();
+  console.log('[Startup] starting M2F-OBS without historical replay');
   migrationSecondLegObserver.start();
+  console.log(`[Startup] M2F-OBS ready in ${Date.now() - m2fStartedAt}ms`);
   const migratedDropReboundShadow = new MigratedDropReboundShadowSuite({
     config: runtimeConfig.migratedDropReboundShadow,
     store,
@@ -194,6 +204,7 @@ function createRuntime(runtimeConfig = config) {
   });
   graduationAccelerationShadow.start();
   store.releaseStartupTradeReplay();
+  console.log(`[Startup] all strategy state restored in ${Date.now() - runtimeStartedAt}ms`);
   const server = new ResearchServer({
     config: runtimeConfig,
     store,
