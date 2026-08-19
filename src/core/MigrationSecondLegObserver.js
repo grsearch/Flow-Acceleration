@@ -98,19 +98,17 @@ class MigrationSecondLegObserver {
   start() {
     if (!this.config.enabled) return;
     const now = this.now();
-    const restoreWindowMs = this.config.maxAgeMs + this.config.restoreGraceMs;
-    for (const token of this.store.allTokens()) {
-      const normalized = normalizedToken(token);
-      if (normalized.mint && normalized.migrationAt
-        && normalized.migrationAt >= now - restoreWindowMs
-        && normalized.migrationAt <= now + 5_000) {
-        this._ensureState(normalized, false);
-      }
-    }
-    for (const trade of this.store.recentAmmTrades(now - restoreWindowMs)) {
-      this.observeTrade(trade, { replay: true });
-    }
-    this.advanceTime(now, { replay: true });
+    // Keep cold start causal and bounded. Replaying AMM history here adds a
+    // synchronous read to the critical startup path and creates a partial
+    // baseline when the process missed the actual migration event.
+    const censored = this.store.censorOpenMigrationSecondLegObservations({
+      completedAt: now,
+      completionReason: 'PROCESS_RESTART_NO_REPLAY',
+    });
+    this.metrics.rightCensored += Number(censored?.changes) || 0;
+    this.metrics.startupReplaySkipped = true;
+    this.metrics.startupRowsCensored = Number(censored?.changes) || 0;
+    this.metrics.lastActionAt = now;
   }
 
   stop() {}
@@ -131,13 +129,9 @@ class MigrationSecondLegObserver {
     const price = observedPrice(trade);
     if (!(timestampMs > 0) || !(price > 0)) return;
 
-    let state = this.states.get(trade.mint);
-    if (!state) {
-      const token = normalizedToken(this.store.getToken(trade.mint) || {});
-      if (!token.mint || !token.migrationAt) return;
-      if (timestampMs > token.migrationAt + this.config.maxAgeMs) return;
-      state = this._ensureState(token, false);
-    }
+    // Only a migration event observed by this process may create state. A lazy
+    // flow_tokens restore would incorrectly use a post-restart trade as entry.
+    const state = this.states.get(trade.mint);
     if (!state || timestampMs < state.migrationAt - 5_000) return;
     if (timestampMs > state.migrationAt + this.config.maxAgeMs) {
       this._complete(state, timestampMs, 'MAX_AGE');
