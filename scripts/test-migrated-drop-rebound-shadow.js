@@ -779,3 +779,123 @@ function testFastReboundCapacityProfile() {
 }
 
 testFastReboundCapacityProfile();
+
+function fastFlowTrade(mint, timestampMs, price, {
+  wallet,
+  side = 'BUY',
+  solAmount = 0.5,
+} = {}) {
+  return {
+    ...trade(mint, timestampMs, price),
+    wallet,
+    side,
+    solAmount,
+    poolBaseReservesRaw: '1000000000000000',
+    poolQuoteReservesRaw: '720000000000',
+    virtualQuoteReservesRaw: '0',
+  };
+}
+
+function testFastReversalContinuationConfirmation() {
+  const base = 2_700_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const config = optimizationConfig([{
+    id: 'GFR_X8',
+    label: 'fast reversal 8s',
+    entryProfileIds: ['GFR_300'],
+    exitMode: 'FIXED_HOLD',
+    fixedHoldMs: 8_000,
+  }]);
+  config.entryProfiles = [{
+    id: 'GFR_300',
+    label: 'fast reversal 300ms',
+    windowMs: 1_000,
+    dropMinPct: 25,
+    dropMaxPct: 35,
+    reboundMinPct: 2,
+    reboundMaxPct: 5,
+    reboundTimeoutMs: 1_000,
+    maxLifecycleAgeMs: 30_000,
+    maxSignalsPerMint: 1,
+    maxEntryPriceJumpPct: 15,
+    exitProfileIds: ['GFR_X8'],
+    capacityAware: true,
+    positionSols: [0.05, 0.1],
+    fastConfirmation: {
+      confirmationMs: 300,
+      minPriceContinuationPct: 1,
+      minBuyTx: 2,
+      minUniqueBuyers: 2,
+      minNetFlowSol: 0.5,
+      minNetFlowAccelerationSol: 0,
+      maxSellBuyRatio: 0.5,
+      maxTopBuyerSharePct: 60,
+      maxRoundTripImpactPct: 5,
+    },
+  }];
+  const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+
+  const fastMint = 'FastContinuation111111111111111111111111111111';
+  recordCreate(store, fastMint, base);
+  store.recordComplete({ mint: fastMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(fastMint));
+  suite.observeTrade(fastFlowTrade(fastMint, base + 100, 0.000001, {
+    wallet: 'peak-buyer', solAmount: 0.2,
+  }));
+  suite.observeTrade(fastFlowTrade(fastMint, base + 200, 0.0000007, {
+    wallet: 'low-buyer', solAmount: 0.2,
+  }));
+  suite.observeTrade(fastFlowTrade(fastMint, base + 300, 0.00000072, {
+    wallet: 'buyer-a', solAmount: 0.5,
+  }));
+  suite.observeTrade(fastFlowTrade(fastMint, base + 450, 0.000000725, {
+    wallet: 'buyer-b', solAmount: 0.4,
+  }));
+  suite.observeTrade(fastFlowTrade(fastMint, base + 600, 0.00000073, {
+    wallet: 'buyer-c', solAmount: 0.5,
+  }));
+  const opened = store.db.prepare(`
+    SELECT status, position_sol, confirmation_json
+    FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=? ORDER BY position_sol
+  `).all(fastMint);
+  assert.deepStrictEqual(opened.map((row) => row.status), ['OPEN', 'OPEN']);
+  assert.deepStrictEqual(opened.map((row) => row.position_sol), [0.05, 0.1]);
+  const confirmation = JSON.parse(opened[0].confirmation_json);
+  assert.strictEqual(confirmation.uniqueBuyers, 3);
+  assert(confirmation.netFlowAccelerationSol > 0);
+  assert(confirmation.roundTripImpactPct < 5);
+
+  const slowMint = 'SlowContinuation111111111111111111111111111111';
+  recordCreate(store, slowMint, base);
+  store.recordComplete({ mint: slowMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(slowMint));
+  suite.observeTrade(fastFlowTrade(slowMint, base + 1_100, 0.000001, {
+    wallet: 'peak', solAmount: 0.2,
+  }));
+  suite.observeTrade(fastFlowTrade(slowMint, base + 1_200, 0.0000007, {
+    wallet: 'low', solAmount: 0.2,
+  }));
+  suite.observeTrade(fastFlowTrade(slowMint, base + 1_300, 0.00000072, {
+    wallet: 'single-buyer', solAmount: 0.1,
+  }));
+  suite.observeTrade(fastFlowTrade(slowMint, base + 1_600, 0.000000721, {
+    wallet: 'single-buyer', solAmount: 0.05,
+  }));
+  now = base + 4_000;
+  suite.advanceTime(now);
+  const rejected = store.db.prepare(`
+    SELECT status, rejection_reason, confirmation_json
+    FROM migrated_drop_rebound_shadow_positions WHERE mint=?
+  `).all(slowMint);
+  assert(rejected.every((row) => row.status === 'NO_ENTRY'));
+  assert(rejected.every((row) => row.rejection_reason === 'FAST_CONFIRM_PRICE_NOT_CONTINUING'));
+  assert(rejected.every((row) => JSON.parse(row.confirmation_json).uniqueBuyers === 1));
+  assert.strictEqual(suite.health().fastConfirmationPassed, 2);
+  assert.strictEqual(suite.health().fastConfirmationRejected, 2);
+  store.close();
+}
+
+testFastReversalContinuationConfirmation();
