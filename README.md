@@ -627,3 +627,7 @@ PumpSwap 数据流，以真实成交驱动 1 秒快照，记录首波价格、�
 cashback、canonical pool 以及实体/资金图聚类字段，会明确保存为
 `NULL`、`UNKNOWN` 或 `UNAVAILABLE`，绝不以 0 冒充已观测值。积累至少
 3～5 天后再根据这些观察数据决定是否建立正式的交易型 Shadow cohort。
+
+为避免大型历史库冷启动阻塞，`M2F-OBS` 启动时不回放历史 AMM 成交：
+上次进程中断的 `OBSERVING` 记录会标记为 `RIGHT_CENSORED`，新一轮只从
+当前进程真实收到的毕业事件开始记录，保证数据因果完整且不增加启动扫描。
