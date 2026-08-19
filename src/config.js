@@ -156,6 +156,13 @@ const publicFlowLeadLegacyProfilesEnabled = booleanEnv(
   'FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED',
   false,
 );
+// G-FR is intentionally isolated from the rest of Lifecycle Drop/Rebound G.
+// Operators can pause this compute-heavier forward experiment without losing
+// the mature G cohorts or their historical rows.
+const migratedReboundGfrEnabled = booleanEnv(
+  'FLOW_MIGRATED_REBOUND_GFR_ENABLED',
+  true,
+);
 
 // One shared fallback keeps every research-only strategy on the same economic
 // scale. A strategy-specific environment variable may still override it.
@@ -2852,6 +2859,7 @@ const config = {
   // are orthogonal online experiments and never create or sign a transaction.
   migratedDropReboundShadow: {
     enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
+    gfrEnabled: migratedReboundGfrEnabled,
     lifecycleStages: [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ],
@@ -2868,6 +2876,16 @@ const config = {
     entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
       min: 1,
     }),
+    fastFlowMaxTradesPerMint: integerEnv(
+      'FLOW_MIGRATED_REBOUND_GFR_MAX_TRADES_PER_MINT',
+      512,
+      { min: 32, max: 10_000 },
+    ),
+    fastFlowSweepMs: integerEnv(
+      'FLOW_MIGRATED_REBOUND_GFR_SWEEP_MS',
+      5_000,
+      { min: 1_000, max: 60_000 },
+    ),
     exitDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_DELAY_MS', 200, { min: 0 }),
     exitTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_TIMEOUT_MS', 5_000, {
       min: 1,
@@ -3077,7 +3095,7 @@ const config = {
           ['0.05', '0.25', '0.5', '1'],
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
-      ...[
+      ...(migratedReboundGfrEnabled ? [
         ['GFR_300', 300],
         ['GFR_600', 600],
         ['GFR_1000', 1_000],
@@ -3143,7 +3161,7 @@ const config = {
             { min: 0, max: 100 },
           ),
         },
-      })),
+      })) : []),
     ],
     exitProfiles: [
       {
@@ -3217,21 +3235,19 @@ const config = {
         lossCheckAtMs: 6_000,
         maxHoldMs: 15_000,
       },
-      {
+      ...(migratedReboundGfrEnabled ? [{
         id: 'GFR_X8',
         label: 'G-FR · 固定持有8秒',
         entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
         exitMode: 'FIXED_HOLD',
         fixedHoldMs: 8_000,
-      },
-      {
+      }, {
         id: 'GFR_X15',
         label: 'G-FR · 固定持有15秒',
         entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
         exitMode: 'FIXED_HOLD',
         fixedHoldMs: 15_000,
-      },
-      {
+      }, {
         id: 'GFR_HS20_H30',
         label: 'G-FR · 硬止损20% / 最长30秒',
         entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
@@ -3240,7 +3256,7 @@ const config = {
         trailingActivationPct: 1_000,
         trailingStopPct: 100,
         maxHoldMs: 30_000,
-      },
+      }] : []),
       ...[
         ['G1_E2_H6', 2_000, 6],
         ['G1_E2_H8', 2_000, 8],
