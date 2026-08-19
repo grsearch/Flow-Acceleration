@@ -149,6 +149,13 @@ const holderGrowthQualityEnabled = booleanEnv(
   'FLOW_HOLDER_GROWTH_QUALITY_ENABLED',
   true,
 );
+// The first PFL matrix was useful as a future-label discovery sample but is
+// consistently negative as an entry rule. Keep those cohort definitions behind
+// an explicit opt-in while the narrower B2 forward cohort starts a clean sample.
+const publicFlowLeadLegacyProfilesEnabled = booleanEnv(
+  'FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED',
+  false,
+);
 
 // One shared fallback keeps every research-only strategy on the same economic
 // scale. A strategy-specific environment variable may still override it.
@@ -431,12 +438,17 @@ const config = {
         reentryCooldownMs: 0,
         maxEntryPriceJumpPct: numberEnv(
           'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_ENTRY_JUMP_PCT',
-          20,
+          10,
           { min: 0, max: 100 },
         ),
         maxEntrySelfImpactPct: numberEnv(
           'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_ENTRY_SELF_IMPACT_PCT',
           10,
+          { min: 0, max: 100 },
+        ),
+        maxShadowEntryImpactPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_SHADOW_IMPACT_PCT',
+          12,
           { min: 0, max: 100 },
         ),
         exitMode: 'QUALITY_PROTECTED_RUNNER',
@@ -478,6 +490,45 @@ const config = {
           maxSellBuyRatio: 0.55,
           minVirtualSolReserves: 30,
         },
+      },
+      {
+        id: 'launch_pullback_fo_rb10_30s_live',
+        code: 'F-FO-RB10-X30',
+        label: 'Launch Pullback F · FO-RB10 固定30秒',
+        ruleVersion: 'launch_pullback_fo_rb10_30s_live_v1',
+        signalSource: 'LAUNCH_PULLBACK_FO_RB10_30S',
+        enabled: booleanEnv('FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_BONDING_CURVE',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_MAX_ENTRY_JUMP_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 30_000,
+        hardStopPct: 0,
+        maxHoldMs: 30_000,
+        sourceShadowCohortId: 'FO_RB10_30S',
       },
       {
         id: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
@@ -942,7 +993,7 @@ const config = {
   // Smart Wallet pullback A/B research. This path only records simulated
   // positions and never owns an executor or signing key.
   smartPullbackShadow: {
-    enabled: booleanEnv('FLOW_SMART_PULLBACK_SHADOW_ENABLED', true),
+    enabled: booleanEnv('FLOW_SMART_PULLBACK_SHADOW_ENABLED', false),
     minSmartBuySol: numberEnv('FLOW_SMART_PULLBACK_MIN_BUY_SOL', 0.1, { min: 0.000001 }),
     episodeGapMs: integerEnv('FLOW_SMART_PULLBACK_EPISODE_GAP_MS', 30_000, { min: 1_000 }),
     confirmationWindowMs: integerEnv(
@@ -1133,7 +1184,7 @@ const config = {
   // profitable wallets. It never signs transactions and never reuses a future
   // Smart OPEN as an earlier fill price.
   smartLikeEarlyShadow: {
-    enabled: booleanEnv('FLOW_SMART_LIKE_EARLY_SHADOW_ENABLED', true),
+    enabled: booleanEnv('FLOW_SMART_LIKE_EARLY_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_SMART_LIKE_EARLY_POSITION_SOL'),
     stateWindowMs: integerEnv('FLOW_SMART_LIKE_EARLY_STATE_WINDOW_MS', 5_000, { min: 1_000 }),
     stateRetentionMs: integerEnv('FLOW_SMART_LIKE_EARLY_STATE_RETENTION_MS', 240_000, {
@@ -1247,7 +1298,7 @@ const config = {
   // The signal price is never treated as a fill: every cohort waits for the
   // first comparable market trade after the configured execution delay.
   smartResonanceShadow: {
-    enabled: booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', true),
+    enabled: booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
     featureWindowMs: integerEnv('FLOW_SMART_RESONANCE_FEATURE_WINDOW_MS', 5_000, {
       min: 1_000,
@@ -1360,6 +1411,7 @@ const config = {
       { min: 0, max: 1_000 },
     ),
     entryProfiles: [
+      ...(publicFlowLeadLegacyProfilesEnabled ? [
       {
         id: 'PFL_B0',
         label: 'PFL-B0 · broad public breadth baseline',
@@ -1397,6 +1449,20 @@ const config = {
         minPublicNetFlow5sSol: 0, maxLargestBuyerSharePct: 25,
         minSellBuyRatio: 0.35, maxSellBuyRatio: 0.9,
         maxReturn5sPct: 30,
+      },
+      ] : []),
+      {
+        id: 'PFL_B2',
+        label: 'PFL-B2 · 8–12s diversified flow / future Smart OPEN study',
+        minAgeMs: 8_000, maxAgeMs: 12_000,
+        minCurvePct: 60, maxCurvePct: 75,
+        minPublicBuyers1s: 9, maxPublicBuyers1s: 12,
+        minPublicBuyers5s: 45,
+        minPublicBuyFlow5sSol: 26, maxPublicBuyFlow5sSol: 35,
+        minPublicNetFlow5sSol: 2,
+        maxLargestBuyerSharePct: 15,
+        minReturn5sPct: 10, maxReturn5sPct: 25,
+        minFlowAccelerationRatio: 1, maxFlowAccelerationRatio: 2.5,
       },
     ],
     exitProfiles: [20, 30].flatMap((hardStopPct) => (
@@ -2003,6 +2069,7 @@ const config = {
         maxTop3SharePct: 100,
         exitPolicy: 'FIXED_HOLD',
         fixedHoldMs: 30_000,
+        liveStrategyId: 'launch_pullback_fo_rb10_30s_live',
       },
       {
         id: 'FO_RB10_T20',
@@ -3492,7 +3559,7 @@ const config = {
   // seen buying through the captured Pump curve stream; it is deliberately not
   // presented as an authoritative on-chain holder count.
   holderGrowthShadow: {
-    enabled: booleanEnv('FLOW_HOLDER_GROWTH_SHADOW_ENABLED', true),
+    enabled: booleanEnv('FLOW_HOLDER_GROWTH_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
     snapshotHorizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
       min: 5_000,
@@ -4100,6 +4167,40 @@ const config = {
       5_000,
       { min: 1_000, max: 60_000 },
     ),
+  },
+
+  // M2F-OBS collects causal post-migration second-leg evidence only. It has
+  // no position model, execution callback, RPC enrichment or transaction path.
+  migrationSecondLegObserver: {
+    enabled: booleanEnv('FLOW_M2F_OBSERVER_ENABLED', true),
+    maxAgeMs: integerEnv('FLOW_M2F_OBSERVER_MAX_AGE_MS', 480_000, {
+      min: 60_000,
+      max: 30 * 60_000,
+    }),
+    snapshotIntervalMs: integerEnv('FLOW_M2F_OBSERVER_SNAPSHOT_INTERVAL_MS', 1_000, {
+      min: 250,
+      max: 10_000,
+    }),
+    restoreGraceMs: integerEnv('FLOW_M2F_OBSERVER_RESTORE_GRACE_MS', 60_000, {
+      min: 0,
+      max: 10 * 60_000,
+    }),
+    pullbackArmPct: numberEnv('FLOW_M2F_OBSERVER_PULLBACK_ARM_PCT', 8, {
+      min: 0.1,
+      max: 100,
+    }),
+    reboundReferencePct: numberEnv('FLOW_M2F_OBSERVER_REBOUND_REFERENCE_PCT', 3, {
+      min: 0,
+      max: 100,
+    }),
+    retentionFloorPct: numberEnv('FLOW_M2F_OBSERVER_RETENTION_FLOOR_PCT', 20, {
+      min: 0,
+      max: 100,
+    }),
+    effectiveBuyMinSol: numberEnv('FLOW_M2F_OBSERVER_EFFECTIVE_BUY_MIN_SOL', 0.02, {
+      min: 0,
+      max: 100,
+    }),
   },
 
   storage: {
