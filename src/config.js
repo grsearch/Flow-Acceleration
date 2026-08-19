@@ -3077,6 +3077,73 @@ const config = {
           ['0.05', '0.25', '0.5', '1'],
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
+      ...[
+        ['GFR_300', 300],
+        ['GFR_600', 600],
+        ['GFR_1000', 1_000],
+      ].map(([id, confirmationMs]) => ({
+        id,
+        label: `G-FR · 快速反转延续 · ${confirmationMs}ms确认`,
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_GFR_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 100 },
+        ),
+        exitProfileIds: ['GFR_X8', 'GFR_X15', 'GFR_HS20_H30'],
+        capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_MIGRATED_REBOUND_GFR_CAPACITY_SOLS',
+          ['0.05', '0.1'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+        fastConfirmation: {
+          confirmationMs,
+          minPriceContinuationPct: numberEnv(
+            'FLOW_MIGRATED_REBOUND_GFR_MIN_CONTINUATION_PCT',
+            1,
+            { min: -100, max: 100 },
+          ),
+          minBuyTx: integerEnv('FLOW_MIGRATED_REBOUND_GFR_MIN_BUY_TX', 2, {
+            min: 1,
+            max: 100,
+          }),
+          minUniqueBuyers: integerEnv('FLOW_MIGRATED_REBOUND_GFR_MIN_BUYERS', 2, {
+            min: 1,
+            max: 100,
+          }),
+          minNetFlowSol: numberEnv('FLOW_MIGRATED_REBOUND_GFR_MIN_NET_FLOW_SOL', 0.5, {
+            min: -1_000,
+            max: 1_000,
+          }),
+          minNetFlowAccelerationSol: numberEnv(
+            'FLOW_MIGRATED_REBOUND_GFR_MIN_NET_FLOW_ACCEL_SOL',
+            0,
+            { min: -1_000, max: 1_000 },
+          ),
+          maxSellBuyRatio: numberEnv(
+            'FLOW_MIGRATED_REBOUND_GFR_MAX_SELL_BUY_RATIO',
+            0.5,
+            { min: 0, max: 100 },
+          ),
+          maxTopBuyerSharePct: numberEnv(
+            'FLOW_MIGRATED_REBOUND_GFR_MAX_TOP_BUYER_SHARE_PCT',
+            60,
+            { min: 0, max: 100 },
+          ),
+          maxRoundTripImpactPct: numberEnv(
+            'FLOW_MIGRATED_REBOUND_GFR_MAX_ROUND_TRIP_IMPACT_PCT',
+            5,
+            { min: 0, max: 100 },
+          ),
+        },
+      })),
     ],
     exitProfiles: [
       {
@@ -3149,6 +3216,30 @@ const config = {
         fastTakeProfitWindowMs: 5_000,
         lossCheckAtMs: 6_000,
         maxHoldMs: 15_000,
+      },
+      {
+        id: 'GFR_X8',
+        label: 'G-FR · 固定持有8秒',
+        entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 8_000,
+      },
+      {
+        id: 'GFR_X15',
+        label: 'G-FR · 固定持有15秒',
+        entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 15_000,
+      },
+      {
+        id: 'GFR_HS20_H30',
+        label: 'G-FR · 硬止损20% / 最长30秒',
+        entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
+        exitMode: 'TAIL',
+        hardStopPct: 20,
+        trailingActivationPct: 1_000,
+        trailingStopPct: 100,
+        maxHoldMs: 30_000,
       },
       ...[
         ['G1_E2_H6', 2_000, 6],
