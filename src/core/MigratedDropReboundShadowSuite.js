@@ -100,6 +100,8 @@ function rowPosition(row) {
     mint: row.mint,
     symbol: row.symbol,
     status: row.status,
+    rejectionReason: value('rejection_reason', 'rejectionReason'),
+    confirmationJson: value('confirmation_json', 'confirmationJson'),
     positionSol: finite(value('position_sol', 'positionSol'), 1),
     configuredCostPct: finite(value('configured_cost_pct', 'configuredCostPct'), 0),
     reboundAt: value('rebound_at', 'reboundAt'),
@@ -186,6 +188,8 @@ class MigratedDropReboundShadowSuite {
       noExit: 0,
       ammPriceOutliersIgnored: 0,
       ammPriceRegimesConfirmed: 0,
+      fastConfirmationPassed: 0,
+      fastConfirmationRejected: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -217,6 +221,8 @@ class MigratedDropReboundShadowSuite {
       1_000,
       ...[...this.entryProfiles.values()].map((profile) => (
         profile.windowMs + profile.reboundTimeoutMs
+          + finite(profile.fastConfirmation?.confirmationMs, 0)
+          + this.config.entryTimeoutMs
       )),
     );
     const replayTrades = [
@@ -310,10 +316,18 @@ class MigratedDropReboundShadowSuite {
     }
     for (const pending of [...this.pendingEntries.values()]) {
       if (now <= pending.entryDeadlineAt) continue;
-      this.store.updateMigratedDropReboundShadowPosition(pending.id, { status: STATUS.NO_ENTRY });
+      const profile = this.entryProfiles.get(pending.entryProfileId);
+      const rejectionReason = pending.pendingRejectionReason
+        || (profile?.fastConfirmation ? 'FAST_CONFIRM_NO_EXECUTABLE_ENTRY' : null);
+      this.store.updateMigratedDropReboundShadowPosition(pending.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason,
+        confirmationJson: pending.confirmationJson,
+      });
       this.pendingEntries.delete(pending.id);
       this._unindexRow(pending);
       this.metrics.noEntry += 1;
+      if (profile?.fastConfirmation) this.metrics.fastConfirmationRejected += 1;
     }
     for (const position of [...this.positions.values()]) {
       if (position.status === STATUS.EXIT_PENDING) {
@@ -372,7 +386,13 @@ class MigratedDropReboundShadowSuite {
     const { states } = detector;
     let state = states.get(mint);
     if (!state) {
-      state = { prices: [], lastTimestampMs: 0, dropReady: true, candidate: null };
+      state = {
+        prices: [],
+        flowTrades: [],
+        lastTimestampMs: 0,
+        dropReady: true,
+        candidate: null,
+      };
       states.set(mint, state);
     }
     return state;
@@ -467,6 +487,28 @@ class MigratedDropReboundShadowSuite {
     while (state.prices.length && state.prices[0].timestampMs < cutoff) state.prices.shift();
   }
 
+  _pruneFlowTrades(state, timestampMs, profile) {
+    const keepMs = Math.max(
+      profile.windowMs,
+      finite(profile.fastConfirmation?.confirmationMs, 0) + this.config.entryTimeoutMs,
+    );
+    const cutoff = timestampMs - keepMs;
+    while (state.flowTrades.length && state.flowTrades[0].timestampMs < cutoff) {
+      state.flowTrades.shift();
+    }
+  }
+
+  _flowTrade(trade, price) {
+    return {
+      timestampMs: Number(trade.timestampMs),
+      side: trade.side === 'SELL' ? 'SELL' : 'BUY',
+      solAmount: Math.max(0, finite(trade.solAmount, 0)),
+      wallet: trade.wallet || null,
+      price,
+      signature: trade.signature || null,
+    };
+  }
+
   _observeDetector(profile, lifecycleStage, trade, price, anchorAt, replay) {
     const timestampMs = trade.timestampMs;
     const state = this._state(lifecycleStage, profile.id, trade.mint);
@@ -479,7 +521,9 @@ class MigratedDropReboundShadowSuite {
       slot: trade.slot || null,
       signature: trade.signature || null,
     });
+    state.flowTrades.push(this._flowTrade(trade, price));
     this._prune(state, timestampMs, profile.windowMs);
+    this._pruneFlowTrades(state, timestampMs, profile);
 
     let rollingPeak = state.prices[0];
     for (const row of state.prices) if (row.price > rollingPeak.price) rollingPeak = row;
@@ -596,6 +640,9 @@ class MigratedDropReboundShadowSuite {
         const configuredCostPct = costs.deterministicCostPct
           - (profile.capacityAware ? costs.priceImpactPct : 0)
           + (BLEND_EXIT_MODES.has(exitProfile.exitMode) ? costs.fixedCostPct : 0);
+        const confirmationMs = finite(profile.fastConfirmation?.confirmationMs, null);
+        const entryTargetAt = trade.timestampMs
+          + (confirmationMs == null ? this.config.entryDelayMs : confirmationMs);
         const saved = this.store.createMigratedDropReboundShadowPosition({
           cohortId,
           lifecycleStage,
@@ -625,9 +672,9 @@ class MigratedDropReboundShadowSuite {
           reboundPct,
           reboundElapsedMs: trade.timestampMs - candidate.startedAt,
           reboundFromLowMs: trade.timestampMs - candidate.lowAt,
-          entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
-          entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs
-            + this.config.entryTimeoutMs,
+          entryTargetAt,
+          entryDeadlineAt: entryTargetAt + this.config.entryTimeoutMs,
+          confirmationJson: null,
           exitMode: exitProfile.exitMode,
           fixedHoldMs: exitProfile.fixedHoldMs,
           trailingActivationPct: exitProfile.trailingActivationPct,
@@ -675,9 +722,24 @@ class MigratedDropReboundShadowSuite {
           this.metrics.priceJump += 1;
           continue;
         }
-        const fill = entryProfile?.capacityAware && position.lifecycleStage === 'POST_MIGRATION'
+        let fill = entryProfile?.capacityAware && position.lifecycleStage === 'POST_MIGRATION'
           ? ammBuyAveragePrice(trade, position.positionSol, price)
           : { price, impactPct: null };
+        if (entryProfile?.fastConfirmation) {
+          const decision = this._fastConfirmationDecision({
+            position,
+            profile: entryProfile,
+            trade,
+            price,
+            jumpPct,
+            fill,
+          });
+          position.pendingRejectionReason = decision.reason;
+          position.confirmationJson = JSON.stringify(decision.features);
+          if (!decision.pass) continue;
+          fill = decision.fill;
+          this.metrics.fastConfirmationPassed += 1;
+        }
         position.status = STATUS.OPEN;
         position.entryAt = trade.timestampMs;
         position.entryMarket = trade.market;
@@ -695,6 +757,7 @@ class MigratedDropReboundShadowSuite {
           entryPrice: fill.price,
           entryJumpPct: jumpPct,
           entryImpactPct: fill.impactPct,
+          confirmationJson: position.confirmationJson,
           highestPrice: fill.price,
           lowestPrice: fill.price,
           lastObservedAt: trade.timestampMs,
@@ -728,6 +791,100 @@ class MigratedDropReboundShadowSuite {
         else if (trade.timestampMs > position.exitDeadlineAt) this._markNoExit(position);
       }
     }
+  }
+
+  _fastConfirmationDecision({ position, profile, trade, price, jumpPct, fill }) {
+    const settings = profile.fastConfirmation || {};
+    const state = this._state(position.lifecycleStage, profile.id, position.mint);
+    const current = this._flowTrade(trade, price);
+    const rows = [...(state?.flowTrades || []), current]
+      .filter((row) => row.timestampMs >= position.reboundAt
+        && row.timestampMs <= trade.timestampMs);
+    const uniqueRows = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const key = row.signature || [
+        row.timestampMs, row.side, row.wallet || '', row.solAmount, row.price,
+      ].join(':');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      uniqueRows.push(row);
+    }
+    const buys = uniqueRows.filter((row) => row.side === 'BUY');
+    const sells = uniqueRows.filter((row) => row.side === 'SELL');
+    const buySol = buys.reduce((sum, row) => sum + row.solAmount, 0);
+    const sellSol = sells.reduce((sum, row) => sum + row.solAmount, 0);
+    const netFlowSol = buySol - sellSol;
+    const midpoint = position.reboundAt
+      + Math.max(1, Math.trunc((trade.timestampMs - position.reboundAt) / 2));
+    const netFlow = (subset) => subset.reduce((sum, row) => (
+      sum + (row.side === 'BUY' ? row.solAmount : -row.solAmount)
+    ), 0);
+    const previousNetFlowSol = netFlow(uniqueRows.filter((row) => row.timestampMs < midpoint));
+    const recentNetFlowSol = netFlow(uniqueRows.filter((row) => row.timestampMs >= midpoint));
+    const netFlowAccelerationSol = recentNetFlowSol - previousNetFlowSol;
+    const buyerTotals = new Map();
+    for (const row of buys) {
+      if (!row.wallet) continue;
+      buyerTotals.set(row.wallet, (buyerTotals.get(row.wallet) || 0) + row.solAmount);
+    }
+    const uniqueBuyers = buyerTotals.size;
+    const topBuyerSol = buyerTotals.size ? Math.max(...buyerTotals.values()) : 0;
+    const topBuyerSharePct = buySol > 0 ? topBuyerSol / buySol * 100 : 100;
+    const sellBuyRatio = buySol > 0 ? sellSol / buySol : null;
+    const creator = this.store.getToken(position.mint)?.creator || null;
+    const creatorSold = Boolean(creator && sells.some((row) => row.wallet === creator));
+    const tokenUnits = fill.price > 0 ? position.positionSol / fill.price : null;
+    const exitFill = tokenUnits > 0
+      ? ammSellAveragePrice(trade, tokenUnits, price)
+      : { price, impactPct: null };
+    const roundTripImpactPct = Number.isFinite(fill.impactPct)
+      && Number.isFinite(exitFill.impactPct)
+      ? Math.max(0, fill.impactPct) + Math.abs(Math.min(0, exitFill.impactPct))
+      : null;
+    const features = {
+      confirmationMs: trade.timestampMs - position.reboundAt,
+      priceContinuationPct: jumpPct,
+      buyTx: buys.length,
+      sellTx: sells.length,
+      uniqueBuyers,
+      buySol,
+      sellSol,
+      netFlowSol,
+      previousNetFlowSol,
+      recentNetFlowSol,
+      netFlowAccelerationSol,
+      sellBuyRatio,
+      topBuyerSharePct,
+      creatorSold,
+      entryImpactPct: fill.impactPct,
+      exitImpactPct: exitFill.impactPct,
+      roundTripImpactPct,
+    };
+    const checks = [
+      [jumpPct >= finite(settings.minPriceContinuationPct, 1), 'PRICE_NOT_CONTINUING'],
+      [buys.length >= finite(settings.minBuyTx, 2), 'BUY_TX_TOO_LOW'],
+      [uniqueBuyers >= finite(settings.minUniqueBuyers, 2), 'BUYERS_TOO_LOW'],
+      [netFlowSol >= finite(settings.minNetFlowSol, 0.5), 'NET_FLOW_TOO_LOW'],
+      [netFlowAccelerationSol >= finite(settings.minNetFlowAccelerationSol, 0),
+        'NET_FLOW_DECELERATING'],
+      [sellBuyRatio != null
+        && sellBuyRatio <= finite(settings.maxSellBuyRatio, 0.5), 'SELL_PRESSURE_HIGH'],
+      [topBuyerSharePct <= finite(settings.maxTopBuyerSharePct, 60),
+        'BUYER_CONCENTRATION_HIGH'],
+      [!creatorSold, 'CREATOR_SOLD'],
+      [roundTripImpactPct != null, 'CAPACITY_QUOTE_MISSING'],
+      [roundTripImpactPct != null
+        && roundTripImpactPct <= finite(settings.maxRoundTripImpactPct, 5),
+      'ROUND_TRIP_IMPACT_HIGH'],
+    ];
+    const failed = checks.find(([pass]) => !pass);
+    return {
+      pass: !failed,
+      reason: failed ? `FAST_CONFIRM_${failed[1]}` : null,
+      features,
+      fill,
+    };
   }
 
   _updateExtrema(position, timestampMs, price) {
