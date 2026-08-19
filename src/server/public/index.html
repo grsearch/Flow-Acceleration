@@ -1546,6 +1546,7 @@
         ['毕业前 / 毕业后状态', `${number(detectorStates.PRE_MIGRATION)} / ${number(detectorStates.POST_MIGRATION)}`, '检测状态严格分离，不混用基准价'],
         ['下跌候选 / 信号', `${number(runtime.candidates)} / ${number(runtime.signals)}`, `回放抑制 ${number(runtime.replaySignalsSuppressed)} · 超时 ${number(runtime.reboundTimeouts)}`],
         ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
+        ['G-FR 快速确认', `${number(runtime.fastConfirmationPassed)} / ${number(runtime.fastConfirmationRejected)}`, `共享缓冲 ${number(runtime.fastFlowBuffers)} Mint / ${number(runtime.fastFlowRows)} 笔 · 特征/容量计算 ${number(runtime.fastConfirmationFeatureComputations)} / ${number(runtime.fastConfirmationCapacityComputations)}`],
         ['参数矩阵', `${number(lifecycleStages.length || 2)} × ${number(entryProfiles.length)} × ${number(exitProfiles.length)}`, '每个新入口/退出/容量均使用全新 cohort，不混入历史'],
         ['模拟成本', pct(research.configuredCostPct), `仓位 ${number(research.simulatedPositionSol,4)} SOL · 链上交易永不发送`],
         ['AMM异常价隔离', number(runtime.ammPriceOutliersIgnored), `新价格区间确认 ${number(runtime.ammPriceRegimesConfirmed)} · 原始成交仍保留`],
@@ -1952,7 +1953,6 @@
         ['运行模式', runtime.enabled ? 'SHADOW QL' : '关闭', '独立表，永不签名或发送交易'],
         ['快照评估 / 命中', `${number(runtime.evaluated)} / ${number(runtime.matched)}`, `回放抑制 ${number(runtime.replayMatchesSuppressed)}`],
         ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
-        ['G-FR 快速确认', `${number(runtime.fastConfirmationPassed)} / ${number(runtime.fastConfirmationRejected)}`, '确认通过 / 慢反弹、集中拉升或容量不足拒绝'],
         ['独立 Cohort', number(strategy.cohortCount), '严格Barbell / 严格长尾 / 宽松Barbell'],
         ['仓位 / 确定性成本', `${number(research.simulatedPositionSol,2)} SOL / ${rate(research.configuredCostPct)}`, '分批退出另扣额外执行固定成本'],
       ], []);
