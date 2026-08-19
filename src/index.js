@@ -18,6 +18,7 @@ const {
 const { PublicFlowLeadShadowSuite } = require('./core/PublicFlowLeadShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
+const { MigrationSecondLegObserver } = require('./core/MigrationSecondLegObserver');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
 const { MigrationContinuityShadowSuite } = require('./core/MigrationContinuityShadowSuite');
 const { RangeScalperShadowSuite } = require('./core/RangeScalperShadowSuite');
@@ -121,6 +122,7 @@ function createRuntime(runtimeConfig = config) {
   const launchPullbackShadow = new LaunchPullbackShadowSuite({
     config: runtimeConfig.launchPullbackShadow,
     store,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   launchPullbackShadow.start();
   const holderGrowthShadow = new HolderGrowthShadowSuite({
@@ -149,6 +151,11 @@ function createRuntime(runtimeConfig = config) {
     },
   });
   launchQualityObserver.start();
+  const migrationSecondLegObserver = new MigrationSecondLegObserver({
+    config: runtimeConfig.migrationSecondLegObserver,
+    store,
+  });
+  migrationSecondLegObserver.start();
   const migratedDropReboundShadow = new MigratedDropReboundShadowSuite({
     config: runtimeConfig.migratedDropReboundShadow,
     store,
@@ -204,6 +211,7 @@ function createRuntime(runtimeConfig = config) {
     publicFlowLeadShadow,
     launchPullbackShadow,
     launchQualityObserver,
+    migrationSecondLegObserver,
     migratedDropReboundShadow,
     migrationContinuityShadow,
     rangeScalperShadow,
@@ -251,6 +259,7 @@ function createRuntime(runtimeConfig = config) {
       ...qualityLeaderShadow.trackedMints(),
       ...bigWinnerShadow.trackedMints(),
       ...graduationAccelerationShadow.trackedMints(),
+      ...migrationSecondLegObserver.trackedMints(now),
     ])]);
   };
 
@@ -337,6 +346,9 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('graduationAccelerationGraduate', () => (
             graduationAccelerationShadow.onGraduated(token || event)
           ));
+          observeShadow('migrationSecondLegGraduate', () => (
+            migrationSecondLegObserver.onGraduated(token || event)
+          ));
           refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
         }
@@ -357,6 +369,9 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('bigWinnerGraduate', () => bigWinnerShadow.onGraduated(token || event));
           observeShadow('graduationAccelerationGraduate', () => (
             graduationAccelerationShadow.onGraduated(token || event)
+          ));
+          observeShadow('migrationSecondLegGraduate', () => (
+            migrationSecondLegObserver.onGraduated(token || event)
           ));
           refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
@@ -397,6 +412,7 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('bondingCurveMomentum', () => bondingCurveMomentumShadow.observeTrade(trade));
         observeShadow('graduationHold', () => graduationHoldShadow.observeTrade(trade));
         observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
+        observeShadow('migrationSecondLeg', () => migrationSecondLegObserver.observeTrade(trade));
         observeShadow('holderGrowth', () => holderGrowthShadow.observeTrade(trade));
         observeShadow('qualityLeader', () => qualityLeaderShadow.observeTrade(trade));
         observeShadow('bigWinner', () => bigWinnerShadow.observeTrade(trade));
@@ -510,6 +526,11 @@ function createRuntime(runtimeConfig = config) {
       + 'observer-only, sends transactions=false.',
     );
     console.log(
+      `M2F-OBS: PumpSwap ${(runtimeConfig.migrationSecondLegObserver.maxAgeMs / 1_000)}s `
+      + `at ${runtimeConfig.migrationSecondLegObserver.snapshotIntervalMs}ms intervals; `
+      + 'observer-only, no simulated positions, no extra RPC, sends transactions=false.',
+    );
+    console.log(
       `Observed Holder Growth Shadow N: ${runtimeConfig.holderGrowthShadow.entryProfiles
         .map((profile) => `${profile.id}@${(profile.horizonMs
           || runtimeConfig.holderGrowthShadow.snapshotHorizonMs) / 1_000}s`).join('/')} x `
@@ -587,6 +608,7 @@ function createRuntime(runtimeConfig = config) {
       observeShadow('publicFlowLeadAdvance', () => publicFlowLeadShadow.advanceTime(now));
       observeShadow('launchPullbackAdvance', () => launchPullbackShadow.advanceTime(now));
       observeShadow('launchQualityAdvance', () => launchQualityObserver.advanceTime(now));
+      observeShadow('migrationSecondLegAdvance', () => migrationSecondLegObserver.advanceTime(now));
       observeShadow('holderGrowthAdvance', () => holderGrowthShadow.advanceTime(now));
       observeShadow('qualityLeaderAdvance', () => qualityLeaderShadow.advanceTime(now));
       observeShadow('bigWinnerAdvance', () => bigWinnerShadow.advanceTime(now));
@@ -625,6 +647,7 @@ function createRuntime(runtimeConfig = config) {
     publicFlowLeadShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
+    migrationSecondLegObserver.stop();
     holderGrowthShadow.stop();
     qualityLeaderShadow.stop();
     bigWinnerShadow.stop();
@@ -657,6 +680,7 @@ function createRuntime(runtimeConfig = config) {
       publicFlowLeadShadow: publicFlowLeadShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
+      migrationSecondLegObserver: migrationSecondLegObserver.health(),
       holderGrowthShadow: holderGrowthShadow.health(),
       qualityLeaderShadow: qualityLeaderShadow.health(),
       bigWinnerShadow: bigWinnerShadow.health(),
@@ -675,7 +699,8 @@ function createRuntime(runtimeConfig = config) {
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     smartLikeEarlyShadow, smartResonanceShadow, publicFlowLeadShadow,
     launchPullbackShadow,
-    launchQualityObserver, holderGrowthShadow, qualityLeaderShadow, bigWinnerShadow,
+    launchQualityObserver, migrationSecondLegObserver,
+    holderGrowthShadow, qualityLeaderShadow, bigWinnerShadow,
     migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
     migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
