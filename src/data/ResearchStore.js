@@ -92,15 +92,22 @@ function legacyCostModel(configuredCostPct = 0) {
 
 class ResearchStore {
   constructor(storageConfig, labelsConfig) {
+    const startupStartedAt = Date.now();
     this.config = storageConfig;
     this.labelsConfig = labelsConfig;
     ensureParent(storageConfig.dbPath);
+    console.log(`[Startup:DB] opening ${storageConfig.dbPath}`);
     this.db = new Database(storageConfig.dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
+    console.log(`[Startup:DB] connection ready in ${Date.now() - startupStartedAt}ms; initializing schema`);
+    const schemaStartedAt = Date.now();
     this._initSchema();
+    console.log(`[Startup:DB] schema ready in ${Date.now() - schemaStartedAt}ms; preparing statements`);
+    const prepareStartedAt = Date.now();
     this._prepare();
+    console.log(`[Startup:DB] statements ready in ${Date.now() - prepareStartedAt}ms; loading token registry`);
 
     this.startupTradeReplayCache = null;
     this.startupTradeReplayStats = {
@@ -117,6 +124,9 @@ class ResearchStore {
 
     this.tokens = new Map();
     for (const token of this.stmts.allTokens.all()) this.tokens.set(token.mint, token);
+    console.log(
+      `[Startup:DB] token registry ready (${this.tokens.size} tokens); total ${Date.now() - startupStartedAt}ms`,
+    );
     this.rawBuffer = [];
     this.returnUpdateStatements = new Map();
     this.launchQualityUpdateStatements = new Map();
@@ -3770,6 +3780,14 @@ class ResearchStore {
           updated_at = @updatedAt
         WHERE mint = @mint AND status = 'OBSERVING'
       `),
+      censorOpenMigrationSecondLegObservations: this.db.prepare(`
+        UPDATE migration_second_leg_observations SET
+          status = 'RIGHT_CENSORED',
+          completed_at = @completedAt,
+          completion_reason = @completionReason,
+          updated_at = @updatedAt
+        WHERE status = 'OBSERVING'
+      `),
       insertMigrationSecondLegSnapshot: this.db.prepare(`
         INSERT OR IGNORE INTO migration_second_leg_snapshots (
           mint, second_bucket, age_ms, observed_at, last_trade_at,
@@ -6024,6 +6042,16 @@ class ResearchStore {
         ? Math.trunc(Number(patch.completedAt)) : Date.now(),
       completionReason: patch.completionReason || null,
       updatedAt: Date.now(),
+    });
+  }
+
+  censorOpenMigrationSecondLegObservations({ completedAt, completionReason } = {}) {
+    const now = Date.now();
+    return this.stmts.censorOpenMigrationSecondLegObservations.run({
+      completedAt: Number.isFinite(Number(completedAt))
+        ? Math.trunc(Number(completedAt)) : now,
+      completionReason: completionReason || 'PROCESS_RESTART_NO_REPLAY',
+      updatedAt: now,
     });
   }
 
