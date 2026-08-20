@@ -34,6 +34,9 @@ function main() {
     CREATE TABLE public_flow_lead_shadow_positions (
       id INTEGER PRIMARY KEY, signal_at INTEGER NOT NULL, mint TEXT
     );
+    CREATE TABLE cya_slot_flow_shadow_positions (
+      id INTEGER PRIMARY KEY, signal_at INTEGER NOT NULL, mint TEXT
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -54,6 +57,10 @@ function main() {
     .run(30, startMs + 30, 'public-flow-inside');
   db.prepare('INSERT INTO public_flow_lead_shadow_positions VALUES (?, ?, ?)')
     .run(31, endMs + 30, 'public-flow-future');
+  db.prepare('INSERT INTO cya_slot_flow_shadow_positions VALUES (?, ?, ?)')
+    .run(40, startMs + 40, 'cya-slot-flow-inside');
+  db.prepare('INSERT INTO cya_slot_flow_shadow_positions VALUES (?, ?, ?)')
+    .run(41, endMs + 40, 'cya-slot-flow-future');
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
@@ -91,6 +98,11 @@ function main() {
       .all().map((row) => row.id),
     [30],
   );
+  assert.deepStrictEqual(
+    exported.prepare('SELECT id FROM cya_slot_flow_shadow_positions ORDER BY id')
+      .all().map((row) => row.id),
+    [40],
+  );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();
   assert.match(fs.readFileSync(schema, 'utf8'), /CREATE TABLE\s+(?:main\.)?["']?raw_trades/i);
@@ -99,8 +111,12 @@ function main() {
   const service = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'flow-acceleration-backup.service'), 'utf8');
   const credentialTemplate = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'backup-cos.env.example'), 'utf8');
   const installer = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'install-daily-export.sh'), 'utf8');
-  assert.ok(backupScript.includes('guigu-1403019446'));
-  assert.ok(backupScript.includes('cos.na-siliconvalley.myqcloud.com'));
+  assert.ok(backupScript.includes('FLOW_BACKUP_COS_BUCKET'));
+  assert.ok(backupScript.includes('FLOW_BACKUP_COS_REGION'));
+  assert.ok(backupScript.includes('FLOW_BACKUP_COS_ENDPOINT'));
+  assert.match(backupScript, /BUCKET="\$\{FLOW_BACKUP_COS_BUCKET:-\}"/);
+  assert.match(backupScript, /REGION="\$\{FLOW_BACKUP_COS_REGION:-\}"/);
+  assert.match(backupScript, /ENDPOINT="\$\{FLOW_BACKUP_COS_ENDPOINT:-\}"/);
   assert.ok(backupScript.includes('flock -n'));
   assert.ok(backupScript.includes('sha256sums.txt'));
   assert.ok(backupScript.includes('[REDACTED]'));
@@ -122,6 +138,9 @@ function main() {
   assert.match(installer, /cos-auto-upload-export\\\.sh/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_SECRET_ID=\r?\n/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_SECRET_KEY=\r?\n/);
+  assert.match(credentialTemplate, /FLOW_BACKUP_COS_BUCKET=your-bucket-appid/);
+  assert.match(credentialTemplate, /FLOW_BACKUP_COS_REGION=your-region/);
+  assert.match(credentialTemplate, /FLOW_BACKUP_COS_ENDPOINT=cos\.your-region\.myqcloud\.com/);
   assert.match(credentialTemplate, /FLOW_BACKUP_LOCAL_RETENTION_DAYS=2/);
   db.close();
   fs.rmSync(directory, { recursive: true, force: true });
