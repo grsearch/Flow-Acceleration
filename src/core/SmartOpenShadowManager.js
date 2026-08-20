@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -210,8 +211,19 @@ class SmartOpenShadowManager {
     const pending = this.pendingEntries.get(trade.mint);
     if (pending && trade.market === 'PUMP_BONDING_CURVE'
       && timestampMs >= pending.entryTargetAt && timestampMs <= pending.entryDeadlineAt) {
+      const rugGuard = evaluateUniversalRugGuard(this.store, {
+        strategyId: `SMART_OPEN:${this.config.cohortId}`,
+        mint: trade.mint,
+        timestampMs,
+      });
       const entryJumpPct = ((trade.price / pending.smartOpenPrice) - 1) * 100;
-      if (entryJumpPct > this.config.maxEntryPriceJumpPct) {
+      if (rugGuard.blocked) {
+        this.store.updateSmartOpenShadowPosition(pending.id, {
+          status: STATUS.NO_ENTRY,
+          rejectionReason: 'PRE_ENTRY_RUG_RISK',
+        });
+        this.pendingEntries.delete(pending.mint);
+      } else if (entryJumpPct > this.config.maxEntryPriceJumpPct) {
         this.store.updateSmartOpenShadowPosition(pending.id, {
           status: STATUS.PRICE_JUMP,
           rejectionReason: `ENTRY_PRICE_JUMP_${entryJumpPct.toFixed(2)}pct`,
