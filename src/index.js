@@ -16,9 +16,16 @@ const {
   SmartResonanceRightTailShadowSuite,
 } = require('./core/SmartResonanceRightTailShadowSuite');
 const { PublicFlowLeadShadowSuite } = require('./core/PublicFlowLeadShadowSuite');
+const { CyaSlotFlowShadowSuite } = require('./core/CyaSlotFlowShadowSuite');
+const {
+  SameSlotDumpBackrunShadowSuite,
+} = require('./core/SameSlotDumpBackrunShadowSuite');
 const { LaunchPullbackShadowSuite } = require('./core/LaunchPullbackShadowSuite');
 const { LaunchQualityObserver } = require('./core/LaunchQualityObserver');
 const { MigrationSecondLegObserver } = require('./core/MigrationSecondLegObserver');
+const {
+  MigrationSecondLegShadowSuite,
+} = require('./core/MigrationSecondLegShadowSuite');
 const { MigratedDropReboundShadowSuite } = require('./core/MigratedDropReboundShadowSuite');
 const { MigrationContinuityShadowSuite } = require('./core/MigrationContinuityShadowSuite');
 const { RangeScalperShadowSuite } = require('./core/RangeScalperShadowSuite');
@@ -135,6 +142,19 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   publicFlowLeadShadow.start();
+  const cyaSlotFlowShadow = new CyaSlotFlowShadowSuite({
+    config: {
+      ...runtimeConfig.cyaSlotFlowShadow,
+      excludedWallets: [...smartWallets],
+    },
+    store,
+  });
+  cyaSlotFlowShadow.start();
+  const sameSlotDumpBackrunShadow = new SameSlotDumpBackrunShadowSuite({
+    config: runtimeConfig.sameSlotDumpBackrunShadow,
+    store,
+  });
+  sameSlotDumpBackrunShadow.start();
   const launchPullbackShadow = new LaunchPullbackShadowSuite({
     config: runtimeConfig.launchPullbackShadow,
     store,
@@ -168,10 +188,16 @@ function createRuntime(runtimeConfig = config) {
     },
   });
   launchQualityObserver.start();
+  const migrationSecondLegShadow = new MigrationSecondLegShadowSuite({
+    config: runtimeConfig.migrationSecondLegShadow,
+    store,
+  });
+  migrationSecondLegShadow.start();
   const migrationSecondLegObserver = new MigrationSecondLegObserver({
     config: runtimeConfig.migrationSecondLegObserver,
     store,
     rugRiskTracker: preEntryRugRisk,
+    onSnapshot: (snapshot, trade) => migrationSecondLegShadow.onSnapshot(snapshot, trade),
   });
   const m2fStartedAt = Date.now();
   console.log('[Startup] starting M2F-OBS without historical replay');
@@ -233,9 +259,12 @@ function createRuntime(runtimeConfig = config) {
     preEntryRugRisk,
     smartResonanceShadow,
     publicFlowLeadShadow,
+    cyaSlotFlowShadow,
+    sameSlotDumpBackrunShadow,
     launchPullbackShadow,
     launchQualityObserver,
     migrationSecondLegObserver,
+    migrationSecondLegShadow,
     migratedDropReboundShadow,
     migrationContinuityShadow,
     rangeScalperShadow,
@@ -294,6 +323,8 @@ function createRuntime(runtimeConfig = config) {
       ...smartLikeEarlyShadow.trackedMints(),
       ...smartResonanceShadow.trackedMints(),
       ...publicFlowLeadShadow.trackedMints(),
+      ...cyaSlotFlowShadow.trackedMints(),
+      ...sameSlotDumpBackrunShadow.trackedMints(now),
       ...bondingCurveMomentumShadow.trackedMints(),
       ...graduationHoldShadow.trackedMints(),
       ...holderGrowthShadow.trackedMints(),
@@ -301,6 +332,7 @@ function createRuntime(runtimeConfig = config) {
       ...bigWinnerShadow.trackedMints(),
       ...graduationAccelerationShadow.trackedMints(),
       ...migrationSecondLegObserver.trackedMints(now),
+      ...migrationSecondLegShadow.trackedMints(),
     ])]);
   };
 
@@ -390,6 +422,9 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('migrationSecondLegGraduate', () => (
             migrationSecondLegObserver.onGraduated(token || event)
           ));
+          observeShadow('sameSlotDumpBackrunGraduate', () => (
+            sameSlotDumpBackrunShadow.onGraduated(token || event)
+          ));
           refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
         }
@@ -413,6 +448,9 @@ function createRuntime(runtimeConfig = config) {
           ));
           observeShadow('migrationSecondLegGraduate', () => (
             migrationSecondLegObserver.onGraduated(token || event)
+          ));
+          observeShadow('sameSlotDumpBackrunGraduate', () => (
+            sameSlotDumpBackrunShadow.onGraduated(token || event)
           ));
           refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
@@ -443,10 +481,14 @@ function createRuntime(runtimeConfig = config) {
           )
           : null;
         store.queueRawTrade(trade);
+        // SDBR must inspect the pre-dump RUG snapshot. It only mutates bounded
+        // in-memory state here; all SQLite writes are deferred to maintenance.
+        observeShadow('sameSlotDumpBackrun', () => sameSlotDumpBackrunShadow.observeTrade(trade));
         observeShadow('preEntryRugRisk', () => preEntryRugRisk.observeTrade(trade));
         observeShadow('smartLikeEarly', () => smartLikeEarlyShadow.observeTrade(trade));
         observeShadow('smartResonance', () => smartResonanceShadow.observeTrade(trade));
         observeShadow('publicFlowLead', () => publicFlowLeadShadow.observeTrade(trade));
+        observeShadow('cyaSlotFlow', () => cyaSlotFlowShadow.observeTrade(trade));
         observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
         observeShadow('migrationContinuity', () => migrationContinuityShadow.observeTrade(trade));
         observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
@@ -455,6 +497,7 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('graduationHold', () => graduationHoldShadow.observeTrade(trade));
         observeShadow('launchQuality', () => launchQualityObserver.observeTrade(trade));
         observeShadow('migrationSecondLeg', () => migrationSecondLegObserver.observeTrade(trade));
+        observeShadow('migrationSecondLegShadow', () => migrationSecondLegShadow.observeTrade(trade));
         observeShadow('holderGrowth', () => holderGrowthShadow.observeTrade(trade));
         observeShadow('qualityLeader', () => qualityLeaderShadow.observeTrade(trade));
         observeShadow('bigWinner', () => bigWinnerShadow.observeTrade(trade));
@@ -485,6 +528,9 @@ function createRuntime(runtimeConfig = config) {
             ));
             observeShadow('publicFlowLeadLabel', () => (
               publicFlowLeadShadow.onSmartWalletEvent(normalizedSmartEvent)
+            ));
+            observeShadow('cyaSlotFlowLabel', () => (
+              cyaSlotFlowShadow.onSmartWalletEvent(normalizedSmartEvent)
             ));
             if (trade.side === 'BUY') {
               observeShadow('smartPullbackEvent', () => (
@@ -558,6 +604,18 @@ function createRuntime(runtimeConfig = config) {
       `Public Flow Lead Shadow PFL: ${runtimeConfig.publicFlowLeadShadow.entryProfiles.length} `
       + `public-only entries x ${runtimeConfig.publicFlowLeadShadow.exitProfiles.length} exits; `
       + 'Smart OPEN=future label, ADD=ignored, sends transactions=false.',
+    );
+    console.log(
+      `CYA Slot Flow Shadow CSF: ${runtimeConfig.cyaSlotFlowShadow.entryProfiles.length} `
+      + `completed-slot entries x ${runtimeConfig.cyaSlotFlowShadow.managementProfiles.length} `
+      + 'management profiles; target wallet excluded, target OPEN=future label, '
+      + 'capacity-aware fills, sends transactions=false.',
+    );
+    console.log(
+      `Same-Slot Dump Backrun Shadow SDBR: ${runtimeConfig.sameSlotDumpBackrunShadow.entryProfiles.length} `
+      + `dump filters x ${runtimeConfig.sameSlotDumpBackrunShadow.exitProfiles.length} exits; `
+      + `${runtimeConfig.sameSlotDumpBackrunShadow.positionSizeSol} SOL reserve-priced theoretical fill; `
+      + 'deferred writes, no RPC, sends transactions=false.',
     );
     console.log(
       `Launch Quality Observer: snapshots=${runtimeConfig.launchQualityObserver.snapshotHorizonsMs
@@ -649,11 +707,14 @@ function createRuntime(runtimeConfig = config) {
         ['preEntryRugRiskAdvance', preEntryRugRisk],
         ['smartResonanceAdvance', smartResonanceShadow],
         ['publicFlowLeadAdvance', publicFlowLeadShadow],
+        ['cyaSlotFlowAdvance', cyaSlotFlowShadow],
+        ['sameSlotDumpBackrunAdvance', sameSlotDumpBackrunShadow],
         ['launchPullbackAdvance', launchPullbackShadow],
         ['launchQualityAdvance', launchQualityObserver],
       ],
       [
         ['migrationSecondLegAdvance', migrationSecondLegObserver],
+        ['migrationSecondLegShadowAdvance', migrationSecondLegShadow],
         ['holderGrowthAdvance', holderGrowthShadow],
         ['qualityLeaderAdvance', qualityLeaderShadow],
         ['bigWinnerAdvance', bigWinnerShadow],
@@ -713,9 +774,12 @@ function createRuntime(runtimeConfig = config) {
     preEntryRugRisk.stop();
     smartResonanceShadow.stop();
     publicFlowLeadShadow.stop();
+    cyaSlotFlowShadow.stop();
+    sameSlotDumpBackrunShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
     migrationSecondLegObserver.stop();
+    migrationSecondLegShadow.stop();
     holderGrowthShadow.stop();
     qualityLeaderShadow.stop();
     bigWinnerShadow.stop();
@@ -747,9 +811,12 @@ function createRuntime(runtimeConfig = config) {
       preEntryRugRisk: preEntryRugRisk.health(),
       smartResonanceShadow: smartResonanceShadow.health(),
       publicFlowLeadShadow: publicFlowLeadShadow.health(),
+      cyaSlotFlowShadow: cyaSlotFlowShadow.health(),
+      sameSlotDumpBackrunShadow: sameSlotDumpBackrunShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
       migrationSecondLegObserver: migrationSecondLegObserver.health(),
+      migrationSecondLegShadow: migrationSecondLegShadow.health(),
       holderGrowthShadow: holderGrowthShadow.health(),
       qualityLeaderShadow: qualityLeaderShadow.health(),
       bigWinnerShadow: bigWinnerShadow.health(),
@@ -767,8 +834,10 @@ function createRuntime(runtimeConfig = config) {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow, publicFlowLeadShadow,
+    cyaSlotFlowShadow,
+    sameSlotDumpBackrunShadow,
     launchPullbackShadow,
-    launchQualityObserver, migrationSecondLegObserver,
+    launchQualityObserver, migrationSecondLegObserver, migrationSecondLegShadow,
     holderGrowthShadow, qualityLeaderShadow, bigWinnerShadow,
     migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
