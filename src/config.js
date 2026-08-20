@@ -1214,6 +1214,36 @@ const config = {
     }),
     minReturnPct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_RETURN_PCT', 30, { min: 0 }),
     minFlags: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_FLAGS', 5, { min: 1, max: 5 }),
+    verticalFragileMinReturnPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_VERTICAL_MIN_RETURN_PCT', 50, { min: 0 },
+    ),
+    verticalFragileMinBuyImpactPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_VERTICAL_MIN_BUY_IMPACT_PCT', 10, { min: 0 },
+    ),
+    verticalFragileMinWalletTxSharePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_VERTICAL_MIN_WALLET_TX_SHARE_PCT', 8, { min: 0, max: 100 },
+    ),
+    sparseBreadthMinBuysPerBuyer: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_SPARSE_MIN_BUYS_PER_BUYER', 2, { min: 1 },
+    ),
+    chaseRepeatedMinReturnPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_REPEAT_MIN_RETURN_PCT', 30, { min: 0 },
+    ),
+    chaseRepeatedMinSizeSharePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_REPEAT_MIN_SIZE_SHARE_PCT', 15, { min: 0, max: 100 },
+    ),
+    beijingRiskWindowEnabled: booleanEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_WINDOW_ENABLED', true,
+    ),
+    beijingRiskStartHour: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_START_HOUR', 16, { min: 0, max: 23 },
+    ),
+    beijingRiskEndHour: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_END_HOUR', 20, { min: 0, max: 23 },
+    ),
+    beijingRiskMinFlags: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_MIN_FLAGS', 4, { min: 1, max: 5 },
+    ),
   },
 
   // Independent causal study derived from the observed behavior of consistently
@@ -2609,9 +2639,124 @@ const config = {
     }),
   },
 
-  // Independent early Bonding Curve research derived from the observed CYA
-  // wallet pattern. It uses public order flow only and never follows, signs,
-  // or sends the monitored wallet's transactions.
+  // Forward-only public-order-flow analogue of the profitable CYA wallet's
+  // earliest entries. Signals are evaluated only when a completed Solana slot
+  // is followed by the first public trade of the next slot. The target wallet
+  // and all monitored Smart Wallets are excluded from causal features; a later
+  // target OPEN is recorded strictly as a future label.
+  cyaSlotFlowShadow: {
+    enabled: booleanEnv('FLOW_CYA_SLOT_FLOW_SHADOW_ENABLED', true),
+    targetWallet: process.env.FLOW_CYA_SLOT_FLOW_TARGET_WALLET
+      || 'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o',
+    positionSizeSol: shadowPositionEnv('FLOW_CYA_SLOT_FLOW_POSITION_SOL'),
+    featureWindowMs: integerEnv('FLOW_CYA_SLOT_FLOW_FEATURE_WINDOW_MS', 5_000, {
+      min: 2_000, max: 10_000,
+    }),
+    maxTradesPerMint: integerEnv('FLOW_CYA_SLOT_FLOW_MAX_TRADES_PER_MINT', 256, {
+      min: 32, max: 2_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_CYA_SLOT_FLOW_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 60_000, max: 60 * 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_CYA_SLOT_FLOW_EPISODE_COOLDOWN_MS', 10 * 60_000, {
+      min: 1_000,
+    }),
+    targetLabelWindowMs: integerEnv('FLOW_CYA_SLOT_FLOW_TARGET_LABEL_WINDOW_MS', 15_000, {
+      min: 1_000, max: 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_CYA_SLOT_FLOW_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_CYA_SLOT_FLOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_CYA_SLOT_FLOW_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_CYA_SLOT_FLOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ENTRY_JUMP_PCT', 35, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ENTRY_DROP_PCT', 35, {
+      min: 0, max: 100,
+    }),
+    maxEntryImpactPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ENTRY_IMPACT_PCT', 25, {
+      min: 0, max: 1_000,
+    }),
+    maxAddImpactPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ADD_IMPACT_PCT', 20, {
+      min: 0, max: 1_000,
+    }),
+    entryProfiles: [
+      {
+        id: 'CSF_C03',
+        label: 'CSF-C03 · 0–3s early control',
+        minAgeMs: 0, maxAgeMs: 3_000,
+        minBuyers5s: 5, minNetFlow5sSol: 5,
+        minBuyTxSharePct: 75, maxLargestBuyerSharePct: 40,
+        minReturn5sPct: 20, maxReturn5sPct: 140,
+        minSourceSlotBuyers: 1, minSourceSlotNetFlowSol: 0,
+        requireCreatorNoSell: false,
+      },
+      {
+        id: 'CSF_E35',
+        label: 'CSF-E35 · 3–5s diversified prior-slot flow',
+        minAgeMs: 3_000, maxAgeMs: 5_000,
+        minBuyers5s: 5, minNetFlow5sSol: 5,
+        minBuyTxSharePct: 75, maxLargestBuyerSharePct: 40,
+        minReturn5sPct: 20, maxReturn5sPct: 140,
+        minSourceSlotBuyers: 1, minSourceSlotNetFlowSol: 0,
+        requireCreatorNoSell: false,
+      },
+      {
+        id: 'CSF_E510',
+        label: 'CSF-E510 · 5–10s broad persistent flow',
+        minAgeMs: 5_000, maxAgeMs: 10_000,
+        minBuyers5s: 7, minNetFlow5sSol: 8,
+        minBuyTxSharePct: 80, maxLargestBuyerSharePct: 35,
+        minReturn5sPct: 20, maxReturn5sPct: 140,
+        minSourceSlotBuyers: 2, minSourceSlotNetFlowSol: 0.25,
+        requireCreatorNoSell: false,
+      },
+      {
+        id: 'CSF_S310',
+        label: 'CSF-S310 · 3–10s strict / creator no-sell',
+        minAgeMs: 3_000, maxAgeMs: 10_000,
+        minBuyers5s: 9, minNetFlow5sSol: 10,
+        minBuyTxSharePct: 80, maxLargestBuyerSharePct: 30,
+        minReturn5sPct: 30, maxReturn5sPct: 120,
+        minSourceSlotBuyers: 2, minSourceSlotNetFlowSol: 0.5,
+        requireCreatorNoSell: true,
+      },
+    ],
+    managementProfiles: [
+      {
+        id: 'F20', label: '20s fixed control / no add',
+        hardStopPct: 30, noContinuationMs: 3_000, minContinuationMfePct: 5,
+        maxHoldMs: 20_000, trailingActivationPct: 0, trailingStopPct: 0,
+        addActivationPct: 0, addMaxAgeMs: 0, addCooldownMs: 0,
+        addStepPct: 0, addFraction: 0, maxAdds: 0,
+        minAddNetFlow1sSol: 0, minAddBuyers1s: 0, minAddBuyTxSharePct: 0,
+      },
+      {
+        id: 'A50_R120', label: '+50% confirmed adds / 120s runner',
+        hardStopPct: 30, noContinuationMs: 3_000, minContinuationMfePct: 10,
+        maxHoldMs: 120_000, trailingActivationPct: 80, trailingStopPct: 25,
+        addActivationPct: 50, addMaxAgeMs: 2_500, addCooldownMs: 250,
+        addStepPct: 15, addFraction: 0.2, maxAdds: 4,
+        minAddNetFlow1sSol: 0.5, minAddBuyers1s: 2, minAddBuyTxSharePct: 70,
+      },
+      {
+        id: 'A60_R120', label: '+60% strict adds / 120s runner',
+        hardStopPct: 30, noContinuationMs: 3_000, minContinuationMfePct: 10,
+        maxHoldMs: 120_000, trailingActivationPct: 100, trailingStopPct: 30,
+        addActivationPct: 60, addMaxAgeMs: 2_500, addCooldownMs: 250,
+        addStepPct: 15, addFraction: 0.2, maxAdds: 4,
+        minAddNetFlow1sSol: 1, minAddBuyers1s: 3, minAddBuyTxSharePct: 75,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_CYA_SLOT_FLOW_POSITION_SOL'),
+    }),
+  },
+
+  // Independent early Bonding Curve research derived from the original CYA
+  // hypothesis. This retired K matrix is kept separate so its historical rows
+  // never mix with the new completed-slot CSF experiment.
   cyaEarlyPyramidShadow: {
     enabled: provenNegativeShadowsEnabled
       && booleanEnv('FLOW_CYA_EARLY_PYRAMID_SHADOW_ENABLED', false),
@@ -4510,6 +4655,74 @@ const config = {
     effectiveBuyMinSol: numberEnv('FLOW_M2F_OBSERVER_EFFECTIVE_BUY_MIN_SOL', 0.02, {
       min: 0,
       max: 100,
+    }),
+  },
+
+  // Forward-only B cohort selected from the 2026-08-20 M2F study. There is
+  // deliberately no unguarded A cohort: every simulated entry must pass the
+  // shared O(1) pre-entry RUG guard at the delayed fill timestamp.
+  migrationSecondLegShadow: {
+    enabled: booleanEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENABLED', true),
+    cohortId: 'M2F-NH10-GUARD-B',
+    positionSizeSol: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_POSITION_SOL', 1, {
+      min: 0.01,
+      max: 100,
+    }),
+    entryDelayMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENTRY_DELAY_MS', 200, {
+      min: 0,
+      max: 10_000,
+    }),
+    entryTimeoutMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENTRY_TIMEOUT_MS', 2_000, {
+      min: 100,
+      max: 30_000,
+    }),
+    exitDelayMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_EXIT_DELAY_MS', 200, {
+      min: 0,
+      max: 10_000,
+    }),
+    exitTimeoutMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_EXIT_TIMEOUT_MS', 2_000, {
+      min: 100,
+      max: 30_000,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0,
+      max: 1_000,
+    }),
+    maxNegativeEntryJumpPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_ENTRY_DROP_PCT', 30, {
+      min: 0,
+      max: 100,
+    }),
+    hardStopPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_HARD_STOP_PCT', 15, {
+      min: 0,
+      max: 100,
+    }),
+    maxHoldMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_HOLD_MS', 10_000, {
+      min: 1_000,
+      max: 10 * 60_000,
+    }),
+    thresholds: {
+      minAgeMs: 60_000,
+      maxAgeMs: 240_000,
+      minCurrentImpulsePct: 10,
+      maxCurrentImpulsePct: 150,
+      minPeakImpulsePct: 25,
+      minPullbackPct: 5,
+      maxPullbackPct: 15,
+      minReboundPct: 3,
+      minNetFlow10sSol: 1,
+      minNetFlow3sSol: 0.1,
+      minBuyers10s: 10,
+      minBuyers3s: 2,
+      maxLargestBuyerSharePct: 45,
+      minBuySpeedRatio: 1.05,
+      minNetFlowAcceleration: 0,
+      maxSellDecelerationRatio: 1.1,
+      minHolderDiffusionIndex: 8,
+      maxEstimatedImpact1SolPct: 1,
+    },
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: 1,
     }),
   },
 

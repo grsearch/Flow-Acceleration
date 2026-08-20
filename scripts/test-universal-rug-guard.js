@@ -20,6 +20,16 @@ const config = {
   minUpTickSharePct: 55,
   minReturnPct: 30,
   minFlags: 5,
+  verticalFragileMinReturnPct: 50,
+  verticalFragileMinBuyImpactPct: 10,
+  verticalFragileMinWalletTxSharePct: 8,
+  sparseBreadthMinBuysPerBuyer: 2,
+  chaseRepeatedMinReturnPct: 30,
+  chaseRepeatedMinSizeSharePct: 15,
+  beijingRiskWindowEnabled: true,
+  beijingRiskStartHour: 16,
+  beijingRiskEndHour: 20,
+  beijingRiskMinFlags: 4,
 };
 
 const tracker = new PreEntryRugRiskTracker({ config });
@@ -56,6 +66,7 @@ const entryFiles = [
   'LaunchPullbackShadowManager.js',
   'MigratedDropReboundShadowSuite.js',
   'MigrationContinuityShadowSuite.js',
+  'MigrationSecondLegShadowSuite.js',
   'PrimarySignalShadowManager.js',
   'PublicFlowLeadShadowSuite.js',
   'QualityLeaderShadowSuite.js',
