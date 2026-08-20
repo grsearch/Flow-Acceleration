@@ -8,9 +8,9 @@ EXPORT_DIR="${FLOW_BACKUP_EXPORT_DIR:-$PROJECT_DIR/data/exports}"
 DB_PATH="${FLOW_DB_PATH:-$PROJECT_DIR/data/flow-research.db}"
 NODE_BIN="${FLOW_BACKUP_NODE_BIN:-$(command -v node || true)}"
 COSCLI_BIN="${FLOW_BACKUP_COSCLI_BIN:-$(command -v coscli || true)}"
-BUCKET="${FLOW_BACKUP_COS_BUCKET:-guigu-1403019446}"
-REGION="${FLOW_BACKUP_COS_REGION:-na-siliconvalley}"
-ENDPOINT="${FLOW_BACKUP_COS_ENDPOINT:-cos.na-siliconvalley.myqcloud.com}"
+BUCKET="${FLOW_BACKUP_COS_BUCKET:-}"
+REGION="${FLOW_BACKUP_COS_REGION:-}"
+ENDPOINT="${FLOW_BACKUP_COS_ENDPOINT:-}"
 PREFIX="${FLOW_BACKUP_COS_PREFIX:-flow-acceleration/daily}"
 RETENTION_DAYS="${FLOW_BACKUP_LOCAL_RETENTION_DAYS:-2}"
 THREADS="${FLOW_BACKUP_COS_THREADS:-4}"
@@ -29,6 +29,9 @@ done
 [[ -s "$DB_PATH" ]] || { echo "Research database not found: $DB_PATH" >&2; exit 1; }
 [[ -n "${FLOW_BACKUP_COS_SECRET_ID:-}" ]] || { echo "FLOW_BACKUP_COS_SECRET_ID is missing" >&2; exit 1; }
 [[ -n "${FLOW_BACKUP_COS_SECRET_KEY:-}" ]] || { echo "FLOW_BACKUP_COS_SECRET_KEY is missing" >&2; exit 1; }
+[[ -n "$BUCKET" ]] || { echo "FLOW_BACKUP_COS_BUCKET is missing" >&2; exit 1; }
+[[ -n "$REGION" ]] || { echo "FLOW_BACKUP_COS_REGION is missing" >&2; exit 1; }
+[[ -n "$ENDPOINT" ]] || { echo "FLOW_BACKUP_COS_ENDPOINT is missing" >&2; exit 1; }
 case "$FLOW_BACKUP_COS_SECRET_ID$FLOW_BACKUP_COS_SECRET_KEY" in
   *$'\n'*|*$'\r'*) echo "COS credentials must not contain newlines" >&2; exit 1 ;;
 esac
