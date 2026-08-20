@@ -33,6 +33,9 @@ function config() {
     stateRetentionMs: 600_000, entryDelayMs: 200, entryTimeoutMs: 2_000,
     noExitGraceMs: 60_000, maxEntryPriceJumpPct: 50,
     maxEntryPriceDropPct: 50, maxEntryImpactPct: 40, maxAdjacentPriceRatio: 20,
+    transientUpPriceRatio: 20, priceConfirmationWindowMs: 500,
+    priceConfirmationMinPersistenceMs: 150, priceConfirmationTolerancePct: 25,
+    priceConfirmationMinWallets: 2,
     entryProfiles: [
       pullback('PBR_A', 40, 12, 25, 3),
       pullback('PBR_B', 50, 18, 30, 2),
@@ -238,3 +241,46 @@ function runParticipation() {
 }
 
 runParticipation();
+
+function runTransientPriceConfirmation() {
+  const db = store();
+  const base = 1_900_300_000_000;
+  let now = base;
+  const cfg = config();
+  cfg.entryProfiles = [];
+  cfg.exitProfiles = [];
+  cfg.transientUpPriceRatio = 2;
+  const suite = new BigWinnerShadowSuite({ config: cfg, store: db, now: () => now });
+  suite.start();
+  const mint = 'TransientPriceConfirmation111111111111111111111';
+  suite.onGraduated({ mint, migratedAt: base, symbol: 'TPC' });
+  let sequence = 0;
+  const emit = (offset, price, wallet) => {
+    now = base + offset;
+    sequence += 1;
+    suite.observeTrade({
+      mint, timestampMs: now, market: 'PUMP_AMM', side: 'BUY', solAmount: 1,
+      tokenAmount: 1 / price, wallet, price, reservePrice: price,
+      signature: `tpc-${sequence}`, eventIndex: 0,
+    });
+  };
+  emit(0, 1, 'seed');
+  emit(100, 6, 'single-spike');
+  emit(110, 1.1, 'normal');
+  assert.deepStrictEqual(suite._state(mint).events.map((row) => row.price), [1, 1.1],
+    'an isolated upside spike must not contaminate the causal price path');
+  emit(200, 2.5, 'confirm-a');
+  emit(210, 2.6, 'confirm-b');
+  assert.strictEqual(suite._state(mint).events.at(-1).price, 2.6,
+    'a second independent wallet may confirm a genuine fast repricing');
+  emit(220, 0.2, 'rug-sell');
+  assert.strictEqual(suite._state(mint).events.at(-1).price, 0.2,
+    'downside moves must remain immediate so RUG losses are not hidden');
+  const health = suite.health();
+  assert.strictEqual(health.transientUpRowsSuppressed, 2);
+  assert.strictEqual(health.transientUpMovesConfirmed, 1);
+  db.close();
+  console.log('big winner transient price confirmation tests passed');
+}
+
+runTransientPriceConfirmation();

@@ -22,6 +22,15 @@ new table automatically.
 只交叉固定120秒、固定240秒和25% Core + 75% Runner三种新退出。旧PBR/FLOW cohort
 的ID、规则和历史统计不变，也不会因为新增退出而产生混合样本。
 
+2026-08-20 的18小时导出复核发现，旧 PBR/PP 的若干账面大赢家来自单笔、数毫秒后
+即恢复的异常上冲价格。当前实现不再让这种单笔尖峰直接更新 MFE、核心止盈或移动
+止盈：上涨达到前价2倍时，必须由第二个独立钱包确认，或在同一价格区域持续至少
+150ms；下跌仍立即进入执行模型，避免美化 RUG 损失。旧 `PBR_A/B/C`、`FLOW_R`、
+`PP_DIRECT_10`、`PP_PULLBACK_8_20/8_30` 只保留历史与存量退出，不再生成新仓位。
+新增的 `PP20_B45`、`PP20_EARLY_BREADTH`、`PP20_QUALITY` 分别验证 Buyers10≥45、
+AGE≤25s+双窗口买家广度，以及再叠加 Sell3≤2.5 SOL；三组只交叉
+`X25_RATCHET_PP`，继续按0.05/0.1/0.25 SOL独立测试，绝不发送链上交易。
+
 The same exit hypothesis is tested without changing entry rules in two other promising
 families. Smart-Like Early adds BASE-only `FIX60_H20` / `FIX120_H20` exits (no pyramiding,
 partial profit, flow-decay exit, or trailing stop). Launch First Pullback adds

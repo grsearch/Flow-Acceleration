@@ -1990,12 +1990,13 @@
       const profileLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
       const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
       document.querySelector('#big-winner-expression').textContent =
-        '旧PBR/FLOW组保持不变。PP-Direct: 毕业后10-30秒内，10秒成交>=40、买家>=20、净流入>=3 SOL且最近5秒不衰减；PP-Pullback在确认后等待首次8-20/30%回踩与3秒资金重新加速。PP按0.05/0.1/0.25 SOL分别模拟。';
+        '旧PBR/FLOW/PP组仅保留历史；新组 PP20-B45 / Early-Breadth / Quality 验证 Buyers10≥45、AGE≤25–30s、Buyers3≥15 与 Sell3≤2.5 SOL，只使用 X25 Runner。单笔≥2x上冲须第二钱包或150ms持续确认，下跌仍立即计入。';
       renderMetricGroups('#big-winner-metrics', [
         ['Mode', runtime.enabled ? 'SHADOW BW' : 'OFF', 'No chain transaction path'],
         ['Qualified / opened', `${number(runtime.qualifiedSignals)} / ${number(runtime.opened)}`, `Evaluations ${number(runtime.evaluated)}`],
         ['Pending / active', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `Closed ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
         ['Independent cohorts', number(strategy.cohortCount), `旧组 ${number(strategy.positionSizeSol,2)} SOL · PP 0.05/0.1/0.25 SOL · ${number(strategy.entryDelayMs)}ms`],
+        ['尖峰候选 / 已确认', `${number(runtime.transientUpRowsSuppressed)} / ${number(runtime.transientUpMovesConfirmed)}`, `单笔尖峰不计MFE · 下跌立即处理`],
         ['Data guard', number(runtime.priceScaleRows), `${research.sameMarketOnly || 'PUMP_AMM'} only · NO_EXIT censored`],
       ], []);
       renderTimeSessions('#big-winner-time-sessions', data.timeSessions);

@@ -1557,10 +1557,28 @@ const config = {
     maxAdjacentPriceRatio: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_PRICE_RATIO', 20, {
       min: 2, max: 1_000,
     }),
+    transientUpPriceRatio: numberEnv(
+      'FLOW_BIG_WINNER_SHADOW_TRANSIENT_UP_PRICE_RATIO', 2, { min: 1.1, max: 100 },
+    ),
+    priceConfirmationWindowMs: integerEnv(
+      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_WINDOW_MS', 500, { min: 10, max: 5_000 },
+    ),
+    priceConfirmationMinPersistenceMs: integerEnv(
+      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_MIN_PERSISTENCE_MS', 150,
+      { min: 1, max: 5_000 },
+    ),
+    priceConfirmationTolerancePct: numberEnv(
+      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_TOLERANCE_PCT', 25,
+      { min: 1, max: 100 },
+    ),
+    priceConfirmationMinWallets: integerEnv(
+      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_MIN_WALLETS', 2, { min: 1, max: 10 },
+    ),
     entryProfiles: [
       {
         id: 'PBR_A',
         label: 'PBR-A balanced: wave 40 / pullback 12-25 / NF3 3',
+        newEntriesEnabled: false,
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 25,
         minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 3,
@@ -1569,6 +1587,7 @@ const config = {
       {
         id: 'PBR_B',
         label: 'PBR-B right tail: wave 50 / pullback 18-30 / NF3 2',
+        newEntriesEnabled: false,
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 50, minPullbackPct: 18, maxPullbackPct: 30,
         minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
@@ -1577,6 +1596,7 @@ const config = {
       {
         id: 'PBR_C',
         label: 'PBR-C frequency: wave 40 / pullback 15-25 / NF3 2',
+        newEntriesEnabled: false,
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 40, minPullbackPct: 15, maxPullbackPct: 25,
         minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
@@ -1585,6 +1605,7 @@ const config = {
       {
         id: 'FLOW_R',
         label: 'FLOW-R: post-grad 5-60s / NF8 20 / buyers 12 / no chase',
+        newEntriesEnabled: false,
         family: 'FLOW', minAgeMs: 5_000, maxAgeMs: 60_000,
         minNetFlow8sSol: 20, minBuyers8s: 12, maxLargestBuyerShare8s: 0.5,
         maxRunupPct: 40, maxDistanceFromHigh10sPct: 10, maxJump2sPct: 20,
@@ -1593,6 +1614,7 @@ const config = {
       {
         id: 'PP_DIRECT_10',
         label: 'PP-Direct · 毕业后10–30秒 · 参与度持续确认',
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'DIRECT', minAgeMs: 10_000, maxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
         maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
@@ -1607,6 +1629,7 @@ const config = {
       {
         id: 'PP_PULLBACK_8_20',
         label: 'PP-Pullback · 参与度确认后首次回踩8–20% + 二次加速',
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
@@ -1625,6 +1648,7 @@ const config = {
       {
         id: 'PP_PULLBACK_8_30',
         label: 'PP-Pullback Broad · 回踩8–30% + 温和二次加速',
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 75_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
@@ -1638,6 +1662,58 @@ const config = {
         positionSols: listEnv(
           'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
           ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
+        id: 'PP20_B45',
+        label: 'PP20-B45 · 首次回踩8–20% / Buyers10≥45',
+        newEntriesEnabled: true,
+        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
+        qualificationMaxAgeMs: 30_000,
+        minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
+        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
+        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
+        minPullbackPct: 8, maxPullbackPct: 20,
+        minReboundPct: 2, maxReboundPct: 8,
+        minNetFlow3sSol: 2, minBuyers3s: 4, requireFlowAcceleration: true,
+        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS', ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
+        id: 'PP20_EARLY_BREADTH',
+        label: 'PP20-Early-Breadth · AGE≤25s / Buyers3≥15 / Buyers10≥45',
+        newEntriesEnabled: true,
+        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 25_000,
+        qualificationMaxAgeMs: 25_000,
+        minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
+        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
+        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
+        minPullbackPct: 8, maxPullbackPct: 20,
+        minReboundPct: 2, maxReboundPct: 8,
+        minNetFlow3sSol: 2, minBuyers3s: 15, requireFlowAcceleration: true,
+        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS', ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
+        id: 'PP20_QUALITY',
+        label: 'PP20-Quality · AGE≤30s / Buyers3≥15 / Buyers10≥45 / Sell3≤2.5',
+        newEntriesEnabled: true,
+        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 30_000,
+        qualificationMaxAgeMs: 30_000,
+        minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
+        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
+        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
+        minPullbackPct: 8, maxPullbackPct: 20,
+        minReboundPct: 2, maxReboundPct: 8,
+        minNetFlow3sSol: 2, minBuyers3s: 15, maxSingleSell3sSol: 2.5,
+        requireFlowAcceleration: true,
+        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS', ['0.05', '0.1', '0.25'],
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
     ],
@@ -1712,7 +1788,10 @@ const config = {
       },
       {
         id: 'X25_RATCHET_PP', label: 'PP · 25% Core + 75% protected runner',
-        entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
+        entryProfileIds: [
+          'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
+          'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
+        ],
         coreActivationPct: 20, coreWeightPct: 25, hardStopPct: 15,
         trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
         trailingTiers: [],

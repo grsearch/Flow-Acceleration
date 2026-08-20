@@ -56,6 +56,7 @@ function camelRow(row) {
     highestPrice: finite(row.highest_price),
     lowestPrice: finite(row.lowest_price),
     lastObservedAt: finite(row.last_observed_at),
+    lastPrice: finite(row.last_price),
     maxFavorableReturnPct: finite(row.max_favorable_return_pct, 0),
     maxAdverseReturnPct: finite(row.max_adverse_return_pct, 0),
     coreWeight: finite(row.core_weight_pct, 0) / 100,
@@ -91,6 +92,8 @@ class BigWinnerShadowSuite {
     this.metrics = {
       observedTrades: 0,
       priceScaleRows: 0,
+      transientUpRowsSuppressed: 0,
+      transientUpMovesConfirmed: 0,
       evaluated: 0,
       qualifiedSignals: 0,
       replaySignalsSuppressed: 0,
@@ -295,6 +298,19 @@ class BigWinnerShadowSuite {
           isolatedTable: 'big_winner_shadow_positions',
           historicalBacktest: '2026-08-11..2026-08-17 train/test split',
           participationCapacitiesSol: [0.05, 0.1, 0.25],
+          activeEntryProfiles: [...this.entryProfiles.values()]
+            .filter((profile) => profile.newEntriesEnabled !== false)
+            .map((profile) => profile.id),
+          stoppedEntryProfiles: [...this.entryProfiles.values()]
+            .filter((profile) => profile.newEntriesEnabled === false)
+            .map((profile) => profile.id),
+          transientUpPriceConfirmation: {
+            ratio: this.config.transientUpPriceRatio,
+            windowMs: this.config.priceConfirmationWindowMs,
+            minPersistenceMs: this.config.priceConfirmationMinPersistenceMs,
+            tolerancePct: this.config.priceConfirmationTolerancePct,
+            minWallets: this.config.priceConfirmationMinWallets,
+          },
           noExitPricedAsTotalLoss: false,
           sameMarketOnly: 'PUMP_AMM',
           sendsTransactions: false,
@@ -319,20 +335,13 @@ class BigWinnerShadowSuite {
 
   observeTrade(trade, { replay = false } = {}) {
     const timestampMs = finite(trade?.timestampMs);
-    const price = priceOf(trade);
+    const observedPrice = priceOf(trade);
     if (!this.config.enabled || trade?.market !== 'PUMP_AMM' || !trade?.mint
-      || !(timestampMs > 0) || !(price > 0)) return;
+      || !(timestampMs > 0) || !(observedPrice > 0)) return;
     this.advanceTime(timestampMs);
     const state = this._state(trade.mint);
-    const previousPrice = state.events[state.events.length - 1]?.price;
-    if (previousPrice > 0) {
-      const scale = price / previousPrice;
-      if (scale > this.config.maxAdjacentPriceRatio
-        || scale < 1 / this.config.maxAdjacentPriceRatio) {
-        this.metrics.priceScaleRows += 1;
-        return;
-      }
-    }
+    const price = this._confirmedObservationPrice(state, trade, observedPrice);
+    if (!(price > 0)) return;
     const features = this._observeState(state, trade, price);
     this._observePositions(trade, price);
     this.metrics.observedTrades += 1;
@@ -341,7 +350,7 @@ class BigWinnerShadowSuite {
       return;
     }
     for (const profile of this.entryProfiles.values()) {
-      if (state.fired.has(profile.id)
+      if (profile.newEntriesEnabled === false || state.fired.has(profile.id)
         || !this._matches(profile, features, state, trade.timestampMs, price)) continue;
       state.fired.add(profile.id);
       this.metrics.qualifiedSignals += 1;
@@ -395,12 +404,64 @@ class BigWinnerShadowSuite {
         pullbackLowPrice: null,
         events: [],
         participation: new Map(),
+        transientUpCandidate: null,
         fired: new Set(),
         lastAt: 0,
       };
       this.states.set(mint, state);
     }
     return state;
+  }
+
+  _confirmedObservationPrice(state, trade, price) {
+    const previousPrice = state.events[state.events.length - 1]?.price;
+    if (!(previousPrice > 0)) {
+      state.transientUpCandidate = null;
+      return price;
+    }
+    const ratio = price / previousPrice;
+    const transientRatio = finite(this.config.transientUpPriceRatio, 2);
+    const confirmationWindowMs = finite(this.config.priceConfirmationWindowMs, 500);
+    const minPersistenceMs = finite(this.config.priceConfirmationMinPersistenceMs, 150);
+    const tolerancePct = finite(this.config.priceConfirmationTolerancePct, 25);
+    const minWallets = finite(this.config.priceConfirmationMinWallets, 2);
+    if (ratio < transientRatio) {
+      state.transientUpCandidate = null;
+      return price;
+    }
+    const timestampMs = finite(trade.timestampMs, this.now());
+    const wallet = trade.wallet || null;
+    const prior = state.transientUpCandidate;
+    const withinWindow = prior
+      && timestampMs >= prior.firstAt
+      && timestampMs - prior.firstAt <= confirmationWindowMs;
+    const deltaPct = prior ? Math.abs(returnPct(price, prior.lastPrice) || 0) : Infinity;
+    const sameRegime = withinWindow && deltaPct <= tolerancePct;
+    let candidate;
+    if (sameRegime) {
+      candidate = prior;
+      candidate.lastAt = timestampMs;
+      candidate.lastPrice = price;
+      if (wallet) candidate.wallets.add(wallet);
+    } else {
+      candidate = {
+        firstAt: timestampMs,
+        lastAt: timestampMs,
+        lastPrice: price,
+        wallets: new Set(wallet ? [wallet] : []),
+      };
+    }
+    state.transientUpCandidate = candidate;
+    const independentWallets = candidate.wallets.size >= minWallets;
+    const persisted = timestampMs - candidate.firstAt >= minPersistenceMs;
+    if (sameRegime && (independentWallets || persisted)) {
+      state.transientUpCandidate = null;
+      this.metrics.transientUpMovesConfirmed += 1;
+      return price;
+    }
+    this.metrics.priceScaleRows += 1;
+    this.metrics.transientUpRowsSuppressed += 1;
+    return null;
   }
 
   _observeState(state, trade, price) {
@@ -558,6 +619,8 @@ class BigWinnerShadowSuite {
       && reboundPct <= profile.maxReboundPct
       && f.netFlow3s >= profile.minNetFlow3sSol
       && f.buyers3s >= profile.minBuyers3s
+      && (profile.maxSingleSell3sSol == null
+        || f.maxSell3s <= profile.maxSingleSell3sSol)
       && (!profile.requireFlowAcceleration || f.netFlow3s > f.previousNetFlow3s);
   }
 

@@ -474,10 +474,46 @@ assert.ok(gfrProfiles.every((profile) => (
   && profile.fastConfirmation.maxTopBuyerSharePct === 60
   && profile.positionSols.join(',') === '0.05,0.1'
 )));
+assert.strictEqual(config.bigWinnerShadow.transientUpPriceRatio, 2);
+assert.strictEqual(config.bigWinnerShadow.priceConfirmationWindowMs, 500);
+assert.strictEqual(config.bigWinnerShadow.priceConfirmationMinPersistenceMs, 150);
+assert.strictEqual(config.bigWinnerShadow.priceConfirmationTolerancePct, 25);
+assert.strictEqual(config.bigWinnerShadow.priceConfirmationMinWallets, 2);
+const bigWinnerEntryProfiles = new Map(config.bigWinnerShadow.entryProfiles.map((profile) => (
+  [profile.id, profile]
+)));
 assert.deepStrictEqual(
   config.bigWinnerShadow.entryProfiles.filter((profile) => profile.family === 'PARTICIPATION')
     .map((profile) => profile.id),
-  ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
+  [
+    'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
+    'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
+  ],
+);
+assert.ok([
+  'PBR_A', 'PBR_B', 'PBR_C', 'FLOW_R',
+  'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
+].every((id) => bigWinnerEntryProfiles.get(id)?.newEntriesEnabled === false));
+assert.deepStrictEqual(
+  ['PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY'].map((id) => (
+    bigWinnerEntryProfiles.get(id)?.newEntriesEnabled
+  )),
+  [true, true, true],
+);
+assert.strictEqual(bigWinnerEntryProfiles.get('PP20_B45').minBuyers10s, 45);
+assert.strictEqual(bigWinnerEntryProfiles.get('PP20_EARLY_BREADTH').maxAgeMs, 25_000);
+assert.strictEqual(bigWinnerEntryProfiles.get('PP20_EARLY_BREADTH').minBuyers3s, 15);
+assert.strictEqual(bigWinnerEntryProfiles.get('PP20_QUALITY').maxSingleSell3sSol, 2.5);
+assert.ok(['PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY'].every((id) => (
+  bigWinnerEntryProfiles.get(id).positionSols.join(',') === '0.05,0.1,0.25'
+)));
+assert.deepStrictEqual(
+  config.bigWinnerShadow.exitProfiles.find((profile) => profile.id === 'X25_RATCHET_PP')
+    .entryProfileIds,
+  [
+    'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
+    'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
+  ],
 );
 assert.strictEqual(config.migrationContinuityShadow.enabled, true);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
