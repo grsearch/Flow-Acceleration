@@ -1,5 +1,7 @@
 'use strict';
 
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+
 const fs = require('fs');
 const path = require('path');
 
@@ -689,6 +691,17 @@ class LiveTradingManager {
     if (this.stopping) return;
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy) return;
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: strategy.id,
+      mint: event.mint,
+      timestampMs: this.now(),
+      source: 'LIVE',
+    });
+    if (rugGuard.blocked) {
+      this.metrics.riskRejected += 1;
+      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', 'PRE_ENTRY_RUG_RISK');
+      return;
+    }
     const riskReason = this._riskReason(event);
     if (riskReason) {
       this.metrics.riskRejected += 1;
