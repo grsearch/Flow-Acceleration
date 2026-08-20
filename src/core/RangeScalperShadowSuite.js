@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -572,6 +573,20 @@ class RangeScalperShadowSuite {
       if (position.status === STATUS.PENDING_ENTRY) {
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
+        const rugGuard = evaluateUniversalRugGuard(this.store, {
+          strategyId: `RANGE_SCALPER:${position.cohortId}`,
+          mint: position.mint,
+          timestampMs: trade.timestampMs,
+        });
+        if (rugGuard.blocked) {
+          this.store.updateRangeScalperShadowPosition(position.id, {
+            status: STATUS.NO_ENTRY,
+            rejectionReason: 'PRE_ENTRY_RUG_RISK',
+          });
+          this.pendingEntries.delete(position.id);
+          this._unindexRow(position);
+          continue;
+        }
         const jumpPct = (price / position.signalPrice - 1) * 100;
         if (jumpPct > this.config.maxEntryPriceJumpPct) {
           this.store.updateRangeScalperShadowPosition(position.id, {
