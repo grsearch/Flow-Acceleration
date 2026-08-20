@@ -134,6 +134,17 @@ async function main() {
   assert.ok(dashboard.includes('data-strategy-code="PFL-B0/B1/A1/R1"'));
   assert.ok(dashboard.includes("loadDashboard('/api/public-flow-lead-shadow?positionLimit=50'"));
   assert.ok(dashboard.includes('Smart OPEN 只作未来'));
+  assert.ok(dashboard.includes('data-live-strategy="cya-slot-flow"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="cya-slot-flow"'));
+  assert.ok(dashboard.includes('id="cya-slot-flow-cohort-rows"'));
+  assert.ok(dashboard.includes('id="cya-slot-flow-position-rows"'));
+  assert.ok(dashboard.includes("loadDashboard('/api/cya-slot-flow-shadow?positionLimit=50'"));
+  assert.ok(dashboard.includes('data-live-strategy="same-slot-dump-backrun"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="same-slot-dump-backrun"'));
+  assert.ok(dashboard.includes('id="same-slot-dump-backrun-cohort-rows"'));
+  assert.ok(dashboard.includes('id="same-slot-dump-backrun-position-rows"'));
+  assert.ok(dashboard.includes('data-strategy-code="SDBR-S10/S20"'));
+  assert.ok(dashboard.includes("loadDashboard('/api/same-slot-dump-backrun-shadow?positionLimit=50'"));
   assert.ok(dashboard.includes('data-live-strategy="launch-quality"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="launch-quality"'));
   assert.ok(dashboard.includes('id="launch-quality-observation-rows"'));
@@ -287,6 +298,7 @@ async function main() {
       '/api/smart-open-shadow',
       '/api/smart-resonance-shadow',
       '/api/public-flow-lead-shadow',
+      '/api/cya-slot-flow-shadow',
       '/api/launch-pullback-shadow',
       '/api/migrated-drop-rebound-shadow',
       '/api/migration-continuity-shadow',
@@ -304,6 +316,24 @@ async function main() {
       assert.strictEqual(response.status, 200, `${route} should return 200`);
       assert.ok((await response.text()).length > 0, `${route} should return a body`);
     }
+    const cyaSlotFlowResponse = await fetch(
+      `http://127.0.0.1:${port}/api/cya-slot-flow-shadow?positionLimit=5`,
+    );
+    assert.match(cyaSlotFlowResponse.headers.get('content-type') || '', /application\/json/i);
+    const cyaSlotFlow = await cyaSlotFlowResponse.json();
+    assert.strictEqual(cyaSlotFlow.runtime.mode, 'SHADOW_CSF');
+    assert.strictEqual(cyaSlotFlow.runtime.sendsTransactions, false);
+    assert.ok(Array.isArray(cyaSlotFlow.cohorts));
+    assert.ok(Array.isArray(cyaSlotFlow.positions));
+    const missingApiResponse = await fetch(
+      `http://127.0.0.1:${port}/api/route-that-must-not-exist`,
+    );
+    assert.strictEqual(missingApiResponse.status, 404);
+    assert.match(missingApiResponse.headers.get('content-type') || '', /application\/json/i);
+    assert.deepStrictEqual(await missingApiResponse.json(), {
+      error: 'api route not found',
+      path: '/api/route-that-must-not-exist',
+    });
     const lightweightHealth = await (await fetch(
       `http://127.0.0.1:${port}/health`,
     )).json();
