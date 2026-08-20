@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableSell } = require('./ShadowExecutionModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -371,6 +372,20 @@ class QualityLeaderShadowSuite {
   }
 
   _open(position, trade, marketPrice, { replay = false } = {}) {
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: `QUALITY_LEADER:${position.cohortId}`,
+      mint: position.mint,
+      timestampMs: trade.timestampMs,
+    });
+    if (rugGuard.blocked) {
+      this.store.updateQualityLeaderShadowPosition(position.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason: 'PRE_ENTRY_RUG_RISK',
+      });
+      this.pendingEntries.delete(position.id);
+      this._unindex(position);
+      return;
+    }
     const entryPrice = curveBuyAveragePrice(trade, position.positionSol, marketPrice);
     const jumpPct = ((entryPrice / position.signalPrice) - 1) * 100;
     const impactPct = ((entryPrice / marketPrice) - 1) * 100;
