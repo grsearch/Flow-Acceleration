@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -207,6 +208,19 @@ class FlowFirstShadowManager {
     if (pending && trade.market === 'PUMP_BONDING_CURVE'
       && timestampMs >= pending.entryTargetAt
       && timestampMs <= pending.entryDeadlineAt) {
+      const rugGuard = evaluateUniversalRugGuard(this.store, {
+        strategyId: `FLOW_FIRST:${this.config.cohortId}`,
+        mint: trade.mint,
+        timestampMs,
+      });
+      if (rugGuard.blocked) {
+        this.store.updateFlowFirstShadowPosition(pending.id, {
+          status: STATUS.NO_ENTRY,
+          rejectionReason: 'PRE_ENTRY_RUG_RISK',
+        });
+        this.pendingEntries.delete(trade.mint);
+        return;
+      }
       pending.status = STATUS.OPEN;
       pending.entryAt = timestampMs;
       pending.entryMarket = trade.market;
