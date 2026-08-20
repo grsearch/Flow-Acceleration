@@ -27,6 +27,7 @@ class ResearchServer {
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     flowSmartConfirmShadow = null,
     smartLikeEarlyShadow = null,
+    preEntryRugRisk = null,
     smartResonanceShadow = null,
     publicFlowLeadShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
@@ -54,6 +55,7 @@ class ResearchServer {
     this.smartOpenShadow = smartOpenShadow;
     this.flowSmartConfirmShadow = flowSmartConfirmShadow;
     this.smartLikeEarlyShadow = smartLikeEarlyShadow;
+    this.preEntryRugRisk = preEntryRugRisk;
     this.smartResonanceShadow = smartResonanceShadow;
     this.publicFlowLeadShadow = publicFlowLeadShadow;
     this.launchPullbackShadow = launchPullbackShadow;
@@ -643,6 +645,7 @@ class ResearchServer {
         smartOpenShadow: this.smartOpenShadow?.health() || null,
         flowSmartConfirmShadow: this.flowSmartConfirmShadow?.health() || null,
         smartLikeEarlyShadow: this.smartLikeEarlyShadow?.health() || null,
+        preEntryRugRisk: this.preEntryRugRisk?.health() || null,
         smartResonanceShadow: this.smartResonanceShadow?.health() || null,
         publicFlowLeadShadow: this.publicFlowLeadShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,

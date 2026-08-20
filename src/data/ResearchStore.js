@@ -6104,7 +6104,10 @@ class ResearchStore {
       createdAt: Date.now(),
     };
     const result = this.stmts.insertLaunchQualitySnapshot.run(row);
-    return { ...row, inserted: result.changes > 0 };
+    // RUG-risk features are deliberately forward-only and remain transient here.
+    // Downstream Shadow rows persist them inside their existing features_json,
+    // avoiding an ALTER TABLE on the large historical snapshot table.
+    return { ...row, rugRisk: snapshot.rugRisk || null, inserted: result.changes > 0 };
   }
 
   createMigrationSecondLegObservation(token) {

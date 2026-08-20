@@ -427,10 +427,10 @@ const config = {
         ruleVersion: 'quality_leader_ql_strict_protected_live_v1',
         signalSource: 'QUALITY_LEADER_QL_STRICT_PROTECTED',
         enabled: booleanEnv('FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_ENTRY_ENABLED',
-          true,
-        ),
+        // Historical rows and already-open exits remain visible, but stale
+        // production .env values must not reopen a strategy whose realised
+        // RUG losses diverged materially from its mark-price Shadow results.
+        entryEnabled: false,
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL',
@@ -1186,6 +1186,33 @@ const config = {
     }),
   },
 
+  // Strictly forward-only public-trade observer. The score describes the
+  // low-alternation, one-sided stair-step pattern seen before many direct RUGs.
+  // It performs no RPC calls and is not a live veto unless an explicit Shadow
+  // cohort opts into it.
+  preEntryRugRisk: {
+    enabled: booleanEnv('FLOW_PRE_ENTRY_RUG_RISK_ENABLED', true),
+    windowMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_WINDOW_MS', 15_000, { min: 1_000 }),
+    stateRetentionMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_RETENTION_MS', 60_000, {
+      min: 15_000,
+    }),
+    sweepIntervalMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_SWEEP_MS', 5_000, { min: 1_000 }),
+    maxEventsPerMint: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MAX_EVENTS', 256, { min: 32 }),
+    minTrades: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_TRADES', 10, { min: 3 }),
+    minBuySharePct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_BUY_SHARE_PCT', 58, {
+      min: 0, max: 100,
+    }),
+    minConsecutiveBuys: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_BUY_STREAK', 14, { min: 2 }),
+    maxSideAlternationPct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MAX_ALTERNATION_PCT', 30, {
+      min: 0, max: 100,
+    }),
+    minUpTickSharePct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_UPTICK_PCT', 55, {
+      min: 0, max: 100,
+    }),
+    minReturnPct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_RETURN_PCT', 30, { min: 0 }),
+    minFlags: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_FLAGS', 5, { min: 1, max: 5 }),
+  },
+
   // Independent causal study derived from the observed behavior of consistently
   // profitable wallets. It never signs transactions and never reuses a future
   // Smart OPEN as an earlier fill price.
@@ -1304,7 +1331,7 @@ const config = {
   // The signal price is never treated as a fill: every cohort waits for the
   // first comparable market trade after the configured execution delay.
   smartResonanceShadow: {
-    enabled: booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', false),
+    enabled: booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', true),
     positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
     featureWindowMs: integerEnv('FLOW_SMART_RESONANCE_FEATURE_WINDOW_MS', 5_000, {
       min: 1_000,
@@ -1366,6 +1393,19 @@ const config = {
         minCurvePct: 60,
         maxCurvePct: 80,
       },
+      {
+        id: 'SR_R3_GUARD',
+        label: 'SR-R3-GUARD · R3 + 公共订单流RUG过滤',
+        resonanceWindowMs: 60_000,
+        requiredWallets: 2,
+        minPublicBuyers5s: 20,
+        requirePreGraduation: true,
+        requiredMarket: 'PUMP_BONDING_CURVE',
+        maxAgeMs: 25_000,
+        minCurvePct: 60,
+        maxCurvePct: 80,
+        requireHealthyRugRisk: true,
+      },
     ],
     exitProfiles: [20, 30].flatMap((hardStopPct) => (
       [60, 120, 180, 240].map((holdSeconds) => ({
@@ -1387,7 +1427,8 @@ const config = {
   // ADD events are intentionally ignored because repeated small adds can be
   // promotional rather than incremental conviction.
   publicFlowLeadShadow: {
-    enabled: booleanEnv('FLOW_PUBLIC_FLOW_LEAD_SHADOW_ENABLED', true),
+    enabled: provenNegativeShadowsEnabled
+      && booleanEnv('FLOW_PUBLIC_FLOW_LEAD_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
     featureWindowMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_FEATURE_WINDOW_MS', 5_000, {
       min: 2_000,
@@ -2934,6 +2975,37 @@ const config = {
         reboundTimeoutMs: 1_000,
       },
       {
+        id: 'GD25_35_RUG_GUARD_ALL',
+        label: 'G-RUG-ALL · 深跌反弹 + 公共订单流RUG过滤',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+        maxSignalsPerMint: 1,
+        requireHealthyRugRisk: true,
+        exitProfileIds: ['X8', 'XLEG'],
+        capacityAware: true,
+        positionSols: [0.1, 1],
+      },
+      {
+        id: 'GD25_35_RUG_GUARD_T20_24',
+        label: 'G-RUG-T20-24 · RUG过滤 + 北京20–24时',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 5,
+        reboundTimeoutMs: 1_000,
+        maxSignalsPerMint: 1,
+        requireHealthyRugRisk: true,
+        beijingHourRanges: [[20, 24]],
+        exitProfileIds: ['X8', 'XLEG'],
+        capacityAware: true,
+        positionSols: [0.1, 1],
+      },
+      {
         id: 'GE30_R23_F1',
         label: '毕业后30秒内 · 反弹2%–3% · 每Mint首次',
         windowMs: 1_000,
@@ -4103,6 +4175,56 @@ const config = {
         maxSellBuyRatio: 0.55,
         minVirtualSolReserves: 30,
         exitProfileIds: ['QL_BARBELL'],
+      },
+      {
+        id: 'QL_STRICT_GUARD',
+        label: 'QL-GUARD · Strict + 公共订单流RUG过滤',
+        minReturn10Pct: 140,
+        maxDrawdown20Pct: 12,
+        minBuyerDelta: 8,
+        minNetFlowDeltaSol: 3,
+        minRetentionPct: 80,
+        maxCreatorSharePct: 3,
+        minCurvePct: 55,
+        maxCurvePct: 90,
+        maxSellBuyRatio: 0.55,
+        minVirtualSolReserves: 30,
+        requireHealthyRugRisk: true,
+        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
+      },
+      {
+        id: 'QL_STRICT_GUARD_T00_04',
+        label: 'QL-GUARD-T00-04 · Strict/RUG过滤/北京00–04时',
+        minReturn10Pct: 140,
+        maxDrawdown20Pct: 12,
+        minBuyerDelta: 8,
+        minNetFlowDeltaSol: 3,
+        minRetentionPct: 80,
+        maxCreatorSharePct: 3,
+        minCurvePct: 55,
+        maxCurvePct: 90,
+        maxSellBuyRatio: 0.55,
+        minVirtualSolReserves: 30,
+        requireHealthyRugRisk: true,
+        beijingHourRanges: [[0, 4]],
+        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
+      },
+      {
+        id: 'QL_STRICT_GUARD_T16_20',
+        label: 'QL-GUARD-T16-20 · Strict/RUG过滤/北京16–20时',
+        minReturn10Pct: 140,
+        maxDrawdown20Pct: 12,
+        minBuyerDelta: 8,
+        minNetFlowDeltaSol: 3,
+        minRetentionPct: 80,
+        maxCreatorSharePct: 3,
+        minCurvePct: 55,
+        maxCurvePct: 90,
+        maxSellBuyRatio: 0.55,
+        minVirtualSolReserves: 30,
+        requireHealthyRugRisk: true,
+        beijingHourRanges: [[16, 20]],
+        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
       },
     ],
     exitProfiles: [

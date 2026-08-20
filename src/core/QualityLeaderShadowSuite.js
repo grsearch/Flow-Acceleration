@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -24,6 +25,14 @@ function valueOf(row, snake, camel) {
 function shadowPrice(trade) {
   const reserve = finite(trade?.reservePrice);
   return reserve > 0 ? reserve : finite(trade?.price);
+}
+
+function beijingHourAllowed(timestampMs, ranges) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return true;
+  const timestamp = Number(timestampMs);
+  if (!Number.isFinite(timestamp)) return false;
+  const hour = new Date(timestamp + 8 * 60 * 60_000).getUTCHours();
+  return ranges.some(([start, end]) => hour >= Number(start) && hour < Number(end));
 }
 
 function curveBuyAveragePrice(trade, positionSol, fallbackPrice) {
@@ -286,6 +295,8 @@ class QualityLeaderShadowSuite {
     const netFlowDelta = finite(s20.netFlowSol, 0) - finite(s10.netFlowSol, 0);
     const sellBuyRatio = finite(s20.buyTx, 0) > 0
       ? finite(s20.sellTx, 0) / finite(s20.buyTx, 0) : Infinity;
+    const rugRiskPass = !profile.requireHealthyRugRisk
+      || (s20.rugRisk?.sampleReady && !s20.rugRisk.flagged);
     return finite(s10.priceReturnPct, -Infinity) >= profile.minReturn10Pct
       && finite(s20.drawdownPct, Infinity) <= profile.maxDrawdown20Pct
       && buyerDelta >= profile.minBuyerDelta
@@ -295,7 +306,9 @@ class QualityLeaderShadowSuite {
       && finite(s20.curvePct, -1) >= profile.minCurvePct
       && finite(s20.curvePct, 101) <= profile.maxCurvePct
       && sellBuyRatio <= profile.maxSellBuyRatio
-      && finite(s20.virtualSolReserves, -1) >= profile.minVirtualSolReserves;
+      && finite(s20.virtualSolReserves, -1) >= profile.minVirtualSolReserves
+      && rugRiskPass
+      && beijingHourAllowed(s20.observedAt, profile.beijingHourRanges);
   }
 
   _createPending(profile, exitProfile, s10, s20) {
@@ -508,6 +521,18 @@ class QualityLeaderShadowSuite {
 
   _fillPartial(position, trade, price) {
     const stage = position.pendingPartialStage || (position.partialStage + 1);
+    const exitProfile = this.exitProfiles.get(position.exitProfileId);
+    const fractionPct = stage === 1
+      ? finite(exitProfile?.scale1FractionPct, 0)
+      : finite(exitProfile?.scale2FractionPct, 0);
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const execution = executableSell(
+      trade,
+      (position.positionSol / position.entryPrice) * fractionPct / 100,
+      price,
+      { rugMarkReturnPct: markReturnPct },
+    );
+    const executablePrice = execution.price ?? price;
     position.partialStage = stage;
     position.partialExitTargetAt = null;
     position.partialExitDeadlineAt = null;
@@ -519,12 +544,12 @@ class QualityLeaderShadowSuite {
     };
     if (stage === 1) {
       position.scale1At = trade.timestampMs;
-      position.scale1Price = price;
+      position.scale1Price = executablePrice;
       patch.scale1At = position.scale1At;
       patch.scale1Price = price;
     } else {
       position.scale2At = trade.timestampMs;
-      position.scale2Price = price;
+      position.scale2Price = executablePrice;
       patch.scale2At = position.scale2At;
       patch.scale2Price = price;
     }
@@ -552,30 +577,40 @@ class QualityLeaderShadowSuite {
 
   _close(position, trade, price) {
     const exitProfile = this.exitProfiles.get(position.exitProfileId);
-    let weightedRatio = price / position.entryPrice;
+    const firstWeight = exitProfile?.mode === 'BARBELL' && position.scale1Price
+      ? exitProfile.scale1FractionPct / 100 : 0;
+    const secondWeight = exitProfile?.mode === 'BARBELL' && position.scale2Price
+      ? exitProfile.scale2FractionPct / 100 : 0;
+    const runnerWeight = Math.max(0, 1 - firstWeight - secondWeight);
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const execution = executableSell(
+      trade,
+      (position.positionSol / position.entryPrice) * runnerWeight,
+      price,
+      { rugMarkReturnPct: markReturnPct },
+    );
+    const executablePrice = execution.price ?? price;
+    let weightedRatio = executablePrice / position.entryPrice;
     let partialCount = 0;
     if (exitProfile?.mode === 'BARBELL') {
-      const firstWeight = position.scale1Price ? exitProfile.scale1FractionPct / 100 : 0;
-      const secondWeight = position.scale2Price ? exitProfile.scale2FractionPct / 100 : 0;
-      const runnerWeight = 1 - firstWeight - secondWeight;
-      weightedRatio = firstWeight * ((position.scale1Price || price) / position.entryPrice)
-        + secondWeight * ((position.scale2Price || price) / position.entryPrice)
-        + runnerWeight * (price / position.entryPrice);
+      weightedRatio = firstWeight * ((position.scale1Price || executablePrice) / position.entryPrice)
+        + secondWeight * ((position.scale2Price || executablePrice) / position.entryPrice)
+        + runnerWeight * (executablePrice / position.entryPrice);
       partialCount = Number(Boolean(position.scale1Price)) + Number(Boolean(position.scale2Price));
     }
-    const grossReturnPct = (weightedRatio - 1) * 100;
-    if (grossReturnPct > this.config.maxPlausibleReturnPct || grossReturnPct < -100) {
-      this._markNoExit(position, `IMPLAUSIBLE_EXIT_RETURN_${grossReturnPct.toFixed(2)}PCT`);
+    const executableReturnPct = (weightedRatio - 1) * 100;
+    if (executableReturnPct > this.config.maxPlausibleReturnPct || executableReturnPct < -100) {
+      this._markNoExit(position, `IMPLAUSIBLE_EXIT_RETURN_${executableReturnPct.toFixed(2)}PCT`);
       return;
     }
-    const netReturnPct = grossReturnPct - position.configuredCostPct
+    const netReturnPct = executableReturnPct - position.configuredCostPct
       - partialCount * this.costs.fixedCostPct;
     this.store.updateQualityLeaderShadowPosition(position.id, {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
-      exitPrice: price,
-      grossReturnPct,
+      exitPrice: executablePrice,
+      grossReturnPct: markReturnPct,
       netReturnPct,
     });
     this.positions.delete(position.id);
@@ -587,6 +622,11 @@ class QualityLeaderShadowSuite {
     this.store.updateQualityLeaderShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
       rejectionReason: reason,
+      grossReturnPct: -100,
+      netReturnPct: -100 - finite(
+        position.configuredCostPct,
+        this.costs.deterministicCostPct,
+      ),
     });
     this.positions.delete(position.id);
     this._unindex(position);

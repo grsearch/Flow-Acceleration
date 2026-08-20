@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -322,7 +323,9 @@ class LaunchPullbackShadowManager {
     const pending = this.pendingEntries.get(trade.mint);
     if (pending && trade.market === 'PUMP_BONDING_CURVE'
       && timestampMs >= pending.entryTargetAt && timestampMs <= pending.entryDeadlineAt) {
-      const entryJumpPct = ((price / pending.referencePrice) - 1) * 100;
+      const entryExecution = executableBuy(trade, pending.positionSol, price);
+      const entryPrice = entryExecution.price ?? price;
+      const entryJumpPct = ((entryPrice / pending.referencePrice) - 1) * 100;
       if (entryJumpPct > this.config.maxEntryPriceJumpPct) {
         this.store.updateLaunchPullbackShadowPosition(pending.id, {
           status: STATUS.PRICE_JUMP,
@@ -336,7 +339,7 @@ class LaunchPullbackShadowManager {
         pending.status = STATUS.OPEN;
         pending.entryAt = timestampMs;
         pending.entryMarket = trade.market;
-        pending.entryPrice = price;
+        pending.entryPrice = entryPrice;
         pending.entryJumpPct = entryJumpPct;
         pending.highestPrice = price;
         pending.maxFavorableReturnPct = 0;
@@ -344,7 +347,7 @@ class LaunchPullbackShadowManager {
           status: STATUS.OPEN,
           entryAt: timestampMs,
           entryMarket: trade.market,
-          entryPrice: price,
+          entryPrice,
           entryJumpPct,
           highestPrice: price,
           maxFavorableReturnPct: 0,
@@ -514,14 +517,22 @@ class LaunchPullbackShadowManager {
 
   _close(position, trade, price) {
     this._updatePeak(position, price);
-    const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
-    const netReturnPct = grossReturnPct - this.costs.deterministicCostPct;
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const execution = executableSell(
+      trade,
+      position.positionSol / position.entryPrice,
+      price,
+      { rugMarkReturnPct: markReturnPct },
+    );
+    const executablePrice = execution.price ?? price;
+    const executableReturnPct = ((executablePrice / position.entryPrice) - 1) * 100;
+    const netReturnPct = executableReturnPct - this.costs.deterministicCostPct;
     this.store.updateLaunchPullbackShadowPosition(position.id, {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
-      exitPrice: price,
-      grossReturnPct,
+      exitPrice: executablePrice,
+      grossReturnPct: markReturnPct,
       netReturnPct,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
     });

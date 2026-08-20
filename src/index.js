@@ -34,6 +34,7 @@ const {
   GraduationAccelerationShadowSuite,
 } = require('./core/GraduationAccelerationShadowSuite');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
+const { PreEntryRugRiskTracker } = require('./core/PreEntryRugRiskTracker');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
 const { launchStartupDashboard } = require('./server/startup-dashboard');
@@ -80,6 +81,10 @@ function createRuntime(runtimeConfig = config) {
     ...(runtimeConfig.smartLikeEarlyShadow.walletClusters || [])
       .flatMap((cluster) => cluster.wallets || []),
   ]);
+  const preEntryRugRisk = new PreEntryRugRiskTracker({
+    config: runtimeConfig.preEntryRugRisk,
+  });
+  preEntryRugRisk.start();
   const signalShadow = new PrimarySignalShadowSuite({
     config: runtimeConfig.signalShadow,
     store,
@@ -116,6 +121,7 @@ function createRuntime(runtimeConfig = config) {
       smartWallets: [...smartWallets],
     },
     store,
+    rugRiskTracker: preEntryRugRisk,
   });
   smartResonanceShadow.start();
   const publicFlowLeadShadow = new PublicFlowLeadShadowSuite({
@@ -151,6 +157,7 @@ function createRuntime(runtimeConfig = config) {
   const launchQualityObserver = new LaunchQualityObserver({
     config: runtimeConfig.launchQualityObserver,
     store,
+    rugRiskTracker: preEntryRugRisk,
     onReference: (reference) => launchPullbackShadow.onReference(reference),
     onSnapshot: (snapshot, options) => {
       holderGrowthShadow.onSnapshot(snapshot, options);
@@ -161,6 +168,7 @@ function createRuntime(runtimeConfig = config) {
   const migrationSecondLegObserver = new MigrationSecondLegObserver({
     config: runtimeConfig.migrationSecondLegObserver,
     store,
+    rugRiskTracker: preEntryRugRisk,
   });
   const m2fStartedAt = Date.now();
   console.log('[Startup] starting M2F-OBS without historical replay');
@@ -169,6 +177,7 @@ function createRuntime(runtimeConfig = config) {
   const migratedDropReboundShadow = new MigratedDropReboundShadowSuite({
     config: runtimeConfig.migratedDropReboundShadow,
     store,
+    rugRiskTracker: preEntryRugRisk,
   });
   migratedDropReboundShadow.start();
   const migrationContinuityShadow = new MigrationContinuityShadowSuite({
@@ -218,6 +227,7 @@ function createRuntime(runtimeConfig = config) {
     smartOpenShadow,
     flowSmartConfirmShadow,
     smartLikeEarlyShadow,
+    preEntryRugRisk,
     smartResonanceShadow,
     publicFlowLeadShadow,
     launchPullbackShadow,
@@ -430,6 +440,7 @@ function createRuntime(runtimeConfig = config) {
           )
           : null;
         store.queueRawTrade(trade);
+        observeShadow('preEntryRugRisk', () => preEntryRugRisk.observeTrade(trade));
         observeShadow('smartLikeEarly', () => smartLikeEarlyShadow.observeTrade(trade));
         observeShadow('smartResonance', () => smartResonanceShadow.observeTrade(trade));
         observeShadow('publicFlowLead', () => publicFlowLeadShadow.observeTrade(trade));
@@ -632,6 +643,7 @@ function createRuntime(runtimeConfig = config) {
       ],
       [
         ['smartLikeEarlyAdvance', smartLikeEarlyShadow],
+        ['preEntryRugRiskAdvance', preEntryRugRisk],
         ['smartResonanceAdvance', smartResonanceShadow],
         ['publicFlowLeadAdvance', publicFlowLeadShadow],
         ['launchPullbackAdvance', launchPullbackShadow],
@@ -695,6 +707,7 @@ function createRuntime(runtimeConfig = config) {
     smartOpenShadow.stop();
     flowSmartConfirmShadow.stop();
     smartLikeEarlyShadow.stop();
+    preEntryRugRisk.stop();
     smartResonanceShadow.stop();
     publicFlowLeadShadow.stop();
     launchPullbackShadow.stop();
@@ -728,6 +741,7 @@ function createRuntime(runtimeConfig = config) {
       smartOpenShadow: smartOpenShadow.health(),
       flowSmartConfirmShadow: flowSmartConfirmShadow.health(),
       smartLikeEarlyShadow: smartLikeEarlyShadow.health(),
+      preEntryRugRisk: preEntryRugRisk.health(),
       smartResonanceShadow: smartResonanceShadow.health(),
       publicFlowLeadShadow: publicFlowLeadShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
@@ -749,7 +763,7 @@ function createRuntime(runtimeConfig = config) {
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
-    smartLikeEarlyShadow, smartResonanceShadow, publicFlowLeadShadow,
+    smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow, publicFlowLeadShadow,
     launchPullbackShadow,
     launchQualityObserver, migrationSecondLegObserver,
     holderGrowthShadow, qualityLeaderShadow, bigWinnerShadow,

@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -55,10 +56,11 @@ function camelRow(row) {
 }
 
 class SmartResonanceRightTailShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), rugRiskTracker = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.rugRiskTracker = rugRiskTracker;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
@@ -466,6 +468,7 @@ class SmartResonanceRightTailShadowSuite {
       publicSellFlow5s: sellFlow,
       publicNetFlow5s: buyFlow - sellFlow,
       largestBuyerSharePct: buyFlow > 0 ? largestBuyFlow / buyFlow * 100 : 0,
+      rugRisk: this.rugRiskTracker?.snapshot(mint, timestampMs) || null,
     };
   }
 
@@ -490,6 +493,10 @@ class SmartResonanceRightTailShadowSuite {
       && (features.curvePct == null || features.curvePct < profile.minCurvePct)) reasons.push('CURVE_BELOW_MIN');
     if (profile.maxCurvePct != null
       && (features.curvePct == null || features.curvePct > profile.maxCurvePct)) reasons.push('CURVE_ABOVE_MAX');
+    if (profile.requireHealthyRugRisk) {
+      if (!features.rugRisk?.sampleReady) reasons.push('RUG_RISK_SAMPLE_INSUFFICIENT');
+      else if (features.rugRisk.flagged) reasons.push('PRE_ENTRY_RUG_RISK');
+    }
     return reasons;
   }
 
@@ -563,7 +570,9 @@ class SmartResonanceRightTailShadowSuite {
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt
           || trade.market !== position.signalMarket) continue;
-        const jumpPct = (price / position.signalPrice - 1) * 100;
+        const entryExecution = executableBuy(trade, position.positionSol, price);
+        const entryPrice = entryExecution.price ?? price;
+        const jumpPct = (entryPrice / position.signalPrice - 1) * 100;
         if (jumpPct > this.config.maxEntryPriceJumpPct
           || jumpPct < -this.config.maxEntryPriceDropPct) {
           this._patch(position.id, {
@@ -574,7 +583,7 @@ class SmartResonanceRightTailShadowSuite {
           this.pendingEntries.delete(position.id);
           this._unindex(position);
           this.metrics.priceJump += 1;
-        } else this._open(position, trade, price, jumpPct);
+        } else this._open(position, trade, entryPrice, jumpPct, price);
         continue;
       }
       if (position.status === STATUS.EXIT_PENDING) {
@@ -605,15 +614,15 @@ class SmartResonanceRightTailShadowSuite {
     return movePct <= this.config.maxCrossMarketPriceJumpPct;
   }
 
-  _open(position, trade, price, jumpPct) {
+  _open(position, trade, price, jumpPct, marketPrice = price) {
     Object.assign(position, {
       status: STATUS.OPEN,
       entryAt: trade.timestampMs,
       entryMarket: trade.market,
       entryPrice: price,
-      highestPrice: price,
-      lowestPrice: price,
-      lastPrice: price,
+      highestPrice: marketPrice,
+      lowestPrice: marketPrice,
+      lastPrice: marketPrice,
       lastMarket: trade.market,
       maxFavorableReturnPct: 0,
       maxAdverseReturnPct: 0,
@@ -624,11 +633,11 @@ class SmartResonanceRightTailShadowSuite {
       entryMarket: trade.market,
       entryPrice: price,
       entryJumpPct: jumpPct,
-      highestPrice: price,
-      lowestPrice: price,
+      highestPrice: marketPrice,
+      lowestPrice: marketPrice,
       lastObservedAt: trade.timestampMs,
       lastMarket: trade.market,
-      lastPrice: price,
+      lastPrice: marketPrice,
       maxFavorableReturnPct: 0,
       maxAdverseReturnPct: 0,
     });
@@ -683,15 +692,23 @@ class SmartResonanceRightTailShadowSuite {
 
   _close(position, trade, price) {
     this._mark(position, trade.timestampMs, trade.market, price);
-    const grossReturnPct = (price / position.entryPrice - 1) * 100;
+    const markReturnPct = (price / position.entryPrice - 1) * 100;
+    const execution = executableSell(
+      trade,
+      position.positionSol / position.entryPrice,
+      price,
+      { rugMarkReturnPct: markReturnPct },
+    );
+    const executablePrice = execution.price ?? price;
+    const executableReturnPct = (executablePrice / position.entryPrice - 1) * 100;
     const estimatedCostSol = this._estimatedCostSol(position);
-    const netReturnPct = grossReturnPct - estimatedCostSol / position.positionSol * 100;
+    const netReturnPct = executableReturnPct - estimatedCostSol / position.positionSol * 100;
     this._patch(position.id, {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
-      exitPrice: price,
-      grossReturnPct,
+      exitPrice: executablePrice,
+      grossReturnPct: markReturnPct,
       netReturnPct,
       estimatedCostSol,
     });

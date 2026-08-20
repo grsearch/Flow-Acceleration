@@ -84,7 +84,7 @@ assert.strictEqual(liveContinuity.code, 'M-C5-E120');
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
 assert.strictEqual(liveQualityLeader.positionSizeSol, 0.1);
-assert.strictEqual(liveQualityLeader.entryEnabled, true);
+assert.strictEqual(liveQualityLeader.entryEnabled, false);
 assert.strictEqual(liveQualityLeader.code, 'QL-STRICT-PR');
 assert.strictEqual(liveQualityLeader.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveQualityLeader.exitMode, 'QUALITY_PROTECTED_RUNNER');
@@ -233,7 +233,7 @@ assert.deepStrictEqual(
   config.flowSmartConfirmShadow.cohorts.map((cohort) => [cohort.id, cohort.maxConfirmationDelayMs]),
   [['L5_F5', 5_000], ['L15_F5', 15_000], ['L5_T15', 5_000], ['L15_T20', 15_000]],
 );
-assert.strictEqual(config.smartResonanceShadow.enabled, false);
+assert.strictEqual(config.smartResonanceShadow.enabled, true);
 assert.strictEqual(config.smartLikeEarlyShadow.enabled, false);
 assert.strictEqual(config.smartResonanceShadow.positionSizeSol, 1);
 assert.strictEqual(config.smartResonanceShadow.entryDelayMs, 200);
@@ -246,6 +246,7 @@ assert.deepStrictEqual(
     ['SR_R1', 2, 5_000],
     ['SR_R2', 3, 60_000],
     ['SR_R3', 2, 60_000],
+    ['SR_R3_GUARD', 2, 60_000],
   ],
 );
 assert.deepStrictEqual(
@@ -259,7 +260,7 @@ assert.deepStrictEqual(
     ['H30_T180', 30, 180_000], ['H30_T240', 30, 240_000],
   ],
 );
-assert.strictEqual(config.publicFlowLeadShadow.enabled, true);
+assert.strictEqual(config.publicFlowLeadShadow.enabled, false);
 assert.strictEqual(config.publicFlowLeadShadow.positionSizeSol, 1);
 assert.strictEqual(config.publicFlowLeadShadow.smartLabelWindowMs, 15_000);
 assert.deepStrictEqual(
@@ -393,6 +394,8 @@ assert.deepStrictEqual(
   ]),
   [
     ['GD25_35', null, null],
+    ['GD25_35_RUG_GUARD_ALL', null, 1],
+    ['GD25_35_RUG_GUARD_T20_24', null, 1],
     ['GE30_R23_F1', 30_000, 1],
     ['GE30_R23_F3', 30_000, 3],
     ['GE30_R23_F1_EXEC', 30_000, 1],

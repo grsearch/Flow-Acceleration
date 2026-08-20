@@ -70,12 +70,14 @@ function newState(token) {
 class LaunchQualityObserver {
   constructor({
     config, store, now = () => Date.now(), onReference = null, onSnapshot = null,
+    rugRiskTracker = null,
   }) {
     this.config = config;
     this.store = store;
     this.now = now;
     this.onReference = typeof onReference === 'function' ? onReference : null;
     this.onSnapshot = typeof onSnapshot === 'function' ? onSnapshot : null;
+    this.rugRiskTracker = rugRiskTracker;
     this.states = new Map();
     this.marketRegimeCache = new Map();
     this.metrics = {
@@ -542,6 +544,7 @@ class LaunchQualityObserver {
       ? state.maxPullbackPct / depthFractionPct
       : null;
     const creator = state.creator ? state.wallets.get(state.creator) : null;
+    const rugRisk = this.rugRiskTracker?.snapshot(state.mint, observedAt) || null;
     return {
       buyers: buyers.length,
       recentBuyers,
@@ -574,6 +577,7 @@ class LaunchQualityObserver {
       netFlowAcceleration1s: recentNetFlow1s - previousNetFlow1s,
       curvePct: state.latestCurvePct,
       virtualSolReserves: state.latestVirtualSolReserves,
+      rugRisk,
     };
   }
 

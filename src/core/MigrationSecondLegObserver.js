@@ -132,10 +132,11 @@ function windowStats(events, startAt, endAt, effectiveBuyMinSol = 0) {
 }
 
 class MigrationSecondLegObserver {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), rugRiskTracker = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.rugRiskTracker = rugRiskTracker;
     this.states = new Map();
     this.metrics = {
       migrationsObserved: 0,
@@ -376,6 +377,7 @@ class MigrationSecondLegObserver {
     const quoteReserveSol = effectiveQuoteReserveSol(trade) ?? state.latestQuoteReserveSol;
     const provisionalOnfi10Pct = quoteReserveSol > 0
       ? current10.netFlow / quoteReserveSol * 100 : null;
+    const rugRisk = this.rugRiskTracker?.snapshot(state.mint, timestampMs) || null;
     const featureCompleteness = {
       publicOrderFlow: true,
       observedWalletDiffusion: true,
@@ -386,6 +388,7 @@ class MigrationSecondLegObserver {
       cashback: state.cashbackStatus === 'UNKNOWN' ? false : 'HINT_ONLY',
       canonicalPool: state.canonicalPoolStatus === 'UNKNOWN' ? false : true,
       entityClusters: false,
+      preEntryRugRisk: rugRisk,
       note: 'ONFI is provisional gross flow until BOOST/wash/entity filtering is available.',
     };
     const snapshot = {

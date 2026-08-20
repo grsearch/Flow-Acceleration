@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -348,7 +349,9 @@ class MigrationContinuityShadowSuite {
       if (position.status === STATUS.PENDING_ENTRY) {
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
-        const jumpPct = ((price / position.signalPrice) - 1) * 100;
+        const entryExecution = executableBuy(trade, position.positionSol, price);
+        const entryPrice = entryExecution.price ?? price;
+        const jumpPct = ((entryPrice / position.signalPrice) - 1) * 100;
         if (jumpPct > this.config.maxEntryPriceJumpPct) {
           this.store.updateMigrationContinuityShadowPosition(position.id, {
             status: STATUS.PRICE_JUMP,
@@ -363,7 +366,7 @@ class MigrationContinuityShadowSuite {
         Object.assign(position, {
           status: STATUS.OPEN,
           entryAt: trade.timestampMs,
-          entryPrice: price,
+          entryPrice,
           highestPrice: price,
           lowestPrice: price,
           lastObservedAt: trade.timestampMs,
@@ -372,7 +375,7 @@ class MigrationContinuityShadowSuite {
         this.store.updateMigrationContinuityShadowPosition(position.id, {
           status: STATUS.OPEN,
           entryAt: trade.timestampMs,
-          entryPrice: price,
+          entryPrice,
           entryJumpPct: jumpPct,
           highestPrice: price,
           lowestPrice: price,
@@ -498,13 +501,23 @@ class MigrationContinuityShadowSuite {
 
   _close(position, trade, price) {
     this._updateExtrema(position, trade.timestampMs, price);
-    const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const execution = executableSell(
+      trade,
+      position.positionSol / position.entryPrice,
+      price,
+      { rugMarkReturnPct: markReturnPct },
+    );
+    const executablePrice = execution.price ?? price;
+    const executableReturnPct = ((executablePrice / position.entryPrice) - 1) * 100;
     this.store.updateMigrationContinuityShadowPosition(position.id, {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
-      exitPrice: price,
-      grossReturnPct,
-      netReturnPct: grossReturnPct - this.costs.deterministicCostPct,
+      exitPrice: executablePrice,
+      // Keep the observable mark return for audit; net return is the capacity-aware
+      // executable result used by strategy profitability statistics.
+      grossReturnPct: markReturnPct,
+      netReturnPct: executableReturnPct - this.costs.deterministicCostPct,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });

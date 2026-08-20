@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -145,10 +146,11 @@ function rowPosition(row) {
 }
 
 class MigratedDropReboundShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), rugRiskTracker = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.rugRiskTracker = rugRiskTracker;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((profile) => [profile.id, profile]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
@@ -210,6 +212,8 @@ class MigratedDropReboundShadowSuite {
       fastConfirmationRejected: 0,
       fastConfirmationFeatureComputations: 0,
       fastConfirmationCapacityComputations: 0,
+      rugRiskRejected: 0,
+      rugRiskSampleInsufficient: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -646,7 +650,12 @@ class MigratedDropReboundShadowSuite {
                 profile.beijingHourRanges,
               );
               if (agePass && countPass && timePass) {
-                if (minimumPass) {
+                const rugRisk = profile.requireHealthyRugRisk
+                  ? this.rugRiskTracker?.snapshot(trade.mint, trade.timestampMs) || null
+                  : null;
+                const rugRiskPass = !profile.requireHealthyRugRisk
+                  || (rugRisk?.sampleReady && !rugRisk.flagged);
+                if (minimumPass && rugRiskPass) {
                   this._emitSignal({
                     profile,
                     lifecycleStage,
@@ -656,7 +665,11 @@ class MigratedDropReboundShadowSuite {
                     candidate,
                     dropPct,
                     reboundPct,
+                    rugRisk,
                   });
+                } else if (minimumPass && profile.requireHealthyRugRisk) {
+                  if (!rugRisk?.sampleReady) this.metrics.rugRiskSampleInsufficient += 1;
+                  else if (rugRisk.flagged) this.metrics.rugRiskRejected += 1;
                 }
                 this.signalCounts.set(signalKey, signalOrdinal);
               }
@@ -690,6 +703,7 @@ class MigratedDropReboundShadowSuite {
     candidate,
     dropPct,
     reboundPct,
+    rugRisk = null,
   }) {
     const stageCode = lifecycleStage === 'PRE_MIGRATION' ? 'PRE' : 'POST';
     const episodeId = `${trade.mint}:${stageCode}:${profile.id}:${candidate.startedAt}:${trade.timestampMs}`;
@@ -745,7 +759,7 @@ class MigratedDropReboundShadowSuite {
           reboundFromLowMs: trade.timestampMs - candidate.lowAt,
           entryTargetAt,
           entryDeadlineAt: entryTargetAt + this.config.entryTimeoutMs,
-          confirmationJson: null,
+          confirmationJson: rugRisk ? JSON.stringify({ preEntryRugRisk: rugRisk }) : null,
           exitMode: exitProfile.exitMode,
           fixedHoldMs: exitProfile.fixedHoldMs,
           trailingActivationPct: exitProfile.trailingActivationPct,
@@ -1193,11 +1207,13 @@ class MigratedDropReboundShadowSuite {
   _close(position, trade, price) {
     this._updateExtrema(position, trade.timestampMs, price);
     const entryProfile = this.entryProfiles.get(position.entryProfileId);
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
     const exitFill = entryProfile?.capacityAware
-      ? ammSellAveragePrice(
+      ? executableSell(
         trade,
         position.positionSol / position.entryPrice,
         price,
+        { rugMarkReturnPct: markReturnPct },
       )
       : { price, impactPct: null };
     const runnerExitPrice = exitFill.price;

@@ -345,7 +345,7 @@ async function main() {
     assert.strictEqual(continuity.positionSizeSol, 0.1);
     assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
     assert.strictEqual(qualityLeader.positionSizeSol, 0.1);
-    assert.strictEqual(qualityLeader.entryEnabled, true);
+    assert.strictEqual(qualityLeader.entryEnabled, false);
     assert.strictEqual(qualityLeader.code, 'QL-STRICT-PR');
     assert.strictEqual(qualityLeader.exitMode, 'QUALITY_PROTECTED_RUNNER');
     assert.strictEqual(qualityLeader.maxShadowEntryImpactPct, 12);
@@ -462,7 +462,7 @@ async function main() {
     assert.strictEqual(smartResonance.runtime.sendsTransactions, false);
     assert.deepStrictEqual(
       smartResonance.runtime.entryProfiles.map((profile) => profile.id),
-      ['SR_R0', 'SR_R1', 'SR_R2', 'SR_R3'],
+      ['SR_R0', 'SR_R1', 'SR_R2', 'SR_R3', 'SR_R3_GUARD'],
     );
     assert.strictEqual(smartResonance.runtime.exitProfiles.length, 8);
     assert.ok(Array.isArray(smartResonance.cohorts));
@@ -544,7 +544,13 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 14);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 16);
+    assert.deepStrictEqual(
+      migratedRebound.runtime.entryProfiles
+        .filter((profile) => profile.id.startsWith('GD25_35_RUG_GUARD'))
+        .map((profile) => [profile.id, profile.requireHealthyRugRisk]),
+      [['GD25_35_RUG_GUARD_ALL', true], ['GD25_35_RUG_GUARD_T20_24', true]],
+    );
     assert.deepStrictEqual(
       migratedRebound.runtime.entryProfiles
         .filter((profile) => profile.id.startsWith('GFR_'))

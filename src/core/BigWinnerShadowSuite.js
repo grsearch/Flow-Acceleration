@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -687,20 +688,9 @@ class BigWinnerShadowSuite {
   _simulatedExitPrice(trade, position, marketPrice, weight = 1) {
     const profile = this.entryProfiles.get(position.entryProfileId);
     if (!profile?.capacityAware) return marketPrice;
-    try {
-      const baseRaw = BigInt(trade.poolBaseReservesRaw || 0);
-      const quoteRaw = BigInt(trade.poolQuoteReservesRaw || 0)
-        + BigInt(trade.virtualQuoteReservesRaw || 0);
-      const tokenUnits = (position.positionSol / position.entryPrice) * Math.max(0, weight);
-      const inputRaw = BigInt(Math.max(1, Math.round(tokenUnits * 1e6)));
-      if (baseRaw <= 0n || quoteRaw <= 0n || !(tokenUnits > 0)) return marketPrice;
-      const quoteOutRaw = quoteRaw * inputRaw / (baseRaw + inputRaw);
-      const solOut = Number(quoteOutRaw) / 1e9;
-      const exitPrice = solOut / tokenUnits;
-      return exitPrice > 0 ? exitPrice : marketPrice;
-    } catch (_) {
-      return marketPrice;
-    }
+    const tokenUnits = (position.positionSol / position.entryPrice) * Math.max(0, weight);
+    const rugMarkReturnPct = returnPct(marketPrice, position.entryPrice);
+    return executableSell(trade, tokenUnits, marketPrice, { rugMarkReturnPct }).price;
   }
 
   _open(position, trade, marketPrice) {
