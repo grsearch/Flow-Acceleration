@@ -18,12 +18,20 @@ class PreEntryRugRiskTracker {
     this.config = config;
     this.now = now;
     this.states = new Map();
+    this.guardStrategies = new Map();
+    this.recentGuardDecisions = [];
     this.lastSweepAt = 0;
     this.metrics = {
       observedTrades: 0,
       evaluations: 0,
       sampleReady: 0,
       flagged: 0,
+      guardEvaluations: 0,
+      guardPassed: 0,
+      guardRejected: 0,
+      guardSampleInsufficient: 0,
+      liveCacheHits: 0,
+      liveCacheMisses: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -33,6 +41,8 @@ class PreEntryRugRiskTracker {
 
   stop() {
     this.states.clear();
+    this.guardStrategies.clear();
+    this.recentGuardDecisions = [];
   }
 
   observeTrade(trade) {
@@ -42,10 +52,14 @@ class PreEntryRugRiskTracker {
     if (!(timestampMs > 0) || !(price > 0)) return;
     let state = this.states.get(trade.mint);
     if (!state) {
-      state = { events: [], offset: 0, lastAt: timestampMs };
+      state = {
+        events: [], offset: 0, lastAt: timestampMs, version: 0,
+        cachedVersion: -1, cachedRisk: null,
+      };
       this.states.set(trade.mint, state);
     }
     state.events.push({ timestampMs, side: trade.side, price });
+    state.version += 1;
     state.lastAt = Math.max(state.lastAt, timestampMs);
     this._prune(state, timestampMs);
     if (state.events.length - state.offset > this.config.maxEventsPerMint) {
@@ -59,6 +73,13 @@ class PreEntryRugRiskTracker {
   snapshot(mint, timestampMs = this.now()) {
     const state = this.states.get(mint);
     if (!state) return this._empty(timestampMs);
+    if (state.cachedRisk && state.cachedVersion === state.version
+      && Math.abs(timestampMs - state.cachedRisk.observedAt) <= this.config.cacheMaxAgeMs) {
+      this.metrics.evaluations += 1;
+      if (state.cachedRisk.sampleReady) this.metrics.sampleReady += 1;
+      if (state.cachedRisk.flagged) this.metrics.flagged += 1;
+      return state.cachedRisk;
+    }
     this._prune(state, timestampMs);
     const cutoff = timestampMs - this.config.windowMs;
     const rows = state.events.slice(state.offset).filter((row) => (
@@ -103,7 +124,7 @@ class PreEntryRugRiskTracker {
     this.metrics.evaluations += 1;
     if (sampleReady) this.metrics.sampleReady += 1;
     if (flagged) this.metrics.flagged += 1;
-    return {
+    const risk = {
       observedAt: timestampMs,
       windowMs: this.config.windowMs,
       sampleSize: rows.length,
@@ -118,6 +139,72 @@ class PreEntryRugRiskTracker {
       returnPct,
       checks,
     };
+    state.cachedRisk = risk;
+    state.cachedVersion = state.version;
+    return risk;
+  }
+
+  evaluateGuard({ strategyId, mint, timestampMs = this.now(), source = 'SHADOW' }) {
+    const normalizedStrategyId = String(strategyId || 'UNKNOWN');
+    const normalizedSource = String(source || 'SHADOW').toUpperCase();
+    let risk;
+    if (normalizedSource === 'LIVE') {
+      const state = this.states.get(mint);
+      const cached = state?.cachedRisk;
+      if (cached && state.cachedVersion === state.version
+        && Math.abs(timestampMs - cached.observedAt) <= this.config.cacheMaxAgeMs) {
+        risk = cached;
+        this.metrics.liveCacheHits += 1;
+      } else {
+        // Live entry is deliberately fail-open on a cache miss. It must never wait for
+        // computation, disk or RPC on the transaction hot path.
+        risk = this._empty(timestampMs);
+        this.metrics.liveCacheMisses += 1;
+      }
+    } else risk = this.snapshot(mint, timestampMs);
+    const blocked = Boolean(this.config.enabled && risk.sampleReady && risk.flagged);
+    const stats = this.guardStrategies.get(normalizedStrategyId) || {
+      strategyId: normalizedStrategyId,
+      source: normalizedSource,
+      evaluated: 0,
+      sampleReady: 0,
+      sampleInsufficient: 0,
+      passed: 0,
+      rejected: 0,
+      lastEvaluatedAt: null,
+      lastRejectedAt: null,
+    };
+    stats.evaluated += 1;
+    stats.lastEvaluatedAt = timestampMs;
+    if (risk.sampleReady) stats.sampleReady += 1;
+    else stats.sampleInsufficient += 1;
+    if (blocked) {
+      stats.rejected += 1;
+      stats.lastRejectedAt = timestampMs;
+    } else stats.passed += 1;
+    this.guardStrategies.set(normalizedStrategyId, stats);
+
+    this.metrics.guardEvaluations += 1;
+    if (risk.sampleReady) this.metrics.guardPassed += blocked ? 0 : 1;
+    else this.metrics.guardSampleInsufficient += 1;
+    if (blocked) this.metrics.guardRejected += 1;
+
+    const decision = {
+      strategyId: normalizedStrategyId,
+      source: normalizedSource,
+      mint,
+      observedAt: timestampMs,
+      blocked,
+      reason: blocked ? 'PRE_ENTRY_RUG_RISK' : (
+        risk.sampleReady ? 'RUG_GUARD_PASS' : 'RUG_GUARD_SAMPLE_INSUFFICIENT'
+      ),
+      ...risk,
+    };
+    if (blocked) {
+      this.recentGuardDecisions.unshift(decision);
+      if (this.recentGuardDecisions.length > 100) this.recentGuardDecisions.length = 100;
+    }
+    return decision;
   }
 
   advanceTime(now = this.now()) {
@@ -133,7 +220,10 @@ class PreEntryRugRiskTracker {
   health() {
     return {
       enabled: this.config.enabled,
-      mode: 'PRE_ENTRY_RUG_RISK_OBSERVER',
+      mode: 'UNIVERSAL_PRE_ENTRY_RUG_GUARD',
+      scope: 'ALL_LIVE_AND_SHADOW_ENTRIES',
+      enforcement: 'FLAGGED_BLOCK_SAMPLE_INSUFFICIENT_ALLOW',
+      livePath: 'MEMORY_CACHE_ONLY_FAIL_OPEN',
       sendsTransactions: false,
       trackedMints: this.states.size,
       thresholds: {
@@ -146,6 +236,9 @@ class PreEntryRugRiskTracker {
         minReturnPct: this.config.minReturnPct,
         minFlags: this.config.minFlags,
       },
+      strategyStats: [...this.guardStrategies.values()]
+        .sort((left, right) => right.evaluated - left.evaluated),
+      recentFlagged: this.recentGuardDecisions.slice(0, 50),
       ...this.metrics,
     };
   }
