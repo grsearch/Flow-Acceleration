@@ -4726,6 +4726,78 @@ const config = {
     }),
   },
 
+  // Forward-only theoretical same-slot backrun study. This observer never
+  // signs or sends a transaction. It measures whether a large PumpSwap sell
+  // is followed by a buy in the same slot and prices the hypothetical 0.1 SOL
+  // round trip from the sell event's post-trade reserves.
+  sameSlotDumpBackrunShadow: {
+    enabled: booleanEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_SHADOW_ENABLED', true),
+    positionSizeSol: numberEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_POSITION_SOL', 0.1, {
+      min: 0.01,
+      max: 10,
+    }),
+    trackingAgeMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_TRACKING_AGE_MS', 15 * 60_000, {
+      min: 60_000,
+      max: 60 * 60_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_STATE_RETENTION_MS', 20 * 60_000, {
+      min: 60_000,
+      max: 2 * 60 * 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_EPISODE_COOLDOWN_MS', 10_000, {
+      min: 0,
+      max: 10 * 60_000,
+    }),
+    exitGraceMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_EXIT_GRACE_MS', 2_000, {
+      min: 100,
+      max: 30_000,
+    }),
+    maxEpisodesPerMint: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_MAX_EPISODES_PER_MINT', 20, {
+      min: 1,
+      max: 100,
+    }),
+    entryProfiles: [
+      {
+        id: 'SDBR-S10-D15',
+        label: 'Sell>=10 SOL / drop>=15%',
+        minSellSol: 10,
+        minDropPct: 15,
+        maxDropPct: 70,
+        minQuoteReserveSol: 5,
+        maxEntryImpactPct: 12,
+      },
+      {
+        id: 'SDBR-S20-D20',
+        label: 'Sell>=20 SOL / drop>=20%',
+        minSellSol: 20,
+        minDropPct: 20,
+        maxDropPct: 70,
+        minQuoteReserveSol: 5,
+        maxEntryImpactPct: 12,
+      },
+    ],
+    exitProfiles: [
+      { id: 'H250', label: 'fixed 250ms', kind: 'FIXED', holdMs: 250 },
+      { id: 'H500', label: 'fixed 500ms', kind: 'FIXED', holdMs: 500 },
+      { id: 'H1000', label: 'fixed 1s', kind: 'FIXED', holdMs: 1_000 },
+      { id: 'H2000', label: 'fixed 2s', kind: 'FIXED', holdMs: 2_000 },
+      {
+        id: 'TP8-H2000',
+        label: '+8% or fixed 2s',
+        kind: 'TAKE_OR_FIXED',
+        takeProfitPct: 8,
+        maxHoldMs: 2_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_POSITION_SOL', 0.1, {
+        min: 0.01,
+        max: 10,
+      }),
+    }),
+  },
+
   storage: {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 48, { min: 24 }),
@@ -4829,6 +4901,20 @@ function validateConfig() {
     }
     if (bigWinnerExitIds.size !== config.bigWinnerShadow.exitProfiles.length) {
       errors.push('Big Winner Shadow exit profile ids must be unique');
+    }
+  }
+  if (config.sameSlotDumpBackrunShadow.enabled) {
+    const entryIds = new Set(
+      config.sameSlotDumpBackrunShadow.entryProfiles.map((profile) => profile.id),
+    );
+    const exitIds = new Set(
+      config.sameSlotDumpBackrunShadow.exitProfiles.map((profile) => profile.id),
+    );
+    if (!entryIds.size || entryIds.size !== config.sameSlotDumpBackrunShadow.entryProfiles.length) {
+      errors.push('Same-Slot Dump Backrun Shadow entry profile ids must be present and unique');
+    }
+    if (!exitIds.size || exitIds.size !== config.sameSlotDumpBackrunShadow.exitProfiles.length) {
+      errors.push('Same-Slot Dump Backrun Shadow exit profile ids must be present and unique');
     }
   }
   if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
