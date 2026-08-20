@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -405,6 +406,20 @@ class HolderGrowthShadowSuite {
   }
 
   _open(position, trade, price) {
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: `HOLDER_GROWTH:${position.cohortId}`,
+      mint: position.mint,
+      timestampMs: trade.timestampMs,
+    });
+    if (rugGuard.blocked) {
+      this.store.updateHolderGrowthShadowPosition(position.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason: 'PRE_ENTRY_RUG_RISK',
+      });
+      this.pendingEntries.delete(position.id);
+      this._unindex(position);
+      return;
+    }
     const jumpPct = ((price / position.signalPrice) - 1) * 100;
     const entryProfile = this.entryProfiles.get(position.entryProfileId) || {};
     const minJumpPct = finite(entryProfile.minEntryJumpPct, -this.config.maxEntryPriceDropPct);
