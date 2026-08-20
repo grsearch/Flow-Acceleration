@@ -20,7 +20,7 @@
     "test:startup-db": "node scripts/test-startup-no-history-rewrite.js",
     "test:health-sampler": "node scripts/test-database-health-sampler.js",
     "test:shadow-execution": "node scripts/test-shadow-execution-model.js",
-    "test:rug-risk": "node scripts/test-pre-entry-rug-risk.js",
+    "test:rug-risk": "node scripts/test-pre-entry-rug-risk.js && node scripts/test-universal-rug-guard.js",
     "test:config": "node scripts/test-config-cost.js",
     "test:stream": "node scripts/test-flow-stream-failover.js",
     "test:parser": "node scripts/test-pump-event-parser.js",
