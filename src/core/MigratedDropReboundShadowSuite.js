@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableSell } = require('./ShadowExecutionModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -795,6 +796,20 @@ class MigratedDropReboundShadowSuite {
         if (!this._eligibleEntryTrade(position, trade)) continue;
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
+        const universalRugGuard = evaluateUniversalRugGuard(this.store, {
+          strategyId: `MIGRATED_DROP_REBOUND:${position.cohortId}`,
+          mint: position.mint,
+          timestampMs: trade.timestampMs,
+        });
+        if (universalRugGuard.blocked) {
+          this.store.updateMigratedDropReboundShadowPosition(position.id, {
+            status: STATUS.NO_ENTRY,
+            rejectionReason: 'PRE_ENTRY_RUG_RISK',
+          });
+          this.pendingEntries.delete(position.id);
+          this._unindexRow(position);
+          continue;
+        }
         const jumpPct = ((price / position.reboundPrice) - 1) * 100;
         const entryProfile = this.entryProfiles.get(position.entryProfileId);
         const maxEntryPriceJumpPct = Number.isFinite(Number(entryProfile?.maxEntryPriceJumpPct))
