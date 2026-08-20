@@ -85,6 +85,9 @@ function createRuntime(runtimeConfig = config) {
     config: runtimeConfig.preEntryRugRisk,
   });
   preEntryRugRisk.start();
+  // All entry-capable live and Shadow strategies share this forward-only guard.
+  // Observers still collect every trade so risk labels remain available for research.
+  store.preEntryRugRisk = preEntryRugRisk;
   const signalShadow = new PrimarySignalShadowSuite({
     config: runtimeConfig.signalShadow,
     store,
