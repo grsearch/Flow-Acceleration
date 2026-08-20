@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -615,6 +616,17 @@ class SmartResonanceRightTailShadowSuite {
   }
 
   _open(position, trade, price, jumpPct, marketPrice = price) {
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: `SMART_RESONANCE:${position.cohortId}`,
+      mint: position.mint,
+      timestampMs: trade.timestampMs,
+    });
+    if (rugGuard.blocked) {
+      this._patch(position.id, { status: STATUS.NO_ENTRY, rejectionReason: 'PRE_ENTRY_RUG_RISK' });
+      this.pendingEntries.delete(position.id);
+      this._unindex(position);
+      return;
+    }
     Object.assign(position, {
       status: STATUS.OPEN,
       entryAt: trade.timestampMs,
