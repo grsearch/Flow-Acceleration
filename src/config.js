@@ -1188,8 +1188,8 @@ const config = {
 
   // Strictly forward-only public-trade observer. The score describes the
   // low-alternation, one-sided stair-step pattern seen before many direct RUGs.
-  // It performs no RPC calls and is not a live veto unless an explicit Shadow
-  // cohort opts into it.
+  // It performs no RPC calls. All entry-capable live and Shadow strategies use
+  // the same forward-only guard. Live entry reads memory cache only and fails open.
   preEntryRugRisk: {
     enabled: booleanEnv('FLOW_PRE_ENTRY_RUG_RISK_ENABLED', true),
     windowMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_WINDOW_MS', 15_000, { min: 1_000 }),
@@ -1198,6 +1198,9 @@ const config = {
     }),
     sweepIntervalMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_SWEEP_MS', 5_000, { min: 1_000 }),
     maxEventsPerMint: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MAX_EVENTS', 256, { min: 32 }),
+    cacheMaxAgeMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_CACHE_MAX_AGE_MS', 1_000, {
+      min: 50, max: 10_000,
+    }),
     minTrades: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_TRADES', 10, { min: 3 }),
     minBuySharePct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_BUY_SHARE_PCT', 58, {
       min: 0, max: 100,
