@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -596,6 +597,17 @@ class PublicFlowLeadShadowSuite {
   }
 
   _open(position, trade, price, jumpPct) {
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: `PUBLIC_FLOW_LEAD:${position.cohortId}`,
+      mint: position.mint,
+      timestampMs: trade.timestampMs,
+    });
+    if (rugGuard.blocked) {
+      this._patch(position.id, { status: STATUS.NO_ENTRY, rejectionReason: 'PRE_ENTRY_RUG_RISK' });
+      this.pendingEntries.delete(position.id);
+      this._unindex(position);
+      return;
+    }
     Object.assign(position, {
       status: STATUS.OPEN,
       entryAt: trade.timestampMs,
