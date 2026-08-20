@@ -717,3 +717,18 @@ reserve；M2F 会据此保存有效 Quote Reserve、0.05/0.1/0.25 SOL 的恒定�
 模拟入场；填单时必须通过共享的 `Pre-entry RUG Guard`。退出测试固定 10 秒，
 保留 15% mark-price 硬止损，并以真实储备估计退出冲击、费用和 RUG 场景。
 所有结果写入独立表 `migration_second_leg_shadow_positions`，永不签名或发链。
+
+## SDBR 同 Slot 大砸单回补观察（2026-08-20）
+
+`SDBR` 是独立的 Same-Slot Dump Backrun Shadow，只跟踪毕业后最初15分钟的
+PumpSwap 成交。默认对照 `Sell≥10 SOL/跌幅≥15%` 与
+`Sell≥20 SOL/跌幅≥20%` 两组，按砸单事件的真实 post-trade reserves 计算
+0.1 SOL 理论即时买入容量，再分别测试250ms、500ms、1秒、2秒固定退出以及
+`+8%或2秒`退出。
+
+该测试同时保存第一笔非砸单钱包 BUY 的 Slot 与到达延迟，因此会把“信号本身
+有收益”和“没有 Leader 基础设施是否来得及成交”分开统计。它不签名、不发链、
+不增加 RPC；热路径只做有界内存判断，SQLite 写入延迟到维护周期批量完成。
+全局 Pre-entry RUG Guard 与0.1 SOL买卖储备冲击都会计入，`NO_EXIT` 单独右删失，
+不会伪造为 -100%。结果保存在独立表
+`same_slot_dump_backrun_shadow_positions`，不会混入或更改任何旧策略数据。
