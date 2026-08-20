@@ -310,6 +310,11 @@ class ResearchStore {
         table: 'public_flow_lead_shadow_positions',
         anchor: 'signal_at',
       },
+      'cya-slot-flow': {
+        label: 'CYA Slot Flow · CSF',
+        table: 'cya_slot_flow_shadow_positions',
+        anchor: 'signal_at',
+      },
       'launch-pullback': {
         label: 'Launch 回踩 · F',
         table: 'launch_pullback_shadow_positions',
@@ -1704,6 +1709,56 @@ class ResearchStore {
         ON migration_second_leg_snapshots(observed_at DESC);
       CREATE INDEX IF NOT EXISTS idx_m2f_snapshots_mint_age
         ON migration_second_leg_snapshots(mint, age_ms);
+
+      -- B-only M2F trading hypothesis. This stays isolated from the observer
+      -- tables and avoids ALTER work on any large historical table.
+      CREATE TABLE IF NOT EXISTS migration_second_leg_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cohort_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        position_sol REAL NOT NULL,
+        configured_cost_pct REAL NOT NULL,
+        migration_at INTEGER NOT NULL,
+        signal_at INTEGER NOT NULL,
+        signal_price REAL NOT NULL,
+        signal_age_ms INTEGER NOT NULL,
+        features_json TEXT NOT NULL,
+        rug_guard_json TEXT,
+        entry_target_at INTEGER NOT NULL,
+        entry_deadline_at INTEGER NOT NULL,
+        entry_at INTEGER,
+        entry_price REAL,
+        entry_jump_pct REAL,
+        entry_impact_pct REAL,
+        highest_price REAL,
+        lowest_price REAL,
+        last_observed_at INTEGER,
+        last_price REAL,
+        max_favorable_return_pct REAL,
+        max_adverse_return_pct REAL,
+        hard_stop_pct REAL NOT NULL,
+        max_hold_ms INTEGER NOT NULL,
+        exit_trigger_at INTEGER,
+        exit_target_at INTEGER,
+        exit_deadline_at INTEGER,
+        exit_at INTEGER,
+        exit_price REAL,
+        exit_impact_pct REAL,
+        exit_reason TEXT,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(cohort_id, episode_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_m2f_shadow_status
+        ON migration_second_leg_shadow_positions(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_m2f_shadow_mint_signal
+        ON migration_second_leg_shadow_positions(mint, signal_at DESC);
 
       CREATE TABLE IF NOT EXISTS holder_growth_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3941,6 +3996,61 @@ class ResearchStore {
           snapshot_count = snapshot_count + 1,
           updated_at = @updatedAt
         WHERE mint = @mint
+      `),
+      insertMigrationSecondLegShadowPosition: this.db.prepare(`
+        INSERT OR IGNORE INTO migration_second_leg_shadow_positions (
+          cohort_id, episode_id, mint, symbol, status, rejection_reason,
+          position_sol, configured_cost_pct, migration_at, signal_at,
+          signal_price, signal_age_ms, features_json, rug_guard_json,
+          entry_target_at, entry_deadline_at, hard_stop_pct, max_hold_ms,
+          created_at, updated_at
+        ) VALUES (
+          @cohortId, @episodeId, @mint, @symbol, @status, @rejectionReason,
+          @positionSol, @configuredCostPct, @migrationAt, @signalAt,
+          @signalPrice, @signalAgeMs, @featuresJson, @rugGuardJson,
+          @entryTargetAt, @entryDeadlineAt, @hardStopPct, @maxHoldMs,
+          @createdAt, @updatedAt
+        )
+      `),
+      getMigrationSecondLegShadowPosition: this.db.prepare(`
+        SELECT * FROM migration_second_leg_shadow_positions
+        WHERE cohort_id = ? AND episode_id = ?
+      `),
+      activeMigrationSecondLegShadowPositions: this.db.prepare(`
+        SELECT * FROM migration_second_leg_shadow_positions
+        WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        ORDER BY updated_at, id
+      `),
+      updateMigrationSecondLegShadowPosition: this.db.prepare(`
+        UPDATE migration_second_leg_shadow_positions SET
+          status = COALESCE(@status, status),
+          rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          rug_guard_json = COALESCE(@rugGuardJson, rug_guard_json),
+          entry_at = COALESCE(@entryAt, entry_at),
+          entry_price = COALESCE(@entryPrice, entry_price),
+          entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
+          entry_impact_pct = COALESCE(@entryImpactPct, entry_impact_pct),
+          highest_price = COALESCE(@highestPrice, highest_price),
+          lowest_price = COALESCE(@lowestPrice, lowest_price),
+          last_observed_at = COALESCE(@lastObservedAt, last_observed_at),
+          last_price = COALESCE(@lastPrice, last_price),
+          max_favorable_return_pct = COALESCE(
+            @maxFavorableReturnPct, max_favorable_return_pct
+          ),
+          max_adverse_return_pct = COALESCE(
+            @maxAdverseReturnPct, max_adverse_return_pct
+          ),
+          exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
+          exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
+          exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
+          exit_at = COALESCE(@exitAt, exit_at),
+          exit_price = COALESCE(@exitPrice, exit_price),
+          exit_impact_pct = COALESCE(@exitImpactPct, exit_impact_pct),
+          exit_reason = COALESCE(@exitReason, exit_reason),
+          gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
+          net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          updated_at = @updatedAt
+        WHERE id = @id
       `),
       recentSmartWalletEvents: this.db.prepare(`
         SELECT * FROM smart_wallet_events
@@ -6254,6 +6364,137 @@ class ResearchStore {
     return { ...row, inserted: result.changes > 0 };
   }
 
+  createMigrationSecondLegShadowPosition(position) {
+    const now = Date.now();
+    const row = {
+      cohortId: String(position.cohortId),
+      episodeId: String(position.episodeId),
+      mint: String(position.mint),
+      symbol: position.symbol || null,
+      status: position.status || 'PENDING_ENTRY',
+      rejectionReason: position.rejectionReason || null,
+      positionSol: Number(position.positionSol),
+      configuredCostPct: Number(position.configuredCostPct),
+      migrationAt: Math.trunc(Number(position.migrationAt)),
+      signalAt: Math.trunc(Number(position.signalAt)),
+      signalPrice: Number(position.signalPrice),
+      signalAgeMs: Math.trunc(Number(position.signalAgeMs)),
+      featuresJson: JSON.stringify(position.features || {}),
+      rugGuardJson: position.rugGuard ? JSON.stringify(position.rugGuard) : null,
+      entryTargetAt: Math.trunc(Number(position.entryTargetAt)),
+      entryDeadlineAt: Math.trunc(Number(position.entryDeadlineAt)),
+      hardStopPct: Number(position.hardStopPct),
+      maxHoldMs: Math.trunc(Number(position.maxHoldMs)),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = this.stmts.insertMigrationSecondLegShadowPosition.run(row);
+    if (result.changes > 0) {
+      return { ...row, id: Number(result.lastInsertRowid), inserted: true };
+    }
+    const existing = this.stmts.getMigrationSecondLegShadowPosition.get(
+      row.cohortId,
+      row.episodeId,
+    );
+    return existing ? { ...existing, inserted: false } : { ...row, inserted: false };
+  }
+
+  activeMigrationSecondLegShadowPositions() {
+    return this.stmts.activeMigrationSecondLegShadowPositions.all();
+  }
+
+  updateMigrationSecondLegShadowPosition(id, patch = {}) {
+    const numberOrNull = (key) => {
+      const number = Number(patch[key]);
+      return Number.isFinite(number) ? number : null;
+    };
+    return this.stmts.updateMigrationSecondLegShadowPosition.run({
+      id,
+      status: patch.status || null,
+      rejectionReason: patch.rejectionReason || null,
+      rugGuardJson: patch.rugGuard ? JSON.stringify(patch.rugGuard) : null,
+      entryAt: numberOrNull('entryAt'),
+      entryPrice: numberOrNull('entryPrice'),
+      entryJumpPct: numberOrNull('entryJumpPct'),
+      entryImpactPct: numberOrNull('entryImpactPct'),
+      highestPrice: numberOrNull('highestPrice'),
+      lowestPrice: numberOrNull('lowestPrice'),
+      lastObservedAt: numberOrNull('lastObservedAt'),
+      lastPrice: numberOrNull('lastPrice'),
+      maxFavorableReturnPct: numberOrNull('maxFavorableReturnPct'),
+      maxAdverseReturnPct: numberOrNull('maxAdverseReturnPct'),
+      exitTriggerAt: numberOrNull('exitTriggerAt'),
+      exitTargetAt: numberOrNull('exitTargetAt'),
+      exitDeadlineAt: numberOrNull('exitDeadlineAt'),
+      exitAt: numberOrNull('exitAt'),
+      exitPrice: numberOrNull('exitPrice'),
+      exitImpactPct: numberOrNull('exitImpactPct'),
+      exitReason: patch.exitReason || null,
+      grossReturnPct: numberOrNull('grossReturnPct'),
+      netReturnPct: numberOrNull('netReturnPct'),
+      updatedAt: Date.now(),
+    });
+  }
+
+  migrationSecondLegShadowDashboard({ positionLimit = 100 } = {}) {
+    const limit = Math.min(500, Math.max(1, Math.trunc(Number(positionLimit) || 100)));
+    const stats = this.db.prepare(`
+      SELECT COUNT(*) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+        COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+        COALESCE(SUM(rejection_reason = 'PRE_ENTRY_RUG_RISK'), 0) AS rug_rejected,
+        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+          AS average_net_return_pct,
+        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN gross_return_pct END)
+          AS average_gross_return_pct,
+        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0) AS wins,
+        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct IS NOT NULL), 0)
+          AS resolved,
+        MAX(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+          AS maximum_winner_pct,
+        SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0
+          THEN net_return_pct ELSE 0 END) AS gross_profit_pct,
+        ABS(SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct < 0
+          THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
+      FROM migration_second_leg_shadow_positions
+      WHERE cohort_id = 'M2F-NH10-GUARD-B'
+    `).get();
+    const resolved = Number(stats.resolved) || 0;
+    const wins = Number(stats.wins) || 0;
+    const loss = Number(stats.gross_loss_pct) || 0;
+    const positions = this.db.prepare(`
+      SELECT *,
+        CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+          THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM migration_second_leg_shadow_positions
+      WHERE cohort_id = 'M2F-NH10-GUARD-B'
+      ORDER BY CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        THEN 0 ELSE 1 END, updated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit).map((row) => ({
+      ...row,
+      features: (() => {
+        try { return JSON.parse(row.features_json || '{}'); } catch (_) { return {}; }
+      })(),
+      rug_guard: (() => {
+        try { return JSON.parse(row.rug_guard_json || '{}'); } catch (_) { return {}; }
+      })(),
+    }));
+    return {
+      stats: {
+        ...stats,
+        win_rate_pct: resolved > 0 ? wins / resolved * 100 : null,
+        profit_factor: loss > 0 ? (Number(stats.gross_profit_pct) || 0) / loss : null,
+      },
+      positions,
+    };
+  }
+
   migrationSecondLegDashboard({ observationLimit = 40, snapshotLimit = 100 } = {}) {
     const observationsLimit = Math.min(200, Math.max(1, Math.trunc(Number(observationLimit) || 40)));
     const snapshotsLimit = Math.min(500, Math.max(1, Math.trunc(Number(snapshotLimit) || 100)));
@@ -6300,6 +6541,7 @@ class ResearchStore {
     return {
       summary,
       publicCandidates,
+      shadow: this.migrationSecondLegShadowDashboard({ positionLimit: snapshotLimit }),
       featureAvailability: {
         observed: [
           'effective quote reserve',
