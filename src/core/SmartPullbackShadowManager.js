@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   WAITING_PULLBACK: 'WAITING_PULLBACK',
@@ -229,9 +230,16 @@ class SmartPullbackShadowManager {
     if (pending && trade.market === 'PUMP_BONDING_CURVE'
       && timestampMs >= pending.entryTargetAt
       && timestampMs <= pending.entryDeadlineAt) {
+      const rugGuard = evaluateUniversalRugGuard(this.store, {
+        strategyId: `SMART_PULLBACK:${this.config.cohortId}`,
+        mint: trade.mint,
+        timestampMs,
+      });
       const confirmationJumpPct = ((trade.price / pending.confirmationPrice) - 1) * 100;
       const smartBuyJumpPct = ((trade.price / pending.smartBuyPrice) - 1) * 100;
-      if (confirmationJumpPct > this.config.maxEntryPriceJumpPct) {
+      if (rugGuard.blocked) {
+        this._rejectPending(pending, STATUS.NO_ENTRY, 'PRE_ENTRY_RUG_RISK');
+      } else if (confirmationJumpPct > this.config.maxEntryPriceJumpPct) {
         this._rejectPending(pending, STATUS.PRICE_JUMP,
           `CONFIRMATION_PRICE_JUMP_${confirmationJumpPct.toFixed(2)}pct`);
       } else if (smartBuyJumpPct > this.config.maxEntryVsSmartBuyPct) {
