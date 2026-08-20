@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableSell } = require('./ShadowExecutionModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -694,6 +695,17 @@ class BigWinnerShadowSuite {
   }
 
   _open(position, trade, marketPrice) {
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: `BIG_WINNER:${position.cohortId}`,
+      mint: position.mint,
+      timestampMs: trade.timestampMs,
+    });
+    if (rugGuard.blocked) {
+      this._patch(position.id, { status: STATUS.NO_ENTRY, rejectionReason: 'PRE_ENTRY_RUG_RISK' });
+      this.pendingEntries.delete(position.id);
+      this._unindex(position);
+      return;
+    }
     const entryPrice = this._simulatedEntryPrice(trade, marketPrice, position.positionSol);
     const jumpPct = returnPct(entryPrice, position.signalPrice);
     const impactPct = returnPct(entryPrice, marketPrice);
