@@ -30,8 +30,11 @@ class ResearchServer {
     preEntryRugRisk = null,
     smartResonanceShadow = null,
     publicFlowLeadShadow = null,
+    cyaSlotFlowShadow = null,
+    sameSlotDumpBackrunShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migrationSecondLegObserver = null,
+    migrationSecondLegShadow = null,
     migratedDropReboundShadow = null,
     migrationContinuityShadow = null,
     rangeScalperShadow = null,
@@ -58,9 +61,12 @@ class ResearchServer {
     this.preEntryRugRisk = preEntryRugRisk;
     this.smartResonanceShadow = smartResonanceShadow;
     this.publicFlowLeadShadow = publicFlowLeadShadow;
+    this.cyaSlotFlowShadow = cyaSlotFlowShadow;
+    this.sameSlotDumpBackrunShadow = sameSlotDumpBackrunShadow;
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
     this.migrationSecondLegObserver = migrationSecondLegObserver;
+    this.migrationSecondLegShadow = migrationSecondLegShadow;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
     this.migrationContinuityShadow = migrationContinuityShadow;
     this.rangeScalperShadow = rangeScalperShadow;
@@ -331,10 +337,34 @@ class ResearchServer {
           opensSimulatedPositions: false,
           addsRpcRequests: false,
         },
+        runtimeShadow: this.migrationSecondLegShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_M2F_GUARD_B',
+          code: 'M2F-NH10-GUARD-B',
+          sendsTransactions: false,
+          guardRequired: true,
+        },
         ...this.store.migrationSecondLegDashboard({
           observationLimit: numeric(request.query.observationLimit, 40),
           snapshotLimit: numeric(request.query.snapshotLimit, 100),
         }),
+      });
+    });
+
+    this.app.get('/api/same-slot-dump-backrun-shadow', (request, response) => {
+      response.json(this.sameSlotDumpBackrunShadow?.dashboard({
+        positionLimit: numeric(request.query.positionLimit, 50),
+      }) || {
+        generatedAt: Date.now(),
+        runtime: {
+          enabled: false,
+          mode: 'SHADOW_SAME_SLOT_DUMP_BACKRUN',
+          code: 'SDBR',
+          sendsTransactions: false,
+          addsRpcRequests: false,
+        },
+        cohorts: [],
+        positions: [],
       });
     });
 
@@ -557,6 +587,25 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/cya-slot-flow-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.cyaSlotFlowShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_CSF',
+          sendsTransactions: false,
+          entryProfiles: [],
+          managementProfiles: [],
+        },
+        timeSessions: this.cyaSlotFlowShadow
+          ? this.store.shadowTimeSessionDashboard('cya-slot-flow')
+          : { sessions: [] },
+        ...(this.cyaSlotFlowShadow?.dashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+        }) || { cohorts: [], positions: [] }),
+      });
+    });
+
     this.app.get('/api/cya-early-pyramid-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -648,9 +697,12 @@ class ResearchServer {
         preEntryRugRisk: this.preEntryRugRisk?.health() || null,
         smartResonanceShadow: this.smartResonanceShadow?.health() || null,
         publicFlowLeadShadow: this.publicFlowLeadShadow?.health() || null,
+        cyaSlotFlowShadow: this.cyaSlotFlowShadow?.health() || null,
+        sameSlotDumpBackrunShadow: this.sameSlotDumpBackrunShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migrationSecondLegObserver: this.migrationSecondLegObserver?.health() || null,
+        migrationSecondLegShadow: this.migrationSecondLegShadow?.health() || null,
         holderGrowthShadow: this.holderGrowthShadow?.health() || null,
         qualityLeaderShadow: this.qualityLeaderShadow?.health() || null,
         bigWinnerShadow: this.bigWinnerShadow?.health() || null,
@@ -661,6 +713,16 @@ class ResearchServer {
         bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,
         graduationHoldShadow: this.graduationHoldShadow?.health() || null,
         graduationAccelerationShadow: this.graduationAccelerationShadow?.health() || null,
+      });
+    });
+
+    // Keep API failures machine-readable. Without this guard, an omitted API
+    // route falls through to the SPA index and returns HTML with status 200,
+    // which surfaces in the dashboard as a misleading JSON parse failure.
+    this.app.use('/api', (request, response) => {
+      response.status(404).json({
+        error: 'api route not found',
+        path: request.originalUrl,
       });
     });
 
