@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { evaluatePrimarySignal, RULE_VERSION } = require('./PrimarySignalStrategy');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -187,8 +188,19 @@ class PrimarySignalShadowManager {
     if (pending && trade.market === 'PUMP_BONDING_CURVE'
       && timestampMs >= pending.entryTargetAt
       && timestampMs <= pending.entryDeadlineAt) {
+      const rugGuard = evaluateUniversalRugGuard(this.store, {
+        strategyId: `PRIMARY:${this.config.signalVariant}`,
+        mint: trade.mint,
+        timestampMs,
+      });
       const jumpPct = ((trade.price / pending.signalPrice) - 1) * 100;
-      if (jumpPct > this.config.maxEntryPriceJumpPct) {
+      if (rugGuard.blocked) {
+        this.store.updatePrimarySignalShadowPosition(pending.id, {
+          status: STATUS.NO_ENTRY,
+          rejectionReason: 'PRE_ENTRY_RUG_RISK',
+        });
+        this.pendingEntries.delete(trade.mint);
+      } else if (jumpPct > this.config.maxEntryPriceJumpPct) {
         this.store.updatePrimarySignalShadowPosition(pending.id, {
           status: STATUS.PRICE_JUMP,
           rejectionReason: `ENTRY_PRICE_JUMP_${jumpPct.toFixed(2)}pct`,
