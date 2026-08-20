@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -349,6 +350,20 @@ class MigrationContinuityShadowSuite {
       if (position.status === STATUS.PENDING_ENTRY) {
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
+        const rugGuard = evaluateUniversalRugGuard(this.store, {
+          strategyId: `MIGRATION_CONTINUITY:${position.cohortId}`,
+          mint: position.mint,
+          timestampMs: trade.timestampMs,
+        });
+        if (rugGuard.blocked) {
+          this.store.updateMigrationContinuityShadowPosition(position.id, {
+            status: STATUS.NO_ENTRY,
+            rejectionReason: 'PRE_ENTRY_RUG_RISK',
+          });
+          this.pendingEntries.delete(position.id);
+          this._unindex(position);
+          continue;
+        }
         const entryExecution = executableBuy(trade, position.positionSol, price);
         const entryPrice = entryExecution.price ?? price;
         const jumpPct = ((entryPrice / position.signalPrice) - 1) * 100;
