@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   RULE_REJECTED: 'RULE_REJECTED',
@@ -270,6 +271,20 @@ class GraduationHoldShadowSuite {
       if (position.status === STATUS.PENDING_ENTRY) {
         if (trade.market !== 'PUMP_BONDING_CURVE'
           || timestampMs < position.entryTargetAt || timestampMs > position.entryDeadlineAt) continue;
+        const rugGuard = evaluateUniversalRugGuard(this.store, {
+          strategyId: `GRADUATION_HOLD:${position.cohortId}`,
+          mint: position.mint,
+          timestampMs,
+        });
+        if (rugGuard.blocked) {
+          this.store.updateGraduationHoldShadowPosition(position.id, {
+            status: STATUS.NO_ENTRY,
+            rejectionReason: 'PRE_ENTRY_RUG_RISK',
+          });
+          this.pendingEntries.delete(position.id);
+          this._unindex(position);
+          continue;
+        }
         const jumpPct = ((price / position.signalPrice) - 1) * 100;
         if (jumpPct > this.config.maxEntryPriceJumpPct) {
           this.store.updateGraduationHoldShadowPosition(position.id, {
