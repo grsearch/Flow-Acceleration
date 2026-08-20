@@ -366,6 +366,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-slot-flow" data-strategy-code="CSF-C03/E35/E510/S310">
               <b><span class="strategy-code">CSF-C03/E35/E510/S310</span>CYA Slot Flow</b><small>上一 Slot 公共订单流确认；目标钱包只作未来标签</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
+              <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun</b><small>大砸单后理论同Slot 0.1 SOL；永不发链</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
               <b><span class="strategy-code">SR-R0/R1/R2/R3</span>Smart 多钱包共振右尾</b><small>第二/第三个不同钱包确认后入场；硬止损 + 60–240秒固定持有</small>
             </button>
@@ -832,6 +835,27 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Slot</th><th>Buyers / Flow</th><th>Buy占比 / Top1</th><th>CYA标签</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>投入 / 加仓</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="cya-slot-flow-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="same-slot-dump-backrun" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Same-Slot Dump Backrun Shadow SDBR</h2>
+                <p>按大卖单后的 PumpSwap 真实储备理论立即买入；只衡量信号与容量，不代表没有 Leader 基础设施也能保证抢到。</p>
+              </div>
+              <div class="strategy-expression" id="same-slot-dump-backrun-expression">Sell≥10/20 SOL、跌幅≥15%/20% → 0.1 SOL理论即时成交 → 250ms/500ms/1s/2s退出</div>
+              <div class="strategy-metric-groups" id="same-slot-dump-backrun-metrics"></div>
+              <div class="section-title"><h2>大卖单 × 超短退出</h2><p>第一笔外部买单是否同 Slot 单独记录；NO_EXIT 不按 -100% 计。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>信号 / 完成</th><th>胜率 / 均值</th><th>中位 / PF</th><th>最大赢家</th><th>退出同Slot</th><th>首买同Slot</th><th>首买延迟</th><th>跌幅 / 入场冲击</th><th>拒绝 / NO_EXIT</th></tr></thead>
+                <tbody id="same-slot-dump-backrun-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近理论仓位</h2><p>收益按 0.1 SOL 储备冲击和成本计算，不使用理想 K 线价格。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>砸单 / 跌幅</th><th>信号 / 首买 / 退出 Slot</th><th>理论入场 / 冲击</th><th>退出 / 冲击</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="same-slot-dump-backrun-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1457,6 +1481,32 @@
         const targetLabel = row.target_open_at ? age(row.target_open_delay_ms) : '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.management_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.signal_age_ms)}<br><span class="table-note">${number(row.source_slot)} → ${number(row.trigger_slot)}</span></td><td>${number(row.public_buyers_5s)} / ${number(row.public_net_flow_5s,2)} SOL<br><span class="table-note">源Slot ${number(row.source_slot_buyers)}人 / ${number(row.source_slot_net_flow,2)} SOL</span></td><td>${rate(row.buy_tx_share_pct)} / ${rate(row.largest_buyer_share_pct)}</td><td>${targetLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${number(row.total_invested_sol || row.position_sol,3)} SOL / ${number(row.add_count)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="11" class="empty">暂无 CYA Slot Flow 模拟仓位。</td></tr>';
+    }
+
+    function renderSameSlotDumpBackrunShadow(data) {
+      const runtime = data.runtime || {};
+      const firstBuyRate = runtime.firstBuyObserved
+        ? runtime.firstBuySameSlot / runtime.firstBuyObserved * 100 : null;
+      document.querySelector('#same-slot-dump-backrun-expression').textContent = `${(runtime.entryProfiles || []).join(' / ')} × ${(runtime.exitProfiles || []).join(' / ')}；理论0.1 SOL即时入场，记录真实第一笔后续BUY的Slot，不签名、不发链、不增加RPC。`;
+      renderMetricGroups('#same-slot-dump-backrun-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW SDBR' : '关闭', '与实盘及现有Shadow完全隔离'],
+        ['观察成交 / 卖单', `${number(runtime.observedTrades)} / ${number(runtime.observedSells)}`, `跟踪Mint ${number(runtime.trackedMints)}`],
+        ['合格砸单 / 理论入场', `${number(runtime.qualifiedDumps)} / ${number(runtime.simulatedEntries)}`, `RUG拒绝 ${number(runtime.rugGuardRejected)} · 容量拒绝 ${number(runtime.capacityRejected)}`],
+        ['第一笔外部BUY', `${number(runtime.firstBuyObserved)} / 同Slot ${rate(firstBuyRate)}`, '用于判断没有Leader时的真实追单难度'],
+        ['已关 / NO_EXIT', `${number(runtime.closed)} / ${number(runtime.noExit)}`, `活动 ${number(runtime.activePositions)}`],
+        ['热路径 / 延迟写入', `${number(runtime.hotPathLastUs,1)} μs`, `峰值 ${number(runtime.hotPathMaxUs,1)} μs · 待写 ${number(runtime.pendingWrites)}`],
+      ], []);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#same-slot-dump-backrun-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.resolved)}<br><span class="table-note">活动 ${number(row.open)}</span></td><td class="${tone(row.average_net_return_pct)}">${rate(row.win_rate_pct)} / ${pct(row.average_net_return_pct)}</td><td>${pct(row.median_net_return_pct)} / ${number(row.profit_factor,2)}</td><td class="${tone(row.max_winner_pct)}">${pct(row.max_winner_pct)}</td><td>${rate(row.same_slot_exit_rate_pct)}</td><td>${rate(row.same_slot_first_buy_rate_pct)}</td><td>${Number.isFinite(row.average_first_buy_delay_ms) ? `${number(row.average_first_buy_delay_ms,0)}ms` : '—'}</td><td>${pct(row.average_drop_pct)} / ${pct(row.average_entry_impact_pct)}</td><td>RUG ${number(row.rug_rejected)} · 容量 ${number(row.no_entry)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)}</span></td></tr>`
+      )).join('') : '<tr><td colspan="10" class="empty">等待毕业后大砸单样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#same-slot-dump-backrun-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const firstBuy = row.first_buy_at
+          ? `${row.first_buy_same_slot ? '同Slot' : `Slot ${number(row.first_buy_slot)}`} / ${number(row.first_buy_delay_ms)}ms`
+          : '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${number(row.sell_sol,2)} SOL / ${pct(row.drop_pct)}</td><td>${number(row.signal_slot)} / ${firstBuy} / ${number(row.exit_slot)}</td><td>${number(row.entry_price,10)} / ${pct(row.entry_impact_pct)}</td><td>${number(row.exit_price,10)} / ${pct(row.exit_impact_pct)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(row.exit_reason || row.rejection_reason || '—')}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无 SDBR 理论仓位。</td></tr>';
     }
 
     function renderFlowSmartConfirmShadow(data) {
@@ -2416,6 +2466,9 @@
         ],
         'cya-slot-flow': requestContext => [
           loadDashboard('/api/cya-slot-flow-shadow?positionLimit=50', renderCyaSlotFlowShadow, requestContext),
+        ],
+        'same-slot-dump-backrun': requestContext => [
+          loadDashboard('/api/same-slot-dump-backrun-shadow?positionLimit=50', renderSameSlotDumpBackrunShadow, requestContext),
         ],
         'launch-pullback': requestContext => [
           loadDashboard('/api/launch-pullback-shadow?positionLimit=30', renderLaunchPullbackShadow, requestContext),
