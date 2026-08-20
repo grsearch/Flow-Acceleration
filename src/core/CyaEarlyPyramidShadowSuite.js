@@ -1,6 +1,7 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
+const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -366,6 +367,19 @@ class CyaEarlyPyramidShadowSuite {
   }
 
   _open(position, trade, price, jumpPct) {
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: `CYA:${position.cohortId}`,
+      mint: position.mint,
+      timestampMs: trade.timestampMs,
+    });
+    if (rugGuard.blocked) {
+      this.store.updateCyaEarlyPyramidShadowPosition(position.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason: 'PRE_ENTRY_RUG_RISK',
+      });
+      this.pendingEntries.delete(position.id);
+      return;
+    }
     Object.assign(position, {
       status: STATUS.OPEN,
       entryAt: trade.timestampMs,
