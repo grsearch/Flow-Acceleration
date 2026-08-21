@@ -408,12 +408,15 @@ const config = {
         id: 'big_winner_pbr_a_x50_15_live',
         code: 'PBR-A-X50-15',
         label: 'Big Winner PBR-A · X50_15 Core + Runner',
-        ruleVersion: 'big_winner_pbr_a_x50_15_live_v1',
+        ruleVersion: 'big_winner_pbr_a_x50_15_live_v2',
         signalSource: 'BIG_WINNER_PBR_A',
         enabled: booleanEnv('FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_ENABLED', true),
-        // Keep the definition loaded for historical display and outstanding
-        // exits, but do not let a stale production .env reopen live entries.
-        entryEnabled: false,
+        // V2 intentionally uses a new switch so the retired V1 ENTRY_ENABLED=false
+        // left in an existing server .env cannot silently suppress this re-test.
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_V2_ENTRY_ENABLED',
+          true,
+        ),
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL',
@@ -1803,6 +1806,16 @@ const config = {
         minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
       },
       {
+        id: 'PBR_A_B10_PB20',
+        label: 'PBR-A-B10-PB20 · wave40 / pullback12-20 / NF3≥3 / Buyers3≥10',
+        newEntriesEnabled: true,
+        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
+        minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 20,
+        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 3,
+        minBuyers3s: 10, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
+        exitProfileIds: ['X50_15'],
+      },
+      {
         id: 'PBR_B',
         label: 'PBR-B right tail: wave 50 / pullback 18-30 / NF3 2',
         newEntriesEnabled: false,
@@ -1880,6 +1893,24 @@ const config = {
         positionSols: listEnv(
           'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
           ['0.05', '0.1', '0.25'],
+        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
+      },
+      {
+        id: 'PP_PULLBACK_8_30_NF8_3',
+        label: 'PP8-30-NF8-3 · 回踩8–30% / NetFlow8≥3 SOL / X25 Runner',
+        newEntriesEnabled: true,
+        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 75_000,
+        qualificationMaxAgeMs: 30_000,
+        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
+        maxLargestBuyerShare10s: 0.6, minRecentBuyers5s: 7,
+        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.25,
+        minPullbackPct: 8, maxPullbackPct: 30,
+        minReboundPct: 1.5, maxReboundPct: 10,
+        minNetFlow3sSol: 1, minNetFlow8sSol: 3, minBuyers3s: 3,
+        requireFlowAcceleration: true,
+        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
+        positionSols: listEnv(
+          'FLOW_BIG_WINNER_PP_NF8_CAPACITY_SOLS', ['0.1', '0.25'],
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
       {
@@ -2008,6 +2039,7 @@ const config = {
         id: 'X25_RATCHET_PP', label: 'PP · 25% Core + 75% protected runner',
         entryProfileIds: [
           'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
+          'PP_PULLBACK_8_30_NF8_3',
           'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
         ],
         coreActivationPct: 20, coreWeightPct: 25, hardStopPct: 15,
@@ -5217,3 +5249,4 @@ module.exports = {
   validateConfig,
   streamTokenFor,
 };
+
