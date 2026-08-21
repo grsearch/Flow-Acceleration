@@ -131,7 +131,7 @@ function main() {
   assert.match(backupScript, /mktemp --suffix=\.yaml/);
   assert.match(backupScript, /--fail-output=false/);
   assert.ok(!/wal_checkpoint|\.backup\b|db\.backup\b/i.test(backupScript));
-  assert.match(timer, /OnCalendar=\*-\*-\* 08:00:00 Asia\/Shanghai/);
+  assert.match(timer, /OnCalendar=\*-\*-\* 07:00:00 Asia\/Shanghai/);
   assert.match(timer, /Persistent=true/);
   assert.match(service, /Environment=HOME=@INSTALL_DIR@\/data\/exports\/\.coscli-home/);
   assert.match(service, /@BACKUP_ENV_LINE@/);
