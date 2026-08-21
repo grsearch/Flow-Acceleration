@@ -637,7 +637,7 @@ sudo systemctl --no-pager --full status flow-acceleration
 
 也可以在已经配置好 `.env` 时使用 `START_SERVICE=1 sudo -E bash deploy/install.sh`，让安装脚本完成后立即启动并显示服务状态。
 
-### 每日 08:00 自动导出最近 24 小时并上传腾讯 COS
+### 每日 07:00 自动导出最近 24 小时并上传腾讯 COS
 
 每日归档不再调用 `better-sqlite3 backup()` 复制整个历史库，也不会执行任何 WAL checkpoint。`scripts/export-research-window.js` 会在一个一致性读事务内只查询源库，把最近 24 小时数据直接写入小型归档库；历史元数据表完整保留，源服务无需停止或重启。导出包包含 SQLite、schema、时间边界与逐表行数、服务状态、最近日志和版本信息，并在上传前执行 `quick_check`、tar 完整性检查及 SHA-256。
 
@@ -674,7 +674,7 @@ sudo journalctl -u flow-acceleration-backup.service -n 100 --no-pager
 systemctl list-timers flow-acceleration-backup.timer --all
 ```
 
-Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，即使服务器位于其他时区也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予私有 Bucket 前缀所需的上传和查询权限。
+Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 07:00 运行，即使服务器位于其他时区也不会按当地时间偏移。`flock` 会阻止任务重叠；导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予私有 Bucket 前缀所需的上传和查询权限。
 
 远端验证通过后，状态会先进入 `CLEANING`，再运行 `scripts/cleanup-research-retention.js`。默认保留 48 小时 Raw Trade，每批删除 25,000 行、每日最多 5,000,000 行，并在批次间让出磁盘；上传失败、校验文件缺失、状态过期或数据库繁忙超过重试上限时均停止清理。原本位于实时服务启动路径的 `PRAGMA optimize` 已移动到此低优先级维护任务，并设置较小的分析上限。报告写入 `data/exports/retention-last-run.json`。维护过程明确不执行 `wal_checkpoint` 或 `VACUUM`，所以 SQLite 文件不会立刻从磁盘缩小，但释放的页会被后续写入复用，数据库不再持续无上限增长。已有大型数据库如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
 
@@ -701,7 +701,7 @@ FC 的 Flow 证据使用“信号时间不晚于回踩参考时间”的因果�
 补数或链上发送路径。它在每次毕业/迁移后继续订阅最多 480 秒的现有
 PumpSwap 数据流，以真实成交驱动 1 秒快照，记录首波价格、首次回撤、
 反弹、3/10/前20秒资金流、买家扩散、单钱包集中度、买速变化和可观测
-钱包留存。每日 08:00 导出会自动包含两张独立表：
+钱包留存。每日 07:00 导出会自动包含两张独立表：
 
 - `migration_second_leg_observations`
 - `migration_second_leg_snapshots`
