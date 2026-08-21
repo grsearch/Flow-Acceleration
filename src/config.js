@@ -411,10 +411,9 @@ const config = {
         ruleVersion: 'big_winner_pbr_a_x50_15_live_v1',
         signalSource: 'BIG_WINNER_PBR_A',
         enabled: booleanEnv('FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_ENTRY_ENABLED',
-          true,
-        ),
+        // Keep the definition loaded for historical display and outstanding
+        // exits, but do not let a stale production .env reopen live entries.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL',

@@ -95,7 +95,7 @@ assert.strictEqual(liveContinuity.entryEnabled, false);
 assert.strictEqual(liveContinuity.code, 'M-C5-E120');
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
-assert.strictEqual(livePbrA.entryEnabled, true);
+assert.strictEqual(livePbrA.entryEnabled, false);
 assert.strictEqual(livePbrA.positionSizeSol, 0.1);
 assert.strictEqual(livePbrA.exitMode, 'PBR_CORE_RUNNER');
 assert.strictEqual(liveGfr300.entryEnabled, true);
@@ -183,7 +183,7 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  ['PBR-A-X50-15', 'GFR-300-HS20-H30', 'M-C5-T12.5', 'O90-M5-STAIR120'],
+  ['GFR-300-HS20-H30', 'M-C5-T12.5', 'O90-M5-STAIR120'],
 );
 assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
