@@ -95,8 +95,9 @@ assert.strictEqual(liveContinuity.entryEnabled, false);
 assert.strictEqual(liveContinuity.code, 'M-C5-E120');
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
-assert.strictEqual(livePbrA.entryEnabled, false);
+assert.strictEqual(livePbrA.entryEnabled, true);
 assert.strictEqual(livePbrA.positionSizeSol, 0.1);
+assert.strictEqual(livePbrA.ruleVersion, 'big_winner_pbr_a_x50_15_live_v2');
 assert.strictEqual(livePbrA.exitMode, 'PBR_CORE_RUNNER');
 assert.strictEqual(liveGfr300.entryEnabled, true);
 assert.strictEqual(liveGfr300.positionSizeSol, 0.1);
@@ -183,7 +184,7 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  ['GFR-300-HS20-H30', 'M-C5-T12.5', 'O90-M5-STAIR120'],
+  ['PBR-A-X50-15', 'GFR-300-HS20-H30', 'M-C5-T12.5', 'O90-M5-STAIR120'],
 );
 assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
@@ -522,6 +523,7 @@ assert.deepStrictEqual(
     .map((profile) => profile.id),
   [
     'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
+    'PP_PULLBACK_8_30_NF8_3',
     'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
   ],
 );
@@ -530,6 +532,13 @@ assert.ok([
   'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
 ].every((id) => bigWinnerEntryProfiles.get(id)?.newEntriesEnabled === false));
 assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A').newEntriesEnabled, true);
+assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A_B10_PB20').newEntriesEnabled, true);
+assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A_B10_PB20').minBuyers3s, 10);
+assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A_B10_PB20').maxPullbackPct, 20);
+assert.deepStrictEqual(
+  bigWinnerEntryProfiles.get('PBR_A_B10_PB20').exitProfileIds,
+  ['X50_15'],
+);
 assert.strictEqual(
   bigWinnerEntryProfiles.get('PBR_A').liveStrategyId,
   'big_winner_pbr_a_x50_15_live',
@@ -544,6 +553,11 @@ assert.strictEqual(bigWinnerEntryProfiles.get('PP20_B45').minBuyers10s, 45);
 assert.strictEqual(bigWinnerEntryProfiles.get('PP20_EARLY_BREADTH').maxAgeMs, 25_000);
 assert.strictEqual(bigWinnerEntryProfiles.get('PP20_EARLY_BREADTH').minBuyers3s, 15);
 assert.strictEqual(bigWinnerEntryProfiles.get('PP20_QUALITY').maxSingleSell3sSol, 2.5);
+assert.strictEqual(bigWinnerEntryProfiles.get('PP_PULLBACK_8_30_NF8_3').minNetFlow8sSol, 3);
+assert.deepStrictEqual(
+  bigWinnerEntryProfiles.get('PP_PULLBACK_8_30_NF8_3').positionSols,
+  [0.1, 0.25],
+);
 assert.ok(['PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY'].every((id) => (
   bigWinnerEntryProfiles.get(id).positionSols.join(',') === '0.05,0.1,0.25'
 )));
@@ -552,6 +566,7 @@ assert.deepStrictEqual(
     .entryProfileIds,
   [
     'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
+    'PP_PULLBACK_8_30_NF8_3',
     'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
   ],
 );
@@ -672,3 +687,4 @@ assert.deepStrictEqual(liveTradingGuard(true, false, false), {
 });
 
 console.log('test-config-cost: ok');
+
