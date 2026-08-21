@@ -6462,17 +6462,50 @@ class ResearchStore {
         ABS(SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct < 0
           THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
       FROM migration_second_leg_shadow_positions
-      WHERE cohort_id = 'M2F-NH10-GUARD-B'
     `).get();
     const resolved = Number(stats.resolved) || 0;
     const wins = Number(stats.wins) || 0;
     const loss = Number(stats.gross_loss_pct) || 0;
+    const cohorts = this.db.prepare(`
+      SELECT cohort_id,
+        COUNT(*) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+        COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(rejection_reason = 'PRE_ENTRY_RUG_RISK'), 0) AS rug_rejected,
+        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0)
+          AS wins,
+        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+          AS average_net_return_pct,
+        MAX(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+          AS maximum_winner_pct,
+        SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0
+          THEN net_return_pct ELSE 0 END) AS gross_profit_pct,
+        ABS(SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct < 0
+          THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
+      FROM migration_second_leg_shadow_positions
+      GROUP BY cohort_id
+      ORDER BY cohort_id
+    `).all().map((row) => {
+      const cohortResolved = Number(row.resolved) || 0;
+      const cohortLoss = Number(row.gross_loss_pct) || 0;
+      return {
+        ...row,
+        win_rate_pct: cohortResolved > 0
+          ? (Number(row.wins) || 0) / cohortResolved * 100 : null,
+        profit_factor: cohortLoss > 0
+          ? (Number(row.gross_profit_pct) || 0) / cohortLoss : null,
+      };
+    });
     const positions = this.db.prepare(`
       SELECT *,
         CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
           THEN exit_at - entry_at ELSE NULL END AS hold_ms
       FROM migration_second_leg_shadow_positions
-      WHERE cohort_id = 'M2F-NH10-GUARD-B'
       ORDER BY CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         THEN 0 ELSE 1 END, updated_at DESC, id DESC
       LIMIT ?
@@ -6491,6 +6524,7 @@ class ResearchStore {
         win_rate_pct: resolved > 0 ? wins / resolved * 100 : null,
         profit_factor: loss > 0 ? (Number(stats.gross_profit_pct) || 0) / loss : null,
       },
+      cohorts,
       positions,
     };
   }

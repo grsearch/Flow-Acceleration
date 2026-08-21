@@ -402,8 +402,8 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="launch-quality" data-strategy-code="E">
               <b><span class="strategy-code">E</span>Launch Quality</b><small>只观察选币、存活与首次回踩</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="migration-second-leg" data-strategy-code="M2F-OBS / M2F-NH10-B">
-              <b><span class="strategy-code">M2F-OBS / M2F-NH10-B</span>迁移后二段资金扩散</b><small>Observer 全量采集；B组带全局RUG Guard，1 SOL容量模拟，永不发链</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="migration-second-leg" data-strategy-code="M2F-OBS / M2F-MATRIX">
+              <b><span class="strategy-code">M2F-OBS / M2F-MATRIX</span>迁移后二段资金扩散</b><small>原B组 + 同入场延长持有 + 连续快照确认；全局RUG Guard，永不发链</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="holder-growth" data-strategy-code="N/NQ">
               <b><span class="strategy-code">N/NQ</span>Observed Holder Growth</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
@@ -708,8 +708,14 @@
               </div>
               <div class="strategy-expression" id="m2f-observer-expression">等待 M2F-OBS 配置…</div>
               <div class="strategy-metric-groups" id="m2f-observer-metrics"></div>
-              <div class="section-title"><h2>M2F-NH10-GUARD-B Shadow</h2><p>只运行带全局 RUG Guard 的 B 组；200ms 延迟、1 SOL 容量、固定10秒/15%硬止损</p></div>
+              <div class="section-title"><h2>M2F Research Matrix Shadow</h2><p>保留原 B 组；同一模拟入场独立比较 120/240 秒退出，并用连续两次快照确认过滤弱二段资金流。所有组都通过全局 RUG Guard，永不发链。</p></div>
               <div class="strategy-metric-groups" id="m2f-shadow-metrics"></div>
+              <div class="section-title"><h2>分组表现</h2><p>HOLD 组只是同一 M2F 信号的 Shadow 退出镜像，不会增加实盘买入；CF2 组需要连续两次快照保持净流、买家和卖压结构。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>组别</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / PF</th><th>最大赢家</th><th>待入场 / 活动</th><th>拒绝 / 无退出</th></tr></thead>
+                <tbody id="m2f-shadow-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>每个 cohort 独立保存，不覆盖原 M2F-NH10-GUARD-B 历史数据。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>状态 / Mint</th><th>AGE / 结构</th><th>资金流 / Buyers</th><th>集中度 / 扩散</th><th>信号 / 入场 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="m2f-shadow-position-rows"></tbody>
@@ -2028,24 +2034,32 @@
       const shadowStats = shadow.stats || {};
       const shadowStrategy = shadowRuntime.strategy || {};
       renderMetricGroups('#m2f-shadow-metrics', [
-        ['运行模式', shadowRuntime.enabled ? 'SHADOW B' : '关闭', '无A组 · 永不签名或发送交易'],
+        ['运行模式', shadowRuntime.enabled ? 'M2F MATRIX' : '关闭', `${number((shadow.cohorts || []).length)} 个独立 cohort · 永不签名或发送交易`],
         ['信号 / Mint', `${number(shadowStats.signals)} / ${number(shadowStats.mints)}`, `待入场 ${number(shadowStats.pending_entries)} · 活动 ${number(shadowStats.active_positions)}`],
         ['完成 / 胜率', `${number(shadowStats.resolved)} / ${pct(shadowStats.win_rate_pct)}`, `已关 ${number(shadowStats.closed_positions)} · NO_EXIT ${number(shadowStats.no_exit)}`],
         ['平均净收益', pct(shadowStats.average_net_return_pct), `PF ${number(shadowStats.profit_factor,2)} · 最大赢家 ${pct(shadowStats.maximum_winner_pct)}`],
         ['RUG 拦截', number(shadowStats.rug_rejected), `全局 Guard 必须通过；其他无入场 ${number(shadowStats.no_entry)}`],
         ['价格跳变', number(shadowStats.price_jump), `200ms延迟 · 上冲≤${pct(shadowStrategy.maxEntryPriceJumpPct)}`],
         ['模拟仓位', `${number(shadowStrategy.positionSizeSol,2)} SOL`, `成本 ${pct(shadowStrategy.configuredCostPct)} · 容量冲击计入`],
-        ['退出', `${pct(shadowStrategy.hardStopPct)} 硬止损 / ${age(shadowStrategy.maxHoldMs)}`, '实际储备估算卖出冲击，RUG缺失报价按保守损失'],
+        ['退出', '10s / 120s / 240s', '原B组、同入场延长持有和CF2确认组分别计数'],
       ]);
+
+      const shadowCohorts = shadow.cohorts || [];
+      document.querySelector('#m2f-shadow-cohort-rows').innerHTML = shadowCohorts.length
+        ? shadowCohorts.map(row => {
+          const rejects = Number(row.no_entry || 0) + Number(row.price_jump || 0);
+          return `<tr><td><b>${escapeHtml(row.cohort_id || '—')}</b></td><td>${number(row.signals)} / ${number(row.mints)}</td><td>${number(row.resolved)} / ${pct(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${number(row.profit_factor,2)}</td><td class="${tone(row.maximum_winner_pct)}">${pct(row.maximum_winner_pct)}</td><td>${number(row.pending_entries)} / ${number(row.active_positions)}</td><td>${number(rejects)}<br><span class="table-note">RUG ${number(row.rug_rejected)} · NO_EXIT ${number(row.no_exit)}</span></td></tr>`;
+        }).join('')
+        : '<tr><td colspan="7" class="empty">等待升级后的 M2F Matrix 前向样本；历史 B 组会继续单独显示</td></tr>';
 
       const shadowPositions = shadow.positions || [];
       document.querySelector('#m2f-shadow-position-rows').innerHTML = shadowPositions.length
         ? shadowPositions.map(row => {
           const features = row.features || {};
           const hold = row.hold_ms != null ? age(row.hold_ms) : '—';
-          return `<tr><td>${dateTime(row.signal_at)}</td><td>${statusChip(row.status)}<br>${mintLink(row.mint)}</td><td>${age(row.signal_age_ms)}<br><span class="table-note">峰值 ${pct(features.peakImpulsePct)} · 回撤 ${pct(features.pullbackPct)} · 反弹 ${pct(features.reboundPct)}</span></td><td>${number(features.netFlow3s,2)} / ${number(features.netFlow10s,2)} SOL<br><span class="table-note">${number(features.buyers3s)} / ${number(features.buyers10s)} Buyers</span></td><td>Top1 ${pct(features.largestBuyerShare10sPct)}<br><span class="table-note">DI ${number(features.holderDiffusionIndex)} · 1SOL冲击 ${pct(features.estimatedImpact1SolPct)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)} · MAE ${pct(row.max_adverse_return_pct)}</span></td><td>${hold}<br><span class="table-note">${escapeHtml(row.exit_reason || row.rejection_reason || '—')}</span></td></tr>`;
+          return `<tr><td>${dateTime(row.signal_at)}<br><span class="table-note">${escapeHtml(row.cohort_id || '')}</span></td><td>${statusChip(row.status)}<br>${mintLink(row.mint)}</td><td>${age(row.signal_age_ms)}<br><span class="table-note">峰值 ${pct(features.peakImpulsePct)} · 回撤 ${pct(features.pullbackPct)} · 反弹 ${pct(features.reboundPct)}</span></td><td>${number(features.netFlow3s,2)} / ${number(features.netFlow10s,2)} SOL<br><span class="table-note">${number(features.buyers3s)} / ${number(features.buyers10s)} Buyers</span></td><td>Top1 ${pct(features.largestBuyerShare10sPct)}<br><span class="table-note">DI ${number(features.holderDiffusionIndex)} · 1SOL冲击 ${pct(features.estimatedImpact1SolPct)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)} · MAE ${pct(row.max_adverse_return_pct)}</span></td><td>${hold}<br><span class="table-note">${escapeHtml(row.exit_reason || row.rejection_reason || '—')}</span></td></tr>`;
         }).join('')
-        : '<tr><td colspan="8" class="empty">等待 M2F-NH10-GUARD-B 的因果信号；不会建立无保护 A 组</td></tr>';
+        : '<tr><td colspan="8" class="empty">等待 M2F Matrix 的前向因果信号；不会建立无保护组</td></tr>';
 
       const observations = data.observations || [];
       document.querySelector('#m2f-observation-rows').innerHTML = observations.length ? observations.map(row => (

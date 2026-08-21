@@ -37,6 +37,9 @@ function restore(row) {
     symbol: row.symbol,
     status: row.status,
     positionSol: finite(valueOf(row, 'position_sol', 'positionSol'), 1),
+    configuredCostPct: finite(valueOf(
+      row, 'configured_cost_pct', 'configuredCostPct',
+    ), 0),
     signalAt: valueOf(row, 'signal_at', 'signalAt'),
     signalPrice: valueOf(row, 'signal_price', 'signalPrice'),
     entryTargetAt: valueOf(row, 'entry_target_at', 'entryTargetAt'),
@@ -53,6 +56,8 @@ function restore(row) {
     maxAdverseReturnPct: finite(valueOf(
       row, 'max_adverse_return_pct', 'maxAdverseReturnPct',
     ), 0),
+    hardStopPct: finite(valueOf(row, 'hard_stop_pct', 'hardStopPct'), 100),
+    maxHoldMs: finite(valueOf(row, 'max_hold_ms', 'maxHoldMs'), 10_000),
     exitTriggerAt: valueOf(row, 'exit_trigger_at', 'exitTriggerAt'),
     exitTargetAt: valueOf(row, 'exit_target_at', 'exitTargetAt'),
     exitDeadlineAt: valueOf(row, 'exit_deadline_at', 'exitDeadlineAt'),
@@ -65,13 +70,40 @@ class MigrationSecondLegShadowSuite {
     this.config = config;
     this.store = store;
     this.now = now;
-    this.costs = costBreakdown({
-      ...(config.costModel || {}),
+    const legacy = {
+      id: config.cohortId,
+      label: 'M2F Near-High Flow + Universal RUG Guard B',
+      enabled: true,
+      studyMode: 'ENTRY_CONTROL',
+      confirmationMode: 'IMMEDIATE',
       positionSizeSol: config.positionSizeSol,
-    });
+      entryDelayMs: config.entryDelayMs,
+      entryTimeoutMs: config.entryTimeoutMs,
+      exitDelayMs: config.exitDelayMs,
+      exitTimeoutMs: config.exitTimeoutMs,
+      maxEntryPriceJumpPct: config.maxEntryPriceJumpPct,
+      maxNegativeEntryJumpPct: config.maxNegativeEntryJumpPct,
+      hardStopPct: config.hardStopPct,
+      maxHoldMs: config.maxHoldMs,
+      thresholds: config.thresholds,
+    };
+    this.cohorts = (Array.isArray(config.cohorts) && config.cohorts.length
+      ? config.cohorts : [legacy])
+      .filter((cohort) => cohort?.enabled !== false && cohort?.id)
+      .map((cohort) => ({ ...legacy, ...cohort, thresholds: {
+        ...(config.thresholds || {}), ...(cohort.thresholds || {}),
+      } }));
+    this.cohortById = new Map(this.cohorts.map((cohort) => [cohort.id, cohort]));
+    this.costsByCohort = new Map(this.cohorts.map((cohort) => [cohort.id, costBreakdown({
+      ...(config.costModel || {}),
+      positionSizeSol: cohort.positionSizeSol,
+    })]));
     this.pendingEntries = new Map();
     this.positions = new Map();
     this.rowsByMint = new Map();
+    this.confirmationByCohort = new Map(this.cohorts
+      .filter((cohort) => cohort.confirmationMode !== 'IMMEDIATE')
+      .map((cohort) => [cohort.id, new Map()]));
     this.metrics = {
       evaluated: 0,
       matched: 0,
@@ -101,23 +133,34 @@ class MigrationSecondLegShadowSuite {
   stop() {}
 
   health() {
+    const cohortHealth = this.cohorts.map((cohort) => ({
+      id: cohort.id,
+      label: cohort.label,
+      studyMode: cohort.studyMode,
+      confirmationMode: cohort.confirmationMode,
+      hardStopPct: cohort.hardStopPct,
+      maxHoldMs: cohort.maxHoldMs,
+      configuredCostPct: this.costsByCohort.get(cohort.id)?.deterministicCostPct ?? null,
+    }));
     return {
       enabled: this.config.enabled,
-      mode: 'SHADOW_M2F_GUARD_B',
-      code: this.config.cohortId,
+      mode: 'SHADOW_M2F_RESEARCH_MATRIX',
+      code: this.cohorts.map((cohort) => cohort.id).join(' / '),
       sendsTransactions: false,
       guardRequired: true,
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
       strategy: {
-        name: 'M2F Near-High Flow + Universal RUG Guard B',
+        name: 'M2F Entry Control / Hold Extension / Confirmation Filter',
         positionSizeSol: this.config.positionSizeSol,
         entryDelayMs: this.config.entryDelayMs,
         maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
         hardStopPct: this.config.hardStopPct,
         maxHoldMs: this.config.maxHoldMs,
         thresholds: this.config.thresholds,
-        configuredCostPct: this.costs.deterministicCostPct,
+        configuredCostPct: this.costsByCohort.get(this.config.cohortId)
+          ?.deterministicCostPct ?? null,
+        cohorts: cohortHealth,
         isolatedTable: 'migration_second_leg_shadow_positions',
       },
       ...this.metrics,
@@ -131,10 +174,26 @@ class MigrationSecondLegShadowSuite {
   onSnapshot(snapshot, trade) {
     if (!this.config.enabled || !snapshot?.mint || !(snapshot.price > 0)) return;
     this.metrics.evaluated += 1;
-    if (!this._matches(snapshot)) return;
+    for (const cohort of this.cohorts) {
+      const matched = this._matches(snapshot, cohort);
+      if (!matched) {
+        // CF2 means two consecutive qualifying observer snapshots. A failed
+        // snapshot breaks persistence instead of letting an older good sample
+        // bridge across a transient flow deterioration.
+        this.confirmationByCohort.get(cohort.id)?.delete(snapshot.mint);
+        continue;
+      }
+      if (!this._confirmationPassed(snapshot, cohort)) continue;
+      this._createSignal(snapshot, trade, cohort);
+    }
+  }
+
+  _createSignal(snapshot, trade, cohort) {
     const migrationAt = finite(snapshot.migrationAt, snapshot.observedAt - snapshot.ageMs);
-    const episodeId = `${snapshot.mint}:${migrationAt}:${this.config.cohortId}`;
+    const episodeId = `${snapshot.mint}:${migrationAt}:${cohort.id}`;
     const features = {
+      studyMode: cohort.studyMode,
+      confirmationMode: cohort.confirmationMode,
       openingImpulsePct: snapshot.openingImpulsePct,
       peakImpulsePct: snapshot.baselinePrice > 0
         ? ((snapshot.peakPrice / snapshot.baselinePrice) - 1) * 100 : null,
@@ -153,23 +212,23 @@ class MigrationSecondLegShadowSuite {
       estimatedImpact1SolPct: snapshot.estimatedImpact1SolPct,
     };
     const saved = this.store.createMigrationSecondLegShadowPosition({
-      cohortId: this.config.cohortId,
+      cohortId: cohort.id,
       episodeId,
       mint: snapshot.mint,
       symbol: snapshot.symbol || trade?.symbol || null,
       status: STATUS.PENDING_ENTRY,
-      positionSol: this.config.positionSizeSol,
-      configuredCostPct: this.costs.deterministicCostPct,
+      positionSol: cohort.positionSizeSol,
+      configuredCostPct: this.costsByCohort.get(cohort.id).deterministicCostPct,
       migrationAt,
       signalAt: snapshot.observedAt,
       signalPrice: snapshot.price,
       signalAgeMs: snapshot.ageMs,
       features,
-      entryTargetAt: snapshot.observedAt + this.config.entryDelayMs,
-      entryDeadlineAt: snapshot.observedAt + this.config.entryDelayMs
-        + this.config.entryTimeoutMs,
-      hardStopPct: this.config.hardStopPct,
-      maxHoldMs: this.config.maxHoldMs,
+      entryTargetAt: snapshot.observedAt + cohort.entryDelayMs,
+      entryDeadlineAt: snapshot.observedAt + cohort.entryDelayMs
+        + cohort.entryTimeoutMs,
+      hardStopPct: cohort.hardStopPct,
+      maxHoldMs: cohort.maxHoldMs,
     });
     if (!saved?.inserted) {
       this.metrics.deduplicated += 1;
@@ -180,6 +239,31 @@ class MigrationSecondLegShadowSuite {
     this._index(pending);
     this.metrics.matched += 1;
     this.metrics.lastActionAt = this.now();
+  }
+
+  _confirmationPassed(snapshot, cohort) {
+    if (cohort.confirmationMode === 'IMMEDIATE') return true;
+    const states = this.confirmationByCohort.get(cohort.id);
+    if (!states) return false;
+    const previous = states.get(snapshot.mint);
+    states.set(snapshot.mint, {
+      observedAt: snapshot.observedAt,
+      migrationAt: snapshot.migrationAt,
+      netFlow3s: finite(snapshot.netFlow3s, 0),
+      buyers10s: finite(snapshot.buyers10s, 0),
+      sellDecelerationRatio: finite(snapshot.sellDecelerationRatio, Infinity),
+    });
+    if (!previous) return false;
+    const gapMs = snapshot.observedAt - previous.observedAt;
+    if (gapMs < finite(cohort.confirmationMinGapMs, 500)
+      || gapMs > finite(cohort.confirmationMaxGapMs, 2_500)) return false;
+    if (previous.migrationAt != null && snapshot.migrationAt != null
+      && finite(previous.migrationAt) !== finite(snapshot.migrationAt)) return false;
+    return finite(snapshot.netFlow3s, 0) > 0
+      && finite(snapshot.netFlow3s, 0) >= previous.netFlow3s
+      && finite(snapshot.buyers10s, 0) >= previous.buyers10s
+      && finite(snapshot.sellDecelerationRatio, Infinity)
+        <= previous.sellDecelerationRatio + finite(cohort.maxSellDecelerationIncrease, 0.1);
   }
 
   observeTrade(trade) {
@@ -205,9 +289,9 @@ class MigrationSecondLegShadowSuite {
       this._updateExtrema(position, timestampMs, price);
       const gross = ((price / position.entryPrice) - 1) * 100;
       const heldMs = timestampMs - position.entryAt;
-      if (gross <= -this.config.hardStopPct) this._requestExit(position, timestampMs, 'HARD_STOP');
-      else if (heldMs >= this.config.maxHoldMs) {
-        this._requestExit(position, position.entryAt + this.config.maxHoldMs, 'FIXED_HOLD');
+      if (gross <= -position.hardStopPct) this._requestExit(position, timestampMs, 'HARD_STOP');
+      else if (heldMs >= position.maxHoldMs) {
+        this._requestExit(position, position.entryAt + position.maxHoldMs, 'FIXED_HOLD');
       }
       if (position.status === STATUS.EXIT_PENDING
         && timestampMs >= position.exitTargetAt && timestampMs <= position.exitDeadlineAt) {
@@ -229,8 +313,8 @@ class MigrationSecondLegShadowSuite {
       this.metrics.noEntry += 1;
     }
     for (const position of [...this.positions.values()]) {
-      if (position.status === STATUS.OPEN && now >= position.entryAt + this.config.maxHoldMs) {
-        this._requestExit(position, position.entryAt + this.config.maxHoldMs, 'FIXED_HOLD');
+      if (position.status === STATUS.OPEN && now >= position.entryAt + position.maxHoldMs) {
+        this._requestExit(position, position.entryAt + position.maxHoldMs, 'FIXED_HOLD');
       }
       if (position.status === STATUS.EXIT_PENDING && now > position.exitDeadlineAt) {
         this._markNoExit(position);
@@ -238,8 +322,8 @@ class MigrationSecondLegShadowSuite {
     }
   }
 
-  _matches(snapshot) {
-    const t = this.config.thresholds;
+  _matches(snapshot, cohort) {
+    const t = cohort.thresholds;
     const peakImpulsePct = snapshot.baselinePrice > 0
       ? ((snapshot.peakPrice / snapshot.baselinePrice) - 1) * 100 : null;
     const impact1Sol = finite(snapshot.estimatedImpact1SolPct);
@@ -263,8 +347,9 @@ class MigrationSecondLegShadowSuite {
   }
 
   _tryEntry(position, trade, price) {
+    const cohort = this._cohort(position);
     const rugGuard = evaluateUniversalRugGuard(this.store, {
-      strategyId: this.config.cohortId,
+      strategyId: position.cohortId,
       mint: position.mint,
       timestampMs: trade.timestampMs,
       source: 'SHADOW',
@@ -294,8 +379,8 @@ class MigrationSecondLegShadowSuite {
     }
     const entryPrice = execution.price ?? price;
     const jumpPct = ((entryPrice / position.signalPrice) - 1) * 100;
-    if (jumpPct > this.config.maxEntryPriceJumpPct
-      || jumpPct < -this.config.maxNegativeEntryJumpPct) {
+    if (jumpPct > cohort.maxEntryPriceJumpPct
+      || jumpPct < -cohort.maxNegativeEntryJumpPct) {
       this.store.updateMigrationSecondLegShadowPosition(position.id, {
         status: STATUS.PRICE_JUMP,
         rejectionReason: `ENTRY_PRICE_JUMP_${jumpPct.toFixed(2)}PCT`,
@@ -361,12 +446,13 @@ class MigrationSecondLegShadowSuite {
 
   _requestExit(position, triggerAt, reason) {
     if (position.status !== STATUS.OPEN) return;
+    const cohort = this._cohort(position);
     Object.assign(position, {
       status: STATUS.EXIT_PENDING,
       exitReason: reason,
       exitTriggerAt: triggerAt,
-      exitTargetAt: triggerAt + this.config.exitDelayMs,
-      exitDeadlineAt: triggerAt + this.config.exitDelayMs + this.config.exitTimeoutMs,
+      exitTargetAt: triggerAt + cohort.exitDelayMs,
+      exitDeadlineAt: triggerAt + cohort.exitDelayMs + cohort.exitTimeoutMs,
     });
     this.store.updateMigrationSecondLegShadowPosition(position.id, {
       status: STATUS.EXIT_PENDING,
@@ -398,7 +484,7 @@ class MigrationSecondLegShadowSuite {
       exitPrice,
       exitImpactPct: execution.impactPct,
       grossReturnPct: markReturnPct,
-      netReturnPct: executableReturnPct - this.costs.deterministicCostPct,
+      netReturnPct: executableReturnPct - position.configuredCostPct,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
@@ -412,7 +498,7 @@ class MigrationSecondLegShadowSuite {
     this.store.updateMigrationSecondLegShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
       grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
+      netReturnPct: -100 - position.configuredCostPct,
       exitReason: position.exitReason || 'NO_EXIT',
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
@@ -437,6 +523,13 @@ class MigrationSecondLegShadowSuite {
     if (!rows) return;
     rows.delete(position.id);
     if (!rows.size) this.rowsByMint.delete(position.mint);
+  }
+
+  _cohort(position) {
+    return this.cohortById.get(position.cohortId) || {
+      ...this.config,
+      id: position.cohortId,
+    };
   }
 }
 

@@ -251,6 +251,27 @@ const launchDeepPullbackProfiles = [
   }),
 }));
 
+const m2fNearHighThresholds = Object.freeze({
+  minAgeMs: 60_000,
+  maxAgeMs: 240_000,
+  minCurrentImpulsePct: 10,
+  maxCurrentImpulsePct: 150,
+  minPeakImpulsePct: 25,
+  minPullbackPct: 5,
+  maxPullbackPct: 15,
+  minReboundPct: 3,
+  minNetFlow10sSol: 1,
+  minNetFlow3sSol: 0.1,
+  minBuyers10s: 10,
+  minBuyers3s: 2,
+  maxLargestBuyerSharePct: 45,
+  minBuySpeedRatio: 1.05,
+  minNetFlowAcceleration: 0,
+  maxSellDecelerationRatio: 1.1,
+  minHolderDiffusionIndex: 8,
+  maxEstimatedImpact1SolPct: 1,
+});
+
 const config = {
   pump: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
@@ -4888,26 +4909,79 @@ const config = {
       min: 1_000,
       max: 10 * 60_000,
     }),
-    thresholds: {
-      minAgeMs: 60_000,
-      maxAgeMs: 240_000,
-      minCurrentImpulsePct: 10,
-      maxCurrentImpulsePct: 150,
-      minPeakImpulsePct: 25,
-      minPullbackPct: 5,
-      maxPullbackPct: 15,
-      minReboundPct: 3,
-      minNetFlow10sSol: 1,
-      minNetFlow3sSol: 0.1,
-      minBuyers10s: 10,
-      minBuyers3s: 2,
-      maxLargestBuyerSharePct: 45,
-      minBuySpeedRatio: 1.05,
-      minNetFlowAcceleration: 0,
-      maxSellDecelerationRatio: 1.1,
-      minHolderDiffusionIndex: 8,
-      maxEstimatedImpact1SolPct: 1,
-    },
+    thresholds: { ...m2fNearHighThresholds },
+    cohorts: [
+      {
+        id: 'M2F-NH10-GUARD-B',
+        label: 'Near-high 10s entry control',
+        studyMode: 'ENTRY_CONTROL',
+        confirmationMode: 'IMMEDIATE',
+        hardStopPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_HARD_STOP_PCT', 15, {
+          min: 0,
+          max: 100,
+        }),
+        maxHoldMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_HOLD_MS', 10_000, {
+          min: 1_000,
+          max: 10 * 60_000,
+        }),
+      },
+      {
+        id: 'M2F-HOLD-120',
+        label: 'Same-entry fixed 120s hold extension',
+        enabled: booleanEnv('FLOW_M2F_HOLD_120_ENABLED', true),
+        studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
+        confirmationMode: 'IMMEDIATE',
+        hardStopPct: 100,
+        maxHoldMs: integerEnv('FLOW_M2F_HOLD_120_MS', 120_000, {
+          min: 10_000,
+          max: 10 * 60_000,
+        }),
+      },
+      {
+        id: 'M2F-HOLD-240',
+        label: 'Same-entry fixed 240s right-tail extension',
+        enabled: booleanEnv('FLOW_M2F_HOLD_240_ENABLED', true),
+        studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
+        confirmationMode: 'IMMEDIATE',
+        hardStopPct: 100,
+        maxHoldMs: integerEnv('FLOW_M2F_HOLD_240_MS', 240_000, {
+          min: 10_000,
+          max: 10 * 60_000,
+        }),
+      },
+      {
+        id: 'M2F-HOLD-240-H20',
+        label: 'Same-entry 240s extension with 20% mark stop',
+        enabled: booleanEnv('FLOW_M2F_HOLD_240_H20_ENABLED', true),
+        studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
+        confirmationMode: 'IMMEDIATE',
+        hardStopPct: 20,
+        maxHoldMs: integerEnv('FLOW_M2F_HOLD_240_H20_MS', 240_000, {
+          min: 10_000,
+          max: 10 * 60_000,
+        }),
+      },
+      {
+        id: 'M2F-CF2-H10',
+        label: 'Two-snapshot persistence filter / original 10s exit',
+        enabled: booleanEnv('FLOW_M2F_CONFIRM_FILTER_ENABLED', true),
+        studyMode: 'CONFIRM_FILTER',
+        confirmationMode: 'TWO_SNAPSHOT_PERSISTENCE',
+        confirmationMinGapMs: integerEnv('FLOW_M2F_CONFIRM_MIN_GAP_MS', 500, {
+          min: 100,
+          max: 5_000,
+        }),
+        confirmationMaxGapMs: integerEnv('FLOW_M2F_CONFIRM_MAX_GAP_MS', 2_500, {
+          min: 500,
+          max: 10_000,
+        }),
+        maxSellDecelerationIncrease: numberEnv(
+          'FLOW_M2F_CONFIRM_MAX_SELL_DECEL_INCREASE', 0.1, { min: 0, max: 10 },
+        ),
+        hardStopPct: 15,
+        maxHoldMs: 10_000,
+      },
+    ],
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: 1,

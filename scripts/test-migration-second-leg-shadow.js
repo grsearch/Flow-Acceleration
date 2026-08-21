@@ -107,6 +107,68 @@ function main() {
   assert.equal(suite.health().sendsTransactions, false);
   assert.equal(suite.health().guardRequired, true);
   store.close();
+
+  now = 2_000_000;
+  const matrixStore = makeStore();
+  const matrixConfig = {
+    ...config,
+    cohorts: [
+      {
+        id: 'M2F-NH10-GUARD-B', studyMode: 'ENTRY_CONTROL',
+        confirmationMode: 'IMMEDIATE', hardStopPct: 15, maxHoldMs: 10_000,
+      },
+      {
+        id: 'M2F-HOLD-120', studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
+        confirmationMode: 'IMMEDIATE', hardStopPct: 100, maxHoldMs: 120_000,
+      },
+      {
+        id: 'M2F-HOLD-240', studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
+        confirmationMode: 'IMMEDIATE', hardStopPct: 100, maxHoldMs: 240_000,
+      },
+      {
+        id: 'M2F-HOLD-240-H20', studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
+        confirmationMode: 'IMMEDIATE', hardStopPct: 20, maxHoldMs: 240_000,
+      },
+      {
+        id: 'M2F-CF2-H10', studyMode: 'CONFIRM_FILTER',
+        confirmationMode: 'TWO_SNAPSHOT_PERSISTENCE',
+        confirmationMinGapMs: 500, confirmationMaxGapMs: 2_500,
+        maxSellDecelerationIncrease: 0.1, hardStopPct: 15, maxHoldMs: 10_000,
+      },
+    ],
+  };
+  const matrixSuite = new MigrationSecondLegShadowSuite({
+    config: matrixConfig, store: matrixStore, now: () => now,
+  });
+  matrixSuite.start();
+  const migrationAt = now - 90_000;
+  const first = { ...snapshot('matrix-mint', now), migrationAt };
+  matrixSuite.onSnapshot(first, trade('matrix-mint', now));
+  now += 200;
+  matrixSuite.observeTrade(trade('matrix-mint', now));
+  assert.equal(matrixSuite.health().opened, 4, 'four immediate cohorts should open');
+
+  now += 800;
+  const second = {
+    ...snapshot('matrix-mint', now), migrationAt,
+    netFlow3s: 0.7, buyers10s: 15, sellDecelerationRatio: 0.45,
+  };
+  matrixSuite.onSnapshot(second, trade('matrix-mint', now));
+  now += 200;
+  matrixSuite.observeTrade(trade('matrix-mint', now));
+
+  const matrixDashboard = matrixStore.migrationSecondLegShadowDashboard();
+  assert.equal(matrixDashboard.stats.signals, 5);
+  assert.equal(matrixDashboard.cohorts.length, 5);
+  assert.equal(matrixSuite.health().opened, 5, 'CF2 should open only after persistence');
+  assert.deepEqual(
+    matrixDashboard.cohorts.map((row) => row.cohort_id).sort(),
+    ['M2F-CF2-H10', 'M2F-HOLD-120', 'M2F-HOLD-240', 'M2F-HOLD-240-H20',
+      'M2F-NH10-GUARD-B'].sort(),
+  );
+  assert.equal(matrixSuite.health().sendsTransactions, false);
+  assert.equal(matrixSuite.health().strategy.cohorts.length, 5);
+  matrixStore.close();
   console.log('test-migration-second-leg-shadow: ok');
 }
 

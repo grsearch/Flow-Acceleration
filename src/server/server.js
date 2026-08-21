@@ -339,8 +339,8 @@ class ResearchServer {
         },
         runtimeShadow: this.migrationSecondLegShadow?.health() || {
           enabled: false,
-          mode: 'SHADOW_M2F_GUARD_B',
-          code: 'M2F-NH10-GUARD-B',
+          mode: 'SHADOW_M2F_RESEARCH_MATRIX',
+          code: 'M2F-MATRIX',
           sendsTransactions: false,
           guardRequired: true,
         },
