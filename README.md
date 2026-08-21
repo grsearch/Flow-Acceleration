@@ -31,6 +31,17 @@ new table automatically.
 AGE≤25s+双窗口买家广度，以及再叠加 Sell3≤2.5 SOL；三组只交叉
 `X25_RATCHET_PP`，继续按0.05/0.1/0.25 SOL独立测试，绝不发送链上交易。
 
+2026-08-21 起新增两个前向、独立编号的验证组，旧行绝不重算：
+`PP_PULLBACK_8_30_NF8_3` 复用宽回踩结构，但在入场时额外要求最近8秒净流入
+至少3 SOL，只交叉 `X25_RATCHET_PP`，并按0.1/0.25 SOL分别计数；
+`PBR_A_B10_PB20` 把 PBR-A 收紧为 Buyers3≥10、回踩12%–20%，只使用
+`X50_15` 作为严格对照。两组均为 Shadow，不会触发任何实盘交易。
+
+`PBR-A-X50-15` 实盘于 2026-08-21 以 `big_winner_pbr_a_x50_15_live_v2`
+重新开启一天观察：单笔0.1 SOL，仍使用原 PBR-A 入场与 X50_15 Core/Runner
+退出。V2 使用独立入场开关，便于与停用前的 V1 实盘记录分开统计；新增的
+`PP8-30-NF8-3` 与 `PBR-A-B10-PB20` 仍只做 Shadow。
+
 The same exit hypothesis is tested without changing entry rules in two other promising
 families. Smart-Like Early adds BASE-only `FIX60_H20` / `FIX120_H20` exits (no pyramiding,
 partial profit, flow-decay exit, or trailing stop). Launch First Pullback adds
@@ -744,3 +755,4 @@ PumpSwap 成交。默认对照 `Sell≥10 SOL/跌幅≥15%` 与
 全局 Pre-entry RUG Guard 与0.1 SOL买卖储备冲击都会计入，`NO_EXIT` 单独右删失，
 不会伪造为 -100%。结果保存在独立表
 `same_slot_dump_backrun_shadow_positions`，不会混入或更改任何旧策略数据。
+
