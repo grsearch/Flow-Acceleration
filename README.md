@@ -630,18 +630,20 @@ sudo systemctl --no-pager --full status flow-acceleration
 
 每日归档不再调用 `better-sqlite3 backup()` 复制整个历史库，也不会执行任何 WAL checkpoint。`scripts/export-research-window.js` 会在一个一致性读事务内只查询源库，把最近 24 小时数据直接写入小型归档库；历史元数据表完整保留，源服务无需停止或重启。导出包包含 SQLite、schema、时间边界与逐表行数、服务状态、最近日志和版本信息，并在上传前执行 `quick_check`、tar 完整性检查及 SHA-256。
 
-先安装腾讯官方 COSCLI，然后安装 timer：
+先安装腾讯官方 COSCLI，然后安装标准 timer：
 
 ```bash
 sudo bash deploy/install-daily-export.sh /opt/flow-acceleration
 sudoedit /etc/flow-acceleration/backup-cos.env
 ```
 
-新服务器也可以在主安装时直接加 `INSTALL_DAILY_EXPORT=1`，一次安装程序服务和每日 timer（仍需预先安装 COSCLI）：
+主安装程序现在默认使用 `INSTALL_DAILY_EXPORT=auto`：检测到 COSCLI 后会自动安装每日 timer；没有 COSCLI 时只提示安装方法，不会创建一个必然失败的任务。也可以用 `INSTALL_DAILY_EXPORT=1` 强制要求安装，或用 `INSTALL_DAILY_EXPORT=0` 明确关闭：
 
 ```bash
 INSTALL_DAILY_EXPORT=1 sudo -E bash deploy/install.sh /opt/flow-acceleration
 ```
+
+安装器会分别检查 `/etc/flow-acceleration/backup-cos.env` 与项目 `.env`。优先使用完整的 root 私有配置；若 `/etc` 仍是空模板而项目 `.env` 已有完整的 `FLOW_BACKUP_COS_*` 配置，则直接沿用项目 `.env`，空模板不会覆盖有效凭据。两处都不完整时只安装 unit 文件但不启用 Timer，修好配置后重新运行安装器即可。
 
 如果程序不在示例目录，请把安装命令的最后一个参数替换为服务器上的实际项目路径，例如 `/path/to/Flow-Acceleration`。不要在公开文档中记录真实服务器目录。
 
@@ -666,6 +668,8 @@ Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 08:00 运行，�
 远端验证通过后，状态会先进入 `CLEANING`，再运行 `scripts/cleanup-research-retention.js`。默认保留 48 小时 Raw Trade，每批删除 25,000 行、每日最多 5,000,000 行，并在批次间让出磁盘；上传失败、校验文件缺失、状态过期或数据库繁忙超过重试上限时均停止清理。原本位于实时服务启动路径的 `PRAGMA optimize` 已移动到此低优先级维护任务，并设置较小的分析上限。报告写入 `data/exports/retention-last-run.json`。维护过程明确不执行 `wal_checkpoint` 或 `VACUUM`，所以 SQLite 文件不会立刻从磁盘缩小，但释放的页会被后续写入复用，数据库不再持续无上限增长。已有大型数据库如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
 
 安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传、验证与清理均有独立超时和失败保护，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`CLEANING`、`DONE` 或 `FAILED`），COSCLI 或清理任务卡住时不会无限占用下一次任务。
+
+部分服务器曾由 OpenClaw 临时创建 `flow-daily-export.service/timer`。标准安装器只会在 `flow-acceleration-backup.timer` 已通过校验并成功启用后，停用旧的 `flow-daily-export.timer`；正在执行的旧 oneshot 导出不会被强行中止，共用的 `flock` 也会阻止两个任务重叠。配置不完整时旧调度保持不变，避免迁移过程造成备份空窗。
 
 ## 前向组合 Shadow（2026-08-17）
 

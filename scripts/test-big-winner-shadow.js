@@ -90,7 +90,15 @@ function run() {
   const db = store();
   const base = 1_900_100_000_000;
   let now = base;
-  const suite = new BigWinnerShadowSuite({ config: config(), store: db, now: () => now });
+  const cfg = config();
+  cfg.entryProfiles[0].liveStrategyId = 'big_winner_pbr_a_x50_15_live';
+  const liveSignals = [];
+  const suite = new BigWinnerShadowSuite({
+    config: cfg,
+    store: db,
+    now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
   suite.start();
   let sequence = 0;
   const emit = (mint, origin, offset, side, sol, wallet, price) => {
@@ -114,6 +122,10 @@ function run() {
   emit(pullMint, base, 5_000, 'BUY', 1, 'buyer-4', 1.326);
   assert.strictEqual(suite.health().pendingEntries, 18,
     'three pullback entries must each create four runner exits and two fixed-hold exits');
+  assert.strictEqual(liveSignals.length, 1,
+    'PBR-A must emit one live event instead of one event per Shadow exit cohort');
+  assert.strictEqual(liveSignals[0].strategyId, 'big_winner_pbr_a_x50_15_live');
+  assert.strictEqual(liveSignals[0].features.shadowExitProfileId, 'X50_15');
   emit(pullMint, base, 5_250, 'BUY', 0.2, 'fill', 1.326);
   assert.strictEqual(suite.health().activePositions, 18);
   emit(pullMint, base, 5_500, 'BUY', 1, 'core', 1.61);

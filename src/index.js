@@ -175,6 +175,7 @@ function createRuntime(runtimeConfig = config) {
   const bigWinnerShadow = new BigWinnerShadowSuite({
     config: runtimeConfig.bigWinnerShadow,
     store,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   bigWinnerShadow.start();
   const launchQualityObserver = new LaunchQualityObserver({
@@ -207,6 +208,7 @@ function createRuntime(runtimeConfig = config) {
     config: runtimeConfig.migratedDropReboundShadow,
     store,
     rugRiskTracker: preEntryRugRisk,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   migratedDropReboundShadow.start();
   const migrationContinuityShadow = new MigrationContinuityShadowSuite({

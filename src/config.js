@@ -384,6 +384,173 @@ const config = {
     // and independent decision history; the retired Primary live rule is not listed.
     strategies: [
       {
+        id: 'big_winner_pbr_a_x50_15_live',
+        code: 'PBR-A-X50-15',
+        label: 'Big Winner PBR-A · X50_15 Core + Runner',
+        ruleVersion: 'big_winner_pbr_a_x50_15_live_v1',
+        signalSource: 'BIG_WINNER_PBR_A',
+        enabled: booleanEnv('FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'PBR_CORE_RUNNER',
+        hardStopPct: 15,
+        coreActivationPct: 20,
+        coreExitPct: 50,
+        trailingActivationPct: 30,
+        baseTrailingDrawdownPct: 15,
+        trailingTiers: [
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+        ],
+        maxHoldMs: 180_000,
+        sourceShadowCohortId: 'PBR_A:X50_15',
+      },
+      {
+        id: 'migrated_gfr_300_hs20_h30_live',
+        code: 'GFR-300-HS20-H30',
+        label: 'Lifecycle Drop/Rebound G · GFR_300 30秒尾仓',
+        ruleVersion: 'migrated_gfr_300_hs20_h30_live_v1',
+        signalSource: 'MIGRATED_GFR_300_CONFIRMED',
+        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_ENABLED', true),
+        entryEnabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_ENTRY_ENABLED', true),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GFR_300_POSITION_SOL', 0.1),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GFR_300_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GFR_300_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GFR_300_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'TAIL',
+        hardStopPct: 20,
+        maxHoldMs: 30_000,
+        sourceShadowCohortId: 'POST_GFR_300_GFR_HS20_H30_C10',
+      },
+      {
+        id: 'migration_continuity_mc_c5_t12_5_live',
+        code: 'M-C5-T12.5',
+        label: 'Migration Continuity M · 10秒保护 / T12.5',
+        ruleVersion: 'migration_continuity_mc_c5_t12_5_live_v1',
+        signalSource: 'MIGRATION_CONTINUITY_MC_C5_T12_5',
+        enabled: booleanEnv('FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_MAX_ENTRY_JUMP_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'TRAILING',
+        minHoldMs: 10_000,
+        trailingActivationPct: 15,
+        trailingStopPct: 12.5,
+        hardStopPct: 20,
+        maxHoldMs: 180_000,
+        sourceShadowCohortId: 'MC_C5_T12_5',
+      },
+      {
+        id: 'graduation_accel_o90_m5_stair120_live',
+        code: 'O90-M5-STAIR120',
+        label: 'Graduation Acceleration O · O90 M5 STAIR120',
+        ruleVersion: 'graduation_accel_o90_m5_stair120_live_v1',
+        signalSource: 'GRADUATION_ACCEL_O90_M5_STAIR120',
+        enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_BONDING_CURVE',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 1_000 },
+        ),
+        exitMode: 'GRADUATION_CORE_RUNNER',
+        hardStopPct: 30,
+        coreExitPct: 50,
+        maxPreGraduationHoldMs: 5 * 60_000,
+        maxPostGraduationHoldMs: 120_000,
+        maxHoldMs: 5 * 60_000,
+        postMigrationGate: {
+          windowMs: 5_000,
+          minBuyers: 25,
+          minNetFlowSol: 0,
+        },
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 10 },
+          { activationPct: 40, drawdownPct: 15 },
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+          { activationPct: 300, drawdownPct: 30 },
+        ],
+        sourceShadowCohortId: 'O90_M5_STAIR120:C10',
+      },
+      {
         id: 'migration_continuity_mc_c5_e120_live',
         code: 'M-C5-E120',
         label: 'Migration Continuity M · 固定120秒',
@@ -1608,7 +1775,8 @@ const config = {
       {
         id: 'PBR_A',
         label: 'PBR-A balanced: wave 40 / pullback 12-25 / NF3 3',
-        newEntriesEnabled: false,
+        newEntriesEnabled: true,
+        liveStrategyId: 'big_winner_pbr_a_x50_15_live',
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 25,
         minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 3,
@@ -2690,6 +2858,7 @@ const config = {
         minReturn5sPct: 20, maxReturn5sPct: 140,
         minSourceSlotBuyers: 1, minSourceSlotNetFlowSol: 0,
         requireCreatorNoSell: false,
+        newEntriesEnabled: false,
       },
       {
         id: 'CSF_E35',
@@ -2700,6 +2869,7 @@ const config = {
         minReturn5sPct: 20, maxReturn5sPct: 140,
         minSourceSlotBuyers: 1, minSourceSlotNetFlowSol: 0,
         requireCreatorNoSell: false,
+        newEntriesEnabled: false,
       },
       {
         id: 'CSF_E510',
@@ -2710,6 +2880,7 @@ const config = {
         minReturn5sPct: 20, maxReturn5sPct: 140,
         minSourceSlotBuyers: 2, minSourceSlotNetFlowSol: 0.25,
         requireCreatorNoSell: false,
+        newEntriesEnabled: false,
       },
       {
         id: 'CSF_S310',
@@ -2720,6 +2891,19 @@ const config = {
         minReturn5sPct: 30, maxReturn5sPct: 120,
         minSourceSlotBuyers: 2, minSourceSlotNetFlowSol: 0.5,
         requireCreatorNoSell: true,
+        newEntriesEnabled: false,
+      },
+      {
+        id: 'CSF_E510_Q',
+        label: 'CSF-E510-Q · 5–10s strict diversified flow',
+        minAgeMs: 5_000, maxAgeMs: 10_000,
+        minBuyers5s: 15, minNetFlow5sSol: 12,
+        minBuyTxSharePct: 80, maxLargestBuyerSharePct: 35,
+        minReturn5sPct: 20, maxReturn5sPct: 140,
+        minSourceSlotBuyers: 3, minSourceSlotNetFlowSol: 0.25,
+        requireCreatorNoSell: false,
+        newEntriesEnabled: true,
+        managementProfileIds: ['F20'],
       },
     ],
     managementProfiles: [
@@ -3400,6 +3584,7 @@ const config = {
         ['GFR_1000', 1_000],
       ].map(([id, confirmationMs]) => ({
         id,
+        liveStrategyId: id === 'GFR_300' ? 'migrated_gfr_300_hs20_h30_live' : null,
         label: `G-FR · 快速反转延续 · ${confirmationMs}ms确认`,
         windowMs: 1_000,
         dropMinPct: 25,
@@ -3781,7 +3966,7 @@ const config = {
     }),
     entryProfile: {
       id: 'MC_C5',
-      liveStrategyId: 'migration_continuity_mc_c5_e120_live',
+      liveStrategyId: 'migration_continuity_mc_c5_t12_5_live',
       label: 'MC-C · 毕业后5秒质量延续',
       minBuyers: integerEnv('FLOW_MIGRATION_CONTINUITY_MIN_BUYERS', 20, { min: 1 }),
       minNetFlowSol: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_NET_FLOW_SOL', 5, { min: 0 }),
@@ -4534,6 +4719,9 @@ const config = {
         ['O90_M5_STAIR120', 'TIERED_TRAILING', 120_000],
       ].map(([id, runnerExitMode, runnerMaxHoldMs]) => ({
         id,
+        liveStrategyId: id === 'O90_M5_STAIR120'
+          ? 'graduation_accel_o90_m5_stair120_live'
+          : null,
         label: `${id} · Curve90 graduation probability + first PumpSwap 5s gate`,
         mode: 'CURVE_MILESTONE',
         thresholdPct: 90,
@@ -4731,7 +4919,9 @@ const config = {
   // is followed by a buy in the same slot and prices the hypothetical 0.1 SOL
   // round trip from the sell event's post-trade reserves.
   sameSlotDumpBackrunShadow: {
-    enabled: booleanEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_SHADOW_ENABLED', true),
+    // The completed-slot export produced zero winners across every tested
+    // horizon. Keep the historical table/API but stop generating new rows.
+    enabled: booleanEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_SHADOW_ENABLED', false),
     positionSizeSol: numberEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_POSITION_SOL', 0.1, {
       min: 0.01,
       max: 10,
@@ -4925,7 +5115,11 @@ function validateConfig() {
     if (!config.liveTrading.privateKey) {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
-    if (!process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL
+    if (!process.env.FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL
+      && !process.env.FLOW_LIVE_MIGRATED_GFR_300_POSITION_SOL
+      && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_POSITION_SOL
+      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_POSITION_SOL
+      && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL
       && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL

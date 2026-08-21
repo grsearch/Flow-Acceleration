@@ -566,6 +566,7 @@ class CyaSlotFlowShadowSuite {
     this.metrics.evaluatedTransitions += 1;
     const results = [];
     for (const profile of this.entryProfiles.values()) {
+      if (profile.newEntriesEnabled === false) continue;
       const key = `${trade.mint}:${profile.id}`;
       const prior = this.lastEpisodes.get(key);
       if (prior != null && trade.timestampMs - prior < this.config.episodeCooldownMs) continue;
@@ -582,6 +583,8 @@ class CyaSlotFlowShadowSuite {
     const results = [];
     this.metrics.qualifiedSignals += 1;
     for (const management of this.managementProfiles.values()) {
+      if (Array.isArray(entryProfile.managementProfileIds)
+        && !entryProfile.managementProfileIds.includes(management.id)) continue;
       const result = this.insert.run({
         cohortId: `${entryProfile.id}:${management.id}`,
         entryProfileId: entryProfile.id,

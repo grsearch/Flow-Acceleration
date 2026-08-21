@@ -82,6 +82,51 @@ async function main() {
       maxEntrySelfImpactPct: 10, exitMode: 'FIXED_HOLD', fixedHoldMs: 30_000,
       hardStopPct: 0, maxHoldMs: 30_000,
     },
+    {
+      id: 'big_winner_pbr_a_x50_15_live', enabled: true, entryEnabled: true,
+      signalSource: 'BIG_WINNER_PBR_A', ruleVersion: 'pbr-live-test',
+      market: 'PUMP_AMM', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+      maxEntrySelfImpactPct: 10, exitMode: 'PBR_CORE_RUNNER',
+      hardStopPct: 15, coreActivationPct: 20, coreExitPct: 50,
+      trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
+      trailingTiers: [
+        { activationPct: 80, drawdownPct: 20 },
+        { activationPct: 150, drawdownPct: 25 },
+      ],
+      maxHoldMs: 180_000,
+    },
+    {
+      id: 'migrated_gfr_300_hs20_h30_live', enabled: true, entryEnabled: true,
+      signalSource: 'MIGRATED_GFR_300_CONFIRMED', ruleVersion: 'gfr-live-test',
+      market: 'PUMP_AMM', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+      maxEntrySelfImpactPct: 10, exitMode: 'TAIL', hardStopPct: 20,
+      maxHoldMs: 30_000,
+    },
+    {
+      id: 'migration_continuity_mc_c5_t12_5_live', enabled: true, entryEnabled: true,
+      signalSource: 'MIGRATION_CONTINUITY_MC_C5_T12_5', ruleVersion: 't12-live-test',
+      market: 'PUMP_AMM', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 10,
+      maxEntrySelfImpactPct: 10, exitMode: 'TRAILING', minHoldMs: 10_000,
+      trailingActivationPct: 15, trailingStopPct: 12.5, hardStopPct: 20,
+      maxHoldMs: 180_000,
+    },
+    {
+      id: 'graduation_accel_o90_m5_stair120_live', enabled: true, entryEnabled: true,
+      signalSource: 'GRADUATION_ACCEL_O90_M5_STAIR120', ruleVersion: 'o90-live-test',
+      market: 'PUMP_BONDING_CURVE', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+      exitMode: 'GRADUATION_CORE_RUNNER', hardStopPct: 30, coreExitPct: 50,
+      maxPreGraduationHoldMs: 300_000, maxPostGraduationHoldMs: 120_000,
+      maxHoldMs: 300_000,
+      postMigrationGate: { windowMs: 5_000, minBuyers: 25, minNetFlowSol: 0 },
+      trailingTiers: [
+        { activationPct: 20, drawdownPct: 10 },
+        { activationPct: 40, drawdownPct: 15 },
+      ],
+    },
   ];
   const manager = new LiveTradingManager({
     config: runtimeConfig(strategies), store, now: () => now,
@@ -203,6 +248,117 @@ async function main() {
   const foPosition = store.liveTradingDashboard({ strategyId: strategies[3].id }).positions[0];
   assert.strictEqual(foPosition.status, 'CLOSED');
   assert.strictEqual(foPosition.exit_reason, 'FIXED_HOLD_30000MS');
+
+  const pbrMint = 'pbr-live-mint';
+  store.recordCreate({
+    mint: pbrMint, symbol: 'PBR', name: null, uri: null, bondingCurve: null,
+    creator: 'creator-pbr', createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  store.recordComplete({ mint: pbrMint, completedAt: now - 5_000, timestampMs: now - 5_000 });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[4].id, episodeId: 'pbr:1', mint: pbrMint,
+    symbol: 'PBR', price: 1, market: 'PUMP_AMM',
+    timestampMs: now, receivedAtMs: now,
+    features: { shadowEntryProfileId: 'PBR_A', shadowExitProfileId: 'X50_15' },
+  });
+  await waitForQueue();
+  now += 100;
+  manager.observeTrade({ mint: pbrMint, market: 'PUMP_AMM', price: 1.21, timestampMs: now });
+  await waitForQueue();
+  let pbrDashboard = store.liveTradingDashboard({ strategyId: strategies[4].id });
+  assert.strictEqual(pbrDashboard.positions[0].status, 'OPEN');
+  assert.ok(pbrDashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'));
+  assert.strictEqual(pbrDashboard.positions[0].token_amount_raw, '50000');
+  now += 100;
+  manager.observeTrade({ mint: pbrMint, market: 'PUMP_AMM', price: 1.5, timestampMs: now });
+  now += 100;
+  manager.observeTrade({ mint: pbrMint, market: 'PUMP_AMM', price: 1.27, timestampMs: now });
+  await waitForQueue();
+  pbrDashboard = store.liveTradingDashboard({ strategyId: strategies[4].id });
+  assert.strictEqual(pbrDashboard.positions[0].status, 'CLOSED');
+  assert.strictEqual(pbrDashboard.positions[0].exit_reason, 'PBR_RUNNER_TRAIL_D15');
+
+  const gfrMint = 'gfr-live-mint';
+  store.recordCreate({
+    mint: gfrMint, symbol: 'GFR', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  store.recordComplete({ mint: gfrMint, completedAt: now - 5_000, timestampMs: now - 5_000 });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[5].id, episodeId: 'gfr:1', mint: gfrMint,
+    symbol: 'GFR', price: 1, market: 'PUMP_AMM',
+    timestampMs: now, receivedAtMs: now,
+    features: { entryProfileId: 'GFR_300' },
+  });
+  await waitForQueue();
+  now += 100;
+  manager.observeTrade({ mint: gfrMint, market: 'PUMP_AMM', price: 0.79, timestampMs: now });
+  await waitForQueue();
+  const gfrPosition = store.liveTradingDashboard({ strategyId: strategies[5].id }).positions[0];
+  assert.strictEqual(gfrPosition.status, 'CLOSED');
+  assert.strictEqual(gfrPosition.exit_reason, 'HARD_STOP');
+
+  const t12Mint = 't12-live-mint';
+  store.recordCreate({
+    mint: t12Mint, symbol: 'T12', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  store.recordComplete({ mint: t12Mint, completedAt: now - 5_000, timestampMs: now - 5_000 });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[6].id, episodeId: 't12:1', mint: t12Mint,
+    symbol: 'T12', price: 1, market: 'PUMP_AMM',
+    timestampMs: now, receivedAtMs: now,
+    features: { buyers: 20, netFlowSol: 5, returnPct: 5, sellBuyRatio: 0.5 },
+  });
+  await waitForQueue();
+  now += 5_000;
+  manager.observeTrade({ mint: t12Mint, market: 'PUMP_AMM', price: 1.2, timestampMs: now });
+  now += 5_100;
+  manager.observeTrade({ mint: t12Mint, market: 'PUMP_AMM', price: 1.04, timestampMs: now });
+  await waitForQueue();
+  const t12Position = store.liveTradingDashboard({ strategyId: strategies[6].id }).positions[0];
+  assert.strictEqual(t12Position.status, 'CLOSED');
+  assert.strictEqual(t12Position.exit_reason, 'TRAILING_STOP');
+
+  const o90Mint = 'o90-live-mint';
+  store.recordCreate({
+    mint: o90Mint, symbol: 'O90', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[7].id, episodeId: 'o90:1', mint: o90Mint,
+    symbol: 'O90', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { entryProfileId: 'O90_M5_STAIR120' },
+  });
+  await waitForQueue();
+  const o90GraduatedAt = now + 1_000;
+  store.recordComplete({ mint: o90Mint, completedAt: o90GraduatedAt, timestampMs: o90GraduatedAt });
+  manager.onGraduated(store.getToken(o90Mint));
+  for (let index = 0; index < 25; index += 1) {
+    manager.observeTrade({
+      mint: o90Mint, market: 'PUMP_AMM', side: 'BUY', wallet: `o90-buyer-${index}`,
+      solAmount: 0.1, signature: `o90-${index}`, price: 1.2,
+      timestampMs: o90GraduatedAt + 100 + index * 100,
+    });
+  }
+  await waitForQueue();
+  let o90Dashboard = store.liveTradingDashboard({ strategyId: strategies[7].id });
+  assert.ok(!o90Dashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'),
+    'core must wait until the complete five-second gate');
+  now = o90GraduatedAt + 5_001;
+  manager.observeTrade({
+    mint: o90Mint, market: 'PUMP_AMM', side: 'BUY', wallet: 'o90-after-gate',
+    solAmount: 0.1, signature: 'o90-after-gate', price: 1.2, timestampMs: now,
+  });
+  await waitForQueue();
+  o90Dashboard = store.liveTradingDashboard({ strategyId: strategies[7].id });
+  assert.ok(o90Dashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'),
+    'passing the five-second gate releases the 50% core exit');
 
   await manager.stop();
   store.close();

@@ -10,7 +10,7 @@ User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
 WorkingDirectory=@INSTALL_DIR@
 EnvironmentFile=@INSTALL_DIR@/.env
-EnvironmentFile=/etc/flow-acceleration/backup-cos.env
+@BACKUP_ENV_LINE@
 Environment=FLOW_BACKUP_PROJECT_DIR=@INSTALL_DIR@
 Environment=FLOW_BACKUP_NODE_BIN=@NODE_BIN@
 Environment=FLOW_BACKUP_COSCLI_BIN=@COSCLI_BIN@

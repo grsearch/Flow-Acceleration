@@ -363,11 +363,11 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-like-early" data-strategy-code="SLE">
               <b><span class="strategy-code">SLE</span>Smart-Like Early</b><small>早期不追涨入场、顺势加仓、分批止盈与长尾退出</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-slot-flow" data-strategy-code="CSF-C03/E35/E510/S310">
-              <b><span class="strategy-code">CSF-C03/E35/E510/S310</span>CYA Slot Flow</b><small>上一 Slot 公共订单流确认；目标钱包只作未来标签</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-slot-flow" data-strategy-code="CSF-E510-Q">
+              <b><span class="strategy-code">CSF-E510-Q</span>CYA Slot Flow</b><small>严格5–10秒公共流前向组；旧宽松组停止新开仓</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
-              <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun</b><small>大砸单后理论同Slot 0.1 SOL；永不发链</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
+              <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun（已停）</b><small>0胜率且样本稀疏；历史数据保留，不再新增</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
               <b><span class="strategy-code">SR-R0/R1/R2/R3</span>Smart 多钱包共振右尾</b><small>第二/第三个不同钱包确认后入场；硬止损 + 60–240秒固定持有</small>
@@ -823,7 +823,7 @@
                 <h2>CYA Completed-Slot Public Flow Shadow CSF</h2>
                 <p>只使用上一完整 Slot 的非监控钱包成交；下一 Slot 到达后才触发。CYA 钱包买入只作为未来标签，永不参与判定或发送交易。</p>
               </div>
-              <div class="strategy-expression" id="cya-slot-flow-expression">CSF-C03/E35/E510/S310 入场 × F20/A50/A60 管理组合</div>
+              <div class="strategy-expression" id="cya-slot-flow-expression">CSF-E510-Q：5–10秒严格公共流入场 × F20 管理组</div>
               <div class="strategy-metric-groups" id="cya-slot-flow-metrics"></div>
               <div class="strategy-metric-groups" id="cya-slot-flow-time-sessions"></div>
               <div class="section-title"><h2>上一 Slot 公共流 × 容量感知退出</h2><p>对照0–3秒、3–5秒、5–10秒和严格无 Creator 卖出组；NO_EXIT 单独右删失。</p></div>
@@ -843,9 +843,9 @@
             <article class="card record-section">
               <div class="section-title">
                 <h2>Same-Slot Dump Backrun Shadow SDBR</h2>
-                <p>按大卖单后的 PumpSwap 真实储备理论立即买入；只衡量信号与容量，不代表没有 Leader 基础设施也能保证抢到。</p>
+                <p>该实验已停止新增。历史结果显示同 Slot 大砸单后的公开流追单在现有基础设施下没有形成正收益。</p>
               </div>
-              <div class="strategy-expression" id="same-slot-dump-backrun-expression">Sell≥10/20 SOL、跌幅≥15%/20% → 0.1 SOL理论即时成交 → 250ms/500ms/1s/2s退出</div>
+              <div class="strategy-expression" id="same-slot-dump-backrun-expression">已停：Sell≥10/20 SOL、跌幅≥15%/20% → 理论即时成交；历史结果保留</div>
               <div class="strategy-metric-groups" id="same-slot-dump-backrun-metrics"></div>
               <div class="section-title"><h2>大卖单 × 超短退出</h2><p>第一笔外部买单是否同 Slot 单独记录；NO_EXIT 不按 -100% 计。</p></div>
               <div class="table-wrap"><table>
@@ -1247,25 +1247,38 @@
         ['紧急开关', runtime.killSwitchActive ? '<span class="negative">已触发</span>' : '<span class="positive">正常</span>'],
       ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
 
-      const isContinuityLive = strategy.signalSource === 'MIGRATION_CONTINUITY_MC_C5';
-      const isGraduationAccelLive = strategy.signalSource === 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC';
+      const isContinuityLive = String(strategy.signalSource || '').startsWith('MIGRATION_CONTINUITY_MC_C5');
+      const isGraduationAccelLive = String(strategy.signalSource || '').startsWith('GRADUATION_ACCEL_');
+      const isO90Live = strategy.signalSource === 'GRADUATION_ACCEL_O90_M5_STAIR120';
+      const isGfrLive = strategy.signalSource === 'MIGRATED_GFR_300_CONFIRMED';
       const isQualityLeaderLive = strategy.signalSource === 'QUALITY_LEADER_QL_STRICT_PROTECTED';
       const isLaunchPullbackLive = strategy.signalSource === 'LAUNCH_PULLBACK_FO_RB10_30S';
+      const isPbrLive = strategy.signalSource === 'BIG_WINNER_PBR_A';
       const isBondingCurveLive = isGraduationAccelLive || isQualityLeaderLive
         || isLaunchPullbackLive;
       const mintOpportunityCopy = strategy.maxSignalsPerMint
         ? `每Mint只取首次机会（最多${number(strategy.maxSignalsPerMint)}个匹配信号）`
         : `每Mint最多成功开仓${number(strategy.maxEntriesPerMint || 1)}次`;
       let strategyExpression = isContinuityLive
-        ? '毕业后5秒：Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6 → 固定持有120秒（20%硬止损）'
+        ? (strategy.exitMode === 'TRAILING'
+          ? '毕业后5秒：Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6 → 10秒保护 / +15%激活 / 峰值回撤12.5%'
+          : '毕业后5秒：Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6 → 固定持有120秒（20%硬止损）')
         : isGraduationAccelLive
-          ? '首次Curve≥80% + 最近5秒ΔCurve≥5 + Buyers≥2 + 0卖单 + Creator未卖 → 毕业卖50%，剩余阶梯移动止盈'
+          ? (isO90Live
+            ? 'Curve≥90% 毕业概率信号 → 首次PumpSwap 5秒 Buyers≥25 门控 → 卖出50% Core，余仓 STAIR120'
+            : '首次Curve≥80% + 最近5秒ΔCurve≥5 + Buyers≥2 + 0卖单 + Creator未卖 → 毕业卖50%，剩余阶梯移动止盈')
           : `毕业后≤${age(strategy.trackingAgeMs)} + 1秒深跌${number(strategy.dropMinPct)}%–${number(strategy.dropMaxPct)}% + 低点反弹${number(strategy.reboundMinPct)}%–${number(strategy.reboundMaxPct)}% → ${mintOpportunityCopy} → XLEG退出`;
+      if (isGfrLive) {
+        strategyExpression = 'GFR_300：毕业后快速深跌反弹 → 300ms真实延续确认 → 20%硬止损 / 最长持有30秒';
+      }
       if (isQualityLeaderLive) {
         strategyExpression = 'QL Strict：10秒涨幅≥140%、20秒回撤≤12%、Retention≥80%、买家与净流入继续增长 → 首笔可执行 Bonding Curve 成交入场 → 全仓阶梯保护 Runner';
       }
       if (isLaunchPullbackLive) {
         strategyExpression = '首轮上涨后首次回踩参考 + Creator≤5% + 最近买家≥10 + NetFlow≥5 SOL → 200ms后首笔可执行 Bonding Curve 成交 → 固定持有30秒';
+      }
+      if (isPbrLive) {
+        strategyExpression = 'PBR-A：第一波≥40% → 回撤12%–25% → 反弹2%–10% + 3秒净流入≥3 SOL / Buyers≥4 → +20%卖50%，余仓15/20/25%自适应回撤';
       }
       document.querySelector('#live-strategy-expression').textContent = strategyExpression;
       const wallets = data.monitoredWallets || [];
@@ -1292,7 +1305,15 @@
       const commitmentPath = execution.readCommitment && execution.confirmationCommitment
         ? `${execution.readCommitment} → ${execution.confirmationCommitment}`
         : execution.commitment || '—';
-      const liveEntryRows = isContinuityLive ? [
+      const liveEntryRows = isPbrLive ? [
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'PBR-A 首次强势回调后二次加速'], ['市场', 'PUMP_AMM'],
+        ['第一波涨幅', '≥40%'], ['回撤区间', '12%–25%'], ['低点反弹', '2%–10%'], ['3秒净流入 / Buyers', '≥3 SOL / ≥4'],
+        ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isGfrLive ? [
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'GFR_300 快速反转延续确认'], ['市场', 'PUMP_AMM'],
+        ['确认延迟', '300ms'], ['确认要求', '价格延续 + 真实买家/净流入'], ['机会限制', '每Mint首次'],
+        ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isContinuityLive ? [
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '毕业后5秒延续质量'], ['市场', 'PUMP_AMM'],
         ['独立买家', '≥20'], ['净流入', '≥5 SOL'], ['毕业后涨幅', '≥5%'], ['Sell / Buy', '≤0.6'],
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
@@ -1306,7 +1327,7 @@
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
       ] : isGraduationAccelLive ? [
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '首次Curve80加速'], ['市场', 'PUMP_BONDING_CURVE'],
-        ['Curve阈值', '首次≥80%'], ['最近5秒ΔCurve', '≥5%'], ['独立买家', '≥2'], ['卖单 / Creator卖出', '0 / 否'],
+        ['Curve阈值', isO90Live ? '≥90%' : '首次≥80%'], ['最近5秒ΔCurve', isO90Live ? '毕业概率 M5' : '≥5%'], ['独立买家', isO90Live ? 'PumpSwap 5秒≥25' : '≥2'], ['卖单 / Creator卖出', isO90Live ? '由毕业概率信号筛选' : '0 / 否'],
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)],
       ] : [
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止（历史/存量退出）' : '启用'], ['信号类型', '毕业后独立深跌反弹周期'], ['市场', strategy.market || 'PUMP_AMM'],
@@ -1314,8 +1335,19 @@
         ['毕业后窗口', age(strategy.trackingAgeMs)], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)],
         ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)], ['机会限制', mintOpportunityCopy],
       ];
-      const liveExitRows = isContinuityLive ? [
-        ['策略模式', '固定持有'], ['固定持仓', age(strategy.fixedHoldMs)],
+      const liveExitRows = isPbrLive ? [
+        ['策略模式', '50% Core + 50% Runner'], ['Core触发 / 卖出', `${rate(strategy.coreActivationPct)} / ${rate(strategy.coreExitPct)}`],
+        ['Runner激活', rate(strategy.trailingActivationPct)], ['基础峰值回撤', rate(strategy.baseTrailingDrawdownPct)],
+        ['峰值≥80% / ≥150%', '回撤20% / 25%'], ['Core前硬止损', rate(strategy.hardStopPct)],
+        ['最大持仓兜底', age(strategy.maxHoldMs)],
+      ] : isGfrLive ? [
+        ['策略模式', '快速延续尾仓'], ['固定止盈', '无'], ['移动止盈', '无'],
+        ['硬止损', rate(strategy.hardStopPct)], ['最大持仓兜底', age(strategy.maxHoldMs)],
+      ] : isContinuityLive ? [
+        ['策略模式', strategy.exitMode === 'TRAILING' ? '延迟激活移动止盈' : '固定持有'],
+        ['保护期', strategy.exitMode === 'TRAILING' ? age(strategy.minHoldMs) : '—'],
+        ['激活 / 峰值回撤', strategy.exitMode === 'TRAILING' ? `${rate(strategy.trailingActivationPct)} / ${rate(strategy.trailingStopPct)}` : '—'],
+        ['固定持仓', strategy.exitMode === 'TRAILING' ? '—' : age(strategy.fixedHoldMs)],
         ['硬止损', rate(strategy.hardStopPct)], ['最大持仓兜底', age(strategy.maxHoldMs)],
       ] : isQualityLeaderLive ? [
         ['策略模式', 'Protected Runner（不分批）'], ['硬止损', rate(strategy.hardStopPct)],
@@ -1329,6 +1361,7 @@
         ['最大持仓兜底', age(strategy.maxHoldMs)],
       ] : isGraduationAccelLive ? [
         ['策略模式', '毕业核心 + Runner'], ['毕业时核心卖出', rate(strategy.coreExitPct)],
+        ['PumpSwap门控', isO90Live ? '5秒 Buyers≥25' : '无'],
         ['Runner阶梯', '+20/40/80/150/300%'], ['对应峰值回撤', '10/15/20/25/30%'],
         ['硬止损', rate(strategy.hardStopPct)], ['毕业前/后兜底', `${age(strategy.maxPreGraduationHoldMs)} / ${age(strategy.maxPostGraduationHoldMs)}`],
       ] : [
@@ -1348,7 +1381,7 @@
         ]],
         ['链上执行', [
           ['买入模式', isBondingCurveLive ? 'Bonding Curve 固定SOL硬上限' : 'PumpSwap 固定SOL硬上限'], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
-          ['卖出数量', isGraduationAccelLive ? '毕业50% + Runner余额100%' : '链上当前余额 100%'], ['卖后余额核对', '残余自动重试'],
+          ['卖出数量', (isGraduationAccelLive || isPbrLive) ? 'Core 50% + Runner余额100%' : '链上当前余额 100%'], ['卖后余额核对', '残余自动重试'],
           ['买/卖优先费', `${number(runtime.priorityFeeSol,6)} SOL / 笔`],
         ]],
       ];
@@ -2375,7 +2408,7 @@
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['旧7.5%参考', number(launchQuality.referencePullbacks)], ['FD深回踩参考 / 过深拒绝', `${number(launchQuality.deepReferences)} / ${number(launchQuality.deepRejected)}`], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
         ['M2F-OBS', [['模式', migrationSecondLeg.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动迁移', number(migrationSecondLeg.activeMigrations)], ['本次迁移', number(migrationSecondLeg.migrationsObserved)], ['本次快照', number(migrationSecondLeg.snapshotsWritten)], ['额外RPC', '无'], ['模拟仓位', '不创建'], ['已补字段', 'Quote Reserve / 容量冲击 / Canonical'], ['临时字段', 'Gross-NFI10 / Boost与Cashback提示'], ['仍不可用', 'Mayhem / 精确BOOST / 实体聚类'], ['链上交易', '无执行路径']]],
         ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N · 15秒控制 + NQ质量组' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 留存 + Curve + 峰后资金流'], ['数据表', '历史全保留，新 cohort 独立'], ['链上交易', '永不发送']]],
-        ['Scope Guard', [['实盘入场', '当前全部关闭'], ['已停新开仓', 'QL / M-C5-E120 / GD25-35-F1-XLEG / O / 历史XLEG'], ['存量退出', '继续按各自原规则执行'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
+        ['Scope Guard', [['实盘入场', `${number(liveStrategies.filter(strategy => strategy.entryEnabled !== false).length)} 个独立策略启用`], ['启用策略', liveStrategies.filter(strategy => strategy.entryEnabled !== false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['已停新开仓', liveStrategies.filter(strategy => strategy.entryEnabled === false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['存量退出', '继续按各自原规则执行'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const rugStrategies = rugRisk.strategyStats || [];

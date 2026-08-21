@@ -111,6 +111,7 @@ function main() {
   const service = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'flow-acceleration-backup.service'), 'utf8');
   const credentialTemplate = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'backup-cos.env.example'), 'utf8');
   const installer = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'install-daily-export.sh'), 'utf8');
+  const mainInstaller = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'install.sh'), 'utf8');
   assert.ok(backupScript.includes('FLOW_BACKUP_COS_BUCKET'));
   assert.ok(backupScript.includes('FLOW_BACKUP_COS_REGION'));
   assert.ok(backupScript.includes('FLOW_BACKUP_COS_ENDPOINT'));
@@ -133,9 +134,31 @@ function main() {
   assert.match(timer, /OnCalendar=\*-\*-\* 08:00:00 Asia\/Shanghai/);
   assert.match(timer, /Persistent=true/);
   assert.match(service, /Environment=HOME=@INSTALL_DIR@\/data\/exports\/\.coscli-home/);
+  assert.match(service, /@BACKUP_ENV_LINE@/);
   assert.match(service, /ReadWritePaths=@INSTALL_DIR@\/data/);
   assert.match(installer, /remove_legacy_cron/);
   assert.match(installer, /cos-auto-upload-export\\\.sh/);
+  assert.match(installer, /has_complete_cos_config/);
+  assert.match(installer, /CONFIG_SOURCE/);
+  assert.match(installer, /LEGACY_TIMER="flow-daily-export\.timer"/);
+  assert.match(installer, /systemctl disable --now "\$LEGACY_TIMER"/);
+  assert.ok(
+    installer.indexOf('if [[ -z "$CONFIG_SOURCE" ]]')
+      < installer.indexOf('systemctl enable --now "$CANONICAL_TIMER"'),
+    'configuration must be validated before enabling the canonical timer',
+  );
+  assert.ok(
+    installer.indexOf('systemctl enable --now "$CANONICAL_TIMER"')
+      < installer.indexOf('systemctl disable --now "$LEGACY_TIMER"'),
+    'legacy timer must remain available until the canonical timer is enabled',
+  );
+  assert.ok(
+    installer.indexOf('systemctl enable --now "$CANONICAL_TIMER"')
+      < installer.lastIndexOf('remove_legacy_cron "$SERVICE_USER"'),
+    'legacy cron must remain available until the canonical timer is enabled',
+  );
+  assert.match(mainInstaller, /INSTALL_DAILY_EXPORT="\$\{INSTALL_DAILY_EXPORT:-auto\}"/);
+  assert.match(mainInstaller, /command -v coscli/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_SECRET_ID=\r?\n/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_SECRET_KEY=\r?\n/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_BUCKET=your-bucket-appid/);

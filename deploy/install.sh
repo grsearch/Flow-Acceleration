@@ -5,6 +5,7 @@ INSTALL_DIR="${1:-/opt/flow-acceleration}"
 SERVICE_USER="${SERVICE_USER:-ubuntu}"
 SERVICE_GROUP="${SERVICE_GROUP:-}"
 SERVICE_NAME="flow-acceleration"
+INSTALL_DAILY_EXPORT="${INSTALL_DAILY_EXPORT:-auto}"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Please run with sudo."
@@ -80,10 +81,26 @@ if command -v systemd-analyze >/dev/null 2>&1; then
 fi
 systemctl enable "$SERVICE_NAME"
 
-if [[ "${INSTALL_DAILY_EXPORT:-0}" == "1" ]]; then
-  SERVICE_USER="$SERVICE_USER" SERVICE_GROUP="$SERVICE_GROUP" \
-    NODE_BIN="$NODE_BIN" bash "$INSTALL_DIR/deploy/install-daily-export.sh" "$INSTALL_DIR"
-fi
+case "${INSTALL_DAILY_EXPORT,,}" in
+  1|true|yes|on)
+    SERVICE_USER="$SERVICE_USER" SERVICE_GROUP="$SERVICE_GROUP" \
+      NODE_BIN="$NODE_BIN" bash "$INSTALL_DIR/deploy/install-daily-export.sh" "$INSTALL_DIR"
+    ;;
+  auto)
+    if command -v coscli >/dev/null 2>&1; then
+      SERVICE_USER="$SERVICE_USER" SERVICE_GROUP="$SERVICE_GROUP" \
+        NODE_BIN="$NODE_BIN" bash "$INSTALL_DIR/deploy/install-daily-export.sh" "$INSTALL_DIR"
+    else
+      echo "Daily COS export not installed automatically: coscli is not available."
+      echo "Install Tencent COSCLI, then run deploy/install-daily-export.sh."
+    fi
+    ;;
+  0|false|no|off) ;;
+  *)
+    echo "Invalid INSTALL_DAILY_EXPORT value: $INSTALL_DAILY_EXPORT (use auto, 1, or 0)." >&2
+    exit 1
+    ;;
+esac
 
 if [[ "${START_SERVICE:-0}" == "1" ]]; then
   if ! grep -Eq '^(FLOW_GRPC_TOKEN|HELIUS_LASERSTREAM_TOKEN|HELIUS_API_KEY)=.+' "$INSTALL_DIR/.env"; then
@@ -99,6 +116,8 @@ echo "1. Fill FLOW_GRPC_ENDPOINTS and FLOW_GRPC_TOKEN in $INSTALL_DIR/.env"
 echo "2. systemctl restart $SERVICE_NAME"
 echo "3. systemctl --no-pager --full status $SERVICE_NAME"
 echo "4. Open http://<server>:3001"
-if [[ "${INSTALL_DAILY_EXPORT:-0}" != "1" ]]; then
-  echo "5. Optional daily COS export: INSTALL_DAILY_EXPORT=1 sudo -E bash deploy/install.sh $INSTALL_DIR"
+if [[ "${INSTALL_DAILY_EXPORT,,}" == "0" || "${INSTALL_DAILY_EXPORT,,}" == "false" || "${INSTALL_DAILY_EXPORT,,}" == "no" || "${INSTALL_DAILY_EXPORT,,}" == "off" ]]; then
+  echo "5. Daily COS export was explicitly disabled (INSTALL_DAILY_EXPORT=$INSTALL_DAILY_EXPORT)."
+else
+  echo "5. Daily COS export: systemctl list-timers flow-acceleration-backup.timer --all"
 fi

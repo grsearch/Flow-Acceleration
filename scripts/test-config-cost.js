@@ -63,6 +63,18 @@ assert.strictEqual(config.liveTrading.maxConcurrentPositions, 3);
 const liveContinuity = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'migration_continuity_mc_c5_e120_live'
 ));
+const liveContinuityT12 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'migration_continuity_mc_c5_t12_5_live'
+));
+const liveGfr300 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'migrated_gfr_300_hs20_h30_live'
+));
+const liveO90 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'graduation_accel_o90_m5_stair120_live'
+));
+const livePbrA = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'big_winner_pbr_a_x50_15_live'
+));
 const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
 ));
@@ -83,6 +95,24 @@ assert.strictEqual(liveContinuity.entryEnabled, false);
 assert.strictEqual(liveContinuity.code, 'M-C5-E120');
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
+assert.strictEqual(livePbrA.entryEnabled, true);
+assert.strictEqual(livePbrA.positionSizeSol, 0.1);
+assert.strictEqual(livePbrA.exitMode, 'PBR_CORE_RUNNER');
+assert.strictEqual(liveGfr300.entryEnabled, true);
+assert.strictEqual(liveGfr300.positionSizeSol, 0.1);
+assert.strictEqual(liveGfr300.exitMode, 'TAIL');
+assert.strictEqual(liveGfr300.hardStopPct, 20);
+assert.strictEqual(liveGfr300.maxHoldMs, 30_000);
+assert.strictEqual(liveContinuityT12.entryEnabled, true);
+assert.strictEqual(liveContinuityT12.positionSizeSol, 0.1);
+assert.strictEqual(liveContinuityT12.exitMode, 'TRAILING');
+assert.strictEqual(liveContinuityT12.minHoldMs, 10_000);
+assert.strictEqual(liveContinuityT12.trailingActivationPct, 15);
+assert.strictEqual(liveContinuityT12.trailingStopPct, 12.5);
+assert.strictEqual(liveO90.entryEnabled, true);
+assert.strictEqual(liveO90.positionSizeSol, 0.1);
+assert.strictEqual(liveO90.postMigrationGate.windowMs, 5_000);
+assert.strictEqual(liveO90.postMigrationGate.minBuyers, 25);
 assert.strictEqual(liveQualityLeader.positionSizeSol, 0.1);
 assert.strictEqual(liveQualityLeader.entryEnabled, false);
 assert.strictEqual(liveQualityLeader.code, 'QL-STRICT-PR');
@@ -150,6 +180,11 @@ assert.strictEqual(config.liveTrading.readCommitment, 'processed');
 assert.strictEqual(config.liveTrading.confirmationCommitment, 'confirmed');
 assert.strictEqual(config.liveTrading.contextSlotRetryCount, 6);
 assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
+assert.deepStrictEqual(
+  config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
+    .map((strategy) => strategy.code),
+  ['PBR-A-X50-15', 'GFR-300-HS20-H30', 'M-C5-T12.5', 'O90-M5-STAIR120'],
+);
 assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
   config.signalShadow.profiles.map((profile) => [
@@ -491,9 +526,14 @@ assert.deepStrictEqual(
   ],
 );
 assert.ok([
-  'PBR_A', 'PBR_B', 'PBR_C', 'FLOW_R',
+  'PBR_B', 'PBR_C', 'FLOW_R',
   'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
 ].every((id) => bigWinnerEntryProfiles.get(id)?.newEntriesEnabled === false));
+assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A').newEntriesEnabled, true);
+assert.strictEqual(
+  bigWinnerEntryProfiles.get('PBR_A').liveStrategyId,
+  'big_winner_pbr_a_x50_15_live',
+);
 assert.deepStrictEqual(
   ['PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY'].map((id) => (
     bigWinnerEntryProfiles.get(id)?.newEntriesEnabled
@@ -519,9 +559,17 @@ assert.strictEqual(config.migrationContinuityShadow.enabled, true);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
 assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
   id: 'MC_C5', label: 'MC-C · 毕业后5秒质量延续',
-  liveStrategyId: 'migration_continuity_mc_c5_e120_live',
+  liveStrategyId: 'migration_continuity_mc_c5_t12_5_live',
   minBuyers: 20, minNetFlowSol: 5, minReturnPct: 5, maxSellBuyRatio: 0.6,
 });
+assert.strictEqual(config.sameSlotDumpBackrunShadow.enabled, false);
+const csfProfiles = new Map(config.cyaSlotFlowShadow.entryProfiles.map((profile) => (
+  [profile.id, profile]
+)));
+assert.ok(['CSF_C03', 'CSF_E35', 'CSF_E510', 'CSF_S310']
+  .every((id) => csfProfiles.get(id)?.newEntriesEnabled === false));
+assert.strictEqual(csfProfiles.get('CSF_E510_Q').newEntriesEnabled, true);
+assert.deepStrictEqual(csfProfiles.get('CSF_E510_Q').managementProfileIds, ['F20']);
 assert.deepStrictEqual(
   config.migrationContinuityShadow.exitProfiles.map((profile) => profile.id),
   ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER'],

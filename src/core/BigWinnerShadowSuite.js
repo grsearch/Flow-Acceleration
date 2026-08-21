@@ -78,10 +78,11 @@ function percentile(values, q) {
 }
 
 class BigWinnerShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
@@ -662,6 +663,31 @@ class BigWinnerShadowSuite {
   _recordSignal(profile, state, trade, price, features) {
     const episodeId = `${trade.mint}:${profile.id}:${trade.timestampMs}`;
     const now = this.now();
+    if (this.onLiveSignal && profile.liveStrategyId) {
+      try {
+        this.onLiveSignal({
+          strategyId: profile.liveStrategyId,
+          episodeId,
+          mint: trade.mint,
+          symbol: state.symbol,
+          price,
+          slot: trade.slot,
+          timestampMs: trade.timestampMs,
+          receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+          market: 'PUMP_AMM',
+          poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+          poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+          virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+          features: {
+            ...features,
+            shadowEntryProfileId: profile.id,
+            shadowExitProfileId: 'X50_15',
+          },
+        });
+      } catch (error) {
+        this.metrics.lastError = String(error?.message || error);
+      }
+    }
     for (const exit of this.exitProfiles.values()) {
       if (Array.isArray(exit.entryProfileIds) && !exit.entryProfileIds.includes(profile.id)) continue;
       if (Array.isArray(profile.exitProfileIds) && !profile.exitProfileIds.includes(exit.id)) continue;

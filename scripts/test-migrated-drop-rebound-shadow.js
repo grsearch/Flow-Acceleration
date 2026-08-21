@@ -825,6 +825,7 @@ function testFastReversalContinuationConfirmation() {
   config.entryProfiles = [{
     id: 'GFR_300',
     label: 'fast reversal 300ms',
+    liveStrategyId: 'migrated_gfr_300_hs20_h30_live',
     windowMs: 1_000,
     dropMinPct: 25,
     dropMaxPct: 35,
@@ -849,7 +850,13 @@ function testFastReversalContinuationConfirmation() {
       maxRoundTripImpactPct: 5,
     },
   }];
-  const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  const liveSignals = [];
+  const suite = new MigratedDropReboundShadowSuite({
+    config,
+    store,
+    now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
   suite.start();
 
   const fastMint = 'FastContinuation111111111111111111111111111111';
@@ -877,6 +884,9 @@ function testFastReversalContinuationConfirmation() {
     WHERE mint=? ORDER BY position_sol
   `).all(fastMint);
   assert.deepStrictEqual(opened.map((row) => row.status), Array(6).fill('OPEN'));
+  assert.strictEqual(liveSignals.length, 1, 'one confirmed episode emits one live signal');
+  assert.strictEqual(liveSignals[0].strategyId, 'migrated_gfr_300_hs20_h30_live');
+  assert.strictEqual(liveSignals[0].features.entryProfileId, 'GFR_300');
   assert.deepStrictEqual(opened.map((row) => row.position_sol), [0.05, 0.05, 0.05, 0.1, 0.1, 0.1]);
   const confirmation = JSON.parse(opened[0].confirmation_json);
   assert.strictEqual(confirmation.uniqueBuyers, 3);

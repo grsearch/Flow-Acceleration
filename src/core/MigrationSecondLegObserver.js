@@ -132,11 +132,14 @@ function windowStats(events, startAt, endAt, effectiveBuyMinSol = 0) {
 }
 
 class MigrationSecondLegObserver {
-  constructor({ config, store, now = () => Date.now(), rugRiskTracker = null }) {
+  constructor({
+    config, store, now = () => Date.now(), rugRiskTracker = null, onSnapshot = null,
+  }) {
     this.config = config;
     this.store = store;
     this.now = now;
     this.rugRiskTracker = rugRiskTracker;
+    this.onSnapshot = typeof onSnapshot === 'function' ? onSnapshot : null;
     this.states = new Map();
     this.metrics = {
       migrationsObserved: 0,
@@ -393,6 +396,8 @@ class MigrationSecondLegObserver {
     };
     const snapshot = {
       mint: state.mint,
+      symbol: state.symbol,
+      migrationAt: state.migrationAt,
       secondBucket,
       ageMs,
       observedAt: timestampMs,
@@ -432,6 +437,7 @@ class MigrationSecondLegObserver {
       estimatedImpact005Pct: fixedInputImpactPct(quoteReserveSol, 0.05),
       estimatedImpact01Pct: fixedInputImpactPct(quoteReserveSol, 0.1),
       estimatedImpact025Pct: fixedInputImpactPct(quoteReserveSol, 0.25),
+      estimatedImpact1SolPct: fixedInputImpactPct(quoteReserveSol, 1),
       boostStatus: state.boostStatus,
       mayhemStatus: 'UNKNOWN',
       cashbackStatus: state.cashbackStatus,
@@ -443,6 +449,13 @@ class MigrationSecondLegObserver {
     if (saved?.inserted) {
       this.metrics.snapshotsWritten += 1;
       this.metrics.lastActionAt = this.now();
+      if (this.onSnapshot) {
+        try {
+          this.onSnapshot(snapshot, trade);
+        } catch (error) {
+          this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
+        }
+      }
     }
     this.store.updateMigrationSecondLegObservation(state.mint, {
       firstAmmTradeAt: state.firstAmmTradeAt,

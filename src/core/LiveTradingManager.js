@@ -99,6 +99,7 @@ class LiveTradingManager {
     this.settlementSweepPromise = null;
     this.nextSettlementSweepAt = 0;
     this.coreExitPending = new Set();
+    this.graduationGateTrades = new Map();
     this.entryQueue = Promise.resolve();
     this.stopping = false;
     this.metrics = {
@@ -122,7 +123,8 @@ class LiveTradingManager {
     for (const row of this.store.activeLivePositions()) {
       const position = restoredPosition(row);
       position.strategy = this.strategies.get(position.strategyId) || null;
-      if (position.strategy?.exitMode === 'GRADUATION_CORE_RUNNER') {
+      if (['GRADUATION_CORE_RUNNER', 'PBR_CORE_RUNNER']
+        .includes(position.strategy?.exitMode)) {
         const token = this.store.getToken(position.mint);
         position.graduatedAt = Number(token?.graduated_at) || null;
         const lastSell = this.store.latestLiveOrderForPositionSide(position.id, 'SELL');
@@ -401,6 +403,15 @@ class LiveTradingManager {
         position.graduatedAt = position.graduatedAt || graduatedAt;
         if (observedTrade.market !== 'PUMP_AMM'
           || observedTrade.timestampMs < graduatedAt) return;
+        this._recordGraduationGateTrade(position, observedTrade);
+        const gate = this._graduationGateDecision(position, observedTrade.timestampMs);
+        if (strategy.postMigrationGate) {
+          if (!gate) return;
+          if (!gate.passed) {
+            this._requestExit(position, 'POST_MIGRATION_GATE_FAIL', observedTrade.price);
+            return;
+          }
+        }
         if (!position.coreExited) {
           this._requestCoreExit(position);
           return;
@@ -441,10 +452,76 @@ class LiveTradingManager {
     }
     for (const position of this.positions.values()) {
       if (position.status === 'OPEN' && position.lastObservedPrice > 0) {
+        const strategy = position.strategy || this.strategies.get(position.strategyId);
+        if (strategy?.exitMode === 'GRADUATION_CORE_RUNNER'
+          && strategy.postMigrationGate && position.graduatedAt) {
+          const gate = this._graduationGateDecision(position, now);
+          if (!gate) continue;
+          if (!gate.passed) {
+            this._requestExit(position, 'POST_MIGRATION_GATE_FAIL', position.lastObservedPrice);
+            continue;
+          }
+          if (!position.coreExited) {
+            this._requestCoreExit(position);
+            continue;
+          }
+        }
         this._evaluatePositionExit(position, now, position.lastObservedPrice);
       }
     }
     this.trackedMints(now);
+  }
+
+  _recordGraduationGateTrade(position, trade) {
+    const strategy = position.strategy || this.strategies.get(position.strategyId);
+    const gate = strategy?.postMigrationGate;
+    if (!gate || !position.graduatedAt || trade.market !== 'PUMP_AMM') return;
+    if (trade.timestampMs < position.graduatedAt
+      || trade.timestampMs > position.graduatedAt + gate.windowMs) return;
+    let state = this.graduationGateTrades.get(position.id);
+    if (!state) {
+      state = { rows: [], keys: new Set(), decision: null };
+      this.graduationGateTrades.set(position.id, state);
+    }
+    const key = trade.signature || [
+      trade.timestampMs,
+      trade.side,
+      trade.wallet || '',
+      Number(trade.solAmount) || 0,
+    ].join(':');
+    if (state.keys.has(key)) return;
+    state.keys.add(key);
+    state.rows.push({
+      side: trade.side,
+      wallet: trade.wallet || null,
+      solAmount: Math.max(0, Number(trade.solAmount) || 0),
+    });
+  }
+
+  _graduationGateDecision(position, now) {
+    const strategy = position.strategy || this.strategies.get(position.strategyId);
+    const gate = strategy?.postMigrationGate;
+    if (!gate || !position.graduatedAt) return null;
+    const evaluatedAt = position.graduatedAt + gate.windowMs;
+    if (now < evaluatedAt) return null;
+    let state = this.graduationGateTrades.get(position.id);
+    if (!state) {
+      state = { rows: [], keys: new Set(), decision: null };
+      this.graduationGateTrades.set(position.id, state);
+    }
+    if (state.decision) return state.decision;
+    const buys = state.rows.filter((row) => row.side === 'BUY');
+    const sells = state.rows.filter((row) => row.side === 'SELL');
+    const buyers = new Set(buys.map((row) => row.wallet).filter(Boolean)).size;
+    const netFlowSol = buys.reduce((sum, row) => sum + row.solAmount, 0)
+      - sells.reduce((sum, row) => sum + row.solAmount, 0);
+    state.decision = {
+      evaluatedAt,
+      buyers,
+      netFlowSol,
+      passed: buyers >= gate.minBuyers && netFlowSol >= gate.minNetFlowSol,
+    };
+    return state.decision;
   }
 
   async stop() {
@@ -1099,6 +1176,14 @@ class LiveTradingManager {
       this._scheduleMaxHold(position);
       return;
     }
+    if (strategy?.exitMode === 'PBR_CORE_RUNNER') {
+      this._scheduleMaxHold(position);
+      return;
+    }
+    if (strategy?.exitMode === 'TAIL' || strategy?.exitMode === 'TRAILING') {
+      this._scheduleMaxHold(position);
+      return;
+    }
     const lastPrice = position.lastObservedPrice == null
       ? Number.NaN
       : Number(position.lastObservedPrice);
@@ -1158,6 +1243,28 @@ class LiveTradingManager {
       if (reason) this._requestExit(position, reason, price);
       return;
     }
+    if (strategy.exitMode === 'TAIL') {
+      if (strategy.hardStopPct > 0 && grossReturnPct <= -strategy.hardStopPct) {
+        reason = 'HARD_STOP';
+      } else if (ageMs >= strategy.maxHoldMs) {
+        reason = 'TAIL_MAX_HOLD';
+      }
+      if (reason) this._requestExit(position, reason, price);
+      return;
+    }
+    if (strategy.exitMode === 'TRAILING') {
+      if (strategy.hardStopPct > 0 && grossReturnPct <= -strategy.hardStopPct) {
+        reason = 'HARD_STOP';
+      } else if (ageMs >= (strategy.minHoldMs || 0)
+        && peakReturnPct >= strategy.trailingActivationPct
+        && drawdownPct >= strategy.trailingStopPct) {
+        reason = 'TRAILING_STOP';
+      } else if (ageMs >= strategy.maxHoldMs) {
+        reason = 'MAX_HOLD';
+      }
+      if (reason) this._requestExit(position, reason, price);
+      return;
+    }
     if (strategy.exitMode === 'GRADUATION_CORE_RUNNER') {
       if (strategy.hardStopPct > 0 && grossReturnPct <= -strategy.hardStopPct) {
         this._requestExit(position, 'HARD_STOP', price);
@@ -1202,6 +1309,29 @@ class LiveTradingManager {
       if (reason) this._requestExit(position, reason, price);
       return;
     }
+    if (strategy.exitMode === 'PBR_CORE_RUNNER') {
+      if (!position.coreExited && strategy.hardStopPct > 0
+        && grossReturnPct <= -strategy.hardStopPct) {
+        this._requestExit(position, 'HARD_STOP', price);
+        return;
+      }
+      if (!position.coreExited && grossReturnPct >= strategy.coreActivationPct) {
+        this._requestCoreExit(position);
+        return;
+      }
+      if (position.coreExited && peakReturnPct >= strategy.trailingActivationPct) {
+        let drawdownLimit = strategy.baseTrailingDrawdownPct;
+        for (const tier of strategy.trailingTiers || []) {
+          if (peakReturnPct >= tier.activationPct) drawdownLimit = tier.drawdownPct;
+        }
+        if (drawdownPct >= drawdownLimit) {
+          reason = `PBR_RUNNER_TRAIL_D${drawdownLimit}`;
+        }
+      }
+      if (!reason && ageMs >= strategy.maxHoldMs) reason = 'PBR_MAX_HOLD';
+      if (reason) this._requestExit(position, reason, price);
+      return;
+    }
     if (strategy.fastTakeProfitPct > 0 && ageMs <= strategy.fastTakeProfitWindowMs
       && grossReturnPct >= strategy.fastTakeProfitPct) reason = 'FAST_TAKE_PROFIT';
     if (!reason && peakReturnPct >= strategy.trailingActivationPct
@@ -1228,7 +1358,7 @@ class LiveTradingManager {
     const strategy = position?.strategy || this.strategies.get(position?.strategyId);
     if (this.stopping || !position || position.status !== 'OPEN'
       || position.coreExited || position.coreExitAttempted
-      || strategy?.exitMode !== 'GRADUATION_CORE_RUNNER'
+      || !['GRADUATION_CORE_RUNNER', 'PBR_CORE_RUNNER'].includes(strategy?.exitMode)
       || this.coreExitPending.has(position.id)) return;
     position.coreExitAttempted = true;
     this.coreExitPending.add(position.id);
@@ -1242,7 +1372,7 @@ class LiveTradingManager {
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     const balanceRaw = BigInt(position.tokenAmountRaw || 0);
     const sellRaw = (balanceRaw * BigInt(Math.round(strategy.coreExitPct))) / 100n;
-    if (sellRaw <= 0n) throw new Error('Graduation core exit has no token balance');
+    if (sellRaw <= 0n) throw new Error('Core exit has no token balance');
     const submittedAt = this.now();
     try {
       const result = position.mode === 'DRY_RUN'
@@ -1264,7 +1394,7 @@ class LiveTradingManager {
         ? balanceRaw - sellRaw
         : BigInt(result.remainingTokenAmountRaw);
       if (remainingRaw <= 0n) {
-        throw new Error('Graduation core exit unexpectedly sold the complete position');
+        throw new Error('Core exit unexpectedly sold the complete position');
       }
       const confirmedAt = this.now();
       const settlement = result.settlement || null;
@@ -1283,7 +1413,9 @@ class LiveTradingManager {
         networkFeeSol: settlement?.networkFeeSol,
         execution: {
           settlement,
-          liveExitStage: 'GRADUATION_CORE',
+          liveExitStage: strategy.exitMode === 'PBR_CORE_RUNNER'
+            ? 'PBR_PROFIT_CORE'
+            : 'GRADUATION_CORE',
           coreExitPct: strategy.coreExitPct,
           remainingTokenAmountRaw: remainingRaw.toString(),
         },
@@ -1292,12 +1424,16 @@ class LiveTradingManager {
       });
       position.coreExited = true;
       position.tokenAmountRaw = remainingRaw.toString();
-      position.highestPrice = 0;
-      position.lastObservedPrice = null;
+      if (strategy.exitMode === 'GRADUATION_CORE_RUNNER') {
+        position.highestPrice = 0;
+        position.lastObservedPrice = null;
+      }
       this.store.updateLivePosition(position.id, {
         tokenAmountRaw: position.tokenAmountRaw,
-        highestPrice: 0,
-        exitReason: `GRADUATION_CORE_${strategy.coreExitPct}_CONFIRMED`,
+        highestPrice: position.highestPrice,
+        exitReason: strategy.exitMode === 'PBR_CORE_RUNNER'
+          ? `PBR_CORE_${strategy.coreExitPct}_CONFIRMED`
+          : `GRADUATION_CORE_${strategy.coreExitPct}_CONFIRMED`,
         exitError: null,
       });
       this.store.refreshLivePositionSettlement(position.id);
@@ -1322,11 +1458,17 @@ class LiveTradingManager {
         status: error.signature ? 'CONFIRMATION_UNKNOWN' : 'FAILED',
         signature: error.signature,
         error: errorText(error),
-        execution: error.execution || { liveExitStage: 'GRADUATION_CORE' },
+        execution: error.execution || {
+          liveExitStage: strategy.exitMode === 'PBR_CORE_RUNNER'
+            ? 'PBR_PROFIT_CORE'
+            : 'GRADUATION_CORE',
+        },
         submittedAt,
       });
       this.store.updateLivePosition(position.id, {
-        exitReason: 'GRADUATION_CORE_EXIT_FAILED',
+        exitReason: strategy.exitMode === 'PBR_CORE_RUNNER'
+          ? 'PBR_CORE_EXIT_FAILED'
+          : 'GRADUATION_CORE_EXIT_FAILED',
         exitError: errorText(error),
       });
       this.metrics.exitFailures += 1;
@@ -1446,6 +1588,7 @@ class LiveTradingManager {
         this._updatePositionDecision(position, 'CLOSED', reason);
         position.status = 'CLOSED';
         this.positions.delete(position.mint);
+        this.graduationGateTrades.delete(position.id);
         const timer = this.timers.get(position.id);
         if (timer) clearTimeout(timer);
         this.timers.delete(position.id);

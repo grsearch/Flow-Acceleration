@@ -147,11 +147,18 @@ function rowPosition(row) {
 }
 
 class MigratedDropReboundShadowSuite {
-  constructor({ config, store, now = () => Date.now(), rugRiskTracker = null }) {
+  constructor({
+    config,
+    store,
+    now = () => Date.now(),
+    rugRiskTracker = null,
+    onLiveSignal = null,
+  }) {
     this.config = config;
     this.store = store;
     this.now = now;
     this.rugRiskTracker = rugRiskTracker;
+    this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((profile) => [profile.id, profile]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
@@ -193,6 +200,7 @@ class MigratedDropReboundShadowSuite {
       Math.trunc(finite(this.config.fastFlowSweepMs, 5_000)),
     );
     this.fastFlowByMint = new Map();
+    this.liveSignalsEmitted = new Set();
     this.lastFastFlowSweepAt = 0;
     this.metrics = {
       candidates: 0,
@@ -841,6 +849,7 @@ class MigratedDropReboundShadowSuite {
           if (!decision.pass) continue;
           fill = decision.fill;
           this.metrics.fastConfirmationPassed += 1;
+          this._emitFastConfirmedLiveSignal(position, entryProfile, trade, price, decision);
         } else {
           fill = entryProfile?.capacityAware && position.lifecycleStage === 'POST_MIGRATION'
             ? ammBuyAveragePrice(trade, position.positionSol, price)
@@ -953,6 +962,39 @@ class MigratedDropReboundShadowSuite {
       topBuyerSharePct: buySol > 0 ? topBuyerSol / buySol * 100 : 100,
       creatorSold,
     };
+  }
+
+  _emitFastConfirmedLiveSignal(position, profile, trade, price, decision) {
+    if (!this.onLiveSignal || !profile?.liveStrategyId) return;
+    const key = `${position.episodeId}:${profile.id}`;
+    if (this.liveSignalsEmitted.has(key)) return;
+    this.liveSignalsEmitted.add(key);
+    try {
+      this.onLiveSignal({
+        strategyId: profile.liveStrategyId,
+        episodeId: `${position.episodeId}:FAST_CONFIRMED`,
+        mint: position.mint,
+        symbol: position.symbol,
+        price,
+        slot: trade.slot,
+        timestampMs: trade.timestampMs,
+        receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+        market: 'PUMP_AMM',
+        poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+        poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+        virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+        features: {
+          ...(decision.features || {}),
+          entryProfileId: profile.id,
+          sourceShadowCohortId: position.cohortId,
+          migrationAgeMs: position.migrationAgeMs,
+          dropPct: position.dropPct,
+          reboundPct: position.reboundPct,
+        },
+      });
+    } catch (error) {
+      this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
+    }
   }
 
   _fastConfirmationDecision({ position, profile, trade, price, jumpPct, cache }) {
