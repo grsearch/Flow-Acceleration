@@ -619,6 +619,7 @@ class BigWinnerShadowSuite {
       && reboundPct >= profile.minReboundPct
       && reboundPct <= profile.maxReboundPct
       && f.netFlow3s >= profile.minNetFlow3sSol
+      && (profile.minNetFlow8sSol == null || f.netFlow8s >= profile.minNetFlow8sSol)
       && f.buyers3s >= profile.minBuyers3s
       && (profile.maxSingleSell3sSol == null
         || f.maxSell3s <= profile.maxSingleSell3sSol)

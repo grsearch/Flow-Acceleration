@@ -202,9 +202,19 @@ function runParticipation() {
       minReboundPct: 2, maxReboundPct: 8,
       minNetFlow3sSol: 2, minBuyers3s: 4, requireFlowAcceleration: true,
     },
+    {
+      id: 'PP_PULLBACK_8_30_NF8_3', mode: 'PULLBACK', ...baseProfile,
+      minPullbackPct: 8, maxPullbackPct: 30,
+      minReboundPct: 1.5, maxReboundPct: 10,
+      minNetFlow3sSol: 1, minNetFlow8sSol: 3,
+      minBuyers3s: 3, requireFlowAcceleration: true,
+      positionSols: [0.1, 0.25],
+    },
   ];
   cfg.exitProfiles = [{
-    id: 'XFIX120_H15_PP', entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20'],
+    id: 'XFIX120_H15_PP', entryProfileIds: [
+      'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30_NF8_3',
+    ],
     mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
     trailingTiers: [], profitFloors: [], maxHoldMs: 120_000,
   }];
@@ -235,18 +245,24 @@ function runParticipation() {
   emit(12_600, 'BUY', 2, 'reaccel-3', 1.17);
   emit(12_800, 'BUY', 2, 'reaccel-4', 1.18);
   assert.strictEqual(suite.health().pendingEntries, 3,
-    'pullback profile must wait for a fresh executable fill');
+    'the standard pullback must wait for a fresh executable fill');
+  assert.strictEqual(suite.health().activePositions, 5,
+    'direct rows plus the earlier NF8-confirmed 0.1/0.25 rows must be open');
   emit(13_050, 'BUY', 0.2, 'pullback-fill', 1.185);
   const rows = db.db.prepare(`
     SELECT entry_profile_id, position_sol, status
     FROM big_winner_shadow_positions WHERE mint=? ORDER BY cohort_id
   `).all(mint);
-  assert.strictEqual(rows.length, 6);
+  assert.strictEqual(rows.length, 8);
   assert.deepStrictEqual(
     [...new Set(rows.map((row) => row.position_sol))],
     [0.05, 0.1, 0.25],
   );
   assert.ok(rows.every((row) => row.status === 'OPEN'));
+  assert.strictEqual(suite.health().activePositions, 8);
+  assert.strictEqual(rows.filter((row) => (
+    row.entry_profile_id === 'PP_PULLBACK_8_30_NF8_3'
+  )).length, 2, 'NF8 profile must keep 0.1 and 0.25 SOL capacity rows isolated');
   assert.strictEqual(db.db.prepare('SELECT COUNT(*) AS n FROM live_positions').get().n, 0);
   db.close();
   console.log('big winner participation tests passed');
