@@ -366,6 +366,7 @@ async function main() {
     assert.strictEqual(continuity.code, 'M-C5-E120');
     assert.strictEqual(graduationAccel.entryEnabled, true);
     assert.strictEqual(graduationAccel.code, 'O-C80-D5-B2-S0-NC');
+    assert.strictEqual(graduationAccel.positionSizeSol, 0.5);
     assert.strictEqual(retiredV3.entryEnabled, false);
     assert.strictEqual(gd25F1.entryEnabled, false);
     assert.strictEqual(gd25F1.code, 'GD25-35-F1-XLEG');
@@ -374,7 +375,7 @@ async function main() {
     assert.strictEqual(continuity.market, 'PUMP_AMM');
     assert.strictEqual(graduationAccel.market, 'PUMP_BONDING_CURVE');
     assert.strictEqual(continuity.positionSizeSol, 0.1);
-    assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
+    assert.strictEqual(graduationAccel.positionSizeSol, 0.5);
     assert.strictEqual(qualityLeader.positionSizeSol, 0.1);
     assert.strictEqual(qualityLeader.entryEnabled, false);
     assert.strictEqual(qualityLeader.code, 'QL-STRICT-PR');

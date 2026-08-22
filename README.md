@@ -53,7 +53,7 @@ never sign or send transactions. Proven-negative entry families remain disabled.
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
 
-全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前 `M-C5-T12.5`、`O90-M5-STAIR120` 与 `O-C80-D5-B2-S0-NC` 允许产生新实盘仓位；其中 O-C80 仅以0.1 SOL进行实盘验证，对应 Shadow 仍按1 SOL建模。`PBR-A-X50-15`、`GFR-300-HS20-H30`、`F-FO-RB10-X30` 与其余停用定义只保留历史展示和存量退出。实盘规则不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、KOL 或 AI 评分；全局默认 `DISABLED`，不会读取私钥或提交交易。
+全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前 `M-C5-T12.5`、`O90-M5-STAIR120` 与 `O-C80-D5-B2-S0-NC` 允许产生新实盘仓位，三组实盘单笔均为0.5 SOL；O-C80 对应 Shadow 仍按1 SOL建模。`PBR-A-X50-15`、`GFR-300-HS20-H30`、`F-FO-RB10-X30` 与其余停用定义只保留历史展示和存量退出。实盘规则不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、KOL 或 AI 评分；全局默认 `DISABLED`，不会读取私钥或提交交易。
 
 ## 数据链路
 
@@ -569,7 +569,7 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 ## 多策略实盘框架
 
 当前 `M-C5-T12.5`、`O90-M5-STAIR120` 与 `O-C80-D5-B2-S0-NC` 允许产生新实盘仓位；
-前两组单笔为 `0.5 SOL`，O-C80 实盘验证单笔为 `0.1 SOL`，其对应 Shadow 仍保持 `1 SOL`。
+三组实盘单笔均为 `0.5 SOL`，O-C80 对应 Shadow 仍保持 `1 SOL`。
 `PBR-A-X50-15` 与 `GFR-300-HS20-H30` 已于 2026-08-22 在代码层
 锁死新开仓；旧服务器 `.env` 无法误开启，但历史记录和存量仓位退出继续保留。
 其余旧实盘定义同样只用于历史展示与存量退出：
@@ -597,7 +597,7 @@ GD25-35-F1-XLEG / post_gd25_35_f1_xleg_live_v1（停止新开仓）
 
 O-C80-D5-B2-S0-NC / graduation_accel_o_c80_d5_b2_s0_nc_live（开启）
 Curve≥80%、最近5秒ΔCurve≥5、Buyers5≥2、0卖单、Creator未卖
-→ Bonding Curve买入0.1 SOL；对应 Graduation Acceleration Shadow O 继续按1 SOL独立观察
+→ Bonding Curve买入0.5 SOL；对应 Graduation Acceleration Shadow O 继续按1 SOL独立观察
 
 M-C5-T12.5 / migration_continuity_mc_c5_t12_5_live（开启）
 Migration Continuity MC_C5 入场 → PumpSwap买入0.5 SOL
@@ -614,11 +614,11 @@ M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_s
 
 - `DISABLED`：全局安全锁模式，不签名；各实盘策略的独立 `entryEnabled=false` 还会进一步阻止其产生新仓。
 - `DRY_RUN`：只有先显式解除 `FLOW_LIVE_TRADING_SAFETY_LOCK`，再设置 `FLOW_LIVE_TRADING_ENABLED=true` 并保留 `FLOW_LIVE_DRY_RUN=true` 才能启用。
-- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写至少一个启用策略的 `POSITION_SOL`。当前 M-C5-T12.5 与 O90 使用新的 V2 仓位变量，默认均为0.5 SOL；O-C80 使用独立的精确规则变量，默认0.1 SOL；旧仓位变量继续只供历史兼容。
+- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写至少一个启用策略的 `POSITION_SOL`。当前 M-C5-T12.5、O90 与 O-C80 均使用各自的新 V2 仓位变量，默认均为0.5 SOL；旧仓位变量继续只供历史兼容。
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-O90 与 O-C80 使用 Bonding Curve 固定 SOL 输入；M-C5-T12.5 使用官方 PumpSwap SDK。M-C5-T12.5 与 O90 单笔额度均为 `0.5 SOL`，O-C80 单笔额度为 `0.1 SOL`；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
+O90 与 O-C80 使用 Bonding Curve 固定 SOL 输入；M-C5-T12.5 使用官方 PumpSwap SDK。三组实盘单笔额度均为 `0.5 SOL`；滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
 
 M 的卖出规则与 Shadow E120 一致：20%硬止损，否则从真实成交时间起固定120秒后卖出全部余额。如 O 仍有存量仓位，则继续沿用原退出规则：毕业后首笔可执行 PumpSwap 行情卖出50%核心仓位，剩余50%按 `+20/40/80/150/300%` 对应 `10/15/20/25/30%` 峰值回撤退出；毕业前和毕业后各有5分钟兜底，整体保留30%硬止损。最终卖出失败会按配置重试并保留 `EXIT_FAILED`，防止同 Mint 再开仓；紧急开关和单策略停开都只阻止新开仓，不阻止存量退出。
 

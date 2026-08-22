@@ -729,7 +729,7 @@ const config = {
         id: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
         code: 'O-C80-D5-B2-S0-NC',
         label: 'Graduation Acceleration O · Curve80 D5 B2 S0 NC',
-        ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v2',
+        ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v3',
         signalSource: 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC',
         // Exact V2 keys prevent an old server .env value from the retired
         // Curve80 canary from silently keeping this promoted rule disabled.
@@ -743,8 +743,10 @@ const config = {
         ),
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_POSITION_SOL',
-          0.1,
+          // Use a new size key so an existing server's 0.1 SOL canary value
+          // cannot silently override the promoted 0.5 SOL order size.
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V2_POSITION_SOL',
+          0.5,
         ),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_SIGNAL_AGE_MS',
@@ -4759,8 +4761,8 @@ const config = {
     coreExitPct: numberEnv('FLOW_GRADUATION_ACCEL_CORE_EXIT_PCT', 50, {
       min: 1, max: 99,
     }),
-    // Shadow remains a 1 SOL research model. The promoted 0.1 SOL live order
-    // is a canary only and must not weaken the eventual 1 SOL capacity test.
+    // Shadow remains a 1 SOL research model independently of the promoted
+    // 0.5 SOL live order, preserving the eventual production-size capacity test.
     capacitySols: listEnv('FLOW_GRADUATION_ACCEL_V2_CAPACITY_SOLS', ['1'])
       .map(Number).filter((value) => Number.isFinite(value) && value > 0),
     entryProfiles: [
@@ -5248,6 +5250,7 @@ function validateConfig() {
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL
       && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL
+      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL
