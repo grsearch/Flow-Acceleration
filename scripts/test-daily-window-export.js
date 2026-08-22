@@ -134,6 +134,8 @@ function main() {
   assert.match(timer, /OnCalendar=\*-\*-\* 07:00:00 Asia\/Shanghai/);
   assert.match(timer, /Persistent=true/);
   assert.match(service, /Environment=HOME=@INSTALL_DIR@\/data\/exports\/\.coscli-home/);
+  assert.match(service, /Environment=PATH=@NODE_DIR@:@COSCLI_DIR@:\/usr\/local\/bin:\/usr\/bin:\/bin/);
+  assert.match(service, /Environment=FLOW_BACKUP_NODE_BIN=@NODE_BIN@/);
   assert.match(service, /@BACKUP_ENV_LINE@/);
   assert.match(service, /ReadWritePaths=@INSTALL_DIR@\/data/);
   assert.match(installer, /remove_legacy_cron/);
@@ -141,6 +143,10 @@ function main() {
   assert.match(installer, /has_complete_cos_config/);
   assert.match(installer, /CONFIG_SOURCE/);
   assert.match(installer, /LEGACY_TIMER="flow-daily-export\.timer"/);
+  assert.match(installer, /systemctl show flow-acceleration\.service -p MainPID/);
+  assert.match(installer, /readlink -f "\/proc\/\$main_pid\/exe"/);
+  assert.match(installer, /\.nvm\/versions\/node/);
+  assert.match(installer, /s\|@NODE_DIR@\|\$NODE_DIR\|g/);
   assert.match(installer, /systemctl disable --now "\$LEGACY_TIMER"/);
   assert.ok(
     installer.indexOf('if [[ -z "$CONFIG_SOURCE" ]]')

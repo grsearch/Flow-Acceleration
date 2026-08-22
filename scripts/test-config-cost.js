@@ -95,23 +95,23 @@ assert.strictEqual(liveContinuity.entryEnabled, false);
 assert.strictEqual(liveContinuity.code, 'M-C5-E120');
 assert.strictEqual(liveContinuity.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveContinuity.fixedHoldMs, 120_000);
-assert.strictEqual(livePbrA.entryEnabled, true);
+assert.strictEqual(livePbrA.entryEnabled, false);
 assert.strictEqual(livePbrA.positionSizeSol, 0.1);
 assert.strictEqual(livePbrA.ruleVersion, 'big_winner_pbr_a_x50_15_live_v2');
 assert.strictEqual(livePbrA.exitMode, 'PBR_CORE_RUNNER');
-assert.strictEqual(liveGfr300.entryEnabled, true);
+assert.strictEqual(liveGfr300.entryEnabled, false);
 assert.strictEqual(liveGfr300.positionSizeSol, 0.1);
 assert.strictEqual(liveGfr300.exitMode, 'TAIL');
 assert.strictEqual(liveGfr300.hardStopPct, 20);
 assert.strictEqual(liveGfr300.maxHoldMs, 30_000);
 assert.strictEqual(liveContinuityT12.entryEnabled, true);
-assert.strictEqual(liveContinuityT12.positionSizeSol, 0.1);
+assert.strictEqual(liveContinuityT12.positionSizeSol, 0.5);
 assert.strictEqual(liveContinuityT12.exitMode, 'TRAILING');
 assert.strictEqual(liveContinuityT12.minHoldMs, 10_000);
 assert.strictEqual(liveContinuityT12.trailingActivationPct, 15);
 assert.strictEqual(liveContinuityT12.trailingStopPct, 12.5);
 assert.strictEqual(liveO90.entryEnabled, true);
-assert.strictEqual(liveO90.positionSizeSol, 0.1);
+assert.strictEqual(liveO90.positionSizeSol, 0.5);
 assert.strictEqual(liveO90.postMigrationGate.windowMs, 5_000);
 assert.strictEqual(liveO90.postMigrationGate.minBuyers, 25);
 assert.strictEqual(liveQualityLeader.positionSizeSol, 0.1);
@@ -133,8 +133,11 @@ assert.strictEqual(liveLaunchPullback.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveLaunchPullback.fixedHoldMs, 30_000);
 assert.strictEqual(liveLaunchPullback.sourceShadowCohortId, 'FO_RB10_30S');
 assert.strictEqual(liveGraduationAccel.positionSizeSol, 0.1);
-assert.strictEqual(liveGraduationAccel.entryEnabled, false);
+assert.strictEqual(liveGraduationAccel.entryEnabled, true);
+assert.strictEqual(liveGraduationAccel.code, 'O-C80-D5-B2-S0-NC');
+assert.strictEqual(liveGraduationAccel.ruleVersion, 'graduation_accel_o_c80_d5_b2_s0_nc_live_v2');
 assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
+assert.strictEqual(liveGraduationAccel.maxEntrySelfImpactPct, 10);
 assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
 assert.strictEqual(liveV3.positionSizeSol, 0.1);
@@ -184,7 +187,7 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  ['PBR-A-X50-15', 'GFR-300-HS20-H30', 'M-C5-T12.5', 'O90-M5-STAIR120'],
+  ['M-C5-T12.5', 'O90-M5-STAIR120', 'O-C80-D5-B2-S0-NC'],
 );
 assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
@@ -511,6 +514,7 @@ assert.ok(gfrProfiles.every((profile) => (
   && profile.positionSols.join(',') === '0.05,0.1'
 )));
 assert.strictEqual(config.bigWinnerShadow.transientUpPriceRatio, 2);
+assert.strictEqual(config.bigWinnerShadow.enabled, false);
 assert.strictEqual(config.bigWinnerShadow.priceConfirmationWindowMs, 500);
 assert.strictEqual(config.bigWinnerShadow.priceConfirmationMinPersistenceMs, 150);
 assert.strictEqual(config.bigWinnerShadow.priceConfirmationTolerancePct, 25);
@@ -581,6 +585,7 @@ assert.strictEqual(config.sameSlotDumpBackrunShadow.enabled, false);
 const csfProfiles = new Map(config.cyaSlotFlowShadow.entryProfiles.map((profile) => (
   [profile.id, profile]
 )));
+assert.strictEqual(config.cyaSlotFlowShadow.enabled, false);
 assert.ok(['CSF_C03', 'CSF_E35', 'CSF_E510', 'CSF_S310']
   .every((id) => csfProfiles.get(id)?.newEntriesEnabled === false));
 assert.strictEqual(csfProfiles.get('CSF_E510_Q').newEntriesEnabled, true);
@@ -633,7 +638,7 @@ assert.ok(config.holderGrowthShadow.exitProfiles
   .filter((profile) => ['ADAPTIVE_TRAILING', 'SCALE_ADAPTIVE'].includes(profile.exitMode))
   .every((profile) => profile.trailingTiers.length >= 4));
 assert.strictEqual(config.graduationAccelerationShadow.enabled, true);
-assert.deepStrictEqual(config.graduationAccelerationShadow.capacitySols, [0.05, 0.5, 1]);
+assert.deepStrictEqual(config.graduationAccelerationShadow.capacitySols, [1]);
 assert.deepStrictEqual(
   config.graduationAccelerationShadow.entryProfiles.map((profile) => profile.id),
   [
@@ -687,4 +692,3 @@ assert.deepStrictEqual(liveTradingGuard(true, false, false), {
 });
 
 console.log('test-config-cost: ok');
-

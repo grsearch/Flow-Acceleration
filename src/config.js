@@ -411,12 +411,9 @@ const config = {
         ruleVersion: 'big_winner_pbr_a_x50_15_live_v2',
         signalSource: 'BIG_WINNER_PBR_A',
         enabled: booleanEnv('FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_ENABLED', true),
-        // V2 intentionally uses a new switch so the retired V1 ENTRY_ENABLED=false
-        // left in an existing server .env cannot silently suppress this re-test.
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_V2_ENTRY_ENABLED',
-          true,
-        ),
+        // Keep the definition loaded for history and already-open exits, but a stale
+        // server .env must not reopen this loss-making live cohort.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL',
@@ -459,7 +456,9 @@ const config = {
         ruleVersion: 'migrated_gfr_300_hs20_h30_live_v1',
         signalSource: 'MIGRATED_GFR_300_CONFIRMED',
         enabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_ENABLED', true),
-        entryEnabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_ENTRY_ENABLED', true),
+        // Keep historical rows and existing-position exits available while locking
+        // all new GFR-300 live entries off regardless of an older .env value.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GFR_300_POSITION_SOL', 0.1),
         maxSignalAgeMs: integerEnv(
@@ -497,8 +496,8 @@ const config = {
         ),
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_POSITION_SOL',
-          0.1,
+          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL',
+          0.5,
         ),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_MAX_SIGNAL_AGE_MS',
@@ -538,8 +537,8 @@ const config = {
         ),
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_POSITION_SOL',
-          0.1,
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_POSITION_SOL',
+          0.5,
         ),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_MAX_SIGNAL_AGE_MS',
@@ -728,28 +727,41 @@ const config = {
       },
       {
         id: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
-        code: 'O-C80-D5-B2',
-        label: 'Graduation Acceleration O · Curve80',
-        ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v1',
+        code: 'O-C80-D5-B2-S0-NC',
+        label: 'Graduation Acceleration O · Curve80 D5 B2 S0 NC',
+        ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v2',
         signalSource: 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC',
-        enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_O_C80_ENABLED', true),
-        // Keep the live definition loaded for historical display and any
-        // already-open position exits. New O entries are intentionally
-        // disabled after the weak daytime live sample; Shadow O is separate.
-        entryEnabled: false,
+        // Exact V2 keys prevent an old server .env value from the retired
+        // Curve80 canary from silently keeping this promoted rule disabled.
+        enabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_ENABLED',
+          true,
+        ),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_ENTRY_ENABLED',
+          true,
+        ),
         market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv('FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL', 0.1),
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_POSITION_SOL',
+          0.1,
+        ),
         maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_MAX_SIGNAL_AGE_MS',
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_SIGNAL_AGE_MS',
           1_500,
           { min: 100 },
         ),
         maxEntriesPerMint: 1,
         reentryCooldownMs: 0,
         maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_MAX_ENTRY_JUMP_PCT',
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_ENTRY_JUMP_PCT',
           15,
           { min: 0, max: 1_000 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
         ),
         exitMode: 'GRADUATION_CORE_RUNNER',
         hardStopPct: 30,
@@ -764,6 +776,7 @@ const config = {
           { activationPct: 150, drawdownPct: 25 },
           { activationPct: 300, drawdownPct: 30 },
         ],
+        sourceShadowCohortId: 'O_C80_D5_B2_S0_NC:1SOL',
       },
       {
         id: 'post_gd20_35_r1_5_5_age60_xleg_v3',
@@ -1752,7 +1765,10 @@ const config = {
   // Independent right-tail study. It consumes the existing PumpSwap trade stream,
   // opens no real positions, and never treats an unobservable exit as a total loss.
   bigWinnerShadow: {
-    enabled: booleanEnv('FLOW_BIG_WINNER_SHADOW_ENABLED', true),
+    // The latest non-overlapping windows remained negative. Preserve tables
+    // and Dashboard history, but stop spending the hot path on new episodes.
+    // A V2 key prevents a stale server FLOW_BIG_WINNER_SHADOW_ENABLED=true.
+    enabled: booleanEnv('FLOW_BIG_WINNER_SHADOW_V2_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_BIG_WINNER_SHADOW_POSITION_SOL'),
     stateWindowMs: integerEnv('FLOW_BIG_WINNER_SHADOW_STATE_WINDOW_MS', 10_000, {
       min: 8_000,
@@ -2865,7 +2881,9 @@ const config = {
   // and all monitored Smart Wallets are excluded from causal features; a later
   // target OPEN is recorded strictly as a future label.
   cyaSlotFlowShadow: {
-    enabled: booleanEnv('FLOW_CYA_SLOT_FLOW_SHADOW_ENABLED', true),
+    // Completed-slot CSF cohorts stayed negative after execution costs. Keep
+    // their historical rows visible while disabling new causal episodes.
+    enabled: booleanEnv('FLOW_CYA_SLOT_FLOW_SHADOW_V2_ENABLED', false),
     targetWallet: process.env.FLOW_CYA_SLOT_FLOW_TARGET_WALLET
       || 'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o',
     positionSizeSol: shadowPositionEnv('FLOW_CYA_SLOT_FLOW_POSITION_SOL'),
@@ -4741,7 +4759,9 @@ const config = {
     coreExitPct: numberEnv('FLOW_GRADUATION_ACCEL_CORE_EXIT_PCT', 50, {
       min: 1, max: 99,
     }),
-    capacitySols: listEnv('FLOW_GRADUATION_ACCEL_CAPACITY_SOLS', ['0.05', '0.5', '1'])
+    // Shadow remains a 1 SOL research model. The promoted 0.1 SOL live order
+    // is a canary only and must not weaken the eventual 1 SOL capacity test.
+    capacitySols: listEnv('FLOW_GRADUATION_ACCEL_V2_CAPACITY_SOLS', ['1'])
       .map(Number).filter((value) => Number.isFinite(value) && value > 0),
     entryProfiles: [
       {
@@ -5220,12 +5240,15 @@ function validateConfig() {
     if (!config.liveTrading.privateKey) {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
-    if (!process.env.FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL
+    if (!process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL
+      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_POSITION_SOL
+      && !process.env.FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATED_GFR_300_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL
       && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL
+      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL
@@ -5249,4 +5272,3 @@ module.exports = {
   validateConfig,
   streamTokenFor,
 };
-

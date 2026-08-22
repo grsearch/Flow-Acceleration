@@ -962,6 +962,8 @@ class LiveTradingManager {
       }
       const rejectionReason = transactionFailed
         ? 'ENTRY_TRANSACTION_FAILED'
+        : error.code === 'CURVE_COMPLETE'
+          ? 'ENTRY_MIGRATED_BEFORE_SUBMIT'
         : error.code === 'MARKET_PRICE_MOVED'
           ? 'ENTRY_MARKET_PRICE_MOVED'
           : error.code === 'SELF_IMPACT_REJECTED'

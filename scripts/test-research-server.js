@@ -364,7 +364,8 @@ async function main() {
     ));
     assert.strictEqual(continuity.entryEnabled, false);
     assert.strictEqual(continuity.code, 'M-C5-E120');
-    assert.strictEqual(graduationAccel.entryEnabled, false);
+    assert.strictEqual(graduationAccel.entryEnabled, true);
+    assert.strictEqual(graduationAccel.code, 'O-C80-D5-B2-S0-NC');
     assert.strictEqual(retiredV3.entryEnabled, false);
     assert.strictEqual(gd25F1.entryEnabled, false);
     assert.strictEqual(gd25F1.code, 'GD25-35-F1-XLEG');
@@ -741,7 +742,7 @@ async function main() {
     )).json();
     assert.strictEqual(graduationAcceleration.runtime.mode, 'SHADOW_O');
     assert.strictEqual(graduationAcceleration.runtime.sendsTransactions, false);
-    assert.deepStrictEqual(graduationAcceleration.runtime.capacitySols, [0.05, 0.5, 1]);
+    assert.deepStrictEqual(graduationAcceleration.runtime.capacitySols, [1]);
     assert.strictEqual(
       graduationAcceleration.runtime.strategy.research.isolatedTable,
       'graduation_acceleration_shadow_positions',

@@ -18,7 +18,62 @@ fi
 [[ -d "$INSTALL_DIR" ]] || { echo "Install directory not found: $INSTALL_DIR" >&2; exit 1; }
 id "$SERVICE_USER" >/dev/null 2>&1 || { echo "Service user not found: $SERVICE_USER" >&2; exit 1; }
 
-NODE_BIN="${NODE_BIN:-$(sudo -H -u "$SERVICE_USER" bash -lc 'command -v node' 2>/dev/null || true)}"
+node_is_usable() {
+  local candidate="${1:-}"
+  [[ -n "$candidate" && -x "$candidate" ]] || return 1
+  "$candidate" -p 'process.execPath' >/dev/null 2>&1
+}
+
+detect_node_bin() {
+  local candidate main_pid service_home
+
+  # An explicit installer override always wins.
+  candidate="${NODE_BIN:-}"
+  if node_is_usable "$candidate"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  # Reuse the exact Node binary already running the collector. This works even
+  # when NVM is absent from the non-interactive systemd/login PATH.
+  main_pid="$(systemctl show flow-acceleration.service -p MainPID --value 2>/dev/null || true)"
+  if [[ "$main_pid" =~ ^[1-9][0-9]*$ ]]; then
+    candidate="$(readlink -f "/proc/$main_pid/exe" 2>/dev/null || true)"
+    if node_is_usable "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+
+  candidate="$(sudo -H -u "$SERVICE_USER" bash -lc 'command -v node' 2>/dev/null || true)"
+  if node_is_usable "$candidate"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  for candidate in /usr/local/bin/node /usr/bin/node; do
+    if node_is_usable "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+
+  # NVM is often initialized only by interactive shells. Search the service
+  # user's own NVM versions as the final, bounded fallback.
+  service_home="$(getent passwd "$SERVICE_USER" 2>/dev/null | cut -d: -f6)"
+  if [[ -n "$service_home" && -d "$service_home/.nvm/versions/node" ]]; then
+    while IFS= read -r candidate; do
+      if node_is_usable "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done < <(find "$service_home/.nvm/versions/node" -mindepth 3 -maxdepth 3 \
+      -type f -path '*/bin/node' | sort -Vr)
+  fi
+  return 1
+}
+
+NODE_BIN="$(detect_node_bin || true)"
 COSCLI_BIN="${COSCLI_BIN:-$(command -v coscli 2>/dev/null || true)}"
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { echo "Node.js was not found for $SERVICE_USER" >&2; exit 1; }
 [[ -n "$COSCLI_BIN" && -x "$COSCLI_BIN" ]] || {
@@ -43,6 +98,9 @@ chmod 700 "$INSTALL_DIR/data/exports"
 chmod 700 "$INSTALL_DIR/data/exports/.coscli-home"
 chmod 700 "$INSTALL_DIR/scripts/export-last24h-cos.sh"
 chmod 700 "$INSTALL_DIR/scripts/cleanup-research-retention.js"
+
+NODE_DIR="$(dirname "$NODE_BIN")"
+COSCLI_DIR="$(dirname "$COSCLI_BIN")"
 
 env_value() {
   local file="$1"
@@ -97,6 +155,8 @@ render_unit() {
     -e "s|@SERVICE_GROUP@|$SERVICE_GROUP|g" \
     -e "s|@NODE_BIN@|$NODE_BIN|g" \
     -e "s|@COSCLI_BIN@|$COSCLI_BIN|g" \
+    -e "s|@NODE_DIR@|$NODE_DIR|g" \
+    -e "s|@COSCLI_DIR@|$COSCLI_DIR|g" \
     -e "s|@BACKUP_ENV_LINE@|$BACKUP_ENV_LINE|g" \
     "$source" > "$destination"
 }
