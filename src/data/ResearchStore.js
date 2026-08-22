@@ -808,6 +808,7 @@ class ResearchStore {
         exit_at INTEGER,
         exit_market TEXT,
         exit_price REAL,
+        exit_impact_pct REAL,
         exit_reason TEXT,
         gross_return_pct REAL,
         net_return_pct REAL,
@@ -1950,6 +1951,7 @@ class ResearchStore {
         exit_at INTEGER,
         exit_market TEXT,
         exit_price REAL,
+        exit_impact_pct REAL,
         exit_reason TEXT,
         gross_return_pct REAL,
         net_return_pct REAL,
@@ -1964,6 +1966,15 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_graduation_accel_mint
         ON graduation_acceleration_shadow_positions(mint, signal_at DESC);
     `);
+
+    const graduationAccelerationColumns = new Set(
+      this.db.prepare('PRAGMA table_info(graduation_acceleration_shadow_positions)')
+        .all().map((column) => column.name),
+    );
+    if (!graduationAccelerationColumns.has('exit_impact_pct')) {
+      this.db.exec(`ALTER TABLE graduation_acceleration_shadow_positions
+        ADD COLUMN exit_impact_pct REAL`);
+    }
 
     this._migrateLiveTradingSchema();
 
@@ -3382,6 +3393,7 @@ class ResearchStore {
             @maxAdverseReturnPct, max_adverse_return_pct
           ),
           trailing_activated_at = COALESCE(@trailingActivatedAt, trailing_activated_at),
+          fixed_hold_ms = COALESCE(@fixedHoldMs, fixed_hold_ms),
           exit_trigger_at = COALESCE(@exitTriggerAt, exit_trigger_at),
           exit_target_at = COALESCE(@exitTargetAt, exit_target_at),
           exit_deadline_at = COALESCE(@exitDeadlineAt, exit_deadline_at),
@@ -3865,6 +3877,7 @@ class ResearchStore {
           exit_at = COALESCE(@exitAt, exit_at),
           exit_market = COALESCE(@exitMarket, exit_market),
           exit_price = COALESCE(@exitPrice, exit_price),
+          exit_impact_pct = COALESCE(@exitImpactPct, exit_impact_pct),
           exit_reason = COALESCE(@exitReason, exit_reason),
           gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
           net_return_pct = COALESCE(@netReturnPct, net_return_pct),
@@ -5272,6 +5285,9 @@ class ResearchStore {
       maxFavorableReturnPct: finiteOrNull(value('maxFavorableReturnPct')),
       maxAdverseReturnPct: finiteOrNull(value('maxAdverseReturnPct')),
       trailingActivatedAt: value('trailingActivatedAt'),
+      fixedHoldMs: Number.isFinite(value('fixedHoldMs'))
+        ? Math.trunc(value('fixedHoldMs'))
+        : null,
       exitTriggerAt: value('exitTriggerAt'),
       exitTargetAt: value('exitTargetAt'),
       exitDeadlineAt: value('exitDeadlineAt'),
@@ -6114,6 +6130,7 @@ class ResearchStore {
       exitAt: value('exitAt'),
       exitMarket: value('exitMarket'),
       exitPrice: finiteOrNull(value('exitPrice')),
+      exitImpactPct: finiteOrNull(value('exitImpactPct')),
       exitReason: value('exitReason'),
       grossReturnPct: finiteOrNull(value('grossReturnPct')),
       netReturnPct: finiteOrNull(value('netReturnPct')),

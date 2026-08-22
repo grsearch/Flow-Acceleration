@@ -576,7 +576,7 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 16);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 17);
     assert.deepStrictEqual(
       migratedRebound.runtime.entryProfiles
         .filter((profile) => profile.id.startsWith('GD25_35_RUG_GUARD'))
@@ -594,6 +594,7 @@ async function main() {
       [
         'X3', 'X8', 'XLEG',
         'GEXEC_XLEG', 'G2_XLEG', 'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+        'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
         'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
         'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
         'G1_B75_H30', 'G1_B50_H60',
@@ -637,6 +638,7 @@ async function main() {
         ['GE30_R23_F1', 30_000, 1, 3],
         ['GE30_R23_F3', 30_000, 3, 3],
         ['GE30_R23_F1_EXEC', 30_000, 1, 3],
+        ['GE30_R23_F1_XQ', 30_000, 1, 3],
         ['GE30_R23_F2_ONLY', 30_000, 2, 3],
         ['GE30_R23_F3_EXEC', 30_000, 3, 3],
         ['GE30_R23_F2_ONLY_EXEC', 30_000, 2, 3],
@@ -781,7 +783,7 @@ async function main() {
     );
     assert.deepStrictEqual(
       migrationContinuity.runtime.exitProfiles.map((profile) => profile.id),
-      ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER'],
+      ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER', 'AH60_180'],
     );
     assert.ok(Array.isArray(migrationContinuity.cohorts));
     assert.ok(Array.isArray(migrationContinuity.positions));

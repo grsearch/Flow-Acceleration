@@ -271,3 +271,63 @@ function testCurve90PostMigrationGate() {
 }
 
 testCurve90PostMigrationGate();
+
+function testCurve80PersistenceRemainsShadowOnly() {
+  const store = makeStore();
+  let now = 3_000_000;
+  const settings = config();
+  settings.capacitySols = [1];
+  settings.entryProfiles = [{
+    id: 'O_C80_P1000_X120',
+    label: 'persistence',
+    mode: 'CURVE_MILESTONE_PERSISTENCE',
+    thresholdPct: 80,
+    recentWindowMs: 5_000,
+    minCurveDeltaPct: 5,
+    minBuyers: 2,
+    maxSellTx: 0,
+    requireNoCreatorSell: true,
+    persistenceMs: 1_000,
+    maxPersistenceSellTx: 0,
+    maxPersistencePullbackPct: 5,
+    coreExitPct: 0,
+    capacityAwareExit: true,
+    runnerExitMode: 'FIXED_HOLD',
+    runnerMaxHoldMs: 120_000,
+  }];
+  const liveSignals = [];
+  const suite = new GraduationAccelerationShadowSuite({
+    config: settings,
+    store,
+    now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
+  suite.start();
+  const mint = 'curve80-persistence';
+  suite.onCreate({ mint, symbol: 'P80', creator: 'creator-p80', createdAt: now });
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 100, curvePct: 20, wallet: 'p80-buyer-0',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 1_000, curvePct: 80, wallet: 'p80-buyer-1',
+  }));
+  assert.equal(suite.health().pendingEntries, 0, 'first threshold touch only arms persistence');
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 2_000, curvePct: 82, wallet: 'p80-buyer-2',
+  }));
+  assert.equal(suite.health().pendingEntries, 1, 'persistent curve and buyers create one Shadow row');
+  assert.equal(liveSignals.length, 0, 'the persistence cohort has no live bridge');
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 2_200, curvePct: 83, wallet: 'p80-fill',
+  }));
+  const row = store.db.prepare(`
+    SELECT status, entry_profile_id
+    FROM graduation_acceleration_shadow_positions WHERE mint=?
+  `).get(mint);
+  assert.equal(row.status, STATUS.OPEN);
+  assert.equal(row.entry_profile_id, 'O_C80_P1000_X120');
+  assert.equal(suite.health().sendsTransactions, false);
+  store.close();
+}
+
+testCurve80PersistenceRemainsShadowOnly();

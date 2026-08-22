@@ -855,6 +855,23 @@ class MigratedDropReboundShadowSuite {
             ? ammBuyAveragePrice(trade, position.positionSol, price)
             : { price, impactPct: null };
         }
+        const maxEntryImpactPct = finite(entryProfile?.maxEntryImpactPct, null);
+        if (maxEntryImpactPct != null
+          && (fill.impactPct == null || fill.impactPct > maxEntryImpactPct)) {
+          this.store.updateMigratedDropReboundShadowPosition(position.id, {
+            status: STATUS.NO_ENTRY,
+            rejectionReason: fill.impactPct == null
+              ? 'ENTRY_CAPACITY_QUOTE_MISSING'
+              : `ENTRY_SELF_IMPACT_${fill.impactPct.toFixed(2)}PCT`,
+            entryJumpPct: jumpPct,
+            entryImpactPct: fill.impactPct,
+            confirmationJson: position.confirmationJson,
+          });
+          this.pendingEntries.delete(position.id);
+          this._unindexRow(position);
+          this.metrics.noEntry += 1;
+          continue;
+        }
         position.status = STATUS.OPEN;
         position.entryAt = trade.timestampMs;
         position.entryMarket = trade.market;

@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const { executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -120,6 +121,8 @@ class GraduationAccelerationShadowSuite {
       runnerExits: 0,
       closed: 0,
       noExit: 0,
+      persistenceArmed: 0,
+      persistenceRejected: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -147,7 +150,7 @@ class GraduationAccelerationShadowSuite {
           && startupAt >= state.createdAt + profile.horizonMs) {
           state.fixedEvaluated = true;
           this.metrics.replayEvaluationsSuppressed += 1;
-        } else if (profile.mode === 'CURVE_MILESTONE'
+        } else if (['CURVE_MILESTONE', 'CURVE_MILESTONE_PERSISTENCE'].includes(profile.mode)
           && state.events.some((row) => row.curvePct >= profile.thresholdPct)) {
           state.crossed.add(profile.id);
           this.metrics.replayEvaluationsSuppressed += 1;
@@ -206,6 +209,7 @@ class GraduationAccelerationShadowSuite {
       fixedEvaluated: false,
       crossed: new Set(),
       triggered: new Set(),
+      confirmations: new Map(),
       creatorSold: false,
       lastAt: finite(token.createdAt ?? token.created_at),
     });
@@ -364,6 +368,7 @@ class GraduationAccelerationShadowSuite {
       fixedEvaluated: false,
       crossed: new Set(),
       triggered: new Set(),
+      confirmations: new Map(),
       creatorSold: false,
       lastAt: trade.timestampMs,
     };
@@ -399,6 +404,10 @@ class GraduationAccelerationShadowSuite {
     if (ageMs < 0) return;
     for (const profile of this.entryProfiles.values()) {
       if (state.triggered.has(profile.id)) continue;
+      if (profile.mode === 'CURVE_MILESTONE_PERSISTENCE') {
+        this._evaluatePersistenceEntry(state, profile, trade, price);
+        continue;
+      }
       let matched = false;
       let features = null;
       if (profile.mode === 'FIXED_10S') {
@@ -430,6 +439,61 @@ class GraduationAccelerationShadowSuite {
       this.metrics.signals += 1;
       this._createPendingRows(state, profile, trade, price, features);
     }
+  }
+
+  _evaluatePersistenceEntry(state, profile, trade, price) {
+    let confirmation = state.confirmations.get(profile.id);
+    if (!confirmation) {
+      if (state.crossed.has(profile.id)
+        || finite(trade.curvePct, -Infinity) < profile.thresholdPct) return;
+      state.crossed.add(profile.id);
+      const rows = state.events.filter((row) => (
+        row.timestampMs >= trade.timestampMs - profile.recentWindowMs
+      ));
+      const features = this._features(rows);
+      const baseMatched = features.curveDeltaPct >= profile.minCurveDeltaPct
+        && features.buyers >= profile.minBuyers
+        && features.sellTx <= profile.maxSellTx
+        && (!profile.requireNoCreatorSell || !state.creatorSold);
+      this.metrics.evaluated += 1;
+      if (!baseMatched) {
+        this.metrics.persistenceRejected += 1;
+        return;
+      }
+      confirmation = {
+        armedAt: trade.timestampMs,
+        deadlineAt: trade.timestampMs + profile.persistenceMs,
+        price,
+        buyers: features.buyers,
+      };
+      state.confirmations.set(profile.id, confirmation);
+      this.metrics.persistenceArmed += 1;
+      return;
+    }
+    if (trade.timestampMs < confirmation.deadlineAt) return;
+    state.confirmations.delete(profile.id);
+    const rows = state.events.filter((row) => (
+      row.timestampMs >= confirmation.armedAt && row.timestampMs <= trade.timestampMs
+    ));
+    const features = this._features(rows);
+    const pullbackPct = confirmation.price > 0
+      ? Math.max(0, ((confirmation.price - price) / confirmation.price) * 100) : Infinity;
+    features.persistenceMs = trade.timestampMs - confirmation.armedAt;
+    features.persistenceBuyers = features.buyers;
+    features.persistencePullbackPct = pullbackPct;
+    const matched = finite(trade.curvePct, -Infinity) >= profile.thresholdPct
+      && features.buyers >= confirmation.buyers
+      && features.sellTx <= profile.maxPersistenceSellTx
+      && pullbackPct <= profile.maxPersistencePullbackPct
+      && (!profile.requireNoCreatorSell || !state.creatorSold);
+    this.metrics.evaluated += 1;
+    if (!matched) {
+      this.metrics.persistenceRejected += 1;
+      return;
+    }
+    state.triggered.add(profile.id);
+    this.metrics.signals += 1;
+    this._createPendingRows(state, profile, trade, price, features);
   }
 
   _features(rows) {
@@ -599,8 +663,22 @@ class GraduationAccelerationShadowSuite {
 
   _takeCore(position, trade, price) {
     this._updateExtrema(position, trade.timestampMs, price);
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    const coreWeight = position.coreWeightPct / 100;
+    let corePrice = price;
+    if (coreWeight > 0 && profile?.capacityAwareExit) {
+      const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+      const execution = executableSell(
+        trade,
+        position.tokenUnits * coreWeight,
+        price,
+        { rugMarkReturnPct: markReturnPct },
+      );
+      if (!execution.available && !execution.conservative) return;
+      corePrice = execution.price ?? price;
+    }
     position.coreExitAt = trade.timestampMs;
-    position.coreExitPrice = price;
+    position.coreExitPrice = coreWeight > 0 ? corePrice : null;
     position.status = STATUS.RUNNER;
     position.runnerHighestPrice = price;
     position.runnerTierIndex = -1;
@@ -754,10 +832,25 @@ class GraduationAccelerationShadowSuite {
 
   _close(position, trade, price) {
     this._updateExtrema(position, trade.timestampMs, price);
+    const profile = this.entryProfiles.get(position.entryProfileId);
     const coreWeight = position.coreExitPrice ? position.coreWeightPct / 100 : 0;
     const runnerWeight = 1 - coreWeight;
+    let runnerPrice = price;
+    let exitImpactPct = null;
+    if (profile?.capacityAwareExit) {
+      const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+      const execution = executableSell(
+        trade,
+        position.tokenUnits * runnerWeight,
+        price,
+        { rugMarkReturnPct: markReturnPct },
+      );
+      if (!execution.available && !execution.conservative) return;
+      runnerPrice = execution.price ?? price;
+      exitImpactPct = execution.impactPct;
+    }
     const proceeds = position.tokenUnits
-      * ((position.coreExitPrice || 0) * coreWeight + price * runnerWeight);
+      * ((position.coreExitPrice || 0) * coreWeight + runnerPrice * runnerWeight);
     const grossReturnPct = ((proceeds / position.positionSol) - 1) * 100;
     const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: position.positionSol });
     const extraExitCostPct = position.coreExitPrice ? costs.fixedCostPct : 0;
@@ -765,7 +858,8 @@ class GraduationAccelerationShadowSuite {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
-      exitPrice: price,
+      exitPrice: runnerPrice,
+      exitImpactPct,
       exitReason: position.exitReason,
       grossReturnPct,
       netReturnPct: grossReturnPct - position.configuredCostPct - extraExitCostPct,

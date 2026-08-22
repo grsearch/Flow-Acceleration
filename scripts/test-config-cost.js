@@ -438,6 +438,7 @@ assert.deepStrictEqual(
     ['GE30_R23_F1', 30_000, 1],
     ['GE30_R23_F3', 30_000, 3],
     ['GE30_R23_F1_EXEC', 30_000, 1],
+    ['GE30_R23_F1_XQ', 30_000, 1],
     ['GE30_R23_F2_ONLY', 30_000, 2],
     ['GE30_R23_F3_EXEC', 30_000, 3],
     ['GE30_R23_F2_ONLY_EXEC', 30_000, 2],
@@ -465,6 +466,7 @@ assert.deepStrictEqual(
   [
     'X3', 'X8', 'XLEG',
     'GEXEC_XLEG', 'G2_XLEG', 'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+    'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
     'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
     'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
     'G1_B75_H30', 'G1_B50_H60',
@@ -592,7 +594,7 @@ assert.strictEqual(csfProfiles.get('CSF_E510_Q').newEntriesEnabled, true);
 assert.deepStrictEqual(csfProfiles.get('CSF_E510_Q').managementProfileIds, ['F20']);
 assert.deepStrictEqual(
   config.migrationContinuityShadow.exitProfiles.map((profile) => profile.id),
-  ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER'],
+  ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER', 'AH60_180'],
 );
 assert.strictEqual(config.holderGrowthShadow.enabled, false);
 assert.deepStrictEqual(
@@ -643,9 +645,27 @@ assert.deepStrictEqual(
   config.graduationAccelerationShadow.entryProfiles.map((profile) => profile.id),
   [
     'O_FAST10_C80_B20_R07', 'O_C80_D5_B2_S0_NC',
+    'O_C80_P500_STAIR240', 'O_C80_P1000_X60',
+    'O_C80_P1000_X120', 'O_C80_P1000_STAIR240',
     'O90_M5_X60', 'O90_M5_X120', 'O90_M5_STAIR120',
   ],
 );
+assert.ok(config.graduationAccelerationShadow.entryProfiles
+  .filter((profile) => profile.id.startsWith('O_C80_P'))
+  .every((profile) => !profile.liveStrategyId && profile.capacityAwareExit === true));
+assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, true);
+assert.deepStrictEqual(
+  config.migrationSecondLegShadow.cohorts
+    .filter((cohort) => cohort.id.startsWith('M2F-SSR-'))
+    .map((cohort) => cohort.id),
+  [
+    'M2F-SSR-CTRL-X60', 'M2F-SSR-MRG-X60', 'M2F-SSR-MRG-X120',
+    'M2F-SSR-MRG-R120-H20', 'M2F-SSR-MRG-R240-H20',
+  ],
+);
+assert.ok(config.migrationSecondLegShadow.cohorts
+  .filter((cohort) => cohort.id.startsWith('M2F-SSR-'))
+  .every((cohort) => !cohort.liveStrategyId));
 const o90Gate = config.graduationAccelerationShadow.entryProfiles
   .find((profile) => profile.id === 'O90_M5_X60');
 assert.deepStrictEqual(o90Gate.postMigrationGate, {

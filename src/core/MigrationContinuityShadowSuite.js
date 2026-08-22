@@ -61,6 +61,7 @@ function restoredPosition(row) {
     exitTargetAt: valueOf(row, 'exit_target_at', 'exitTargetAt'),
     exitDeadlineAt: valueOf(row, 'exit_deadline_at', 'exitDeadlineAt'),
     exitReason: valueOf(row, 'exit_reason', 'exitReason'),
+    fixedHoldMs: finite(valueOf(row, 'fixed_hold_ms', 'fixedHoldMs'), null),
   };
 }
 
@@ -452,6 +453,8 @@ class MigrationContinuityShadowSuite {
     return {
       netFlowSol: buySol - sellSol,
       sellBuyRatio: buySol > 0 ? sellSol / buySol : (sellSol > 0 ? Infinity : 0),
+      buyers: new Set(rows.filter((row) => row.side === 'BUY')
+        .map((row) => row.wallet).filter(Boolean)).size,
     };
   }
 
@@ -475,6 +478,21 @@ class MigrationContinuityShadowSuite {
       const flow = this._flowFeatures(state, timestampMs);
       if (flow.sellBuyRatio >= profile.minSellBuyRatio
         && flow.netFlowSol <= profile.maxNetFlowSol) reason = 'FLOW_FADE';
+    } else if (profile.exitMode === 'ADAPTIVE_HORIZON' && state) {
+      if (!(position.fixedHoldMs > 0) && ageMs >= profile.decisionAtMs) {
+        const flow = this._flowFeatures(state, timestampMs);
+        const strong = flow.netFlowSol >= profile.minStrongNetFlowSol
+          && flow.sellBuyRatio <= profile.maxStrongSellBuyRatio
+          && flow.buyers >= profile.minStrongBuyers;
+        position.fixedHoldMs = strong ? profile.strongHoldMs : profile.weakHoldMs;
+        this.store.updateMigrationContinuityShadowPosition(position.id, {
+          fixedHoldMs: position.fixedHoldMs,
+        });
+      }
+      if (position.fixedHoldMs > 0 && ageMs >= position.fixedHoldMs) {
+        reason = `ADAPTIVE_HORIZON_${position.fixedHoldMs}MS`;
+        triggerAt = position.entryAt + position.fixedHoldMs;
+      }
     } else if (['TRAILING', 'ADAPTIVE_TRAILING'].includes(profile.exitMode)) {
       if (!position.trailingActivatedAt && peakReturnPct >= profile.trailingActivationPct) {
         position.trailingActivatedAt = timestampMs;

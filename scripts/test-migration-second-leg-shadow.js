@@ -1,7 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { MigrationSecondLegShadowSuite } = require('../src/core/MigrationSecondLegShadowSuite');
+const {
+  MigrationSecondLegShadowSuite,
+  MarketRegimeTracker,
+} = require('../src/core/MigrationSecondLegShadowSuite');
 const { ResearchStore } = require('../src/data/ResearchStore');
 
 function makeStore(blockedMints = new Set()) {
@@ -173,3 +176,40 @@ function main() {
 }
 
 main();
+
+function testShadowOnlyMarketRegime() {
+  const tracker = new MarketRegimeTracker({
+    maturityAgeMs: 60_000,
+    lookbackMs: 600_000,
+    minMints: 3,
+    minPositiveReturnRatePct: 50,
+    maxRugCollapseRatePct: 20,
+    minPositiveNetFlowRatePct: 50,
+    maxMedianEstimatedImpact1SolPct: 5,
+  });
+  const observedAt = 10_000_000;
+  const outcome = (mint, returnPct, options = {}) => ({
+    mint,
+    observedAt,
+    ageMs: 60_000,
+    baselinePrice: 1,
+    price: 1 + (returnPct / 100),
+    netFlow10s: options.netFlow10s ?? 1,
+    estimatedImpact1SolPct: options.impactPct ?? 2,
+    featureCompleteness: options.blocked
+      ? { preEntryRugRisk: { blocked: true } }
+      : null,
+  });
+  tracker.observe(outcome('regime-a', 20));
+  tracker.observe(outcome('regime-b', 5));
+  tracker.observe(outcome('regime-c', -10));
+  const green = tracker.snapshot(observedAt + 1);
+  assert.equal(green.state, 'GREEN');
+  assert.equal(green.shadowOnly, true);
+
+  tracker.observe(outcome('regime-rug', 5, { blocked: true }));
+  const red = tracker.snapshot(observedAt + 2);
+  assert.equal(red.state, 'RED', 'a blocked RUG label contributes to the regime risk rate');
+}
+
+testShadowOnlyMarketRegime();

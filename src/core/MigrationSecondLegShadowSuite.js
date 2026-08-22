@@ -65,6 +65,101 @@ function restore(row) {
   };
 }
 
+function median(values) {
+  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+// Cross-token regime labels are deliberately owned by the M2F shadow suite.
+// They are never exported as a live signal and cannot gate LiveTradingManager.
+class MarketRegimeTracker {
+  constructor(config = {}) {
+    this.config = {
+      enabled: config.enabled !== false,
+      maturityAgeMs: finite(config.maturityAgeMs, 120_000),
+      lookbackMs: finite(config.lookbackMs, 10 * 60_000),
+      minMints: finite(config.minMints, 12),
+      minPositiveReturnRatePct: finite(config.minPositiveReturnRatePct, 50),
+      maxRugCollapseRatePct: finite(config.maxRugCollapseRatePct, 15),
+      minPositiveNetFlowRatePct: finite(config.minPositiveNetFlowRatePct, 55),
+      maxMedianEstimatedImpact1SolPct: finite(
+        config.maxMedianEstimatedImpact1SolPct, 5,
+      ),
+    };
+    this.outcomes = new Map();
+    this.cachedSnapshot = null;
+  }
+
+  observe(snapshot) {
+    if (!this.config.enabled || !snapshot?.mint
+      || finite(snapshot.ageMs, -1) < this.config.maturityAgeMs
+      || this.outcomes.has(snapshot.mint)) return;
+    const baseline = finite(snapshot.baselinePrice);
+    const price = finite(snapshot.price);
+    if (!(baseline > 0) || !(price > 0)) return;
+    const returnPct = ((price / baseline) - 1) * 100;
+    const rugRisk = snapshot.featureCompleteness?.preEntryRugRisk;
+    this.outcomes.set(snapshot.mint, {
+      mint: snapshot.mint,
+      observedAt: finite(snapshot.observedAt, Date.now()),
+      returnPct,
+      rugCollapse: returnPct <= -50
+        || rugRisk?.flagged === true
+        || rugRisk?.blocked === true,
+      positiveNetFlow: finite(snapshot.netFlow10s, 0) > 0,
+      estimatedImpact1SolPct: finite(snapshot.estimatedImpact1SolPct),
+    });
+    this.cachedSnapshot = null;
+    this._prune(finite(snapshot.observedAt, Date.now()));
+  }
+
+  snapshot(now = Date.now()) {
+    this._prune(now);
+    if (this.cachedSnapshot) return { ...this.cachedSnapshot };
+    const rows = [...this.outcomes.values()];
+    const count = rows.length;
+    const percent = (matched) => (count ? (matched / count) * 100 : 0);
+    const positiveReturnRatePct = percent(rows.filter((row) => row.returnPct > 0).length);
+    const rugCollapseRatePct = percent(rows.filter((row) => row.rugCollapse).length);
+    const positiveNetFlowRatePct = percent(rows.filter((row) => row.positiveNetFlow).length);
+    const medianEstimatedImpact1SolPct = median(
+      rows.map((row) => row.estimatedImpact1SolPct),
+    );
+    const sufficient = count >= this.config.minMints;
+    const green = sufficient
+      && positiveReturnRatePct >= this.config.minPositiveReturnRatePct
+      && rugCollapseRatePct <= this.config.maxRugCollapseRatePct
+      && positiveNetFlowRatePct >= this.config.minPositiveNetFlowRatePct
+      && medianEstimatedImpact1SolPct != null
+      && medianEstimatedImpact1SolPct <= this.config.maxMedianEstimatedImpact1SolPct;
+    this.cachedSnapshot = {
+      state: sufficient ? (green ? 'GREEN' : 'RED') : 'INSUFFICIENT',
+      shadowOnly: true,
+      sampleMints: count,
+      positiveReturnRatePct,
+      rugCollapseRatePct,
+      positiveNetFlowRatePct,
+      medianEstimatedImpact1SolPct,
+      lookbackMs: this.config.lookbackMs,
+    };
+    return { ...this.cachedSnapshot };
+  }
+
+  _prune(now) {
+    const cutoff = now - this.config.lookbackMs;
+    let changed = false;
+    for (const [mint, row] of this.outcomes) {
+      if (row.observedAt < cutoff) {
+        this.outcomes.delete(mint);
+        changed = true;
+      }
+    }
+    if (changed) this.cachedSnapshot = null;
+  }
+}
+
 class MigrationSecondLegShadowSuite {
   constructor({ config, store, now = () => Date.now() }) {
     this.config = config;
@@ -104,6 +199,7 @@ class MigrationSecondLegShadowSuite {
     this.confirmationByCohort = new Map(this.cohorts
       .filter((cohort) => cohort.confirmationMode !== 'IMMEDIATE')
       .map((cohort) => [cohort.id, new Map()]));
+    this.marketRegime = new MarketRegimeTracker(config.marketRegime);
     this.metrics = {
       evaluated: 0,
       matched: 0,
@@ -147,6 +243,8 @@ class MigrationSecondLegShadowSuite {
       mode: 'SHADOW_M2F_RESEARCH_MATRIX',
       code: this.cohorts.map((cohort) => cohort.id).join(' / '),
       sendsTransactions: false,
+      liveDecisionIntegration: 'DISABLED',
+      marketRegimeUsage: 'SHADOW_ONLY_NEVER_LIVE',
       guardRequired: true,
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
@@ -162,6 +260,7 @@ class MigrationSecondLegShadowSuite {
           ?.deterministicCostPct ?? null,
         cohorts: cohortHealth,
         isolatedTable: 'migration_second_leg_shadow_positions',
+        marketRegime: this.marketRegime.snapshot(this.now()),
       },
       ...this.metrics,
     };
@@ -173,9 +272,13 @@ class MigrationSecondLegShadowSuite {
 
   onSnapshot(snapshot, trade) {
     if (!this.config.enabled || !snapshot?.mint || !(snapshot.price > 0)) return;
+    // Read the regime before this observation is incorporated. With the
+    // default 120s maturity this is also strictly later than every SSR entry
+    // horizon (<=90s), preventing the candidate from grading itself.
+    const regime = this.marketRegime.snapshot(snapshot.observedAt);
     this.metrics.evaluated += 1;
     for (const cohort of this.cohorts) {
-      const matched = this._matches(snapshot, cohort);
+      const matched = this._matches(snapshot, cohort, regime);
       if (!matched) {
         // CF2 means two consecutive qualifying observer snapshots. A failed
         // snapshot breaks persistence instead of letting an older good sample
@@ -184,11 +287,12 @@ class MigrationSecondLegShadowSuite {
         continue;
       }
       if (!this._confirmationPassed(snapshot, cohort)) continue;
-      this._createSignal(snapshot, trade, cohort);
+      this._createSignal(snapshot, trade, cohort, regime);
     }
+    this.marketRegime.observe(snapshot);
   }
 
-  _createSignal(snapshot, trade, cohort) {
+  _createSignal(snapshot, trade, cohort, regime) {
     const migrationAt = finite(snapshot.migrationAt, snapshot.observedAt - snapshot.ageMs);
     const episodeId = `${snapshot.mint}:${migrationAt}:${cohort.id}`;
     const features = {
@@ -210,6 +314,9 @@ class MigrationSecondLegShadowSuite {
       holderDiffusionIndex: snapshot.observedHolderDiffusionIndex,
       quoteReserveSol: snapshot.quoteReserveSol,
       estimatedImpact1SolPct: snapshot.estimatedImpact1SolPct,
+      marketRegime: regime,
+      marketRegimeRequired: cohort.requireGreenRegime === true,
+      liveEligible: false,
     };
     const saved = this.store.createMigrationSecondLegShadowPosition({
       cohortId: cohort.id,
@@ -322,11 +429,12 @@ class MigrationSecondLegShadowSuite {
     }
   }
 
-  _matches(snapshot, cohort) {
+  _matches(snapshot, cohort, regime = null) {
     const t = cohort.thresholds;
     const peakImpulsePct = snapshot.baselinePrice > 0
       ? ((snapshot.peakPrice / snapshot.baselinePrice) - 1) * 100 : null;
     const impact1Sol = finite(snapshot.estimatedImpact1SolPct);
+    if (cohort.requireGreenRegime && regime?.state !== 'GREEN') return false;
     return snapshot.ageMs >= t.minAgeMs && snapshot.ageMs <= t.maxAgeMs
       && snapshot.openingImpulsePct >= t.minCurrentImpulsePct
       && snapshot.openingImpulsePct <= t.maxCurrentImpulsePct
@@ -334,6 +442,7 @@ class MigrationSecondLegShadowSuite {
       && snapshot.pullbackPct >= t.minPullbackPct
       && snapshot.pullbackPct <= t.maxPullbackPct
       && snapshot.reboundPct >= t.minReboundPct
+      && snapshot.reboundPct <= finite(t.maxReboundPct, Infinity)
       && snapshot.netFlow10s >= t.minNetFlow10sSol
       && snapshot.netFlow3s >= t.minNetFlow3sSol
       && snapshot.buyers10s >= t.minBuyers10s
@@ -343,6 +452,7 @@ class MigrationSecondLegShadowSuite {
       && finite(snapshot.netFlowAcceleration, -Infinity) >= t.minNetFlowAcceleration
       && finite(snapshot.sellDecelerationRatio, Infinity) <= t.maxSellDecelerationRatio
       && snapshot.observedHolderDiffusionIndex >= t.minHolderDiffusionIndex
+      && finite(snapshot.quoteReserveSol, 0) >= finite(t.minQuoteReserveSol, 0)
       && impact1Sol != null && impact1Sol <= t.maxEstimatedImpact1SolPct;
   }
 
@@ -533,4 +643,4 @@ class MigrationSecondLegShadowSuite {
   }
 }
 
-module.exports = { MigrationSecondLegShadowSuite, STATUS };
+module.exports = { MigrationSecondLegShadowSuite, MarketRegimeTracker, STATUS };

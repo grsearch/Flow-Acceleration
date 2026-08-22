@@ -3531,6 +3531,23 @@ const config = {
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
       {
+        id: 'GE30_R23_F1_XQ',
+        label: 'G-XQ · 首次反弹 + 可执行容量/价格质量',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+        maxEntryPriceJumpPct: 5,
+        maxEntryImpactPct: 3,
+        exitProfileIds: ['G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60'],
+        capacityAware: true,
+        positionSols: [0.1, 0.5, 1],
+      },
+      {
         id: 'GE30_R23_F2_ONLY',
         label: 'G-F2 · 30秒内反弹2%–3% · 只取第二次机会',
         windowMs: 1_000,
@@ -3791,6 +3808,17 @@ const config = {
         lossCheckAtMs: 6_000,
         maxHoldMs: 15_000,
       },
+      ...[
+        ['G1XQ_X8', 8_000],
+        ['G1XQ_X30', 30_000],
+        ['G1XQ_X60', 60_000],
+      ].map(([id, fixedHoldMs]) => ({
+        id,
+        label: `${id} · G-XQ容量感知固定持有`,
+        entryProfileIds: ['GE30_R23_F1_XQ'],
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs,
+      })),
       ...(migratedReboundGfrEnabled ? [{
         id: 'GFR_X8',
         label: 'G-FR · 固定持有8秒',
@@ -4080,6 +4108,19 @@ const config = {
           { belowPct: 100, stopPct: 20 },
           { belowPct: Infinity, stopPct: 25 },
         ],
+      },
+      {
+        id: 'AH60_180',
+        label: 'MC-AH · 30秒订单流判定 / 弱60秒 / 强180秒',
+        exitMode: 'ADAPTIVE_HORIZON',
+        decisionAtMs: 30_000,
+        weakHoldMs: 60_000,
+        strongHoldMs: 180_000,
+        minStrongNetFlowSol: 1,
+        maxStrongSellBuyRatio: 0.8,
+        minStrongBuyers: 3,
+        hardStopPct: 20,
+        maxHoldMs: 180_000,
       },
     ],
     costModel: normalizeCostModel({
@@ -4788,6 +4829,29 @@ const config = {
         requireNoCreatorSell: true,
       },
       ...[
+        ['O_C80_P500_STAIR240', 500, 'TIERED_TRAILING', 240_000],
+        ['O_C80_P1000_X60', 1_000, 'FIXED_HOLD', 60_000],
+        ['O_C80_P1000_X120', 1_000, 'FIXED_HOLD', 120_000],
+        ['O_C80_P1000_STAIR240', 1_000, 'TIERED_TRAILING', 240_000],
+      ].map(([id, persistenceMs, runnerExitMode, runnerMaxHoldMs]) => ({
+        id,
+        label: `${id} · Curve80持续确认 / 1 SOL可执行退出`,
+        mode: 'CURVE_MILESTONE_PERSISTENCE',
+        thresholdPct: 80,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 2,
+        maxSellTx: 0,
+        requireNoCreatorSell: true,
+        persistenceMs,
+        maxPersistenceSellTx: 0,
+        maxPersistencePullbackPct: 5,
+        coreExitPct: 0,
+        capacityAwareExit: true,
+        runnerExitMode,
+        runnerMaxHoldMs,
+      })),
+      ...[
         ['O90_M5_X60', 'FIXED_HOLD', 60_000],
         ['O90_M5_X120', 'FIXED_HOLD', 120_000],
         ['O90_M5_STAIR120', 'TIERED_TRAILING', 120_000],
@@ -4925,6 +4989,32 @@ const config = {
   // shared O(1) pre-entry RUG guard at the delayed fill timestamp.
   migrationSecondLegShadow: {
     enabled: booleanEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENABLED', true),
+    // Labels the broad post-migration tape for Shadow research only. This
+    // object is not consumed by LiveTradingManager or any live strategy.
+    marketRegime: {
+      enabled: booleanEnv('FLOW_M2F_MARKET_REGIME_SHADOW_ENABLED', true),
+      maturityAgeMs: integerEnv('FLOW_M2F_MARKET_REGIME_MATURITY_MS', 120_000, {
+        min: 10_000, max: 10 * 60_000,
+      }),
+      lookbackMs: integerEnv('FLOW_M2F_MARKET_REGIME_LOOKBACK_MS', 10 * 60_000, {
+        min: 60_000, max: 6 * 60 * 60_000,
+      }),
+      minMints: integerEnv('FLOW_M2F_MARKET_REGIME_MIN_MINTS', 12, {
+        min: 3, max: 1_000,
+      }),
+      minPositiveReturnRatePct: numberEnv(
+        'FLOW_M2F_MARKET_REGIME_MIN_POSITIVE_RETURN_RATE_PCT', 50, { min: 0, max: 100 },
+      ),
+      maxRugCollapseRatePct: numberEnv(
+        'FLOW_M2F_MARKET_REGIME_MAX_RUG_RATE_PCT', 15, { min: 0, max: 100 },
+      ),
+      minPositiveNetFlowRatePct: numberEnv(
+        'FLOW_M2F_MARKET_REGIME_MIN_POSITIVE_FLOW_RATE_PCT', 55, { min: 0, max: 100 },
+      ),
+      maxMedianEstimatedImpact1SolPct: numberEnv(
+        'FLOW_M2F_MARKET_REGIME_MAX_MEDIAN_IMPACT_1SOL_PCT', 5, { min: 0, max: 100 },
+      ),
+    },
     cohortId: 'M2F-NH10-GUARD-B',
     positionSizeSol: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_POSITION_SOL', 1, {
       min: 0.01,
@@ -5034,6 +5124,49 @@ const config = {
         hardStopPct: 15,
         maxHoldMs: 10_000,
       },
+      ...[
+        ['M2F-SSR-CTRL-X60', 'SSR control / fixed 60s', false, 100, 60_000],
+        ['M2F-SSR-MRG-X60', 'SSR + MRG green / fixed 60s', true, 100, 60_000],
+        ['M2F-SSR-MRG-X120', 'SSR + MRG green / fixed 120s', true, 100, 120_000],
+        ['M2F-SSR-MRG-R120-H20', 'SSR + MRG green / H20 / 120s', true, 20, 120_000],
+        ['M2F-SSR-MRG-R240-H20', 'SSR + MRG green / H20 / 240s right tail', true, 20, 240_000],
+      ].map(([id, label, requireGreenRegime, hardStopPct, maxHoldMs]) => ({
+        id,
+        label,
+        enabled: booleanEnv('FLOW_M2F_SELL_STRESS_RECOVERY_ENABLED', true),
+        studyMode: requireGreenRegime
+          ? 'SELL_STRESS_RECOVERY_MARKET_REGIME'
+          : 'SELL_STRESS_RECOVERY_CONTROL',
+        confirmationMode: 'TWO_SNAPSHOT_PERSISTENCE',
+        confirmationMinGapMs: 500,
+        confirmationMaxGapMs: 2_500,
+        maxSellDecelerationIncrease: 0.15,
+        requireGreenRegime,
+        hardStopPct,
+        maxHoldMs,
+        thresholds: {
+          minAgeMs: 10_000,
+          maxAgeMs: 90_000,
+          minCurrentImpulsePct: 20,
+          maxCurrentImpulsePct: 100,
+          minPeakImpulsePct: 20,
+          minPullbackPct: 10,
+          maxPullbackPct: 30,
+          minReboundPct: 3,
+          maxReboundPct: 15,
+          minNetFlow10sSol: 1,
+          minNetFlow3sSol: 0.5,
+          minBuyers10s: 8,
+          minBuyers3s: 1,
+          maxLargestBuyerSharePct: 40,
+          minBuySpeedRatio: 0,
+          minNetFlowAcceleration: -1_000,
+          maxSellDecelerationRatio: 0.8,
+          minHolderDiffusionIndex: -10_000,
+          minQuoteReserveSol: 20,
+          maxEstimatedImpact1SolPct: 5,
+        },
+      })),
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,

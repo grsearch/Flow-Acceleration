@@ -113,3 +113,57 @@ function main() {
 }
 
 main();
+
+function testAdaptiveHorizonSelection() {
+  const base = 1_910_000_000_000;
+  let now = base;
+  const store = new ResearchStore({
+    dbPath: ':memory:', rawRetentionHours: 168, archiveDir: './data/archive',
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const mint = 'MigrationAdaptive111111111111111111111111111';
+  store.recordCreate({ mint, symbol: 'MCAH', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: base - 60_000, initialRealTokenReservesRaw: null,
+    tokenTotalSupplyRaw: null });
+  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  const settings = config();
+  settings.entryProfile.liveStrategyId = null;
+  settings.exitProfiles = [{
+    id: 'AH60_180', exitMode: 'ADAPTIVE_HORIZON', decisionAtMs: 30_000,
+    weakHoldMs: 60_000, strongHoldMs: 180_000,
+    minStrongNetFlowSol: 1, maxStrongSellBuyRatio: 0.8, minStrongBuyers: 3,
+    hardStopPct: 20, maxHoldMs: 180_000,
+  }];
+  const suite = new MigrationContinuityShadowSuite({
+    config: settings, store, now: () => now,
+  });
+  suite.start();
+  suite.onGraduated(store.getToken(mint));
+  suite.observeTrade(trade(mint, base + 100, 1));
+  for (let index = 0; index < 21; index += 1) {
+    suite.observeTrade(trade(
+      mint, base + 500 + index * 200, 1 + (index + 1) * 0.003,
+      'BUY', 0.4, `entry-${index}`,
+    ));
+  }
+  now = base + 5_000;
+  suite.observeTrade(trade(mint, now, 1.07, 'BUY', 0.4, 'entry-trigger'));
+  now += 250;
+  suite.observeTrade(trade(mint, now, 1.075, 'BUY', 0.2, 'entry-fill'));
+  assert.equal(suite.health().opened, 1);
+
+  for (let index = 0; index < 3; index += 1) {
+    now = base + 34_000 + index * 500;
+    suite.observeTrade(trade(mint, now, 1.1, 'BUY', 0.6, `strong-${index}`));
+  }
+  now = base + 35_600;
+  suite.observeTrade(trade(mint, now, 1.1, 'BUY', 0.6, 'strong-decision'));
+  const row = store.db.prepare(`
+    SELECT fixed_hold_ms FROM migration_continuity_shadow_positions WHERE mint=?
+  `).get(mint);
+  assert.equal(row.fixed_hold_ms, 180_000, 'strong public flow selects the long horizon');
+  assert.equal(suite.health().sendsTransactions, false);
+  store.close();
+}
+
+testAdaptiveHorizonSelection();
