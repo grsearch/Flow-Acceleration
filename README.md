@@ -41,6 +41,11 @@ AGE≤25s+双窗口买家广度，以及再叠加 Sell3≤2.5 SOL；三组只交
 历史展示和存量退出，旧服务器 `.env` 也不能将其误开启。`PP8-30-NF8-3` 与
 `PBR-A-B10-PB20` 继续只做 Shadow。
 
+2026-08-22 起仅恢复 `PBR_C` 的前向 Shadow 入场，用新的 V3 总开关隔离服务器
+遗留配置；只交叉 `X50_12`、`X50_15`、`X50_RATCHET` 三种表现相对较好的退出。
+其他 PBR、FLOW 与 PP 入场组继续暂停，因此不会混入这批新的 PBR-C 样本，也不会
+触发任何实盘交易。
+
 The same exit hypothesis is tested without changing entry rules in two other promising
 families. Smart-Like Early adds BASE-only `FIX60_H20` / `FIX120_H20` exits (no pyramiding,
 partial profit, flow-decay exit, or trailing stop). Launch First Pullback adds
