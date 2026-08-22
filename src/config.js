@@ -1767,10 +1767,11 @@ const config = {
   // Independent right-tail study. It consumes the existing PumpSwap trade stream,
   // opens no real positions, and never treats an unobservable exit as a total loss.
   bigWinnerShadow: {
-    // The latest non-overlapping windows remained negative. Preserve tables
-    // and Dashboard history, but stop spending the hot path on new episodes.
-    // A V2 key prevents a stale server FLOW_BIG_WINNER_SHADOW_ENABLED=true.
-    enabled: booleanEnv('FLOW_BIG_WINNER_SHADOW_V2_ENABLED', false),
+    // V3 reopens only the PBR-C frequency entry for a clean forward sample.
+    // The new key prevents a stale server V2=false from silently keeping the
+    // suite paused after deployment; every other entry profile remains gated
+    // independently below.
+    enabled: booleanEnv('FLOW_BIG_WINNER_SHADOW_V3_ENABLED', true),
     positionSizeSol: shadowPositionEnv('FLOW_BIG_WINNER_SHADOW_POSITION_SOL'),
     stateWindowMs: integerEnv('FLOW_BIG_WINNER_SHADOW_STATE_WINDOW_MS', 10_000, {
       min: 8_000,
@@ -1816,7 +1817,7 @@ const config = {
       {
         id: 'PBR_A',
         label: 'PBR-A balanced: wave 40 / pullback 12-25 / NF3 3',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         liveStrategyId: 'big_winner_pbr_a_x50_15_live',
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 25,
@@ -1826,7 +1827,7 @@ const config = {
       {
         id: 'PBR_A_B10_PB20',
         label: 'PBR-A-B10-PB20 · wave40 / pullback12-20 / NF3≥3 / Buyers3≥10',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 20,
         minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 3,
@@ -1845,11 +1846,12 @@ const config = {
       {
         id: 'PBR_C',
         label: 'PBR-C frequency: wave 40 / pullback 15-25 / NF3 2',
-        newEntriesEnabled: false,
+        newEntriesEnabled: true,
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 40, minPullbackPct: 15, maxPullbackPct: 25,
         minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
         minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
+        exitProfileIds: ['X50_12', 'X50_15', 'X50_RATCHET'],
       },
       {
         id: 'FLOW_R',
@@ -1916,7 +1918,7 @@ const config = {
       {
         id: 'PP_PULLBACK_8_30_NF8_3',
         label: 'PP8-30-NF8-3 · 回踩8–30% / NetFlow8≥3 SOL / X25 Runner',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 75_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
@@ -1934,7 +1936,7 @@ const config = {
       {
         id: 'PP20_B45',
         label: 'PP20-B45 · 首次回踩8–20% / Buyers10≥45',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
@@ -1951,7 +1953,7 @@ const config = {
       {
         id: 'PP20_EARLY_BREADTH',
         label: 'PP20-Early-Breadth · AGE≤25s / Buyers3≥15 / Buyers10≥45',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 25_000,
         qualificationMaxAgeMs: 25_000,
         minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
@@ -1968,7 +1970,7 @@ const config = {
       {
         id: 'PP20_QUALITY',
         label: 'PP20-Quality · AGE≤30s / Buyers3≥15 / Buyers10≥45 / Sell3≤2.5',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 30_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
