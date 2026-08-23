@@ -360,16 +360,16 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="flow-smart-confirm" data-strategy-code="L">
               <b><span class="strategy-code">L</span>Flow → Smart 确认</b><small>Primary Rank 1 后 Smart OPEN，再按下一笔成交入场</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-like-early" data-strategy-code="SLE">
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-like-early" data-strategy-code="SLE">
               <b><span class="strategy-code">SLE</span>Smart-Like Early</b><small>早期不追涨入场、顺势加仓、分批止盈与长尾退出</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-slot-flow" data-strategy-code="CSF-E510-Q">
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="cya-slot-flow" data-strategy-code="CSF-E510-Q">
               <b><span class="strategy-code">CSF-E510-Q</span>CYA Slot Flow</b><small>严格5–10秒公共流前向组；旧宽松组停止新开仓</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
               <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun（已停）</b><small>0胜率且样本稀疏；历史数据保留，不再新增</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
               <b><span class="strategy-code">SR-R0/R1/R2/R3</span>Smart 多钱包共振右尾</b><small>第二/第三个不同钱包确认后入场；硬止损 + 60–240秒固定持有</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="public-flow-lead" data-strategy-code="PFL-B0/B1/A1/R1">
@@ -405,7 +405,7 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="migration-second-leg" data-strategy-code="M2F-OBS / M2F-MATRIX">
               <b><span class="strategy-code">M2F-OBS / M2F-MATRIX</span>迁移后二段资金扩散</b><small>原B组 + 同入场延长持有 + 连续快照确认；全局RUG Guard，永不发链</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="holder-growth" data-strategy-code="N/NQ">
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="holder-growth" data-strategy-code="N/NQ">
               <b><span class="strategy-code">N/NQ</span>Observed Holder Growth</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="quality-leader" data-strategy-code="QL">
@@ -417,7 +417,7 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="flow-first" data-strategy-code="C5/C7.5/C12.5">
               <b><span class="strategy-code">C5/C7.5/C12.5</span>Flow-First（已停）</b><small>负期望，历史数据保留</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-pullback" data-strategy-code="A/B">
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-pullback" data-strategy-code="A/B">
               <b><span class="strategy-code">A/B</span>Smart 回踩</b><small>旧回踩实验，规则保持不变</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="primary-shadow" data-strategy-code="PE-3/3-5/4-7/5">
@@ -1049,6 +1049,23 @@
         .forEach(item => container.appendChild(item));
     }
     sortStrategySelector('#shadow-strategy-selector');
+    function renderStrategyStatusCatalog(data) {
+      const statuses = data?.shadows || {};
+      document.querySelectorAll('#shadow-strategy-selector [data-live-strategy]').forEach(button => {
+        const active = statuses[button.dataset.liveStrategy] === true;
+        button.dataset.strategyState = active ? 'active' : 'stopped';
+      });
+      sortStrategySelector('#shadow-strategy-selector');
+    }
+    async function loadStrategyStatusCatalog(context) {
+      try {
+        const data = await json('/api/strategy-status', { signal: context.signal });
+        if (context.generation !== refreshGeneration) return;
+        renderStrategyStatusCatalog(data);
+      } catch (error) {
+        if (error?.name !== 'AbortError') console.warn('[Dashboard] strategy status unavailable');
+      }
+    }
     let activeTabId = 'overview';
     let activeLiveStrategyId = 'execution';
     let activeExecutionStrategyId = document.querySelector(
@@ -2581,9 +2598,10 @@
           loadDashboard('/api/smart-wallets', renderWallets, requestContext),
           loadDashboard('/api/signal-repetition', renderSignalQuality, requestContext),
         ],
-        'live-trading': requestContext => (
-          liveStrategyRequests[activeLiveStrategyId] || (() => [])
-        )(requestContext),
+        'live-trading': requestContext => [
+          loadStrategyStatusCatalog(requestContext),
+          ...(liveStrategyRequests[activeLiveStrategyId] || (() => []))(requestContext),
+        ],
         health: requestContext => [
           loadDashboard('/api/health', renderHealth, requestContext),
         ],

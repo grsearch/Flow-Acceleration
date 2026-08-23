@@ -46,6 +46,10 @@ async function main() {
   assert.ok(staticStrategyButtons.every(([button]) => button.includes('data-strategy-state=')));
   assert.ok(dashboard.includes('id="shadow-strategy-selector"'));
   assert.ok(dashboard.includes("sortStrategySelector('#shadow-strategy-selector')"));
+  assert.ok(dashboard.includes('function renderStrategyStatusCatalog(data)'));
+  assert.ok(dashboard.includes("json('/api/strategy-status'"));
+  assert.ok(dashboard.includes('data-strategy-state="stopped" data-live-strategy="smart-like-early"'));
+  assert.ok(dashboard.includes('data-strategy-state="stopped" data-live-strategy="cya-slot-flow"'));
   assert.ok(dashboard.includes('Number(left.entryEnabled === false) - Number(right.entryEnabled === false)'));
   assert.ok(dashboard.includes('.strategy-nav-item[data-strategy-state="active"] > b'));
   assert.ok(dashboard.includes('.strategy-nav-item[data-strategy-state="stopped"] > b'));
@@ -342,6 +346,14 @@ async function main() {
     const liveTrading = await (await fetch(
       `http://127.0.0.1:${port}/api/live-trading`,
     )).json();
+    const strategyStatus = await (await fetch(
+      `http://127.0.0.1:${port}/api/strategy-status`,
+    )).json();
+    assert.strictEqual(strategyStatus.shadows['smart-like-early'], false);
+    assert.strictEqual(strategyStatus.shadows['cya-slot-flow'], false);
+    assert.strictEqual(strategyStatus.shadows['smart-resonance'], false);
+    assert.strictEqual(strategyStatus.shadows['holder-growth'], false);
+    assert.strictEqual(strategyStatus.shadows['smart-pullback'], false);
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
     assert.strictEqual(liveTrading.runtime.safetyLock, true);
     const continuity = liveTrading.runtime.strategies.find((strategy) => (
@@ -366,7 +378,7 @@ async function main() {
     assert.strictEqual(continuity.code, 'M-C5-E120');
     assert.strictEqual(graduationAccel.entryEnabled, true);
     assert.strictEqual(graduationAccel.code, 'O-C80-D5-B2-S0-NC');
-    assert.strictEqual(graduationAccel.positionSizeSol, 0.5);
+    assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
     assert.strictEqual(retiredV3.entryEnabled, false);
     assert.strictEqual(gd25F1.entryEnabled, false);
     assert.strictEqual(gd25F1.code, 'GD25-35-F1-XLEG');
@@ -375,7 +387,7 @@ async function main() {
     assert.strictEqual(continuity.market, 'PUMP_AMM');
     assert.strictEqual(graduationAccel.market, 'PUMP_BONDING_CURVE');
     assert.strictEqual(continuity.positionSizeSol, 0.1);
-    assert.strictEqual(graduationAccel.positionSizeSol, 0.5);
+    assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
     assert.strictEqual(qualityLeader.positionSizeSol, 0.1);
     assert.strictEqual(qualityLeader.entryEnabled, false);
     assert.strictEqual(qualityLeader.code, 'QL-STRICT-PR');
@@ -576,7 +588,7 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 17);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 18);
     assert.deepStrictEqual(
       migratedRebound.runtime.entryProfiles
         .filter((profile) => profile.id.startsWith('GD25_35_RUG_GUARD'))
@@ -600,7 +612,7 @@ async function main() {
         'G1_B75_H30', 'G1_B50_H60',
         'G1_STAIR_H60', 'G1_STAIR_H120',
         'XB50', 'XB25',
-        'V2_R2_H10', 'V2_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
+        'V2_R2_H10', 'V2_R2_H15', 'V2_TIME_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
         'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15',
       ],
     );
@@ -645,6 +657,7 @@ async function main() {
         ['GE30_R23_F1_NIGHT', 30_000, 1, 3],
         ['GE30_R23_F1_DAY', 30_000, 1, 3],
         ['GE30_D25_32_R24_F1', 30_000, 1, 4],
+        ['GE30_D25_32_R24_F1_04_24', 30_000, 1, 4],
         ['GE30_D25_32_R23_F1_FAST200', 30_000, 1, 3],
       ],
     );
@@ -783,7 +796,7 @@ async function main() {
     );
     assert.deepStrictEqual(
       migrationContinuity.runtime.exitProfiles.map((profile) => profile.id),
-      ['E60', 'E120', 'T10', 'T12_5', 'FLOW', 'RUNNER', 'AH60_180'],
+      ['E60', 'E120', 'E120_GUARD_V2', 'T10', 'T12_5', 'FLOW', 'RUNNER', 'AH60_180'],
     );
     assert.ok(Array.isArray(migrationContinuity.cohorts));
     assert.ok(Array.isArray(migrationContinuity.positions));

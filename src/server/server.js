@@ -110,6 +110,42 @@ class ResearchServer {
       response.json(this.store.recentSignals(numeric(request.query.limit, 200)));
     });
 
+    // Keep the sidebar state tied to the configuration that is actually loaded
+    // by the running process. This route intentionally reads no SQLite tables so
+    // the five-second dashboard refresh cannot add pressure to a large database.
+    this.app.get('/api/strategy-status', (_request, response) => {
+      const enabled = (key) => Boolean(this.config[key]?.enabled);
+      response.set('Cache-Control', 'no-store');
+      response.json({
+        shadows: {
+          'smart-open': enabled('smartOpenShadow'),
+          'flow-smart-confirm': enabled('flowSmartConfirmShadow'),
+          'smart-like-early': enabled('smartLikeEarlyShadow'),
+          'cya-slot-flow': enabled('cyaSlotFlowShadow'),
+          'same-slot-dump-backrun': enabled('sameSlotDumpBackrunShadow'),
+          'smart-resonance': enabled('smartResonanceShadow'),
+          'public-flow-lead': enabled('publicFlowLeadShadow'),
+          'launch-pullback': enabled('launchPullbackShadow'),
+          'migrated-rebound': enabled('migratedDropReboundShadow'),
+          'migration-continuity': enabled('migrationContinuityShadow'),
+          'range-scalper': enabled('rangeScalperShadow'),
+          'cya-early-pyramid': enabled('cyaEarlyPyramidShadow'),
+          'bonding-momentum': enabled('bondingCurveMomentumShadow'),
+          'graduation-hold': enabled('graduationHoldShadow'),
+          'graduation-acceleration': enabled('graduationAccelerationShadow'),
+          'launch-quality': enabled('launchQualityObserver'),
+          'migration-second-leg': enabled('migrationSecondLegObserver')
+            || enabled('migrationSecondLegShadow'),
+          'holder-growth': enabled('holderGrowthShadow'),
+          'quality-leader': enabled('qualityLeaderShadow'),
+          'big-winner': enabled('bigWinnerShadow'),
+          'flow-first': enabled('flowFirstShadow'),
+          'smart-pullback': enabled('smartPullbackShadow'),
+          'primary-shadow': enabled('signalShadow'),
+        },
+      });
+    });
+
     this.app.get('/api/backtest', (request, response) => {
       const defaultCosts = this.config.labels.costModel || {};
       const signalVariant = request.query.signalVariant || 'primary_3w';
