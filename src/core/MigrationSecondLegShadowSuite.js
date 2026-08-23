@@ -12,6 +12,7 @@ const STATUS = Object.freeze({
   EXIT_PENDING: 'EXIT_PENDING',
   CLOSED: 'CLOSED',
   NO_EXIT: 'NO_EXIT',
+  DATA_ERROR: 'DATA_ERROR',
 });
 
 function finite(value, fallback = null) {
@@ -178,6 +179,7 @@ class MigrationSecondLegShadowSuite {
       exitTimeoutMs: config.exitTimeoutMs,
       maxEntryPriceJumpPct: config.maxEntryPriceJumpPct,
       maxNegativeEntryJumpPct: config.maxNegativeEntryJumpPct,
+      maxObservedPriceRatio: config.maxObservedPriceRatio,
       hardStopPct: config.hardStopPct,
       maxHoldMs: config.maxHoldMs,
       thresholds: config.thresholds,
@@ -210,6 +212,7 @@ class MigrationSecondLegShadowSuite {
       opened: 0,
       closed: 0,
       noExit: 0,
+      dataError: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -381,6 +384,10 @@ class MigrationSecondLegShadowSuite {
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
       const position = this.pendingEntries.get(id) || this.positions.get(id);
       if (!position) continue;
+      if (position.entryPrice > 0 && this._priceScaleDiscontinuity(position, price)) {
+        this._markDataError(position, trade, price);
+        continue;
+      }
       if (position.status === STATUS.PENDING_ENTRY) {
         if (timestampMs < position.entryTargetAt || timestampMs > position.entryDeadlineAt) continue;
         this._tryEntry(position, trade, price);
@@ -552,6 +559,33 @@ class MigrationSecondLegShadowSuite {
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
+  }
+
+  _priceScaleDiscontinuity(position, price) {
+    const cohort = this._cohort(position);
+    const anchor = finite(position.lastPrice, finite(position.entryPrice));
+    if (!(anchor > 0) || !(price > 0)) return false;
+    return (price / anchor) > finite(cohort.maxObservedPriceRatio, 100);
+  }
+
+  _markDataError(position, trade, price) {
+    const anchor = finite(position.lastPrice, finite(position.entryPrice));
+    const ratio = anchor > 0 ? price / anchor : null;
+    this.store.updateMigrationSecondLegShadowPosition(position.id, {
+      status: STATUS.DATA_ERROR,
+      lastObservedAt: trade.timestampMs,
+      lastPrice: price,
+      exitReason: ratio == null
+        ? 'PRICE_SCALE_DISCONTINUITY'
+        : `PRICE_SCALE_DISCONTINUITY_${ratio.toFixed(2)}X`,
+      maxFavorableReturnPct: position.maxFavorableReturnPct,
+      maxAdverseReturnPct: position.maxAdverseReturnPct,
+    });
+    this.pendingEntries.delete(position.id);
+    this.positions.delete(position.id);
+    this._unindex(position);
+    this.metrics.dataError += 1;
+    this.metrics.lastActionAt = this.now();
   }
 
   _requestExit(position, triggerAt, reason) {

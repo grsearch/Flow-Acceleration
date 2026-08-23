@@ -490,10 +490,9 @@ const config = {
         ruleVersion: 'migration_continuity_mc_c5_t12_5_live_v1',
         signalSource: 'MIGRATION_CONTINUITY_MC_C5_T12_5',
         enabled: booleanEnv('FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_ENTRY_ENABLED',
-          true,
-        ),
+        // Keep historical rows and already-open exits available, but do not let
+        // a stale production .env reopen the currently negative live cohort.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL',
@@ -729,10 +728,10 @@ const config = {
         id: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
         code: 'O-C80-D5-B2-S0-NC',
         label: 'Graduation Acceleration O · Curve80 D5 B2 S0 NC',
-        ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v3',
+        ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v4',
         signalSource: 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC',
-        // Exact V2 keys prevent an old server .env value from the retired
-        // Curve80 canary from silently keeping this promoted rule disabled.
+        // Exact strategy keys prevent an old Curve80 canary setting from
+        // silently changing this promoted rule's enablement.
         enabled: booleanEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_ENABLED',
           true,
@@ -743,10 +742,10 @@ const config = {
         ),
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
-          // Use a new size key so an existing server's 0.1 SOL canary value
-          // cannot silently override the promoted 0.5 SOL order size.
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V2_POSITION_SOL',
-          0.5,
+          // V3 deliberately bypasses the previous server-side V2=0.5 value.
+          // Shadow remains 1 SOL; only the real order size returns to 0.1 SOL.
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V3_POSITION_SOL',
+          0.1,
         ),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_SIGNAL_AGE_MS',
@@ -1569,7 +1568,8 @@ const config = {
   // The signal price is never treated as a fill: every cohort waits for the
   // first comparable market trade after the configured execution delay.
   smartResonanceShadow: {
-    enabled: booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', true),
+    enabled: provenNegativeShadowsEnabled
+      && booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
     featureWindowMs: integerEnv('FLOW_SMART_RESONANCE_FEATURE_WINDOW_MS', 5_000, {
       min: 1_000,
@@ -1846,7 +1846,7 @@ const config = {
       {
         id: 'PBR_C',
         label: 'PBR-C frequency: wave 40 / pullback 15-25 / NF3 2',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
         minFirstWavePct: 40, minPullbackPct: 15, maxPullbackPct: 25,
         minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
@@ -1936,7 +1936,7 @@ const config = {
       {
         id: 'PP20_B45',
         label: 'PP20-B45 · 首次回踩8–20% / Buyers10≥45',
-        newEntriesEnabled: false,
+        newEntriesEnabled: true,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
@@ -1970,7 +1970,7 @@ const config = {
       {
         id: 'PP20_QUALITY',
         label: 'PP20-Quality · AGE≤30s / Buyers3≥15 / Buyers10≥45 / Sell3≤2.5',
-        newEntriesEnabled: false,
+        newEntriesEnabled: true,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 30_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
@@ -3646,6 +3646,27 @@ const config = {
         ),
       },
       {
+        id: 'GE30_D25_32_R24_F1_04_24',
+        label: 'V2-TIME · 04:00–24:00 · 跌25%–32% · 反弹2%–4% · 首次',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 32,
+        reboundMinPct: 2,
+        reboundMaxPct: 4,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+        beijingHourRanges: [[4, 24]],
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_V2_MAX_ENTRY_JUMP_PCT',
+          3,
+          { min: 0, max: 100 },
+        ),
+        exitProfileIds: ['V2_TIME_R2_H15'],
+        capacityAware: true,
+        positionSols: [0.1, 0.5, 1],
+      },
+      {
         id: 'GE30_D25_32_R23_F1_FAST200',
         label: 'GQ · post-grad <=30s · drop25-32% · rebound2-3% within200ms · first',
         windowMs: 1_000,
@@ -3977,6 +3998,20 @@ const config = {
         ),
         maxHoldMs: 15_000,
       })),
+      {
+        id: 'V2_TIME_R2_H15',
+        label: 'V2-TIME | 04:00–24:00 / 2秒弱势检查 / 硬止损15%',
+        entryProfileIds: ['GE30_D25_32_R24_F1_04_24'],
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        hardStopPct: 15,
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: 2_000,
+        lossCheckRecoveryPct: 1,
+        maxHoldMs: 15_000,
+      },
       ...[
         ['V2_B75_H20', 20_000],
         ['V2_B75_H60', 60_000],
@@ -4085,6 +4120,16 @@ const config = {
       {
         id: 'E120', label: '固定120秒', exitMode: 'FIXED_HOLD', fixedHoldMs: 120_000,
         hardStopPct: 20, maxHoldMs: 120_000,
+      },
+      {
+        // New id creates a clean forward sample after Universal RUG Guard was
+        // applied to every Shadow entry. Historical E120 rows remain unchanged.
+        id: 'E120_GUARD_V2',
+        label: '固定120秒 · Universal RUG Guard 前向样本',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 120_000,
+        hardStopPct: 20,
+        maxHoldMs: 120_000,
       },
       {
         id: 'T10', label: '5秒保护 / +10%激活 / 回撤10%', exitMode: 'TRAILING',
@@ -5046,6 +5091,13 @@ const config = {
       min: 0,
       max: 100,
     }),
+    // A PumpSwap token cannot causally reprice by hundreds of times between
+    // adjacent observations in this short study. Such rows are reserve/decimal
+    // scale discontinuities and must not become giant MFE or PnL winners.
+    maxObservedPriceRatio: numberEnv('FLOW_M2F_MAX_OBSERVED_PRICE_RATIO', 100, {
+      min: 2,
+      max: 1_000_000,
+    }),
     hardStopPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_HARD_STOP_PCT', 15, {
       min: 0,
       max: 100,
@@ -5385,6 +5437,7 @@ function validateConfig() {
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL
       && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL
+      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V3_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL

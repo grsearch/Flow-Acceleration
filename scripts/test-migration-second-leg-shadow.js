@@ -96,10 +96,22 @@ function main() {
   now += 200;
   suite.observeTrade(trade('rug-mint', now));
 
+  suite.onSnapshot(snapshot('scale-error-mint', now), trade('scale-error-mint', now));
+  now += 200;
+  suite.observeTrade(trade('scale-error-mint', now));
+  now += 100;
+  suite.observeTrade(trade('scale-error-mint', now, 2e-5));
+
   const dashboard = store.migrationSecondLegShadowDashboard();
-  assert.equal(dashboard.stats.signals, 2);
+  assert.equal(dashboard.stats.signals, 3);
   assert.equal(dashboard.stats.closed_positions, 1);
   assert.equal(dashboard.stats.rug_rejected, 1);
+  const scaleError = store.db.prepare(`SELECT * FROM migration_second_leg_shadow_positions
+    WHERE mint = 'scale-error-mint'`).get();
+  assert.equal(scaleError.status, 'DATA_ERROR');
+  assert.match(scaleError.exit_reason, /^PRICE_SCALE_DISCONTINUITY_/);
+  assert.equal(scaleError.net_return_pct, null);
+  assert.equal(suite.health().dataError, 1);
   assert.ok(Number.isFinite(Number(dashboard.stats.average_net_return_pct)));
   assert.equal(
     store.db.prepare(`SELECT COUNT(*) AS n FROM migration_second_leg_shadow_positions
