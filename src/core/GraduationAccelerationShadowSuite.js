@@ -109,6 +109,28 @@ function curveBuyAveragePrice(trade, positionSol, fallbackPrice) {
   }
 }
 
+function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
+  try {
+    const base = BigInt(trade.poolBaseReservesRaw || 0);
+    const quote = BigInt(trade.poolQuoteReservesRaw || 0)
+      + BigInt(trade.virtualQuoteReservesRaw || 0);
+    const input = BigInt(Math.max(1, Math.round(positionSol * 1e9)));
+    if (base <= 0n || quote <= 0n) {
+      return { price: fallbackPrice, impactPct: null };
+    }
+    const tokensOutRaw = (base * input) / (quote + input);
+    const tokenUnits = Number(tokensOutRaw) / 1e6;
+    const spotPrice = (Number(quote) / 1e9) / (Number(base) / 1e6);
+    if (!(tokenUnits > 0) || !(spotPrice > 0)) {
+      return { price: fallbackPrice, impactPct: null };
+    }
+    const price = positionSol / tokenUnits;
+    return { price, impactPct: ((price / spotPrice) - 1) * 100 };
+  } catch (_) {
+    return { price: fallbackPrice, impactPct: null };
+  }
+}
+
 class GraduationAccelerationShadowSuite {
   constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
@@ -136,6 +158,8 @@ class GraduationAccelerationShadowSuite {
       coreExits: 0,
       postMigrationGatePassed: 0,
       postMigrationGateFailed: 0,
+      migrationHandoffPassed: 0,
+      migrationHandoffRejected: 0,
       runnerExits: 0,
       closed: 0,
       noExit: 0,
@@ -247,6 +271,20 @@ class GraduationAccelerationShadowSuite {
     for (const id of [...(this.rowsByMint.get(tokenOrEvent.mint) || [])]) {
       const pending = this.pendingEntries.get(id);
       if (pending) {
+        const profile = this.entryProfiles.get(pending.entryProfileId);
+        if (profile?.migrationHandoff) {
+          const windowMs = finite(profile.postMigrationEntryGate?.windowMs, 5_000);
+          pending.graduatedAt = pending.graduatedAt > 0
+            ? Math.min(pending.graduatedAt, graduatedAt) : graduatedAt;
+          pending.entryTargetAt = pending.graduatedAt + windowMs;
+          pending.entryDeadlineAt = pending.entryTargetAt + this.config.entryTimeoutMs;
+          this.store.updateGraduationAccelerationShadowPosition(id, {
+            graduatedAt: pending.graduatedAt,
+            entryTargetAt: pending.entryTargetAt,
+            entryDeadlineAt: pending.entryDeadlineAt,
+          });
+          continue;
+        }
         this.store.updateGraduationAccelerationShadowPosition(id, {
           status: STATUS.NO_ENTRY,
           rejectionReason: 'MIGRATED_BEFORE_SIMULATED_ENTRY',
@@ -356,9 +394,12 @@ class GraduationAccelerationShadowSuite {
           this.metrics.postMigrationGatePassed += 1;
         }
         const maxHoldMs = profile?.runnerMaxHoldMs ?? this.config.maxPostGraduationHoldMs;
-        if (now >= position.graduatedAt + maxHoldMs) {
+        const runnerStartedAt = profile?.migrationHandoff
+          ? position.entryAt
+          : position.graduatedAt;
+        if (now >= runnerStartedAt + maxHoldMs) {
           this._requestExit(position,
-            position.graduatedAt + maxHoldMs,
+            runnerStartedAt + maxHoldMs,
             'MAX_POST_GRAD_RUNNER', 'PUMP_AMM');
         }
       }
@@ -570,6 +611,12 @@ class GraduationAccelerationShadowSuite {
     for (const positionSol of this.capacitySols) {
       const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: positionSol });
       const cohortId = `${profile.id}:${capacityId(positionSol)}`;
+      const handoffWindowMs = profile.migrationHandoff
+        ? finite(profile.postMigrationEntryGate?.windowMs, 5_000) : 0;
+      const initialDeadlineAt = profile.migrationHandoff
+        ? trade.timestampMs + this.config.maxPreGraduationHoldMs
+          + handoffWindowMs + this.config.entryTimeoutMs
+        : trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs;
       const saved = this.store.createGraduationAccelerationShadowPosition({
         cohortId,
         episodeId,
@@ -585,7 +632,7 @@ class GraduationAccelerationShadowSuite {
         signalCurvePct: finite(trade.curvePct),
         features,
         entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
-        entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs,
+        entryDeadlineAt: initialDeadlineAt,
         coreWeightPct: profile.coreExitPct ?? this.config.coreExitPct,
       });
       if (!saved?.inserted) {
@@ -603,6 +650,11 @@ class GraduationAccelerationShadowSuite {
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
       const pending = this.pendingEntries.get(id);
       if (pending) {
+        const profile = this.entryProfiles.get(pending.entryProfileId);
+        if (profile?.migrationHandoff) {
+          this._observeMigrationHandoffEntry(pending, profile, trade, price);
+          continue;
+        }
         if (trade.market !== 'PUMP_BONDING_CURVE'
           || trade.timestampMs < pending.entryTargetAt
           || trade.timestampMs > pending.entryDeadlineAt) continue;
@@ -618,6 +670,7 @@ class GraduationAccelerationShadowSuite {
           });
           this.pendingEntries.delete(id);
           this._unindex(pending);
+          this.metrics.noEntry += 1;
           continue;
         }
         const fillPrice = curveBuyAveragePrice(trade, pending.positionSol, price);
@@ -737,8 +790,11 @@ class GraduationAccelerationShadowSuite {
     }
     const maxHoldMs = profile?.runnerMaxHoldMs ?? this.config.maxPostGraduationHoldMs;
     if (profile?.runnerExitMode === 'FIXED_HOLD') {
-      if (trade.timestampMs >= position.graduatedAt + maxHoldMs) {
-        this._requestExit(position, position.graduatedAt + maxHoldMs,
+      const runnerStartedAt = profile?.migrationHandoff
+        ? position.entryAt
+        : position.graduatedAt;
+      if (trade.timestampMs >= runnerStartedAt + maxHoldMs) {
+        this._requestExit(position, runnerStartedAt + maxHoldMs,
           `RUNNER_FIXED_${maxHoldMs / 1_000}S`, 'PUMP_AMM');
       }
       return;
@@ -768,16 +824,18 @@ class GraduationAccelerationShadowSuite {
     const timestampMs = finite(trade.timestampMs);
     if (!(timestampMs > 0)) return;
     const positions = [...(this.rowsByMint.get(trade.mint) || [])]
-      .map((id) => this.positions.get(id))
+      .map((id) => this.positions.get(id) || this.pendingEntries.get(id))
       .filter(Boolean);
     const gated = positions.filter((position) => (
-      this.entryProfiles.get(position.entryProfileId)?.postMigrationGate
+      (this.entryProfiles.get(position.entryProfileId)?.postMigrationGate
+        || this.entryProfiles.get(position.entryProfileId)?.postMigrationEntryGate)
       && position.graduatedAt > 0
     ));
     if (!gated.length) return;
     const graduatedAt = Math.min(...gated.map((position) => position.graduatedAt));
     const maxWindowMs = Math.max(...gated.map((position) => (
-      this.entryProfiles.get(position.entryProfileId).postMigrationGate.windowMs
+      (this.entryProfiles.get(position.entryProfileId).postMigrationGate
+        || this.entryProfiles.get(position.entryProfileId).postMigrationEntryGate).windowMs
     )));
     if (timestampMs < graduatedAt || timestampMs > graduatedAt + maxWindowMs) return;
     const rows = this.postMigrationTrades.get(trade.mint) || [];
@@ -786,9 +844,143 @@ class GraduationAccelerationShadowSuite {
       side: trade.side,
       wallet: trade.wallet || null,
       solAmount: finite(trade.solAmount, 0),
+      price: shadowPrice(trade),
+      poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+      poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+      virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
     });
     rows.sort((left, right) => left.timestampMs - right.timestampMs);
     this.postMigrationTrades.set(trade.mint, rows);
+  }
+
+  _observeMigrationHandoffEntry(pending, profile, trade, price) {
+    if (trade.market !== 'PUMP_AMM' || !(pending.graduatedAt > 0)
+      || trade.timestampMs < pending.entryTargetAt
+      || trade.timestampMs > pending.entryDeadlineAt) return;
+    const gate = this._postMigrationEntryGateDecision(pending, profile, trade.timestampMs);
+    if (!gate) return;
+    if (!gate.passed) {
+      this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason: `POST_MIGRATION_ENTRY_GATE_FAIL_${gate.reason}`,
+      });
+      this.pendingEntries.delete(pending.id);
+      this._unindex(pending);
+      this.metrics.noEntry += 1;
+      this.metrics.migrationHandoffRejected += 1;
+      return;
+    }
+    const rugGuard = evaluateUniversalRugGuard(this.store, {
+      strategyId: `GRADUATION_ACCEL:${pending.cohortId}`,
+      mint: pending.mint,
+      timestampMs: trade.timestampMs,
+    });
+    if (rugGuard.blocked) {
+      this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason: 'PRE_ENTRY_RUG_RISK',
+      });
+      this.pendingEntries.delete(pending.id);
+      this._unindex(pending);
+      this.metrics.noEntry += 1;
+      this.metrics.migrationHandoffRejected += 1;
+      return;
+    }
+    const execution = ammBuyAveragePrice(trade, pending.positionSol, price);
+    const fillPrice = execution.price;
+    const referencePrice = gate.firstPrice || price;
+    const marketMovePct = ((price / referencePrice) - 1) * 100;
+    const maxMarketMovePct = finite(profile.postMigrationEntryGate?.maxMarketMovePct, 15);
+    const maxSelfImpactPct = finite(profile.postMigrationEntryGate?.maxSelfImpactPct, 10);
+    if (marketMovePct > maxMarketMovePct
+      || (execution.impactPct != null && execution.impactPct > maxSelfImpactPct)) {
+      this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+        status: STATUS.PRICE_JUMP,
+        rejectionReason: marketMovePct > maxMarketMovePct
+          ? `HANDOFF_MARKET_MOVE_${marketMovePct.toFixed(2)}PCT`
+          : `HANDOFF_SELF_IMPACT_${execution.impactPct.toFixed(2)}PCT`,
+        entryJumpPct: marketMovePct,
+        entryImpactPct: execution.impactPct,
+      });
+      this.pendingEntries.delete(pending.id);
+      this._unindex(pending);
+      this.metrics.priceJump += 1;
+      this.metrics.migrationHandoffRejected += 1;
+      return;
+    }
+    pending.status = STATUS.RUNNER;
+    pending.entryAt = trade.timestampMs;
+    pending.entryMarket = trade.market;
+    pending.entryPrice = fillPrice;
+    pending.entryJumpPct = marketMovePct;
+    pending.entryImpactPct = execution.impactPct;
+    pending.tokenUnits = pending.positionSol / fillPrice;
+    pending.highestPrice = price;
+    pending.lowestPrice = price;
+    pending.coreWeightPct = 0;
+    pending.runnerHighestPrice = price;
+    pending.runnerTierIndex = -1;
+    this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+      status: STATUS.RUNNER,
+      entryAt: pending.entryAt,
+      entryMarket: pending.entryMarket,
+      entryPrice: pending.entryPrice,
+      entryJumpPct: pending.entryJumpPct,
+      entryImpactPct: pending.entryImpactPct,
+      tokenUnits: pending.tokenUnits,
+      highestPrice: price,
+      lowestPrice: price,
+      runnerHighestPrice: price,
+      runnerTierIndex: -1,
+      maxFavorableReturnPct: 0,
+      maxAdverseReturnPct: 0,
+    });
+    this.pendingEntries.delete(pending.id);
+    this.positions.set(pending.id, pending);
+    this.metrics.opened += 1;
+    this.metrics.migrationHandoffPassed += 1;
+  }
+
+  _postMigrationEntryGateDecision(position, profile, now) {
+    const gate = profile?.postMigrationEntryGate;
+    if (!gate || !(position.graduatedAt > 0)) return null;
+    const evaluatedAt = position.graduatedAt + gate.windowMs;
+    if (now < evaluatedAt) return null;
+    const rows = (this.postMigrationTrades.get(position.mint) || []).filter((row) => (
+      row.timestampMs >= position.graduatedAt && row.timestampMs <= evaluatedAt
+    ));
+    const buys = rows.filter((row) => row.side === 'BUY');
+    const sells = rows.filter((row) => row.side === 'SELL');
+    const buyers = new Set(buys.map((row) => row.wallet).filter(Boolean)).size;
+    const buySol = buys.reduce((sum, row) => sum + row.solAmount, 0);
+    const sellSol = sells.reduce((sum, row) => sum + row.solAmount, 0);
+    const netFlowSol = buySol - sellSol;
+    const sellBuyRatio = buySol > 0 ? sellSol / buySol : Infinity;
+    const prices = rows.map((row) => row.price).filter((value) => value > 0);
+    const firstPrice = prices[0] || null;
+    const lastPrice = prices.at(-1) || null;
+    const peakPrice = prices.length ? Math.max(...prices) : null;
+    const drawdownPct = peakPrice > 0 && lastPrice > 0
+      ? ((peakPrice - lastPrice) / peakPrice) * 100 : Infinity;
+    const checks = [
+      ['NO_PRICE', firstPrice > 0 && lastPrice > 0],
+      ['BUYERS', buyers >= gate.minBuyers],
+      ['NET_FLOW', netFlowSol >= gate.minNetFlowSol],
+      ['SELL_BUY', sellBuyRatio <= gate.maxSellBuyRatio],
+      ['DRAWDOWN', drawdownPct <= gate.maxDrawdownPct],
+    ];
+    const failed = checks.find(([, passed]) => !passed);
+    return {
+      evaluatedAt,
+      buyers,
+      netFlowSol,
+      sellBuyRatio,
+      drawdownPct,
+      firstPrice,
+      lastPrice,
+      passed: !failed,
+      reason: failed?.[0] || 'PASSED',
+    };
   }
 
   _postMigrationGateDecision(position, now) {

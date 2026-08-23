@@ -108,6 +108,9 @@ class LiveTradingManager {
       riskRejected: 0,
       entries: 0,
       entryFailures: 0,
+      entryMigrationsBeforeSubmit: 0,
+      entryPreSubmitRejected: 0,
+      entryTransactionFailures: 0,
       entryUnknown: 0,
       entryRecoveries: 0,
       exits: 0,
@@ -964,6 +967,10 @@ class LiveTradingManager {
         ? 'ENTRY_TRANSACTION_FAILED'
         : error.code === 'CURVE_COMPLETE'
           ? 'ENTRY_MIGRATED_BEFORE_SUBMIT'
+        : error.code === 'PRICE_JUMP'
+          ? 'ENTRY_PRICE_JUMP'
+        : error.code === 'WALLET_RESERVE'
+          ? 'ENTRY_WALLET_RESERVE_REJECTED'
         : error.code === 'MARKET_PRICE_MOVED'
           ? 'ENTRY_MARKET_PRICE_MOVED'
           : error.code === 'SELF_IMPACT_REJECTED'
@@ -978,6 +985,9 @@ class LiveTradingManager {
       this.store.updateLiveStrategyDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
       this.positions.delete(position.mint);
       this.metrics.entryFailures += 1;
+      if (error.code === 'CURVE_COMPLETE') this.metrics.entryMigrationsBeforeSubmit += 1;
+      else if (transactionFailed) this.metrics.entryTransactionFailures += 1;
+      else this.metrics.entryPreSubmitRejected += 1;
       this.metrics.lastActionAt = failedAt;
       this._rememberError(error);
     }
@@ -1034,6 +1044,7 @@ class LiveTradingManager {
       this._updatePositionDecision(position, 'ENTRY_FAILED', failure);
       this.positions.delete(position.mint);
       this.metrics.entryFailures += 1;
+      this.metrics.entryTransactionFailures += 1;
       this.metrics.lastActionAt = reconciledAt;
       return 'FAILED';
     }
@@ -1111,6 +1122,7 @@ class LiveTradingManager {
       this._updatePositionDecision(position, 'ENTRY_FAILED', 'ENTRY_EXPIRED_UNOBSERVED');
       this.positions.delete(position.mint);
       this.metrics.entryFailures += 1;
+      this.metrics.entryTransactionFailures += 1;
       this.metrics.lastActionAt = reconciledAt;
       return 'FAILED';
     }

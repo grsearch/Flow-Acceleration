@@ -360,6 +360,44 @@ async function main() {
   assert.ok(o90Dashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'),
     'passing the five-second gate releases the 50% core exit');
 
+  const taxonomyStrategyId = 'entry_failure_taxonomy_test';
+  const migrated = store.createLivePosition({
+    strategyId: taxonomyStrategyId, mint: 'taxonomy-migrated', mode: 'LIVE',
+    positionSol: 0.1, entryPrice: 1,
+  });
+  store.updateLivePosition(migrated.id, {
+    status: 'ENTRY_FAILED', entryError: 'Bonding curve already complete',
+    exitReason: 'ENTRY_REJECTED',
+  });
+  const guard = store.createLivePosition({
+    strategyId: taxonomyStrategyId, mint: 'taxonomy-guard', mode: 'LIVE',
+    positionSol: 0.1, entryPrice: 1,
+  });
+  store.updateLivePosition(guard.id, {
+    status: 'ENTRY_FAILED', entryError: 'Entry price moved 18%, above 15%',
+    exitReason: 'ENTRY_PRICE_JUMP',
+  });
+  const executionFailure = store.createLivePosition({
+    strategyId: taxonomyStrategyId, mint: 'taxonomy-execution', mode: 'LIVE',
+    positionSol: 0.1, entryPrice: 1,
+  });
+  store.updateLivePosition(executionFailure.id, {
+    status: 'ENTRY_FAILED', entrySignature: 'taxonomy-signature',
+    entryError: 'Transaction failed on chain', exitReason: 'ENTRY_TRANSACTION_FAILED',
+  });
+  const taxonomyDashboard = store.liveTradingDashboard({ strategyId: taxonomyStrategyId });
+  const taxonomy = taxonomyDashboard.stats;
+  assert.strictEqual(taxonomy.entry_failed_positions, 3);
+  assert.strictEqual(taxonomy.pre_submit_migrated_positions, 1,
+    'legacy Curve complete errors are reclassified as pre-submit graduation');
+  assert.strictEqual(taxonomy.pre_submit_guard_rejected_positions, 1);
+  assert.strictEqual(taxonomy.execution_entry_failed_positions, 1);
+  assert.strictEqual(
+    taxonomyDashboard.positions.find((row) => row.mint === 'taxonomy-migrated')
+      .entry_failure_category,
+    'ENTRY_MIGRATED_BEFORE_SUBMIT',
+  );
+
   await manager.stop();
   store.close();
   console.log('test-live-shadow-promotion: ok');

@@ -3844,6 +3844,8 @@ class ResearchStore {
         UPDATE graduation_acceleration_shadow_positions SET
           status = COALESCE(@status, status),
           rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          entry_target_at = COALESCE(@entryTargetAt, entry_target_at),
+          entry_deadline_at = COALESCE(@entryDeadlineAt, entry_deadline_at),
           entry_at = COALESCE(@entryAt, entry_at),
           entry_market = COALESCE(@entryMarket, entry_market),
           entry_price = COALESCE(@entryPrice, entry_price),
@@ -4784,6 +4786,8 @@ class ResearchStore {
       id,
       status: value('status'),
       rejectionReason: value('rejectionReason'),
+      entryTargetAt: value('entryTargetAt'),
+      entryDeadlineAt: value('entryDeadlineAt'),
       entryAt: value('entryAt'),
       entryMarket: value('entryMarket'),
       entryPrice: finiteOrNull(value('entryPrice')),
@@ -6104,6 +6108,8 @@ class ResearchStore {
       id,
       status: value('status'),
       rejectionReason: value('rejectionReason'),
+      entryTargetAt: value('entryTargetAt'),
+      entryDeadlineAt: value('entryDeadlineAt'),
       entryAt: value('entryAt'),
       entryMarket: value('entryMarket'),
       entryPrice: finiteOrNull(value('entryPrice')),
@@ -8079,7 +8085,18 @@ class ResearchStore {
         updated_at DESC,
         id DESC
       LIMIT ?
-    `).all(...(strategy ? [strategy, safeLimit(positionLimit)] : [safeLimit(positionLimit)]));
+    `).all(...(strategy ? [strategy, safeLimit(positionLimit)] : [safeLimit(positionLimit)]))
+      .map((row) => {
+        const legacyCurveComplete = row.status === 'ENTRY_FAILED'
+          && row.entry_signature == null
+          && /(?:bonding curve already complete|curve complete)/i.test(row.entry_error || '');
+        return {
+          ...row,
+          entry_failure_category: legacyCurveComplete
+            ? 'ENTRY_MIGRATED_BEFORE_SUBMIT'
+            : null,
+        };
+      });
     const orders = this.db.prepare(`
       SELECT * FROM live_orders ${filter}
       ORDER BY created_at DESC, id DESC
@@ -8128,6 +8145,53 @@ class ResearchStore {
         COALESCE(SUM(status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED')), 0) AS active_positions,
         COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
         COALESCE(SUM(status = 'ENTRY_FAILED'), 0) AS entry_failed_positions,
+        COALESCE(SUM(
+          status = 'ENTRY_FAILED' AND (
+            COALESCE(exit_reason, '') = 'ENTRY_MIGRATED_BEFORE_SUBMIT'
+            OR (
+              entry_signature IS NULL
+              AND (
+                COALESCE(entry_error, '') LIKE '%Bonding curve already complete%'
+                OR COALESCE(entry_error, '') LIKE '%Curve complete%'
+              )
+            )
+          )
+        ), 0) AS pre_submit_migrated_positions,
+        COALESCE(SUM(
+          status = 'ENTRY_FAILED'
+          AND NOT (
+            COALESCE(exit_reason, '') = 'ENTRY_MIGRATED_BEFORE_SUBMIT'
+            OR (
+              entry_signature IS NULL
+              AND (
+                COALESCE(entry_error, '') LIKE '%Bonding curve already complete%'
+                OR COALESCE(entry_error, '') LIKE '%Curve complete%'
+              )
+            )
+          )
+          AND entry_signature IS NULL AND exit_reason IN (
+            'ENTRY_REJECTED', 'ENTRY_PRICE_JUMP', 'ENTRY_WALLET_RESERVE_REJECTED',
+            'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED'
+          )
+        ), 0) AS pre_submit_guard_rejected_positions,
+        COALESCE(SUM(
+          status = 'ENTRY_FAILED' AND NOT (
+            COALESCE(exit_reason, '') = 'ENTRY_MIGRATED_BEFORE_SUBMIT'
+            OR (
+              entry_signature IS NULL
+              AND (
+                COALESCE(entry_error, '') LIKE '%Bonding curve already complete%'
+                OR COALESCE(entry_error, '') LIKE '%Curve complete%'
+              )
+            )
+            OR (
+              entry_signature IS NULL AND exit_reason IN (
+                'ENTRY_REJECTED', 'ENTRY_PRICE_JUMP', 'ENTRY_WALLET_RESERVE_REJECTED',
+                'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED'
+              )
+            )
+          )
+        ), 0) AS execution_entry_failed_positions,
         COALESCE(SUM(status = 'EXIT_FAILED'), 0) AS exit_failed_positions,
         COALESCE(SUM(CASE WHEN opened_at IS NOT NULL THEN position_sol ELSE 0 END), 0) AS deployed_sol,
         AVG(CASE WHEN opened_at IS NOT NULL AND closed_at IS NOT NULL THEN closed_at - opened_at END) AS average_hold_ms,

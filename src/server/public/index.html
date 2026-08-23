@@ -1266,7 +1266,9 @@
         ['命中', number(runtime.matched)],
         ['开仓', number(runtime.entries)],
         ['平仓', number(runtime.exits)],
-        ['失败', number((runtime.entryFailures || 0) + (runtime.exitFailures || 0))],
+        ['提交前已毕业', number(runtime.entryMigrationsBeforeSubmit)],
+        ['提交前保护', number(runtime.entryPreSubmitRejected)],
+        ['真实执行失败', number((runtime.entryTransactionFailures || 0) + (runtime.exitFailures || 0))],
         ['紧急开关', runtime.killSwitchActive ? '<span class="negative">已触发</span>' : '<span class="positive">正常</span>'],
       ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
 
@@ -1318,6 +1320,9 @@
         ['规则命中', stats.matched, `规则拒绝 ${number(stats.rule_rejected)}`],
         ['仓位记录', stats.positions, `活动 ${number(stats.active_positions)}`],
         ['已关闭仓位', stats.closed_positions, `链上已结算 ${number(stats.settled_closed_positions)}`],
+        ['提交前已毕业', stats.pre_submit_migrated_positions, '未签名、未花费 SOL'],
+        ['提交前保护拒绝', stats.pre_submit_guard_rejected_positions, '追价 / 余额 / 自身冲击保护'],
+        ['真实入场失败', stats.execution_entry_failed_positions, '已进入交易执行阶段'],
         ['链上实际胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
         ['平均实际收益', pct(stats.average_realized_return_pct), `累计 ${number(stats.total_realized_pnl_sol,6)} SOL`],
         ['累计开仓规模', `${number(stats.deployed_sol,4)} SOL`, `平均持仓 ${age(stats.average_hold_ms)}`],
@@ -1417,7 +1422,9 @@
           ? (row.mode === 'DRY_RUN' ? pct(row.price_return_pct) : '待链上结算')
           : `${row.realized_pnl_sol >= 0 ? '+' : ''}${number(row.realized_pnl_sol,6)} SOL<br>${pct(row.realized_return_pct)}`;
         const priceNote = row.price_return_pct == null ? '' : `<br><span class="table-note">价格 ${pct(row.price_return_pct)}</span>`;
-        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(row.exit_reason || row.entry_error || row.exit_error || '—')}</td><td>${signatures}</td></tr>`;
+        const positionReason = row.entry_failure_category || row.exit_reason
+          || row.entry_error || row.exit_error || '—';
+        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;
       }).join('') : '<tr><td colspan="10" class="empty">暂无仓位记录；策略判定仍会继续采集</td></tr>';
 
       document.querySelector('#live-order-summary').textContent = `共 ${number(stats.orders)} 笔 · 确认 ${number(stats.confirmed_orders)} · 失败 ${number(stats.failed_orders)} · 状态未知 ${number(stats.unknown_orders)}`;
