@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 function finite(value, fallback = null) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -26,10 +29,23 @@ function hourInWindow(hour, startHour, endHour) {
 }
 
 class PreEntryRugRiskTracker {
-  constructor({ config, now = () => Date.now() }) {
+  constructor({ config, now = () => Date.now(), fileSystem = fs }) {
     this.config = config;
     this.now = now;
+    this.fileSystem = fileSystem;
     this.states = new Map();
+    // Cross-Mint toxic-template decisions are deliberately process-memory only.
+    // A tiny snapshot is restored at startup and saved asynchronously, while
+    // the hot entry path never waits for SQLite, disk, RPC or another service.
+    // The first observed collapse remains unavoidable; later copies can be
+    // rejected even when they contain fewer than minTrades.
+    this.toxicWallets = new Map();
+    this.toxicTemplates = new Map();
+    this.toxicTemplateIndex = new Map();
+    this.toxicVersion = 0;
+    this.toxicMemoryDirty = false;
+    this.toxicPersistTimer = null;
+    this.toxicPersistPromise = null;
     this.guardStrategies = new Map();
     this.recentGuardDecisions = [];
     this.lastSweepAt = 0;
@@ -43,10 +59,21 @@ class PreEntryRugRiskTracker {
       flaggedSparseBreadth: 0,
       flaggedChaseRepeatedSize: 0,
       flaggedBeijingRiskWindow: 0,
+      toxicCollapsesLabeled: 0,
+      toxicWalletsLearned: 0,
+      toxicTemplatesLearned: 0,
+      toxicMemoryLoaded: 0,
+      toxicMemorySaved: 0,
+      toxicMemoryLoadErrors: 0,
+      toxicMemorySaveErrors: 0,
+      toxicFuzzyMatches: 0,
+      flaggedCrossMintWallets: 0,
+      flaggedCrossMintTemplates: 0,
       guardEvaluations: 0,
       guardPassed: 0,
       guardRejected: 0,
       guardSampleInsufficient: 0,
+      guardCrossMintRejected: 0,
       liveCacheHits: 0,
       liveCacheMisses: 0,
       lastActionAt: null,
@@ -54,10 +81,24 @@ class PreEntryRugRiskTracker {
     };
   }
 
-  start() {}
+  start() {
+    if (this.config.crossMintEnabled === false) return;
+    this._loadToxicMemory();
+    const intervalMs = this._cfg('toxicPersistIntervalMs', 5_000);
+    this.toxicPersistTimer = setInterval(() => {
+      this._persistToxicMemory().catch(() => {});
+    }, intervalMs);
+    this.toxicPersistTimer.unref?.();
+  }
 
   stop() {
+    if (this.toxicPersistTimer) clearInterval(this.toxicPersistTimer);
+    this.toxicPersistTimer = null;
+    this._persistToxicMemorySync();
     this.states.clear();
+    this.toxicWallets.clear();
+    this.toxicTemplates.clear();
+    this.toxicTemplateIndex.clear();
     this.guardStrategies.clear();
     this.recentGuardDecisions = [];
   }
@@ -71,7 +112,9 @@ class PreEntryRugRiskTracker {
     if (!state) {
       state = {
         events: [], offset: 0, lastAt: timestampMs, version: 0,
-        cachedVersion: -1, cachedRisk: null,
+        cachedVersion: -1, cachedToxicVersion: -1, cachedRisk: null,
+        peakPrice: price, peakAt: timestampMs, template: null,
+        templatePeakPrice: null, templateToxicLabeled: false,
       };
       this.states.set(trade.mint, state);
     }
@@ -84,10 +127,18 @@ class PreEntryRugRiskTracker {
     });
     state.version += 1;
     state.lastAt = Math.max(state.lastAt, timestampMs);
+    if (!(state.peakPrice > 0) || price > state.peakPrice) {
+      state.peakPrice = price;
+      state.peakAt = timestampMs;
+    }
     this._prune(state, timestampMs);
     if (state.events.length - state.offset > this.config.maxEventsPerMint) {
       state.offset = state.events.length - this.config.maxEventsPerMint;
       this._compact(state);
+    }
+    if (this.config.crossMintEnabled !== false) {
+      this._refreshCrossMintTemplate(state, timestampMs, price);
+      this._labelRapidCollapse(trade.mint, state, timestampMs, price);
     }
     this.metrics.observedTrades += 1;
     this.metrics.lastActionAt = this.now();
@@ -97,6 +148,7 @@ class PreEntryRugRiskTracker {
     const state = this.states.get(mint);
     if (!state) return this._empty(timestampMs);
     if (state.cachedRisk && state.cachedVersion === state.version
+      && state.cachedToxicVersion === this.toxicVersion
       && Math.abs(timestampMs - state.cachedRisk.observedAt) <= this.config.cacheMaxAgeMs) {
       this.metrics.evaluations += 1;
       if (state.cachedRisk.sampleReady) this.metrics.sampleReady += 1;
@@ -158,6 +210,16 @@ class PreEntryRugRiskTracker {
     const buysPerBuyer = uniqueBuyers > 0 ? buys / uniqueBuyers : null;
     const maxWalletBuyTxSharePct = buys > 0 ? maxWalletBuyTrades / buys * 100 : null;
     const repeatedBuySizeSharePct = buys > 0 ? repeatedBuySizeTrades / buys * 100 : null;
+    const template = state.template
+      && timestampMs - state.template.observedAt <= this._cfg('toxicCollapseWindowMs', 30_000)
+      ? state.template : null;
+    const toxicWalletOverlap = template
+      ? this._toxicWalletOverlap(template.wallets, timestampMs) : 0;
+    const toxicTemplateMatch = template
+      ? this._activeToxicTemplate(template, timestampMs) : null;
+    const crossMintToxicWallets = toxicWalletOverlap
+      >= this._cfg('toxicWalletOverlapMin', 2);
+    const crossMintToxicTemplate = Boolean(toxicTemplateMatch);
     const checks = {
       buyShare: buySharePct >= this.config.minBuySharePct,
       consecutiveBuys: maxConsecutiveBuys >= this.config.minConsecutiveBuys,
@@ -187,11 +249,16 @@ class PreEntryRugRiskTracker {
       chaseRepeatedSize: returnPct >= this.config.chaseRepeatedMinReturnPct
         && repeatedBuySizeSharePct != null
         && repeatedBuySizeSharePct >= this.config.chaseRepeatedMinSizeSharePct,
+      crossMintToxicWallets,
+      crossMintToxicTemplate,
     };
     const flaggedReasons = Object.entries(signatures)
       .filter(([, matched]) => matched)
       .map(([name]) => name);
-    const flagged = sampleReady && flaggedReasons.length > 0;
+    const nativeFlagged = sampleReady && Object.entries(signatures)
+      .some(([name, matched]) => !name.startsWith('crossMint') && matched);
+    const crossMintToxic = crossMintToxicWallets || crossMintToxicTemplate;
+    const flagged = nativeFlagged || crossMintToxic;
     this.metrics.evaluations += 1;
     if (sampleReady) this.metrics.sampleReady += 1;
     if (flagged) {
@@ -218,6 +285,13 @@ class PreEntryRugRiskTracker {
       maxWalletBuyTxSharePct,
       repeatedBuySizeSharePct,
       maxBuyImpactPct,
+      crossMintToxic,
+      toxicWalletOverlap,
+      toxicTemplateMatch: toxicTemplateMatch?.fingerprint || null,
+      templateFingerprint: template?.fingerprint || null,
+      templateLargeBuyCount: template?.largeBuyCount || 0,
+      templateBuySol: template?.totalBuySol || null,
+      templateBurstSpanMs: template?.burstSpanMs || null,
       checks,
       signatures,
       flaggedReasons,
@@ -225,6 +299,7 @@ class PreEntryRugRiskTracker {
     if (flagged) this._recordSignatureMetrics(risk);
     state.cachedRisk = risk;
     state.cachedVersion = state.version;
+    state.cachedToxicVersion = this.toxicVersion;
     return risk;
   }
 
@@ -236,6 +311,7 @@ class PreEntryRugRiskTracker {
       const state = this.states.get(mint);
       const cached = state?.cachedRisk;
       if (cached && state.cachedVersion === state.version
+        && state.cachedToxicVersion === this.toxicVersion
         && Math.abs(timestampMs - cached.observedAt) <= this.config.cacheMaxAgeMs) {
         risk = cached;
         this.metrics.liveCacheHits += 1;
@@ -246,7 +322,7 @@ class PreEntryRugRiskTracker {
         this.metrics.liveCacheMisses += 1;
       }
     } else risk = this.snapshot(mint, timestampMs);
-    const blocked = Boolean(this.config.enabled && risk.sampleReady && risk.flagged);
+    const blocked = Boolean(this.config.enabled && risk.flagged);
     const stats = this.guardStrategies.get(normalizedStrategyId) || {
       strategyId: normalizedStrategyId,
       source: normalizedSource,
@@ -269,9 +345,10 @@ class PreEntryRugRiskTracker {
     this.guardStrategies.set(normalizedStrategyId, stats);
 
     this.metrics.guardEvaluations += 1;
-    if (risk.sampleReady) this.metrics.guardPassed += blocked ? 0 : 1;
-    else this.metrics.guardSampleInsufficient += 1;
+    if (!blocked) this.metrics.guardPassed += 1;
+    if (!risk.sampleReady) this.metrics.guardSampleInsufficient += 1;
     if (blocked) this.metrics.guardRejected += 1;
+    if (blocked && risk.crossMintToxic) this.metrics.guardCrossMintRejected += 1;
 
     const decision = {
       strategyId: normalizedStrategyId,
@@ -299,6 +376,7 @@ class PreEntryRugRiskTracker {
       if (state.lastAt < cutoff) this.states.delete(mint);
       else this._prune(state, now);
     }
+    this._expireToxicMemory(now);
   }
 
   health() {
@@ -306,10 +384,14 @@ class PreEntryRugRiskTracker {
       enabled: this.config.enabled,
       mode: 'UNIVERSAL_PRE_ENTRY_RUG_GUARD',
       scope: 'ALL_LIVE_AND_SHADOW_ENTRIES',
-      enforcement: 'FLAGGED_BLOCK_SAMPLE_INSUFFICIENT_ALLOW',
+      enforcement: 'NATIVE_FLAGGED_BLOCK_OR_CROSS_MINT_TOXIC_BLOCK',
       livePath: 'MEMORY_ONLY_BOUNDED_CACHE_REFRESH',
       sendsTransactions: false,
       trackedMints: this.states.size,
+      toxicWallets: this.toxicWallets.size,
+      toxicTemplates: this.toxicTemplates.size,
+      toxicMemoryPath: this._cfg('toxicMemoryPath', null),
+      toxicMemoryPersistence: 'ASYNC_SNAPSHOT_HOT_PATH_MEMORY_ONLY',
       thresholds: {
         windowMs: this.config.windowMs,
         minTrades: this.config.minTrades,
@@ -329,6 +411,17 @@ class PreEntryRugRiskTracker {
         beijingRiskStartHour: this.config.beijingRiskStartHour,
         beijingRiskEndHour: this.config.beijingRiskEndHour,
         beijingRiskMinFlags: this.config.beijingRiskMinFlags,
+        crossMintEnabled: this.config.crossMintEnabled !== false,
+        templateWindowMs: this._cfg('templateWindowMs', 5_000),
+        templateMinLargeBuys: this._cfg('templateMinLargeBuys', 4),
+        templateMinTotalBuySol: this._cfg('templateMinTotalBuySol', 40),
+        templateMaxBurstSpanMs: this._cfg('templateMaxBurstSpanMs', 500),
+        toxicCollapsePct: this._cfg('toxicCollapsePct', 60),
+        toxicCollapseWindowMs: this._cfg('toxicCollapseWindowMs', 30_000),
+        toxicRetentionMs: this._cfg('toxicRetentionMs', 86_400_000),
+        toxicAmountTolerancePct: this._cfg('toxicAmountTolerancePct', 2),
+        toxicBurstToleranceMs: this._cfg('toxicBurstToleranceMs', 100),
+        toxicWalletOverlapMin: this._cfg('toxicWalletOverlapMin', 2),
       },
       strategyStats: [...this.guardStrategies.values()]
         .sort((left, right) => right.evaluated - left.evaluated),
@@ -359,6 +452,13 @@ class PreEntryRugRiskTracker {
       maxWalletBuyTxSharePct: null,
       repeatedBuySizeSharePct: null,
       maxBuyImpactPct: null,
+      crossMintToxic: false,
+      toxicWalletOverlap: 0,
+      toxicTemplateMatch: null,
+      templateFingerprint: null,
+      templateLargeBuyCount: 0,
+      templateBuySol: null,
+      templateBurstSpanMs: null,
       checks: {},
       signatures: {},
       flaggedReasons: [],
@@ -377,6 +477,8 @@ class PreEntryRugRiskTracker {
     if (risk.signatures?.verticalFragileReuse) this.metrics.flaggedVerticalFragile += 1;
     if (risk.signatures?.sparseBuyerBreadth) this.metrics.flaggedSparseBreadth += 1;
     if (risk.signatures?.chaseRepeatedSize) this.metrics.flaggedChaseRepeatedSize += 1;
+    if (risk.signatures?.crossMintToxicWallets) this.metrics.flaggedCrossMintWallets += 1;
+    if (risk.signatures?.crossMintToxicTemplate) this.metrics.flaggedCrossMintTemplates += 1;
     if (risk.beijingRiskWindow && risk.score >= this.config.beijingRiskMinFlags
       && risk.score < this.config.minFlags) this.metrics.flaggedBeijingRiskWindow += 1;
   }
@@ -385,6 +487,286 @@ class PreEntryRugRiskTracker {
     if (state.offset <= 0) return;
     state.events = state.events.slice(state.offset);
     state.offset = 0;
+  }
+
+  _cfg(name, fallback) {
+    const value = this.config?.[name];
+    return value == null ? fallback : value;
+  }
+
+  _refreshCrossMintTemplate(state, timestampMs, price) {
+    const cutoff = timestampMs - this._cfg('templateWindowMs', 5_000);
+    const minSol = this._cfg('templateLargeBuyMinSol', 1);
+    const largeBuys = state.events.slice(state.offset).filter((row) => (
+      row.side === 'BUY' && row.timestampMs >= cutoff && row.timestampMs <= timestampMs
+      && row.solAmount >= minSol
+    ));
+    const minBuys = this._cfg('templateMinLargeBuys', 4);
+    const maxBuys = this._cfg('templateMaxLargeBuys', 6);
+    if (largeBuys.length < minBuys || largeBuys.length > maxBuys) return;
+    const firstAt = largeBuys[0].timestampMs;
+    const observedAt = largeBuys[largeBuys.length - 1].timestampMs;
+    const burstSpanMs = observedAt - firstAt;
+    const totalBuySol = largeBuys.reduce((sum, row) => sum + row.solAmount, 0);
+    if (burstSpanMs > this._cfg('templateMaxBurstSpanMs', 500)
+      || totalBuySol < this._cfg('templateMinTotalBuySol', 40)) return;
+    const amounts = largeBuys.map((row) => row.solAmount).sort((left, right) => right - left);
+    const fingerprint = this._templateFingerprint(amounts, burstSpanMs);
+    const prior = state.template;
+    state.template = {
+      fingerprint,
+      firstAt,
+      observedAt,
+      burstSpanMs,
+      totalBuySol,
+      largeBuyCount: largeBuys.length,
+      wallets: [...new Set(largeBuys.map((row) => row.wallet).filter(Boolean))],
+      amounts,
+    };
+    if (!prior || prior.fingerprint !== fingerprint || prior.observedAt !== observedAt) {
+      state.templatePeakPrice = price;
+      state.templateToxicLabeled = false;
+    } else if (price > state.templatePeakPrice) state.templatePeakPrice = price;
+  }
+
+  _templateFingerprint(amounts, burstSpanMs) {
+    const bucketSol = Math.max(0.01, this._cfg('templateSizeBucketSol', 0.25));
+    const amountKey = amounts.map((amount) => (
+      Math.round(amount / bucketSol) * bucketSol
+    ).toFixed(2)).join(',');
+    let spanKey = '1000';
+    if (burstSpanMs <= 50) spanKey = '50';
+    else if (burstSpanMs <= 100) spanKey = '100';
+    else if (burstSpanMs <= 250) spanKey = '250';
+    else if (burstSpanMs <= 500) spanKey = '500';
+    return `${amounts.length}|${spanKey}|${amountKey}`;
+  }
+
+  _labelRapidCollapse(mint, state, timestampMs, price) {
+    const template = state.template;
+    if (!template || state.templateToxicLabeled
+      || timestampMs - template.observedAt > this._cfg('toxicCollapseWindowMs', 30_000)) return;
+    if (!(state.templatePeakPrice > 0) || price > state.templatePeakPrice) {
+      state.templatePeakPrice = price;
+      return;
+    }
+    const collapsePct = (1 - price / state.templatePeakPrice) * 100;
+    if (collapsePct < this._cfg('toxicCollapsePct', 60)) return;
+    state.templateToxicLabeled = true;
+    const expiresAt = timestampMs + this._cfg('toxicRetentionMs', 86_400_000);
+    const record = {
+      mint,
+      fingerprint: template.fingerprint,
+      labeledAt: timestampMs,
+      expiresAt,
+      collapsePct,
+      totalBuySol: template.totalBuySol,
+      largeBuyCount: template.largeBuyCount,
+      burstSpanMs: template.burstSpanMs,
+      amounts: [...template.amounts],
+    };
+    this.toxicTemplates.set(template.fingerprint, record);
+    this._indexToxicTemplate(record);
+    this._boundToxicTemplates(this._cfg('maxToxicTemplates', 1_024));
+    let learnedWallets = 0;
+    for (const wallet of template.wallets) {
+      if (!wallet) continue;
+      if (!this.toxicWallets.has(wallet)) learnedWallets += 1;
+      this.toxicWallets.set(wallet, { ...record, wallet });
+    }
+    this._boundMap(this.toxicWallets, this._cfg('maxToxicWallets', 4_096));
+    this.metrics.toxicCollapsesLabeled += 1;
+    this.metrics.toxicTemplatesLearned += 1;
+    this.metrics.toxicWalletsLearned += learnedWallets;
+    this.toxicVersion += 1;
+    this.toxicMemoryDirty = true;
+  }
+
+  _toxicWalletOverlap(wallets, timestampMs) {
+    let overlap = 0;
+    for (const wallet of new Set(wallets || [])) {
+      const record = this.toxicWallets.get(wallet);
+      if (!record) continue;
+      if (record.expiresAt <= timestampMs) {
+        this.toxicWallets.delete(wallet);
+        this.toxicVersion += 1;
+        this.toxicMemoryDirty = true;
+      }
+      else overlap += 1;
+    }
+    return overlap;
+  }
+
+  _activeToxicTemplate(template, timestampMs) {
+    const exact = this.toxicTemplates.get(template.fingerprint);
+    if (exact?.expiresAt > timestampMs) return exact;
+    if (exact) this._deleteToxicTemplate(exact.fingerprint);
+
+    // Conservative fuzzy matching is bounded by large-buy count. It tolerates
+    // tiny amount/timing jitter, but never treats a scaled or structurally
+    // different burst as the same launch template.
+    const candidates = this.toxicTemplateIndex.get(template.largeBuyCount);
+    if (!candidates?.size) return null;
+    for (const fingerprint of candidates) {
+      const record = this.toxicTemplates.get(fingerprint);
+      if (!record) continue;
+      if (record.expiresAt <= timestampMs) {
+        this._deleteToxicTemplate(fingerprint);
+        continue;
+      }
+      if (this._templatesApproximatelyEqual(template, record)) {
+        this.metrics.toxicFuzzyMatches += 1;
+        return record;
+      }
+    }
+    return null;
+  }
+
+  _expireToxicMemory(now) {
+    let changed = false;
+    for (const [key, record] of this.toxicWallets) {
+      if (record.expiresAt <= now) {
+        this.toxicWallets.delete(key);
+        changed = true;
+      }
+    }
+    for (const [key, record] of this.toxicTemplates) {
+      if (record.expiresAt <= now) {
+        this._deleteToxicTemplate(key, false);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.toxicVersion += 1;
+      this.toxicMemoryDirty = true;
+    }
+  }
+
+  _boundMap(map, maxSize) {
+    while (map.size > maxSize) map.delete(map.keys().next().value);
+  }
+
+  _templatesApproximatelyEqual(left, right) {
+    if (left.largeBuyCount !== right.largeBuyCount) return false;
+    const burstToleranceMs = this._cfg('toxicBurstToleranceMs', 100);
+    if (Math.abs(left.burstSpanMs - right.burstSpanMs) > burstToleranceMs) return false;
+    const leftAmounts = [...(left.amounts || [])].sort((a, b) => b - a);
+    const rightAmounts = [...(right.amounts || [])].sort((a, b) => b - a);
+    if (!leftAmounts.length || leftAmounts.length !== rightAmounts.length) return false;
+    const tolerance = this._cfg('toxicAmountTolerancePct', 2) / 100;
+    return leftAmounts.every((amount, index) => {
+      const reference = rightAmounts[index];
+      return reference > 0 && Math.abs(amount - reference) / reference <= tolerance;
+    });
+  }
+
+  _indexToxicTemplate(record) {
+    const key = finite(record?.largeBuyCount, 0);
+    if (!(key > 0) || !record?.fingerprint) return;
+    const bucket = this.toxicTemplateIndex.get(key) || new Set();
+    bucket.add(record.fingerprint);
+    this.toxicTemplateIndex.set(key, bucket);
+  }
+
+  _deleteToxicTemplate(fingerprint, bumpVersion = true) {
+    const record = this.toxicTemplates.get(fingerprint);
+    if (!record) return;
+    this.toxicTemplates.delete(fingerprint);
+    const bucket = this.toxicTemplateIndex.get(record.largeBuyCount);
+    bucket?.delete(fingerprint);
+    if (bucket && !bucket.size) this.toxicTemplateIndex.delete(record.largeBuyCount);
+    if (bumpVersion) this.toxicVersion += 1;
+    this.toxicMemoryDirty = true;
+  }
+
+  _boundToxicTemplates(maxSize) {
+    while (this.toxicTemplates.size > maxSize) {
+      this._deleteToxicTemplate(this.toxicTemplates.keys().next().value, false);
+    }
+  }
+
+  _memoryPath() {
+    const configured = String(this._cfg('toxicMemoryPath', '') || '').trim();
+    return configured && configured !== ':memory:' ? path.resolve(configured) : null;
+  }
+
+  _memorySnapshot(now = this.now()) {
+    return {
+      version: 1,
+      savedAt: now,
+      retentionMs: this._cfg('toxicRetentionMs', 86_400_000),
+      templates: [...this.toxicTemplates.values()].filter((row) => row.expiresAt > now),
+      wallets: [...this.toxicWallets.values()].filter((row) => row.expiresAt > now),
+    };
+  }
+
+  _loadToxicMemory() {
+    const memoryPath = this._memoryPath();
+    if (!memoryPath) return;
+    try {
+      const payload = JSON.parse(this.fileSystem.readFileSync(memoryPath, 'utf8'));
+      const now = this.now();
+      for (const record of payload.templates || []) {
+        if (!record?.fingerprint || !(record.expiresAt > now)) continue;
+        this.toxicTemplates.set(record.fingerprint, record);
+        this._indexToxicTemplate(record);
+      }
+      for (const record of payload.wallets || []) {
+        if (!record?.wallet || !(record.expiresAt > now)) continue;
+        this.toxicWallets.set(record.wallet, record);
+      }
+      this._boundToxicTemplates(this._cfg('maxToxicTemplates', 1_024));
+      this._boundMap(this.toxicWallets, this._cfg('maxToxicWallets', 4_096));
+      this.metrics.toxicMemoryLoaded = this.toxicTemplates.size + this.toxicWallets.size;
+      this.toxicMemoryDirty = false;
+      if (this.metrics.toxicMemoryLoaded > 0) this.toxicVersion += 1;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        this.metrics.toxicMemoryLoadErrors += 1;
+        this.metrics.lastError = `toxic memory load: ${error.message}`;
+      }
+    }
+  }
+
+  async _persistToxicMemory() {
+    const memoryPath = this._memoryPath();
+    if (!memoryPath || !this.toxicMemoryDirty || this.toxicPersistPromise) return;
+    const snapshot = JSON.stringify(this._memorySnapshot());
+    const temporaryPath = `${memoryPath}.${process.pid}.tmp`;
+    this.toxicMemoryDirty = false;
+    this.toxicPersistPromise = (async () => {
+      try {
+        await this.fileSystem.promises.mkdir(path.dirname(memoryPath), { recursive: true });
+        await this.fileSystem.promises.writeFile(temporaryPath, snapshot, 'utf8');
+        await this.fileSystem.promises.rename(temporaryPath, memoryPath);
+        this.metrics.toxicMemorySaved += 1;
+      } catch (error) {
+        this.toxicMemoryDirty = true;
+        this.metrics.toxicMemorySaveErrors += 1;
+        this.metrics.lastError = `toxic memory save: ${error.message}`;
+      } finally {
+        this.toxicPersistPromise = null;
+      }
+    })();
+    await this.toxicPersistPromise;
+  }
+
+  _persistToxicMemorySync() {
+    const memoryPath = this._memoryPath();
+    if (!memoryPath || !this.toxicMemoryDirty) return;
+    const temporaryPath = `${memoryPath}.${process.pid}.stop.tmp`;
+    try {
+      this.fileSystem.mkdirSync(path.dirname(memoryPath), { recursive: true });
+      this.fileSystem.writeFileSync(
+        temporaryPath, JSON.stringify(this._memorySnapshot()), 'utf8',
+      );
+      this.fileSystem.renameSync(temporaryPath, memoryPath);
+      this.toxicMemoryDirty = false;
+      this.metrics.toxicMemorySaved += 1;
+    } catch (error) {
+      this.metrics.toxicMemorySaveErrors += 1;
+      this.metrics.lastError = `toxic memory save: ${error.message}`;
+    }
   }
 }
 

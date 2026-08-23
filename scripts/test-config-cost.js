@@ -111,7 +111,7 @@ assert.strictEqual(liveContinuityT12.minHoldMs, 10_000);
 assert.strictEqual(liveContinuityT12.trailingActivationPct, 15);
 assert.strictEqual(liveContinuityT12.trailingStopPct, 12.5);
 assert.strictEqual(liveO90.entryEnabled, true);
-assert.strictEqual(liveO90.positionSizeSol, 0.5);
+assert.strictEqual(liveO90.positionSizeSol, 0.1);
 assert.strictEqual(liveO90.postMigrationGate.windowMs, 5_000);
 assert.strictEqual(liveO90.postMigrationGate.minBuyers, 25);
 assert.strictEqual(liveQualityLeader.positionSizeSol, 0.1);
@@ -189,6 +189,12 @@ assert.deepStrictEqual(
     .map((strategy) => strategy.code),
   ['O90-M5-STAIR120', 'O-C80-D5-B2-S0-NC'],
 );
+assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
+assert.strictEqual(config.preEntryRugRisk.templateMinLargeBuys, 4);
+assert.strictEqual(config.preEntryRugRisk.templateMinTotalBuySol, 40);
+assert.strictEqual(config.preEntryRugRisk.templateMaxBurstSpanMs, 500);
+assert.strictEqual(config.preEntryRugRisk.toxicCollapsePct, 60);
+assert.strictEqual(config.preEntryRugRisk.toxicWalletOverlapMin, 2);
 assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
   config.signalShadow.profiles.map((profile) => [
@@ -659,11 +665,16 @@ assert.deepStrictEqual(
     'O_C80_P500_STAIR240', 'O_C80_P1000_X60',
     'O_C80_P1000_X120', 'O_C80_P1000_STAIR240',
     'O90_M5_X60', 'O90_M5_X120', 'O90_M5_STAIR120',
+    'O90_Q70_D30_X60', 'O90_Q70_D30_STAIR120',
+    'O90_DAY0818_STAIR120', 'O_C80_DAY1218_STAIR240',
   ],
 );
 assert.ok(config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('O_C80_P'))
   .every((profile) => !profile.liveStrategyId && profile.capacityAwareExit === true));
+assert.ok(config.graduationAccelerationShadow.entryProfiles
+  .filter((profile) => profile.id.startsWith('O90_') || profile.id === 'O_C80_D5_B2_S0_NC')
+  .every((profile) => profile.capacityAwareExit === true));
 assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, true);
 assert.strictEqual(config.migrationSecondLegShadow.maxObservedPriceRatio, 100);
 assert.deepStrictEqual(
@@ -683,6 +694,22 @@ const o90Gate = config.graduationAccelerationShadow.entryProfiles
 assert.deepStrictEqual(o90Gate.postMigrationGate, {
   windowMs: 5_000, minBuyers: 25, minNetFlowSol: 0,
 });
+const o90QualityProfiles = config.graduationAccelerationShadow.entryProfiles
+  .filter((profile) => profile.id.startsWith('O90_Q70_D30_'));
+assert.strictEqual(o90QualityProfiles.length, 2);
+assert.ok(o90QualityProfiles.every((profile) => (
+  profile.minBuyers === 3
+  && profile.minNetFlowSol === 70
+  && profile.minCurveDeltaPct === 30
+  && profile.capacityAwareExit === true
+  && !profile.liveStrategyId
+)));
+const o90Day = config.graduationAccelerationShadow.entryProfiles
+  .find((profile) => profile.id === 'O90_DAY0818_STAIR120');
+assert.deepStrictEqual(
+  [o90Day.sessionStartHourCst, o90Day.sessionEndHourCst, o90Day.liveStrategyId],
+  [8, 18, undefined],
+);
 assert.deepStrictEqual(
   config.graduationAccelerationShadow.trailingTiers.map((tier) => [
     tier.activationPct, tier.drawdownPct,

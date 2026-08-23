@@ -58,7 +58,7 @@ never sign or send transactions. Proven-negative entry families remain disabled.
 
 > 短时间内净买入资金、独立买家数量和买入成交速度同时加速时，未来数秒是否存在扣除真实成本后仍可交易的价格惯性。
 
-全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前 `O90-M5-STAIR120` 与 `O-C80-D5-B2-S0-NC` 允许产生新实盘仓位：O90 单笔0.5 SOL，O-C80 单笔0.1 SOL；O-C80 对应 Shadow 仍按1 SOL建模。`M-C5-T12.5`、`PBR-A-X50-15`、`GFR-300-HS20-H30`、`F-FO-RB10-X30` 与其余停用定义只保留历史展示和存量退出。实盘规则不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、KOL 或 AI 评分；全局默认 `DISABLED`，不会读取私钥或提交交易。
+全量 Raw Trade、Flow Signals、Future Labels 和 Smart Wallet 事件始终继续采集。当前 `O-C80-D5-B2-S0-NC` 与 `O90-M5-STAIR120` 允许产生新实盘仓位，均为单笔0.1 SOL；对应 Shadow 仍按1 SOL建模。O90 重新启用后继续强制经过全策略 RUG Guard；`M-C5-T12.5`、`PBR-A-X50-15`、`GFR-300-HS20-H30`、`F-FO-RB10-X30` 等停用定义只保留历史展示和存量退出。实盘规则不使用 Smart Wallet 跟单、RSI、EMA、MACD、社交数据、KOL 或 AI 评分；全局默认 `DISABLED`，不会读取私钥或提交交易。
 
 ## 数据链路
 
@@ -297,7 +297,15 @@ Bonding Curve 或 PumpSwap 的同笔池储备估算实际买卖均价；`net_ret
 - 15秒涨幅至少30%、最常见三位小数买入金额占买单至少15%的“追涨同额买单”。
 
 北京时间16:00–20:00的历史严重RUG比例较高，因此该窗口内原五项阶梯从5项全中
-收紧为命中4项即拒绝；窗口外仍使用5/5。所有实盘策略和所有会创建模拟仓位的
+收紧为命中4项即拒绝；窗口外仍使用5/5。除此以外，Guard 会在内存中记录“4～6笔
+大额买单、总额至少40 SOL、500ms内完成”的跨 Mint 发射模板。模板若在30秒内从峰值
+崩跌至少60%，其大额买家与金额/时序指纹保留24小时；后续 Mint 即使不足10笔成交，
+只要重合至少2个已标毒钱包，或命中同一/保守近似的金额与时序模板，就直接拒绝。
+24小时、3天、7天和永久窗口在现有历史回测中拦截结果相同，因此默认不扩大过期窗口；
+毒模板会异步保存到独立小文件并在重启时恢复，避免服务重启后失忆。这样可拦截轮换
+钱包但复用约20 SOL×4买单的脚本族，同时不会因一次大亏暂停整个低频策略。
+
+所有实盘策略和所有会创建模拟仓位的
 Shadow 策略都在真正开仓前执行同一项强制检查；任一硬过滤命中即拒绝，样本不足则
 放行并单独计数。纯观察器继续采集完整数据，不受开仓风控影响。
 
@@ -307,7 +315,10 @@ Shadow 策略都在真正开仓前执行同一项强制检查；任一硬过滤�
 `QL_STRICT_GUARD`、`GD25_35_RUG_GUARD_*`、`SR_R3_GUARD` 等独立前向组仍保留，
 用于比较专门过滤组的历史结果，但不再代表 RUG Guard 的唯一适用范围。
 
-升级前已经关闭的历史 Shadow 行仍保留其原始价格口径，不会被后台静默改写。由于
+Graduation Acceleration O 的所有新仓都启用1 SOL容量报价；即使是旧入口组，只要
+图表价已下跌35%以上，也强制按池储备计算可执行卖价。储备缺失时按无法回收处理，
+不再把 -30% 图表止损冒充实盘可实现止损。升级前已经关闭的历史 Shadow 行仍保留其
+原始价格口径，不会被后台静默改写。由于
 旧行未必保存当时完整池储备，不能可靠重算真实可卖回的 SOL；研究时应把新增 GUARD
 组及升级后的前向样本作为可执行口径，不要与旧的 mark-price 历史均值直接合并。
 
@@ -573,8 +584,9 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-当前 `O90-M5-STAIR120` 与 `O-C80-D5-B2-S0-NC` 允许产生新实盘仓位；
-O90 单笔 `0.5 SOL`，O-C80 单笔 `0.1 SOL`，O-C80 对应 Shadow 仍保持 `1 SOL`。
+当前 `O-C80-D5-B2-S0-NC` 与 `O90-M5-STAIR120` 均允许产生新实盘仓位，
+单笔都为 `0.1 SOL`；两者对应 Shadow 仍保持 `1 SOL`，且实盘入场统一经过
+内存态跨 Mint RUG Guard。
 `PBR-A-X50-15` 与 `GFR-300-HS20-H30` 已于 2026-08-22 在代码层
 锁死新开仓；旧服务器 `.env` 无法误开启，但历史记录和存量仓位退出继续保留。
 其余旧实盘定义同样只用于历史展示与存量退出：
@@ -609,7 +621,7 @@ Migration Continuity MC_C5 历史定义 → PumpSwap买入0.5 SOL
 → 10秒保护，+15%激活、峰值回撤12.5%，最长3分钟
 
 O90-M5-STAIR120 / graduation_accel_o90_m5_stair120_live（开启）
-Curve90毕业概率入场 → Bonding Curve买入0.5 SOL
+Curve90毕业概率入场 → Bonding Curve买入0.1 SOL
 → 首次PumpSwap 5秒门控，50%核心退出，剩余仓位按阶梯移动止盈
 ```
 
@@ -619,11 +631,11 @@ M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_s
 
 - `DISABLED`：全局安全锁模式，不签名；各实盘策略的独立 `entryEnabled=false` 还会进一步阻止其产生新仓。
 - `DRY_RUN`：只有先显式解除 `FLOW_LIVE_TRADING_SAFETY_LOCK`，再设置 `FLOW_LIVE_TRADING_ENABLED=true` 并保留 `FLOW_LIVE_DRY_RUN=true` 才能启用。
-- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写至少一个启用策略的 `POSITION_SOL`。O90 使用 V2 仓位变量（0.5 SOL），O-C80 使用新的 V3 仓位变量（0.1 SOL）；旧仓位变量只供历史兼容。
+- `LIVE`：除解除安全锁外，还需设置 `FLOW_LIVE_DRY_RUN=false`、`FLOW_RPC_URL`、`FLOW_LIVE_PRIVATE_KEY`，并显式填写至少一个启用策略的 `POSITION_SOL`。O90 使用 V3 仓位变量（0.1 SOL），O-C80 也使用其独立 V3 仓位变量（0.1 SOL）；旧仓位变量只供历史兼容。
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-O90 与 O-C80 使用 Bonding Curve 固定 SOL 输入；M-C5-T12.5 仅保留历史和存量退出。滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
+O-C80 与 O90 都使用 Bonding Curve 固定 SOL 输入；M-C5-T12.5 仅保留历史和存量退出。滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
 
 已停止策略的存量仓位继续沿用各自原退出规则。O90/O-C80 在毕业后首笔可执行 PumpSwap 行情卖出50%核心仓位，剩余50%按 `+20/40/80/150/300%` 对应 `10/15/20/25/30%` 峰值回撤退出；毕业前后保留兜底与30%硬止损。最终卖出失败会按配置重试并保留 `EXIT_FAILED`，防止同 Mint 再开仓；紧急开关和单策略停开都只阻止新开仓，不阻止存量退出。
 
@@ -709,6 +721,8 @@ Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 07:00 运行，�
 - `GE30_D25_32_R23_F1_FAST200 + GQ_XLEG`：毕业后 30 秒内，1 秒跌 25%～32%，从低点 200ms 内反弹 2%～3%，每 Mint 只取首次机会；分别模拟 0.05、0.25、0.5、1 SOL 容量冲击。
 - `GFR_300/GFR_600/GFR_1000`：旧 G 组之外的快速反转延续研究。急跌首次反弹后分别等待 300/600/1000ms，只在价格继续上涨、独立 Buyers 与净流入增加、后半窗资金流不衰减、Sell/Buy 与 Top1 集中度受控、Creator 未卖且 0.05/0.1 SOL 往返 AMM 冲击不超过门槛时模拟入场；每组独立测试固定 8 秒、固定 15 秒及 20% 硬止损/最长 30 秒。确认快照和具体拒绝原因写入新 cohort，不改变旧 G 历史。
 - `O90_M5_X60` / `O90_M5_X120` / `O90_M5_STAIR120`：首次 Curve `>=90%` 且 5 秒推进 `>=5%`、买家 `>=1`、卖单 `<=1`、Creator 未卖。毕业时退出 50% Core；只有首个 PumpSwap 5 秒买家 `>=25` 且净流入非负才保留 Runner，再分别测试固定 60 秒、固定 120 秒与阶梯 120 秒。
+- `O90_Q70_D30_X60` / `O90_Q70_D30_STAIR120`：全新、仅向前的强质量组；首次 Curve `>=90%` 时同时要求 5 秒独立买家 `>=3`、净流入 `>=70 SOL`、Curve 推进 `>=30%`。分别测试固定 60 秒和阶梯 120 秒，均使用 1 SOL 容量感知退出，不接实盘。
+- `O90_DAY0818_STAIR120` / `O_C80_DAY1218_STAIR240`：不叠加强质量阈值，只把旧 O90/O-C80 入场规则分别限制在北京时间 `08:00–18:00` 和 `12:00–18:00`，用于检验时段效果能否向前复现；同样不接实盘。
 
 FC 的 Flow 证据使用“信号时间不晚于回踩参考时间”的因果约束，未来信号不能反向使历史参考点合格。O90→M5 的 PumpSwap 门槛只决定毕业后的 Runner，失败时不会把未成交或不可定价样本伪记为盈利。
 
@@ -766,7 +780,8 @@ A 组。
 独立 Mint，包括正收益比例、正净流比例、RUG 崩塌率和 1 SOL 中位容量冲击。
 
 市场状态过滤严格限定为 **Shadow-only**：`LiveTradingManager` 不导入、不读取
-该标签，当前 O90/O-C80 两个实盘策略的入场、仓位和退出完全不变。另新增的 Curve80
+该标签，当前 O-C80 与 O90 实盘策略的入场、仓位和退出都不受影响。
+另新增的 Curve80
 持续确认、G 组 1 SOL 可执行容量筛选，以及 MC 30 秒订单流自适应 60/180 秒
 持仓，也都使用新的 cohort 编号，不与旧历史混合，不存在实盘桥接。
 

@@ -178,6 +178,103 @@ function main() {
 
 main();
 
+function testForwardQualityAndBeijingSessionProfiles() {
+  {
+    const store = makeStore();
+    const settings = config();
+    settings.capacitySols = [1];
+    settings.entryProfiles = [{
+      id: 'O90_Q70_D30_X60', label: 'quality', mode: 'CURVE_MILESTONE',
+      thresholdPct: 90, recentWindowMs: 5_000, minCurveDeltaPct: 30,
+      minBuyers: 3, minNetFlowSol: 70, maxSellTx: 1,
+      requireNoCreatorSell: true, capacityAwareExit: true,
+      runnerExitMode: 'FIXED_HOLD', runnerMaxHoldMs: 60_000,
+    }];
+    const suite = new GraduationAccelerationShadowSuite({
+      config: settings, store, now: () => Date.UTC(2026, 7, 23, 4, 0, 0),
+    });
+    suite.start();
+
+    const qualifyingMint = 'o90-quality-pass';
+    const base = Date.UTC(2026, 7, 23, 4, 0, 0);
+    suite.onCreate({ mint: qualifyingMint, creator: 'quality-creator', createdAt: base });
+    suite.observeTrade(trade({
+      mint: qualifyingMint, timestampMs: base + 100, curvePct: 60,
+      wallet: 'quality-buyer-1', solAmount: 25,
+    }));
+    suite.observeTrade(trade({
+      mint: qualifyingMint, timestampMs: base + 500, curvePct: 70,
+      wallet: 'quality-buyer-2', solAmount: 25,
+    }));
+    suite.observeTrade(trade({
+      mint: qualifyingMint, timestampMs: base + 1_000, curvePct: 90,
+      wallet: 'quality-buyer-3', solAmount: 25,
+    }));
+    assert.strictEqual(suite.health().pendingEntries, 1,
+      'quality cohort requires the combined Buyers/NetFlow/CurveDelta gate');
+    const qualityFeatures = JSON.parse(store.db.prepare(`
+      SELECT features_json FROM graduation_acceleration_shadow_positions WHERE mint=?
+    `).get(qualifyingMint).features_json);
+    assert.deepStrictEqual(
+      [qualityFeatures.buyers, qualityFeatures.netFlowSol,
+        qualityFeatures.curveDeltaPct, qualityFeatures.signalCstHour],
+      [3, 75, 30, 12],
+    );
+
+    const lowFlowMint = 'o90-quality-low-flow';
+    suite.onCreate({ mint: lowFlowMint, creator: 'low-flow-creator', createdAt: base + 10_000 });
+    for (const [offset, curvePct, wallet] of [
+      [100, 60, 'low-flow-1'], [500, 70, 'low-flow-2'], [1_000, 90, 'low-flow-3'],
+    ]) {
+      suite.observeTrade(trade({
+        mint: lowFlowMint, timestampMs: base + 10_000 + offset,
+        curvePct, wallet, solAmount: 10,
+      }));
+    }
+    assert.strictEqual(store.db.prepare(`
+      SELECT COUNT(*) count FROM graduation_acceleration_shadow_positions WHERE mint=?
+    `).get(lowFlowMint).count, 0, 'low NetFlow is not admitted to the quality cohort');
+    store.close();
+  }
+
+  {
+    const store = makeStore();
+    const settings = config();
+    settings.capacitySols = [1];
+    settings.entryProfiles = [{
+      id: 'O_C80_DAY1218_STAIR240', label: 'day', mode: 'CURVE_MILESTONE',
+      thresholdPct: 80, recentWindowMs: 5_000, minCurveDeltaPct: 5,
+      minBuyers: 2, maxSellTx: 0, requireNoCreatorSell: true,
+      sessionStartHourCst: 12, sessionEndHourCst: 18,
+      capacityAwareExit: true, runnerExitMode: 'TIERED_TRAILING',
+      runnerMaxHoldMs: 240_000,
+    }];
+    const suite = new GraduationAccelerationShadowSuite({
+      config: settings, store, now: () => Date.UTC(2026, 7, 23, 4, 0, 0),
+    });
+    suite.start();
+
+    const observeCross = (mint, base) => {
+      suite.onCreate({ mint, creator: `${mint}-creator`, createdAt: base });
+      suite.observeTrade(trade({
+        mint, timestampMs: base + 100, curvePct: 70, wallet: `${mint}-buyer-1`,
+      }));
+      suite.observeTrade(trade({
+        mint, timestampMs: base + 1_000, curvePct: 80, wallet: `${mint}-buyer-2`,
+      }));
+    };
+    observeCross('day-inside', Date.UTC(2026, 7, 23, 4, 0, 0)); // 12:00 CST
+    observeCross('day-outside', Date.UTC(2026, 7, 23, 12, 0, 0)); // 20:00 CST
+    assert.strictEqual(store.db.prepare(`
+      SELECT COUNT(*) count FROM graduation_acceleration_shadow_positions
+      WHERE entry_profile_id='O_C80_DAY1218_STAIR240'
+    `).get().count, 1, 'only the Beijing 12:00-18:00 crossing is admitted');
+    store.close();
+  }
+}
+
+testForwardQualityAndBeijingSessionProfiles();
+
 function testCurve90PostMigrationGate() {
   const store = makeStore();
   let now = 1_000_000;

@@ -530,14 +530,17 @@ const config = {
         ruleVersion: 'graduation_accel_o90_m5_stair120_live_v1',
         signalSource: 'GRADUATION_ACCEL_O90_M5_STAIR120',
         enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_ENABLED', true),
+        // V2 entry key intentionally bypasses the retired server setting so
+        // this 0.1-SOL canary resumes after upgrade while remaining independently
+        // switchable without touching the global live-trading lock.
         entryEnabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_ENTRY_ENABLED',
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_ENTRY_ENABLED',
           true,
         ),
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_POSITION_SOL',
-          0.5,
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V3_POSITION_SOL',
+          0.1,
         ),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_MAX_SIGNAL_AGE_MS',
@@ -1448,6 +1451,61 @@ const config = {
     beijingRiskMinFlags: integerEnv(
       'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_MIN_FLAGS', 4, { min: 1, max: 5 },
     ),
+    // Learn repeated launch/rug families from public trades only. Four large
+    // buys in a sub-500ms burst form a template; after that template visibly
+    // collapses, later Mints with the same amount/timing vector or at least two
+    // learned wallets are blocked without requiring the native 10-trade sample.
+    crossMintEnabled: booleanEnv('FLOW_PRE_ENTRY_RUG_CROSS_MINT_ENABLED', true),
+    templateWindowMs: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_WINDOW_MS', 5_000, {
+      min: 100, max: 30_000,
+    }),
+    templateLargeBuyMinSol: numberEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_LARGE_BUY_MIN_SOL', 1, {
+      min: 0.01,
+    }),
+    templateMinLargeBuys: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MIN_LARGE_BUYS', 4, {
+      min: 2, max: 16,
+    }),
+    templateMaxLargeBuys: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MAX_LARGE_BUYS', 6, {
+      min: 2, max: 32,
+    }),
+    templateMinTotalBuySol: numberEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MIN_TOTAL_BUY_SOL', 40, {
+      min: 1,
+    }),
+    templateMaxBurstSpanMs: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MAX_BURST_SPAN_MS', 500, {
+      min: 10, max: 5_000,
+    }),
+    templateSizeBucketSol: numberEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_SIZE_BUCKET_SOL', 0.25, {
+      min: 0.01, max: 10,
+    }),
+    toxicCollapsePct: numberEnv('FLOW_PRE_ENTRY_RUG_TOXIC_COLLAPSE_PCT', 60, {
+      min: 20, max: 100,
+    }),
+    toxicCollapseWindowMs: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_COLLAPSE_WINDOW_MS', 30_000, {
+      min: 1_000, max: 120_000,
+    }),
+    toxicRetentionMs: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_RETENTION_MS', 86_400_000, {
+      min: 60_000, max: 7 * 86_400_000,
+    }),
+    toxicMemoryPath: process.env.FLOW_PRE_ENTRY_RUG_TOXIC_MEMORY_PATH
+      || './data/pre-entry-rug-toxic-memory.json',
+    toxicPersistIntervalMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_TOXIC_PERSIST_INTERVAL_MS', 5_000, { min: 1_000, max: 60_000 },
+    ),
+    toxicAmountTolerancePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_TOXIC_AMOUNT_TOLERANCE_PCT', 2, { min: 0, max: 10 },
+    ),
+    toxicBurstToleranceMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_TOXIC_BURST_TOLERANCE_MS', 100, { min: 0, max: 1_000 },
+    ),
+    toxicWalletOverlapMin: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_WALLET_OVERLAP_MIN', 2, {
+      min: 1, max: 16,
+    }),
+    maxToxicWallets: integerEnv('FLOW_PRE_ENTRY_RUG_MAX_TOXIC_WALLETS', 4_096, {
+      min: 64, max: 65_536,
+    }),
+    maxToxicTemplates: integerEnv('FLOW_PRE_ENTRY_RUG_MAX_TOXIC_TEMPLATES', 1_024, {
+      min: 32, max: 16_384,
+    }),
   },
 
   // Independent causal study derived from the observed behavior of consistently
@@ -4874,6 +4932,7 @@ const config = {
         minBuyers: 2,
         maxSellTx: 0,
         requireNoCreatorSell: true,
+        capacityAwareExit: true,
       },
       ...[
         ['O_C80_P500_STAIR240', 500, 'TIERED_TRAILING', 240_000],
@@ -4890,11 +4949,11 @@ const config = {
         minBuyers: 2,
         maxSellTx: 0,
         requireNoCreatorSell: true,
+        capacityAwareExit: true,
         persistenceMs,
         maxPersistenceSellTx: 0,
         maxPersistencePullbackPct: 5,
         coreExitPct: 0,
-        capacityAwareExit: true,
         runnerExitMode,
         runnerMaxHoldMs,
       })),
@@ -4915,6 +4974,7 @@ const config = {
         minBuyers: 1,
         maxSellTx: 1,
         requireNoCreatorSell: true,
+        capacityAwareExit: true,
         coreExitPct: 50,
         postMigrationGate: {
           windowMs: 5_000,
@@ -4924,6 +4984,69 @@ const config = {
         runnerExitMode,
         runnerMaxHoldMs,
       })),
+      ...[
+        ['O90_Q70_D30_X60', 'FIXED_HOLD', 60_000],
+        ['O90_Q70_D30_STAIR120', 'TIERED_TRAILING', 120_000],
+      ].map(([id, runnerExitMode, runnerMaxHoldMs]) => ({
+        id,
+        label: `${id} · Curve90 / Buyers5≥3 / NetFlow5≥70 / ΔCurve5≥30 · forward-only`,
+        mode: 'CURVE_MILESTONE',
+        thresholdPct: 90,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 30,
+        minBuyers: 3,
+        minNetFlowSol: 70,
+        maxSellTx: 1,
+        requireNoCreatorSell: true,
+        coreExitPct: 50,
+        capacityAwareExit: true,
+        postMigrationGate: {
+          windowMs: 5_000,
+          minBuyers: 25,
+          minNetFlowSol: 0,
+        },
+        runnerExitMode,
+        runnerMaxHoldMs,
+      })),
+      {
+        id: 'O90_DAY0818_STAIR120',
+        label: 'O90-DAY-0818 · 北京时间08–18点 / 旧O90入场 / 阶梯120秒',
+        mode: 'CURVE_MILESTONE',
+        thresholdPct: 90,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 1,
+        maxSellTx: 1,
+        requireNoCreatorSell: true,
+        sessionStartHourCst: 8,
+        sessionEndHourCst: 18,
+        coreExitPct: 50,
+        capacityAwareExit: true,
+        postMigrationGate: {
+          windowMs: 5_000,
+          minBuyers: 25,
+          minNetFlowSol: 0,
+        },
+        runnerExitMode: 'TIERED_TRAILING',
+        runnerMaxHoldMs: 120_000,
+      },
+      {
+        id: 'O_C80_DAY1218_STAIR240',
+        label: 'O-C80-DAY-1218 · 北京时间12–18点 / 旧Curve80入场 / 阶梯240秒',
+        mode: 'CURVE_MILESTONE',
+        thresholdPct: 80,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 2,
+        maxSellTx: 0,
+        requireNoCreatorSell: true,
+        sessionStartHourCst: 12,
+        sessionEndHourCst: 18,
+        coreExitPct: 50,
+        capacityAwareExit: true,
+        runnerExitMode: 'TIERED_TRAILING',
+        runnerMaxHoldMs: 240_000,
+      },
     ],
     trailingTiers: [
       { activationPct: 20, drawdownPct: 10 },
@@ -5430,6 +5553,7 @@ function validateConfig() {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
     if (!process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL
+      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V3_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATED_GFR_300_POSITION_SOL

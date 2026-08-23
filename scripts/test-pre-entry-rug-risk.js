@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { PreEntryRugRiskTracker } = require('../src/core/PreEntryRugRiskTracker');
 
 const config = {
@@ -27,6 +30,20 @@ const config = {
   beijingRiskStartHour: 16,
   beijingRiskEndHour: 20,
   beijingRiskMinFlags: 4,
+  crossMintEnabled: true,
+  templateWindowMs: 5_000,
+  templateLargeBuyMinSol: 1,
+  templateMinLargeBuys: 4,
+  templateMaxLargeBuys: 6,
+  templateMinTotalBuySol: 40,
+  templateMaxBurstSpanMs: 500,
+  templateSizeBucketSol: 0.25,
+  toxicCollapsePct: 60,
+  toxicCollapseWindowMs: 30_000,
+  toxicRetentionMs: 86_400_000,
+  toxicWalletOverlapMin: 2,
+  maxToxicWallets: 4_096,
+  maxToxicTemplates: 1_024,
 };
 
 {
@@ -161,6 +178,113 @@ const config = {
   assert.equal(normalHour.score, 4);
   assert.equal(normalHour.beijingRiskWindow, false);
   assert.equal(normalHour.flagged, false);
+}
+
+{
+  const tracker = new PreEntryRugRiskTracker({ config });
+  const base = Date.UTC(2026, 7, 23, 4, 0, 0);
+  const toxicSizes = [20.01, 20.07, 19.16, 19.25];
+  toxicSizes.forEach((solAmount, index) => tracker.observeTrade({
+    mint: 'first-toxic-mint', side: 'BUY', wallet: `toxic-wallet-${index}`,
+    solAmount, timestampMs: base + index * 10, price: 1 + index * 0.2,
+  }));
+  tracker.observeTrade({
+    mint: 'first-toxic-mint', side: 'SELL', wallet: 'dump-wallet', solAmount: 70,
+    timestampMs: base + 1_000, price: 0.2,
+  });
+  assert.equal(tracker.health().toxicCollapsesLabeled, 1);
+  assert.equal(tracker.health().toxicTemplates, 1);
+  assert.equal(tracker.health().toxicWallets, 4);
+
+  // Rotating every wallet does not evade an identical amount/timing template.
+  toxicSizes.forEach((solAmount, index) => tracker.observeTrade({
+    mint: 'rotated-wallet-copy', side: 'BUY', wallet: `rotated-${index}`,
+    solAmount, timestampMs: base + 2_000 + index * 10, price: 1 + index * 0.2,
+  }));
+  const templateCopy = tracker.evaluateGuard({
+    strategyId: 'O90', mint: 'rotated-wallet-copy',
+    timestampMs: base + 2_100, source: 'LIVE',
+  });
+  assert.equal(templateCopy.sampleReady, false);
+  assert.equal(templateCopy.crossMintToxic, true);
+  assert.equal(templateCopy.signatures.crossMintToxicTemplate, true);
+  assert.equal(templateCopy.blocked, true);
+
+  // Different amounts are still rejected when two learned wallets reappear.
+  [12, 13, 14, 15].forEach((solAmount, index) => tracker.observeTrade({
+    mint: 'wallet-overlap-copy', side: 'BUY',
+    wallet: index < 2 ? `toxic-wallet-${index}` : `fresh-wallet-${index}`,
+    solAmount, timestampMs: base + 3_000 + index * 10, price: 1 + index * 0.1,
+  }));
+  const walletCopy = tracker.evaluateGuard({
+    strategyId: 'O90', mint: 'wallet-overlap-copy',
+    timestampMs: base + 3_100, source: 'SHADOW',
+  });
+  assert.equal(walletCopy.sampleReady, false);
+  assert.equal(walletCopy.toxicWalletOverlap, 2);
+  assert.equal(walletCopy.signatures.crossMintToxicWallets, true);
+  assert.equal(walletCopy.blocked, true);
+
+  [5, 10, 15, 20].forEach((solAmount, index) => tracker.observeTrade({
+    mint: 'benign-burst', side: 'BUY', wallet: `benign-${index}`,
+    solAmount, timestampMs: base + 4_000 + index * 10, price: 1 + index * 0.02,
+  }));
+  const benign = tracker.evaluateGuard({
+    strategyId: 'O90', mint: 'benign-burst',
+    timestampMs: base + 4_100, source: 'LIVE',
+  });
+  assert.equal(benign.sampleReady, false);
+  assert.equal(benign.crossMintToxic, false);
+  assert.equal(benign.blocked, false);
+  assert.equal(tracker.health().guardCrossMintRejected, 2);
+}
+
+{
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-rug-memory-'));
+  const memoryPath = path.join(temporaryDirectory, 'toxic-memory.json');
+  const base = Date.UTC(2026, 7, 23, 5, 0, 0);
+  try {
+    const first = new PreEntryRugRiskTracker({
+      config: { ...config, toxicMemoryPath: memoryPath, toxicPersistIntervalMs: 60_000 },
+      now: () => base + 2_000,
+    });
+    first.start();
+    const toxicSizes = [20.01, 20.07, 19.16, 19.25];
+    toxicSizes.forEach((solAmount, index) => first.observeTrade({
+      mint: 'persistent-toxic', side: 'BUY', wallet: `persist-wallet-${index}`,
+      solAmount, timestampMs: base + index * 10, price: 1 + index * 0.2,
+    }));
+    first.observeTrade({
+      mint: 'persistent-toxic', side: 'SELL', wallet: 'dump-wallet', solAmount: 70,
+      timestampMs: base + 1_000, price: 0.2,
+    });
+    first.stop();
+    assert.equal(fs.existsSync(memoryPath), true);
+
+    const restored = new PreEntryRugRiskTracker({
+      config: { ...config, toxicMemoryPath: memoryPath, toxicPersistIntervalMs: 60_000 },
+      now: () => base + 3_000,
+    });
+    restored.start();
+    assert.ok(restored.health().toxicMemoryLoaded >= 5);
+    // Each buy is shifted enough to change the exact 0.25-SOL fingerprint,
+    // while remaining within the conservative 2% amount tolerance. The burst
+    // also crosses an exact span bucket but stays within 100ms.
+    toxicSizes.forEach((solAmount, index) => restored.observeTrade({
+      mint: 'fuzzy-copy', side: 'BUY', wallet: `new-wallet-${index}`,
+      solAmount: solAmount + 0.3,
+      timestampMs: base + 2_100 + index * 40, price: 1 + index * 0.1,
+    }));
+    const decision = restored.evaluateGuard({
+      strategyId: 'O90', mint: 'fuzzy-copy', timestampMs: base + 2_300, source: 'LIVE',
+    });
+    assert.equal(decision.blocked, true);
+    assert.equal(decision.signatures.crossMintToxicTemplate, true);
+    assert.equal(restored.health().toxicFuzzyMatches, 1);
+    restored.stop();
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 }
 
 console.log('pre-entry RUG risk tests passed');

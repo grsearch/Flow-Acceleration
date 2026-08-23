@@ -34,6 +34,24 @@ function capacityId(positionSol) {
   return `${String(positionSol).replace('.', '_')}SOL`;
 }
 
+function beijingHour(timestampMs) {
+  const value = finite(timestampMs);
+  if (!(value > 0)) return null;
+  return new Date(value + (8 * 60 * 60_000)).getUTCHours();
+}
+
+function matchesBeijingSession(profile, timestampMs) {
+  const start = finite(profile?.sessionStartHourCst);
+  const end = finite(profile?.sessionEndHourCst);
+  if (start == null || end == null) return true;
+  const hour = beijingHour(timestampMs);
+  if (hour == null) return false;
+  if (start === end) return true;
+  return start < end
+    ? hour >= start && hour < end
+    : hour >= start || hour < end;
+}
+
 function rowPosition(row) {
   return {
     id: row.id,
@@ -410,6 +428,7 @@ class GraduationAccelerationShadowSuite {
       }
       let matched = false;
       let features = null;
+      const sessionAllowed = matchesBeijingSession(profile, trade.timestampMs);
       if (profile.mode === 'FIXED_10S') {
         if (ageMs < profile.horizonMs || state.fixedEvaluated) continue;
         state.fixedEvaluated = true;
@@ -418,7 +437,8 @@ class GraduationAccelerationShadowSuite {
         const ratio = features.buySol > 0 ? features.sellSol / features.buySol : null;
         matched = features.curvePct >= profile.minCurvePct
           && features.buyers >= profile.minBuyers
-          && ratio != null && ratio <= profile.maxSellBuyRatio;
+          && ratio != null && ratio <= profile.maxSellBuyRatio
+          && sessionAllowed;
         features.sellBuyRatio = ratio;
       } else if (profile.mode === 'CURVE_MILESTONE') {
         if (finite(trade.curvePct, -Infinity) < profile.thresholdPct
@@ -430,8 +450,14 @@ class GraduationAccelerationShadowSuite {
         features = this._features(rows);
         matched = features.curveDeltaPct >= profile.minCurveDeltaPct
           && features.buyers >= profile.minBuyers
+          && features.netFlowSol >= finite(profile.minNetFlowSol, -Infinity)
           && features.sellTx <= profile.maxSellTx
-          && (!profile.requireNoCreatorSell || !state.creatorSold);
+          && (!profile.requireNoCreatorSell || !state.creatorSold)
+          && sessionAllowed;
+      }
+      if (features) {
+        features.signalCstHour = beijingHour(trade.timestampMs);
+        features.sessionAllowed = sessionAllowed;
       }
       this.metrics.evaluated += 1;
       if (!matched) continue;
@@ -837,8 +863,12 @@ class GraduationAccelerationShadowSuite {
     const runnerWeight = 1 - coreWeight;
     let runnerPrice = price;
     let exitImpactPct = null;
-    if (profile?.capacityAwareExit) {
-      const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    // Every capacity-aware cohort uses the pool quote. Additionally, any
+    // catastrophic mark move must use executable liquidity even for a legacy
+    // cohort: otherwise a direct RUG is falsely recorded near the configured
+    // -30% stop while a real 1 SOL position may recover almost nothing.
+    if (profile?.capacityAwareExit || markReturnPct <= -35) {
       const execution = executableSell(
         trade,
         position.tokenUnits * runnerWeight,

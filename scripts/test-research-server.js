@@ -123,7 +123,7 @@ async function main() {
   assert.ok(dashboard.includes('data-live-strategy-pane="graduation-acceleration"'));
   assert.ok(dashboard.includes('id="graduation-acceleration-cohort-rows"'));
   assert.ok(dashboard.includes('id="graduation-acceleration-position-rows"'));
-  assert.ok(dashboard.includes('data-strategy-code="O/O90-M5"'));
+  assert.ok(dashboard.includes('data-strategy-code="O/O90/Q70/DAY"'));
   assert.ok(dashboard.includes("loadDashboard('/api/graduation-acceleration-shadow?positionLimit=30'"));
   assert.ok(dashboard.includes('data-live-strategy="smart-resonance"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="smart-resonance"'));
@@ -781,6 +781,29 @@ async function main() {
         ['O90_M5_X60', 90, 25, 'FIXED_HOLD', 60_000],
         ['O90_M5_X120', 90, 25, 'FIXED_HOLD', 120_000],
         ['O90_M5_STAIR120', 90, 25, 'TIERED_TRAILING', 120_000],
+      ],
+    );
+    assert.deepStrictEqual(
+      graduationAcceleration.runtime.entryProfiles
+        .filter((profile) => profile.id.startsWith('O90_Q70_D30_'))
+        .map((profile) => [
+          profile.id, profile.minBuyers, profile.minNetFlowSol,
+          profile.minCurveDeltaPct, profile.capacityAwareExit,
+        ]),
+      [
+        ['O90_Q70_D30_X60', 3, 70, 30, true],
+        ['O90_Q70_D30_STAIR120', 3, 70, 30, true],
+      ],
+    );
+    assert.deepStrictEqual(
+      graduationAcceleration.runtime.entryProfiles
+        .filter((profile) => profile.id.includes('_DAY'))
+        .map((profile) => [
+          profile.id, profile.sessionStartHourCst, profile.sessionEndHourCst,
+        ]),
+      [
+        ['O90_DAY0818_STAIR120', 8, 18],
+        ['O_C80_DAY1218_STAIR240', 12, 18],
       ],
     );
     assert.ok(Array.isArray(graduationAcceleration.cohorts));
