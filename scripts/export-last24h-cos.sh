@@ -49,6 +49,27 @@ if ! flock -n 9; then
   exit 0
 fi
 
+STATE_FILE="$EXPORT_DIR/last-run.env"
+RUN_DATE_CST="$(TZ=Asia/Shanghai date +%F)"
+DONE_MARKER="$EXPORT_DIR/.daily-export-${RUN_DATE_CST}.done"
+FORCE_RUN="${FLOW_BACKUP_FORCE_RUN:-false}"
+
+state_completed_today() {
+  [[ -f "$STATE_FILE" ]] || return 1
+  grep -qx 'STATE=DONE' "$STATE_FILE" \
+    && grep -qx "RUN_DATE_CST=$RUN_DATE_CST" "$STATE_FILE"
+}
+
+case "${FORCE_RUN,,}" in
+  1|true|yes|on) ;;
+  *)
+    if [[ -f "$DONE_MARKER" ]] || state_completed_today; then
+      echo "Daily export for $RUN_DATE_CST already completed; skipping duplicate trigger."
+      exit 0
+    fi
+    ;;
+esac
+
 STAMP="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M-CST)"
 DATE_PATH="$(TZ=Asia/Shanghai date +%Y/%m/%d)"
 BASE_NAME="flow-acceleration-last24h-${STAMP}.tar.gz"
@@ -57,7 +78,6 @@ SHA_FILE="$ARCHIVE.sha256"
 STAGE="$(mktemp -d "$EXPORT_DIR/.stage-XXXXXXXX")"
 # COSCLI rejects a custom config path without a .yaml/.yml suffix.
 COS_CONFIG="$(mktemp --suffix=.yaml)"
-STATE_FILE="$EXPORT_DIR/last-run.env"
 SUCCESS=0
 
 write_state() {
@@ -66,6 +86,7 @@ write_state() {
   local temporary="$STATE_FILE.tmp"
   {
     printf 'STATE=%q\n' "$state"
+    printf 'RUN_DATE_CST=%q\n' "$RUN_DATE_CST"
     printf 'UPDATED_AT=%q\n' "$(TZ=Asia/Shanghai date --iso-8601=seconds)"
     printf 'ARCHIVE=%q\n' "$ARCHIVE"
     printf 'REMOTE=%q\n' "${REMOTE_OBJECT:-}"
@@ -195,9 +216,17 @@ esac
 find "$EXPORT_DIR" -maxdepth 1 -type f \
   \( -name 'flow-acceleration-last24h-*.tar.gz' -o -name 'flow-acceleration-last24h-*.tar.gz.sha256' \) \
   -mtime "+$RETENTION_DAYS" -delete
+find "$EXPORT_DIR" -maxdepth 1 -type f -name '.daily-export-*.done' \
+  -mtime "+$RETENTION_DAYS" -delete
 
 SUCCESS=1
 write_state DONE "sha256=$ARCHIVE_SHA retention=$RETENTION_RESULT"
+{
+  printf 'RUN_DATE_CST=%s\n' "$RUN_DATE_CST"
+  printf 'REMOTE=%s\n' "$REMOTE_OBJECT"
+  printf 'SHA256=%s\n' "$ARCHIVE_SHA"
+} > "$DONE_MARKER.tmp"
+mv -f -- "$DONE_MARKER.tmp" "$DONE_MARKER"
 echo "Daily export complete"
 echo "local=$ARCHIVE"
 echo "remote=$REMOTE_DIR/$BASE_NAME"

@@ -208,17 +208,18 @@ if command -v crontab >/dev/null 2>&1; then
   [[ "$SERVICE_USER" == "root" ]] || remove_legacy_cron root
 fi
 
-# OpenClaw temporarily used flow-daily-export.* on some servers. Disable only
-# its scheduler after the canonical timer is installed and valid. Do not stop
-# an in-flight oneshot export; the shared flock also prevents overlap.
-if systemctl cat "$LEGACY_TIMER" >/dev/null 2>&1; then
-  systemctl disable --now "$LEGACY_TIMER" || true
-  if systemctl is-active --quiet "$LEGACY_SERVICE"; then
-    echo "$LEGACY_SERVICE is currently exporting; it will be allowed to finish."
-  else
-    systemctl reset-failed "$LEGACY_SERVICE" >/dev/null 2>&1 || true
-  fi
-  echo "Disabled legacy scheduler $LEGACY_TIMER."
+# OpenClaw temporarily used flow-daily-export.* on some servers. Some copies of
+# that legacy oneshot were coupled to flow-acceleration.service and configured
+# to restart, so restarting the collector could repeatedly launch a new export.
+# Once the canonical timer is valid, stop and disable both legacy units. The
+# canonical exporter owns the same flock and can be started again explicitly.
+if systemctl cat "$LEGACY_TIMER" >/dev/null 2>&1 \
+  || systemctl cat "$LEGACY_SERVICE" >/dev/null 2>&1; then
+  systemctl disable --now "$LEGACY_TIMER" >/dev/null 2>&1 || true
+  systemctl disable --now "$LEGACY_SERVICE" >/dev/null 2>&1 || true
+  systemctl stop "$LEGACY_TIMER" "$LEGACY_SERVICE" >/dev/null 2>&1 || true
+  systemctl reset-failed "$LEGACY_TIMER" "$LEGACY_SERVICE" >/dev/null 2>&1 || true
+  echo "Stopped and disabled legacy export units $LEGACY_TIMER and $LEGACY_SERVICE."
 fi
 
 echo "Daily export timer installed."

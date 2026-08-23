@@ -119,6 +119,10 @@ function main() {
   assert.match(backupScript, /REGION="\$\{FLOW_BACKUP_COS_REGION:-\}"/);
   assert.match(backupScript, /ENDPOINT="\$\{FLOW_BACKUP_COS_ENDPOINT:-\}"/);
   assert.ok(backupScript.includes('flock -n'));
+  assert.ok(backupScript.includes('FLOW_BACKUP_FORCE_RUN'));
+  assert.ok(backupScript.includes('RUN_DATE_CST'));
+  assert.ok(backupScript.includes('.daily-export-${RUN_DATE_CST}.done'));
+  assert.ok(backupScript.includes('already completed; skipping duplicate trigger'));
   assert.ok(backupScript.includes('sha256sums.txt'));
   assert.ok(backupScript.includes('[REDACTED]'));
   assert.ok(backupScript.includes('FLOW_BACKUP_UPLOAD_TIMEOUT'));
@@ -138,6 +142,9 @@ function main() {
   assert.match(service, /Environment=FLOW_BACKUP_NODE_BIN=@NODE_BIN@/);
   assert.match(service, /@BACKUP_ENV_LINE@/);
   assert.match(service, /ReadWritePaths=@INSTALL_DIR@\/data/);
+  assert.doesNotMatch(service, /(?:Requires|PartOf|BindsTo)=flow-acceleration\.service/);
+  assert.doesNotMatch(service, /^After=.*flow-acceleration\.service/m);
+  assert.doesNotMatch(service, /^Restart=/m);
   assert.match(installer, /remove_legacy_cron/);
   assert.match(installer, /cos-auto-upload-export\\\.sh/);
   assert.match(installer, /has_complete_cos_config/);
@@ -148,6 +155,8 @@ function main() {
   assert.match(installer, /\.nvm\/versions\/node/);
   assert.match(installer, /s\|@NODE_DIR@\|\$NODE_DIR\|g/);
   assert.match(installer, /systemctl disable --now "\$LEGACY_TIMER"/);
+  assert.match(installer, /systemctl disable --now "\$LEGACY_SERVICE"/);
+  assert.match(installer, /systemctl stop "\$LEGACY_TIMER" "\$LEGACY_SERVICE"/);
   assert.ok(
     installer.indexOf('if [[ -z "$CONFIG_SOURCE" ]]')
       < installer.indexOf('systemctl enable --now "$CANONICAL_TIMER"'),
