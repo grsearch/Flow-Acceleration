@@ -637,6 +637,8 @@ M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_s
 
 O-C80 与 O90 都使用 Bonding Curve 固定 SOL 输入；M-C5-T12.5 仅保留历史和存量退出。滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
 
+实盘硬止损同时检查边际价格与数据流携带的储备状态。只要按整仓代币计算的可执行回收额先跌破硬止损，系统就以 `EXECUTABLE_HARD_STOP` 退出；Bonding Curve 报价还会受真实 SOL 储备上限约束。紧急退出遇到滑点或旧报价失败后按 `FLOW_LIVE_EMERGENCY_EXIT_RETRY_DELAY_MS`（默认100ms）刷新状态重试，不增加买入路径的 RPC 或延迟。
+
 已停止策略的存量仓位继续沿用各自原退出规则。O90/O-C80 在毕业后首笔可执行 PumpSwap 行情卖出50%核心仓位，剩余50%按 `+20/40/80/150/300%` 对应 `10/15/20/25/30%` 峰值回撤退出；毕业前后保留兜底与30%硬止损。最终卖出失败会按配置重试并保留 `EXIT_FAILED`，防止同 Mint 再开仓；紧急开关和单策略停开都只阻止新开仓，不阻止存量退出。
 
 买入交易如果已经获得签名，程序会区分“链上明确失败”和“RPC确认状态未知”。链上明确失败直接记录为 `ENTRY_FAILED`，不会尝试卖出；状态未知时同时查询签名历史、确认交易的 `pre/postTokenBalances` 和交易钱包的Token余额。即使Token-2022 ATA尚未被RPC账户索引，只要交易回执显示钱包实际收到Token，也会按真实raw数量恢复仓位。单次余额为0或账户暂不可见只保持 `ENTRY_CONFIRMATION_UNKNOWN`，不会再误写 `ENTRY_CONFIRMED_EMPTY`，也不会盲目发送卖出。若签名明确因区块高度过期，并且等待 `FLOW_LIVE_EXPIRED_ENTRY_RELEASE_MS`（默认10分钟）后签名历史、交易回执与Token收款仍全部不可见，程序才会将其标记为 `ENTRY_EXPIRED_UNOBSERVED` 并释放并发槽；其余任何歧义状态继续保留等待人工/重启复核。服务重启时也会自动重新核对未知仓位，以及旧版本曾误关的 `ENTRY_CONFIRMED_EMPTY` 仓位；恢复成功且已超过持仓兜底时间时会立即进入正常卖出流程。

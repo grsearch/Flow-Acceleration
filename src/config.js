@@ -383,6 +383,11 @@ const config = {
     maxHoldMs: 15_000,
     exitRetryCount: integerEnv('FLOW_LIVE_EXIT_RETRY_COUNT', 10, { min: 0, max: 60 }),
     exitRetryDelayMs: integerEnv('FLOW_LIVE_EXIT_RETRY_DELAY_MS', 1_000, { min: 100 }),
+    emergencyExitRetryDelayMs: integerEnv(
+      'FLOW_LIVE_EMERGENCY_EXIT_RETRY_DELAY_MS',
+      100,
+      { min: 25, max: 1_000 },
+    ),
     entryReconcileCount: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_COUNT', 5, {
       min: 1,
       max: 30,

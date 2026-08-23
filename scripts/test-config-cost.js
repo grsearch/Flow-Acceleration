@@ -178,6 +178,7 @@ assert.strictEqual(config.liveTrading.strategies
   .find((strategy) => strategy.id === 'post_gd25_35_xleg').entryEnabled, false);
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);
 assert.strictEqual(config.liveTrading.sellSlippagePct, 15);
+assert.strictEqual(config.liveTrading.emergencyExitRetryDelayMs, 100);
 assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
 assert.strictEqual(config.liveTrading.expiredEntryReleaseMs, 10 * 60_000);
 assert.strictEqual(config.liveTrading.readCommitment, 'processed');

@@ -1,6 +1,7 @@
 'use strict';
 
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const { executableSell } = require('./ShadowExecutionModel');
 
 const fs = require('fs');
 const path = require('path');
@@ -73,6 +74,24 @@ function restoredPosition(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function rawTokenUnits(value) {
+  try {
+    const raw = BigInt(value || 0);
+    return raw > 0n ? Number(raw) / 1e6 : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function rawSol(value) {
+  try {
+    const raw = BigInt(value || 0);
+    return raw >= 0n ? Number(raw) / 1e9 : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 class LiveTradingManager {
@@ -406,6 +425,22 @@ class LiveTradingManager {
         position.graduatedAt = position.graduatedAt || graduatedAt;
         if (observedTrade.market !== 'PUMP_AMM'
           || observedTrade.timestampMs < graduatedAt) return;
+        position.lastObservedPrice = observedTrade.price;
+        const highest = Math.max(Number(position.highestPrice) || 0, observedTrade.price);
+        if (highest !== position.highestPrice) {
+          position.highestPrice = highest;
+          this.store.updateLivePosition(position.id, { highestPrice: highest });
+        }
+        const immediateStop = this._immediateHardStopReason(
+          position,
+          strategy,
+          observedTrade,
+          observedTrade.price,
+        );
+        if (immediateStop) {
+          this._requestExit(position, immediateStop, observedTrade.price);
+          return;
+        }
         this._recordGraduationGateTrade(position, observedTrade);
         const gate = this._graduationGateDecision(position, observedTrade.timestampMs);
         if (strategy.postMigrationGate) {
@@ -442,7 +477,12 @@ class LiveTradingManager {
       this.store.updateLivePosition(position.id, { highestPrice: highest });
     }
     if (!(position.entryPrice > 0)) return;
-    this._evaluatePositionExit(position, observedTrade.timestampMs, observedTrade.price);
+    this._evaluatePositionExit(
+      position,
+      observedTrade.timestampMs,
+      observedTrade.price,
+      observedTrade,
+    );
   }
 
   advanceTime(now = this.now()) {
@@ -1240,7 +1280,7 @@ class LiveTradingManager {
     this.timers.set(position.id, timer);
   }
 
-  _evaluatePositionExit(position, timestampMs, price) {
+  _evaluatePositionExit(position, timestampMs, price, trade = null) {
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     if (!strategy || position.status !== 'OPEN' || !(position.entryPrice > 0) || !(price > 0)) return;
     const ageMs = timestampMs - position.openedAt;
@@ -1248,6 +1288,11 @@ class LiveTradingManager {
     const peakReturnPct = ((position.highestPrice / position.entryPrice) - 1) * 100;
     const drawdownPct = ((price / position.highestPrice) - 1) * -100;
     let reason = null;
+    const immediateStop = this._immediateHardStopReason(position, strategy, trade, price);
+    if (immediateStop) {
+      this._requestExit(position, immediateStop, price);
+      return;
+    }
     if (strategy.exitMode === 'FIXED_HOLD') {
       if (strategy.hardStopPct > 0 && grossReturnPct <= -strategy.hardStopPct) {
         reason = 'HARD_STOP';
@@ -1354,6 +1399,59 @@ class LiveTradingManager {
       && grossReturnPct < 0) reason = 'LOSS_CHECK';
     if (!reason && ageMs >= strategy.maxHoldMs) reason = 'MAX_HOLD';
     if (reason) this._requestExit(position, reason, price);
+  }
+
+  _executableExitRisk(position, strategy, trade, markPrice) {
+    if (!trade || position.coreExited || !(strategy?.hardStopPct > 0)) return null;
+    const tokenUnits = rawTokenUnits(position.tokenAmountRaw);
+    const entrySol = Number(position.positionSol);
+    if (!(tokenUnits > 0) || !(entrySol > 0)) return null;
+    const markReturnPct = ((markPrice / position.entryPrice) - 1) * 100;
+    const quote = executableSell(trade, tokenUnits, markPrice, { rugMarkReturnPct: markReturnPct });
+    if (!quote.available || !(quote.proceedsSol >= 0)) return null;
+    let proceedsSol = quote.proceedsSol;
+    // Pump bonding-curve events expose both virtual pricing reserves and the
+    // actual SOL available to sellers. The virtual constant-product quote can
+    // otherwise materially overstate recovery during a liquidity collapse.
+    if (trade.market === 'PUMP_BONDING_CURVE'
+      && trade.realSolReservesRaw !== undefined
+      && trade.realSolReservesRaw !== null) {
+      const realSolAvailable = rawSol(trade.realSolReservesRaw);
+      if (realSolAvailable !== null) proceedsSol = Math.min(proceedsSol, realSolAvailable);
+    }
+    return {
+      returnPct: ((proceedsSol / entrySol) - 1) * 100,
+      proceedsSol,
+      impactPct: quote.impactPct,
+      reserveSource: quote.reserveSource,
+    };
+  }
+
+  _immediateHardStopReason(position, strategy, trade, markPrice) {
+    if (!(strategy?.hardStopPct > 0) || !(position.entryPrice > 0) || !(markPrice > 0)) {
+      return null;
+    }
+    const executableRisk = this._executableExitRisk(position, strategy, trade, markPrice);
+    if (executableRisk && executableRisk.returnPct <= -strategy.hardStopPct) {
+      position.lastExecutableReturnPct = executableRisk.returnPct;
+      position.lastExecutableProceedsSol = executableRisk.proceedsSol;
+      position.lastExecutableQuoteAt = Number(trade?.timestampMs) || this.now();
+      return 'EXECUTABLE_HARD_STOP';
+    }
+    const markReturnPct = ((markPrice / position.entryPrice) - 1) * 100;
+    return markReturnPct <= -strategy.hardStopPct ? 'HARD_STOP' : null;
+  }
+
+  _exitRetryDelay(reason, attempt) {
+    const normalDelay = Math.max(0, Number(this.config.exitRetryDelayMs) || 0);
+    if (!/HARD_STOP|RUG/i.test(String(reason || ''))) return normalDelay;
+    const emergencyBase = Math.max(
+      0,
+      Number(this.config.emergencyExitRetryDelayMs) || Math.min(normalDelay, 100),
+    );
+    // Retry the first stale/slippage quote almost immediately, while applying
+    // a short linear backoff so repeated RPC failures cannot form a hot loop.
+    return Math.min(normalDelay, emergencyBase * Math.max(1, Number(attempt) || 1));
   }
 
   _qualityProtectedFloor(strategy, peakReturnPct) {
@@ -1579,7 +1677,10 @@ class LiveTradingManager {
             exitError: incompleteReason,
           });
           if (attempt < attempts) {
-            await new Promise((resolve) => setTimeout(resolve, this.config.exitRetryDelayMs));
+            await new Promise((resolve) => setTimeout(
+              resolve,
+              this._exitRetryDelay(reason, attempt),
+            ));
           }
           continue;
         }
@@ -1638,7 +1739,10 @@ class LiveTradingManager {
           }));
         }
         if (attempt < attempts) {
-          await new Promise((resolve) => setTimeout(resolve, this.config.exitRetryDelayMs));
+          await new Promise((resolve) => setTimeout(
+            resolve,
+            this._exitRetryDelay(reason, attempt),
+          ));
         }
       }
     }

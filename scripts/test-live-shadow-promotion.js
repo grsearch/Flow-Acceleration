@@ -360,6 +360,77 @@ async function main() {
   assert.ok(o90Dashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'),
     'passing the five-second gate releases the 50% core exit');
 
+  const executableStopMint = 'o90-executable-stop-mint';
+  store.recordCreate({
+    mint: executableStopMint, symbol: 'O90X', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[7].id, episodeId: 'o90-executable:1', mint: executableStopMint,
+    symbol: 'O90X', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { entryProfileId: 'O90_M5_STAIR120' },
+  });
+  await waitForQueue();
+  now += 100;
+  manager.observeTrade({
+    mint: executableStopMint,
+    market: 'PUMP_BONDING_CURVE',
+    price: 0.9,
+    reservePrice: 1,
+    virtualTokenReservesRaw: '100000',
+    virtualSolReservesRaw: '100000000',
+    realSolReservesRaw: '20000000',
+    timestampMs: now,
+  });
+  await waitForQueue();
+  const executableStopPosition = store.liveTradingDashboard({
+    strategyId: strategies[7].id,
+  }).positions.find((position) => position.mint === executableStopMint);
+  assert.strictEqual(executableStopPosition.status, 'CLOSED');
+  assert.strictEqual(executableStopPosition.exit_reason, 'EXECUTABLE_HARD_STOP',
+    'full-position reserve recovery must stop before the marginal mark reaches hard stop');
+
+  const gateStopMint = 'o90-gate-stop-mint';
+  store.recordCreate({
+    mint: gateStopMint, symbol: 'O90G', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[7].id, episodeId: 'o90-gate-stop:1', mint: gateStopMint,
+    symbol: 'O90G', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { entryProfileId: 'O90_M5_STAIR120' },
+  });
+  await waitForQueue();
+  const gateStopGraduatedAt = now + 100;
+  store.recordComplete({
+    mint: gateStopMint,
+    completedAt: gateStopGraduatedAt,
+    timestampMs: gateStopGraduatedAt,
+  });
+  manager.onGraduated(store.getToken(gateStopMint));
+  now = gateStopGraduatedAt + 100;
+  manager.observeTrade({
+    mint: gateStopMint,
+    market: 'PUMP_AMM',
+    side: 'SELL',
+    wallet: 'gate-rug-seller',
+    solAmount: 1,
+    signature: 'gate-rug-sell',
+    price: 0.6,
+    timestampMs: now,
+  });
+  await waitForQueue();
+  const gateStopPosition = store.liveTradingDashboard({
+    strategyId: strategies[7].id,
+  }).positions.find((position) => position.mint === gateStopMint);
+  assert.strictEqual(gateStopPosition.status, 'CLOSED');
+  assert.strictEqual(gateStopPosition.exit_reason, 'HARD_STOP',
+    'post-migration gate waiting must never suppress the hard stop');
+
   const taxonomyStrategyId = 'entry_failure_taxonomy_test';
   const migrated = store.createLivePosition({
     strategyId: taxonomyStrategyId, mint: 'taxonomy-migrated', mode: 'LIVE',
