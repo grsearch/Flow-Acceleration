@@ -372,6 +372,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
               <b><span class="strategy-code">SR-R0/R1/R2/R3</span>Smart 多钱包共振右尾</b><small>第二/第三个不同钱包确认后入场；硬止损 + 60–240秒固定持有</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-wallet-rug-escape" data-strategy-code="SWRE-B/E/G">
+              <b><span class="strategy-code">SWRE-B/E/G</span>Smart 首仓快速 RUG 逃生</b><small>只研究首次 OPEN；30秒基准 / 10秒紧急退出 / 合成拉盘过滤</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="public-flow-lead" data-strategy-code="PFL-B0/B1/A1/R1">
               <b><span class="strategy-code">PFL-B0/B1/A1/R1</span>Public Flow Lead（已停）</b><small>长期负收益，历史数据保留</small>
             </button>
@@ -797,6 +800,32 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint / 触发钱包</th><th>共振</th><th>AGE / Curve</th><th>公共 Buyers / Flow / Top1</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="smart-resonance-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="smart-wallet-rug-escape" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Smart Wallet Rug Escape Shadow SWRE</h2>
+                <p>只跟踪监控钱包第一次 OPEN，忽略 ADD；只使用内存中的公共成交与现有 RUG 快照，不新增 RPC、不签名、不发送交易。</p>
+              </div>
+              <div class="strategy-expression" id="smart-wallet-rug-escape-expression">BASE_T30 / EE10 / SRG_EE10：固定30秒对照、10秒紧急退出、合成拉盘前置过滤</div>
+              <div class="strategy-metric-groups" id="smart-wallet-rug-escape-metrics"></div>
+              <div class="section-title"><h2>市场 × 逃生组统计</h2><p>未来 RUG、提前逃生与被套率分别统计 Bonding Curve 和 PumpSwap；不同价格尺度绝不混算。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>市场 / 组别</th><th>信号 / 入场</th><th>未来RUG率</th><th>提前逃生率</th><th>被套RUG率</th><th>逃生领先</th><th>平均收益 / 胜率</th><th>Guard避开</th></tr></thead>
+                <tbody id="smart-wallet-rug-escape-group-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>监控钱包质量</h2><p>按首次 OPEN 统计未来30秒快速崩盘率；不把二次小额加仓当作独立机会。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>钱包</th><th>首次OPEN</th><th>未来RUG</th><th>未来RUG率</th><th>30秒基准收益</th></tr></thead>
+                <tbody id="smart-wallet-rug-escape-wallet-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近前向样本</h2><p>紧急退出必须在崩盘标签之前触发；重启未完成样本记为删失，不伪造亏损。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Smart OPEN</th><th>组别 / 状态</th><th>Mint / 钱包</th><th>市场</th><th>信号 / 入场 / 出场</th><th>净收益</th><th>紧急原因</th><th>RUG50 / RUG70</th><th>逃生判定</th></tr></thead>
+                <tbody id="smart-wallet-rug-escape-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1492,6 +1521,34 @@
         const reason = row.exit_reason || row.rejection_reason || '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.trigger_wallet || '')}</span></td><td>${number(row.distinct_wallets)} 钱包 / ${age(row.resonance_span_ms)}<br><span class="table-note">窗口 ${age(row.resonance_window_ms)}</span></td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_5s)} / ${number(row.public_buy_flow_5s,2)} SOL / ${rate(row.largest_buyer_share_pct)}<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL · Sell ${number(row.public_sell_tx_5s)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart Resonance 模拟仓位。</td></tr>';
+    }
+
+    function renderSmartWalletRugEscapeShadow(data) {
+      const runtime = data.health || {};
+      const strategy = data.strategy || {};
+      const profiles = strategy.profiles || [];
+      document.querySelector('#smart-wallet-rug-escape-expression').textContent = `${profiles.map(row => row.id).join(' / ')}：首次 Smart OPEN 后 ${age(strategy.emergencyWindowMs)} 内检测大卖单、净流翻负、买家停滞或快速崩盘；未来 ${age(strategy.labelHorizonMs)} 只作 RUG 标签。`;
+      renderMetricGroups('#smart-wallet-rug-escape-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW SWRE' : '关闭', '前向标签 · 独立表 · 永不发链'],
+        ['首次OPEN / 忽略ADD', `${number(runtime.firstOpens)} / ${number(runtime.ignoredAdds)}`, `Smart事件 ${number(runtime.smartEvents)} · 仅首次机会`],
+        ['活动 Episode / Mint', `${number(runtime.activeEpisodes)} / ${number(runtime.trackedMints)}`, `累计入场 ${number(runtime.entries)} · 样本行 ${number(runtime.rowsCreated)}`],
+        ['紧急触发 / 合成过滤', `${number(runtime.emergencyTriggers)} / ${number(runtime.guardBlocked)}`, `已关 ${number(runtime.closes)} · 额外RPC 无`],
+      ], []);
+      const groups = data.groups || [];
+      document.querySelector('#smart-wallet-rug-escape-group-rows').innerHTML = groups.length ? groups.map(row => (
+        `<tr><td><b>${escapeHtml(row.market || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.cohort_id)}</span></td><td>${number(row.signals)} / ${number(row.entries)}<br><span class="table-note">关闭 ${number(row.closed)} · 不入场 ${number(row.no_entry)}</span></td><td>${rate(row.future_rug_rate_pct)}<br><span class="table-note">${number(row.future_rugs)} 笔</span></td><td>${rate(row.escape_rate_pct)}<br><span class="table-note">${number(row.escaped_before_rug)} 笔</span></td><td>${rate(row.caught_rug_rate_pct)}<br><span class="table-note">${number(row.caught_rug)} 笔</span></td><td>${age(row.median_escape_lead_ms)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${rate(row.win_rate_pct)}</td><td>${number(row.guard_avoided_rug)}</td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待首次 Smart OPEN 前向样本。</td></tr>';
+      const wallets = data.walletStats || [];
+      document.querySelector('#smart-wallet-rug-escape-wallet-rows').innerHTML = wallets.length ? wallets.map(row => (
+        `<tr><td class="wrap-cell">${escapeHtml(row.smart_wallet)}</td><td>${number(row.first_opens)}</td><td>${number(row.future_rugs)}</td><td>${rate(row.future_rug_rate_pct)}</td><td class="${tone(row.baseline_average_net_return_pct)}">${pct(row.baseline_average_net_return_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="5" class="empty">等待钱包质量样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#smart-wallet-rug-escape-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.emergency_reason || row.exit_reason || row.rejection_reason || '—';
+        const rugs = `${row.rug50_at ? age(row.rug50_at - row.signal_at) : '—'} / ${row.rug70_at ? age(row.rug70_at - row.signal_at) : '—'}`;
+        const verdict = row.guard_avoided_rug ? 'GUARD避开' : row.escaped_before_rug ? '提前逃生' : row.caught_rug ? '被套RUG' : '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.cohort_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.smart_wallet || '')}</span></td><td>${escapeHtml(row.market || 'UNKNOWN')}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}</td><td class="wrap-cell">${escapeHtml(reason)}</td><td>${rugs}</td><td>${escapeHtml(verdict)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart RUG Escape 前向样本。</td></tr>';
     }
 
     function renderPublicFlowLeadShadow(data) {
@@ -2540,6 +2597,9 @@
         ],
         'smart-resonance': requestContext => [
           loadDashboard('/api/smart-resonance-shadow?positionLimit=50', renderSmartResonanceShadow, requestContext),
+        ],
+        'smart-wallet-rug-escape': requestContext => [
+          loadDashboard('/api/smart-wallet-rug-escape-shadow?positionLimit=50', renderSmartWalletRugEscapeShadow, requestContext),
         ],
         'public-flow-lead': requestContext => [
           loadDashboard('/api/public-flow-lead-shadow?positionLimit=50', renderPublicFlowLeadShadow, requestContext),

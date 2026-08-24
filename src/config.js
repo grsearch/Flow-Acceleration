@@ -1800,6 +1800,111 @@ const config = {
     }),
   },
 
+  // Forward-only study of why monitored Smart Wallet first entries avoid rapid
+  // collapses. It never follows ADD events and never changes a live decision.
+  // Every OPEN creates an unguarded fixed-hold control, a causal 10-second
+  // emergency-exit cohort, and an isolated synthetic-ramp guard cohort.
+  smartWalletRugEscapeShadow: {
+    enabled: booleanEnv('FLOW_SMART_WALLET_RUG_ESCAPE_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_WALLET_RUG_ESCAPE_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_EXIT_TIMEOUT_MS', 2_000, { min: 1 }),
+    emergencyWindowMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_EMERGENCY_WINDOW_MS', 10_000, {
+      min: 1_000,
+    }),
+    emergencyRecentFlowMs: integerEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_RECENT_FLOW_MS',
+      1_000,
+      { min: 250 },
+    ),
+    labelHorizonMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_LABEL_HORIZON_MS', 30_000, {
+      min: 10_000,
+    }),
+    minLargeSellSol: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_MIN_LARGE_SELL_SOL', 1, {
+      min: 0,
+    }),
+    minSellBuyFlowRatio: numberEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_MIN_SELL_BUY_FLOW_RATIO',
+      0.35,
+      { min: 0, max: 10 },
+    ),
+    flowFlipNetSol: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_FLOW_FLIP_SOL', -1, {
+      max: 0,
+    }),
+    buyerStallMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_BUYER_STALL_MS', 1_500, {
+      min: 250,
+    }),
+    minBuyersBeforeStall: integerEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_MIN_BUYERS_BEFORE_STALL',
+      3,
+      { min: 1 },
+    ),
+    fastDropPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_FAST_DROP_PCT', 15, {
+      min: 1, max: 100,
+    }),
+    rug50Pct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_RUG50_PCT', 50, {
+      min: 1, max: 100,
+    }),
+    rug70Pct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_RUG70_PCT', 70, {
+      min: 1, max: 100,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_MAX_ENTRY_JUMP_PCT', 20, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_MAX_ENTRY_DROP_PCT', 30, {
+      min: 0, max: 100,
+    }),
+    syntheticMinFlags: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_FLAGS', 2, {
+      min: 1,
+    }),
+    syntheticMinRunupPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_RUNUP_PCT', 25),
+    syntheticMinBuySharePct: numberEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_BUY_SHARE_PCT',
+      80,
+      { min: 0, max: 100 },
+    ),
+    syntheticMaxAlternationPct: numberEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MAX_ALTERNATION_PCT',
+      20,
+      { min: 0, max: 100 },
+    ),
+    syntheticMinConsecutiveBuys: integerEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_CONSECUTIVE_BUYS',
+      8,
+      { min: 1 },
+    ),
+    syntheticMinRepeatedSizePct: numberEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_REPEATED_SIZE_PCT',
+      35,
+      { min: 0, max: 100 },
+    ),
+    syntheticMinWalletSharePct: numberEnv(
+      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_WALLET_SHARE_PCT',
+      35,
+      { min: 0, max: 100 },
+    ),
+    profiles: [
+      {
+        id: 'BASE_T30', label: 'First OPEN · fixed 30s control',
+        syntheticGuard: false, emergencyExit: false, holdMs: 30_000,
+      },
+      {
+        id: 'EE10', label: 'First OPEN · 10s causal emergency escape',
+        syntheticGuard: false, emergencyExit: true, holdMs: 30_000,
+      },
+      {
+        id: 'SRG_EE10', label: 'Synthetic ramp guard + 10s emergency escape',
+        syntheticGuard: true, emergencyExit: true, holdMs: 30_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_WALLET_RUG_ESCAPE_POSITION_SOL'),
+    }),
+  },
+
   // Public-order-flow lead study derived from the pre-buy structure observed
   // around profitable Smart Wallet entries. Entry never waits for or consumes a
   // Smart Wallet event. A later Smart OPEN is stored only as a future label;

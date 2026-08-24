@@ -15,6 +15,9 @@ const { SmartLikeEarlyShadowSuite } = require('./core/SmartLikeEarlyShadowSuite'
 const {
   SmartResonanceRightTailShadowSuite,
 } = require('./core/SmartResonanceRightTailShadowSuite');
+const {
+  SmartWalletRugEscapeShadowSuite,
+} = require('./core/SmartWalletRugEscapeShadowSuite');
 const { PublicFlowLeadShadowSuite } = require('./core/PublicFlowLeadShadowSuite');
 const { CyaSlotFlowShadowSuite } = require('./core/CyaSlotFlowShadowSuite');
 const {
@@ -134,6 +137,12 @@ function createRuntime(runtimeConfig = config) {
     rugRiskTracker: preEntryRugRisk,
   });
   smartResonanceShadow.start();
+  const smartWalletRugEscapeShadow = new SmartWalletRugEscapeShadowSuite({
+    config: runtimeConfig.smartWalletRugEscapeShadow,
+    store,
+    rugRiskTracker: preEntryRugRisk,
+  });
+  smartWalletRugEscapeShadow.start();
   const publicFlowLeadShadow = new PublicFlowLeadShadowSuite({
     config: {
       ...runtimeConfig.publicFlowLeadShadow,
@@ -260,6 +269,7 @@ function createRuntime(runtimeConfig = config) {
     smartLikeEarlyShadow,
     preEntryRugRisk,
     smartResonanceShadow,
+    smartWalletRugEscapeShadow,
     publicFlowLeadShadow,
     cyaSlotFlowShadow,
     sameSlotDumpBackrunShadow,
@@ -324,6 +334,7 @@ function createRuntime(runtimeConfig = config) {
       ...cyaEarlyPyramidShadow.trackedMints(),
       ...smartLikeEarlyShadow.trackedMints(),
       ...smartResonanceShadow.trackedMints(),
+      ...smartWalletRugEscapeShadow.trackedMints(),
       ...publicFlowLeadShadow.trackedMints(),
       ...cyaSlotFlowShadow.trackedMints(),
       ...sameSlotDumpBackrunShadow.trackedMints(now),
@@ -489,6 +500,9 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('preEntryRugRisk', () => preEntryRugRisk.observeTrade(trade));
         observeShadow('smartLikeEarly', () => smartLikeEarlyShadow.observeTrade(trade));
         observeShadow('smartResonance', () => smartResonanceShadow.observeTrade(trade));
+        observeShadow('smartWalletRugEscape', () => (
+          smartWalletRugEscapeShadow.observeTrade(trade)
+        ));
         observeShadow('publicFlowLead', () => publicFlowLeadShadow.observeTrade(trade));
         observeShadow('cyaSlotFlow', () => cyaSlotFlowShadow.observeTrade(trade));
         observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
@@ -527,6 +541,9 @@ function createRuntime(runtimeConfig = config) {
             ));
             observeShadow('smartResonanceEvent', () => (
               smartResonanceShadow.onSmartWalletEvent(normalizedSmartEvent)
+            ));
+            observeShadow('smartWalletRugEscapeEvent', () => (
+              smartWalletRugEscapeShadow.onSmartWalletEvent(normalizedSmartEvent)
             ));
             observeShadow('publicFlowLeadLabel', () => (
               publicFlowLeadShadow.onSmartWalletEvent(normalizedSmartEvent)
@@ -708,6 +725,7 @@ function createRuntime(runtimeConfig = config) {
         ['smartLikeEarlyAdvance', smartLikeEarlyShadow],
         ['preEntryRugRiskAdvance', preEntryRugRisk],
         ['smartResonanceAdvance', smartResonanceShadow],
+        ['smartWalletRugEscapeAdvance', smartWalletRugEscapeShadow],
         ['publicFlowLeadAdvance', publicFlowLeadShadow],
         ['cyaSlotFlowAdvance', cyaSlotFlowShadow],
         ['sameSlotDumpBackrunAdvance', sameSlotDumpBackrunShadow],
@@ -775,6 +793,7 @@ function createRuntime(runtimeConfig = config) {
     smartLikeEarlyShadow.stop();
     preEntryRugRisk.stop();
     smartResonanceShadow.stop();
+    smartWalletRugEscapeShadow.stop();
     publicFlowLeadShadow.stop();
     cyaSlotFlowShadow.stop();
     sameSlotDumpBackrunShadow.stop();
@@ -812,6 +831,7 @@ function createRuntime(runtimeConfig = config) {
       smartLikeEarlyShadow: smartLikeEarlyShadow.health(),
       preEntryRugRisk: preEntryRugRisk.health(),
       smartResonanceShadow: smartResonanceShadow.health(),
+      smartWalletRugEscapeShadow: smartWalletRugEscapeShadow.health(),
       publicFlowLeadShadow: publicFlowLeadShadow.health(),
       cyaSlotFlowShadow: cyaSlotFlowShadow.health(),
       sameSlotDumpBackrunShadow: sameSlotDumpBackrunShadow.health(),
@@ -835,7 +855,8 @@ function createRuntime(runtimeConfig = config) {
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
-    smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow, publicFlowLeadShadow,
+    smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow,
+    smartWalletRugEscapeShadow, publicFlowLeadShadow,
     cyaSlotFlowShadow,
     sameSlotDumpBackrunShadow,
     launchPullbackShadow,
