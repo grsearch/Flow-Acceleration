@@ -109,6 +109,15 @@ function curveBuyAveragePrice(trade, positionSol, fallbackPrice) {
   }
 }
 
+function hasCurveReserves(trade) {
+  try {
+    return BigInt(trade?.virtualSolReservesRaw || 0) > 0n
+      && BigInt(trade?.virtualTokenReservesRaw || 0) > 0n;
+  } catch (_) {
+    return false;
+  }
+}
+
 function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
   try {
     const base = BigInt(trade.poolBaseReservesRaw || 0);
@@ -116,18 +125,18 @@ function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
       + BigInt(trade.virtualQuoteReservesRaw || 0);
     const input = BigInt(Math.max(1, Math.round(positionSol * 1e9)));
     if (base <= 0n || quote <= 0n) {
-      return { price: fallbackPrice, impactPct: null };
+      return { price: fallbackPrice, impactPct: null, available: false };
     }
     const tokensOutRaw = (base * input) / (quote + input);
     const tokenUnits = Number(tokensOutRaw) / 1e6;
     const spotPrice = (Number(quote) / 1e9) / (Number(base) / 1e6);
     if (!(tokenUnits > 0) || !(spotPrice > 0)) {
-      return { price: fallbackPrice, impactPct: null };
+      return { price: fallbackPrice, impactPct: null, available: false };
     }
     const price = positionSol / tokenUnits;
-    return { price, impactPct: ((price / spotPrice) - 1) * 100 };
+    return { price, impactPct: ((price / spotPrice) - 1) * 100, available: true };
   } catch (_) {
-    return { price: fallbackPrice, impactPct: null };
+    return { price: fallbackPrice, impactPct: null, available: false };
   }
 }
 
@@ -160,6 +169,8 @@ class GraduationAccelerationShadowSuite {
       postMigrationGateFailed: 0,
       migrationHandoffPassed: 0,
       migrationHandoffRejected: 0,
+      relaxedJumpBandPassed: 0,
+      relaxedJumpBandRejected: 0,
       runnerExits: 0,
       closed: 0,
       noExit: 0,
@@ -226,6 +237,9 @@ class GraduationAccelerationShadowSuite {
         research: {
           isolatedTable: 'graduation_acceleration_shadow_positions',
           capacityAwareBondingCurveEntry: true,
+          relaxedEntryShadowOnly: true,
+          relaxedEntryCapacitySols: [...new Set([...this.entryProfiles.values()]
+            .flatMap((profile) => profile.capacitySols || []))],
           noExitPricedAsLoss: false,
           sendsTransactions: false,
         },
@@ -274,10 +288,12 @@ class GraduationAccelerationShadowSuite {
         const profile = this.entryProfiles.get(pending.entryProfileId);
         if (profile?.migrationHandoff) {
           const windowMs = finite(profile.postMigrationEntryGate?.windowMs, 5_000);
+          const handoffDelayMs = finite(profile.postMigrationEntryGate?.entryDelayMs, windowMs);
+          const entryTimeoutMs = finite(profile.entryTimeoutMs, this.config.entryTimeoutMs);
           pending.graduatedAt = pending.graduatedAt > 0
             ? Math.min(pending.graduatedAt, graduatedAt) : graduatedAt;
-          pending.entryTargetAt = pending.graduatedAt + windowMs;
-          pending.entryDeadlineAt = pending.entryTargetAt + this.config.entryTimeoutMs;
+          pending.entryTargetAt = pending.graduatedAt + handoffDelayMs;
+          pending.entryDeadlineAt = pending.entryTargetAt + entryTimeoutMs;
           this.store.updateGraduationAccelerationShadowPosition(id, {
             graduatedAt: pending.graduatedAt,
             entryTargetAt: pending.entryTargetAt,
@@ -364,9 +380,14 @@ class GraduationAccelerationShadowSuite {
     if (!this.config.enabled) return;
     for (const pending of [...this.pendingEntries.values()]) {
       if (now <= pending.entryDeadlineAt) continue;
+      const profile = this.entryProfiles.get(pending.entryProfileId);
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
         status: STATUS.NO_ENTRY,
-        rejectionReason: 'NO_CURVE_TRADE_IN_ENTRY_WINDOW',
+        rejectionReason: profile?.migrationHandoff
+          ? 'NO_PUMPSWAP_TRADE_IN_HANDOFF_WINDOW'
+          : profile?.entryPriceJumpBand
+            ? 'NO_CURVE_TRADE_FOR_JUMP_BAND'
+            : 'NO_CURVE_TRADE_IN_ENTRY_WINDOW',
       });
       this.pendingEntries.delete(pending.id);
       this._unindex(pending);
@@ -608,15 +629,21 @@ class GraduationAccelerationShadowSuite {
         this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
       }
     }
-    for (const positionSol of this.capacitySols) {
+    const profileCapacitySols = [...new Set((profile.capacitySols || this.capacitySols)
+      .map(Number).filter((value) => Number.isFinite(value) && value > 0))];
+    const entryDelayMs = finite(profile.entryDelayMs, this.config.entryDelayMs);
+    const entryTimeoutMs = finite(profile.entryTimeoutMs, this.config.entryTimeoutMs);
+    for (const positionSol of profileCapacitySols) {
       const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: positionSol });
       const cohortId = `${profile.id}:${capacityId(positionSol)}`;
       const handoffWindowMs = profile.migrationHandoff
         ? finite(profile.postMigrationEntryGate?.windowMs, 5_000) : 0;
+      const handoffDelayMs = profile.migrationHandoff
+        ? finite(profile.postMigrationEntryGate?.entryDelayMs, handoffWindowMs) : 0;
       const initialDeadlineAt = profile.migrationHandoff
         ? trade.timestampMs + this.config.maxPreGraduationHoldMs
-          + handoffWindowMs + this.config.entryTimeoutMs
-        : trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs;
+          + handoffDelayMs + entryTimeoutMs
+        : trade.timestampMs + entryDelayMs + entryTimeoutMs;
       const saved = this.store.createGraduationAccelerationShadowPosition({
         cohortId,
         episodeId,
@@ -631,7 +658,7 @@ class GraduationAccelerationShadowSuite {
         signalPrice: price,
         signalCurvePct: finite(trade.curvePct),
         features,
-        entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
+        entryTargetAt: trade.timestampMs + entryDelayMs,
         entryDeadlineAt: initialDeadlineAt,
         coreWeightPct: profile.coreExitPct ?? this.config.coreExitPct,
       });
@@ -675,17 +702,65 @@ class GraduationAccelerationShadowSuite {
         }
         const fillPrice = curveBuyAveragePrice(trade, pending.positionSol, price);
         const jumpPct = ((fillPrice / pending.signalPrice) - 1) * 100;
-        if (jumpPct > this.config.maxEntryPriceJumpPct) {
+        const jumpBand = profile?.entryPriceJumpBand;
+        if (jumpBand && !hasCurveReserves(trade)) {
+          this.store.updateGraduationAccelerationShadowPosition(id, {
+            status: STATUS.NO_ENTRY,
+            rejectionReason: 'ENTRY_JUMP_RESERVES_UNAVAILABLE',
+          });
+          this.pendingEntries.delete(id);
+          this._unindex(pending);
+          this.metrics.noEntry += 1;
+          this.metrics.relaxedJumpBandRejected += 1;
+          continue;
+        }
+        const maxEntryPriceJumpPct = jumpBand
+          ? finite(jumpBand.maxPct, this.config.maxEntryPriceJumpPct)
+          : finite(profile?.maxEntryPriceJumpPct, this.config.maxEntryPriceJumpPct);
+        if (jumpBand && jumpPct < finite(jumpBand.minPct, 0)) {
+          this.store.updateGraduationAccelerationShadowPosition(id, {
+            status: STATUS.NO_ENTRY,
+            rejectionReason: `ENTRY_JUMP_BELOW_BAND_${jumpPct.toFixed(2)}PCT`,
+            entryJumpPct: jumpPct,
+            entryImpactPct: ((fillPrice / price) - 1) * 100,
+          });
+          this.pendingEntries.delete(id);
+          this._unindex(pending);
+          this.metrics.noEntry += 1;
+          this.metrics.relaxedJumpBandRejected += 1;
+          continue;
+        }
+        if (jumpPct > maxEntryPriceJumpPct) {
           this.store.updateGraduationAccelerationShadowPosition(id, {
             status: STATUS.PRICE_JUMP,
-            rejectionReason: `ENTRY_PRICE_JUMP_${jumpPct.toFixed(2)}PCT`,
+            rejectionReason: jumpBand
+              ? `ENTRY_JUMP_ABOVE_BAND_${jumpPct.toFixed(2)}PCT`
+              : `ENTRY_PRICE_JUMP_${jumpPct.toFixed(2)}PCT`,
             entryJumpPct: jumpPct,
             entryImpactPct: ((fillPrice / price) - 1) * 100,
           });
           this.pendingEntries.delete(id);
           this._unindex(pending);
           this.metrics.priceJump += 1;
+          if (jumpBand) this.metrics.relaxedJumpBandRejected += 1;
           continue;
+        }
+        if (jumpBand) {
+          const confirmation = this._postSignalJumpConfirmation(pending, jumpBand, trade);
+          if (!confirmation.passed) {
+            this.store.updateGraduationAccelerationShadowPosition(id, {
+              status: STATUS.NO_ENTRY,
+              rejectionReason: `ENTRY_JUMP_CONFIRM_FAIL_${confirmation.reason}`,
+              entryJumpPct: jumpPct,
+              entryImpactPct: ((fillPrice / price) - 1) * 100,
+            });
+            this.pendingEntries.delete(id);
+            this._unindex(pending);
+            this.metrics.noEntry += 1;
+            this.metrics.relaxedJumpBandRejected += 1;
+            continue;
+          }
+          this.metrics.relaxedJumpBandPassed += 1;
         }
         pending.status = STATUS.OPEN;
         pending.entryAt = trade.timestampMs;
@@ -834,8 +909,11 @@ class GraduationAccelerationShadowSuite {
     if (!gated.length) return;
     const graduatedAt = Math.min(...gated.map((position) => position.graduatedAt));
     const maxWindowMs = Math.max(...gated.map((position) => (
-      (this.entryProfiles.get(position.entryProfileId).postMigrationGate
-        || this.entryProfiles.get(position.entryProfileId).postMigrationEntryGate).windowMs
+      (() => {
+        const gate = this.entryProfiles.get(position.entryProfileId).postMigrationGate
+          || this.entryProfiles.get(position.entryProfileId).postMigrationEntryGate;
+        return finite(gate.captureWindowMs, gate.windowMs);
+      })()
     )));
     if (timestampMs < graduatedAt || timestampMs > graduatedAt + maxWindowMs) return;
     const rows = this.postMigrationTrades.get(trade.mint) || [];
@@ -887,6 +965,17 @@ class GraduationAccelerationShadowSuite {
       return;
     }
     const execution = ammBuyAveragePrice(trade, pending.positionSol, price);
+    if (!execution.available) {
+      this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason: 'HANDOFF_RESERVES_UNAVAILABLE',
+      });
+      this.pendingEntries.delete(pending.id);
+      this._unindex(pending);
+      this.metrics.noEntry += 1;
+      this.metrics.migrationHandoffRejected += 1;
+      return;
+    }
     const fillPrice = execution.price;
     const referencePrice = gate.firstPrice || price;
     const marketMovePct = ((price / referencePrice) - 1) * 100;
@@ -944,8 +1033,9 @@ class GraduationAccelerationShadowSuite {
   _postMigrationEntryGateDecision(position, profile, now) {
     const gate = profile?.postMigrationEntryGate;
     if (!gate || !(position.graduatedAt > 0)) return null;
-    const evaluatedAt = position.graduatedAt + gate.windowMs;
-    if (now < evaluatedAt) return null;
+    const targetAt = position.graduatedAt + finite(gate.entryDelayMs, gate.windowMs);
+    if (now < targetAt) return null;
+    const evaluatedAt = gate.evaluateAtFill ? now : position.graduatedAt + gate.windowMs;
     const rows = (this.postMigrationTrades.get(position.mint) || []).filter((row) => (
       row.timestampMs >= position.graduatedAt && row.timestampMs <= evaluatedAt
     ));
@@ -981,6 +1071,29 @@ class GraduationAccelerationShadowSuite {
       passed: !failed,
       reason: failed?.[0] || 'PASSED',
     };
+  }
+
+  _postSignalJumpConfirmation(position, band, trade) {
+    const state = this.states.get(position.mint);
+    const priorRows = (state?.events || []).filter((row) => (
+      row.timestampMs > position.signalAt && row.timestampMs < trade.timestampMs
+    ));
+    const rows = [...priorRows, {
+      timestampMs: trade.timestampMs,
+      side: trade.side,
+      wallet: trade.wallet || null,
+      solAmount: finite(trade.solAmount, 0),
+      curvePct: finite(trade.curvePct),
+      price: shadowPrice(trade),
+    }];
+    const features = this._features(rows);
+    const checks = [
+      ['SELL_TX', features.sellTx <= finite(band.maxPostSignalSellTx, Infinity)],
+      ['BUYERS', features.buyers >= finite(band.minPostSignalBuyers, 0)],
+      ['NET_FLOW', features.netFlowSol >= finite(band.minPostSignalNetFlowSol, -Infinity)],
+    ];
+    const failed = checks.find(([, passed]) => !passed);
+    return { passed: !failed, reason: failed?.[0] || 'PASSED', ...features };
   }
 
   _postMigrationGateDecision(position, now) {
