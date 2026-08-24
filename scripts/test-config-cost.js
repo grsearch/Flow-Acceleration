@@ -676,8 +676,26 @@ assert.deepStrictEqual(
     'O90_Q70_D30_X60', 'O90_Q70_D30_STAIR120',
     'O90_DAY0818_STAIR120', 'O_C80_DAY1218_STAIR240',
     'O_C80_NIGHT0004_STAIR240', 'O_C80_EVENING2024_STAIR240',
+    'O_C80_HO0_X60', 'O_C80_HO0_X120',
+    'O_C80_HO200_X60', 'O_C80_HO200_X120',
+    'O_C80_HO500_X60', 'O_C80_HO500_X120',
+    'O_C80_J40_50_X60', 'O_C80_J40_50_X120',
+    'O_C80_J50_60_X60', 'O_C80_J50_60_X120',
+    'O_C80_J60_70_X60', 'O_C80_J60_70_X120',
   ],
 );
+const relaxedGraduationProfiles = config.graduationAccelerationShadow.entryProfiles
+  .filter((profile) => profile.studyGroup?.startsWith('O_C80_'));
+assert.strictEqual(relaxedGraduationProfiles.length, 12);
+assert.ok(relaxedGraduationProfiles.every((profile) => (
+  !profile.liveStrategyId
+  && profile.capacityAwareExit === true
+  && JSON.stringify(profile.capacitySols) === JSON.stringify([0.1, 1])
+)));
+assert.strictEqual(relaxedGraduationProfiles
+  .filter((profile) => profile.migrationHandoff).length, 6);
+assert.strictEqual(relaxedGraduationProfiles
+  .filter((profile) => profile.entryPriceJumpBand).length, 6);
 assert.ok(config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('O_C80_P'))
   .every((profile) => !profile.liveStrategyId && profile.capacityAwareExit === true));
