@@ -797,13 +797,16 @@ async function main() {
     );
     assert.deepStrictEqual(
       graduationAcceleration.runtime.entryProfiles
-        .filter((profile) => profile.id.includes('_DAY'))
+        .filter((profile) => Number.isFinite(profile.sessionStartHourCst)
+          && Number.isFinite(profile.sessionEndHourCst))
         .map((profile) => [
           profile.id, profile.sessionStartHourCst, profile.sessionEndHourCst,
         ]),
       [
         ['O90_DAY0818_STAIR120', 8, 18],
         ['O_C80_DAY1218_STAIR240', 12, 18],
+        ['O_C80_NIGHT0004_STAIR240', 0, 4],
+        ['O_C80_EVENING2024_STAIR240', 20, 24],
       ],
     );
     assert.ok(Array.isArray(graduationAcceleration.cohorts));

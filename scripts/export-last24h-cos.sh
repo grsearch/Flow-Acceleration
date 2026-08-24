@@ -13,6 +13,9 @@ REGION="${FLOW_BACKUP_COS_REGION:-}"
 ENDPOINT="${FLOW_BACKUP_COS_ENDPOINT:-}"
 PREFIX="${FLOW_BACKUP_COS_PREFIX:-flow-acceleration/daily}"
 RETENTION_DAYS="${FLOW_BACKUP_LOCAL_RETENTION_DAYS:-2}"
+MAX_LOCAL_ARCHIVES="${FLOW_BACKUP_MAX_LOCAL_ARCHIVES:-2}"
+MIN_FREE_GB="${FLOW_BACKUP_MIN_FREE_GB:-20}"
+ORPHAN_MAX_AGE_MINUTES="${FLOW_BACKUP_ORPHAN_MAX_AGE_MINUTES:-360}"
 THREADS="${FLOW_BACKUP_COS_THREADS:-4}"
 LOG_LINES="${FLOW_BACKUP_LOG_LINES:-20000}"
 EXPORT_TIMEOUT="${FLOW_BACKUP_EXPORT_TIMEOUT:-2h}"
@@ -21,7 +24,7 @@ VERIFY_TIMEOUT="${FLOW_BACKUP_VERIFY_TIMEOUT:-5m}"
 RETENTION_ENABLED="${FLOW_RETENTION_CLEANUP_ENABLED:-true}"
 RETENTION_TIMEOUT="${FLOW_RETENTION_TIMEOUT:-1h}"
 
-for required in flock tar gzip sha256sum mktemp date tail find sort xargs sed nice systemctl journalctl sleep timeout; do
+for required in flock tar gzip sha256sum mktemp date tail find sort xargs sed nice systemctl journalctl sleep timeout df awk; do
   command -v "$required" >/dev/null 2>&1 || { echo "Missing required command: $required" >&2; exit 1; }
 done
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { echo "Node.js executable not found" >&2; exit 1; }
@@ -43,11 +46,57 @@ case "$EXPORT_DIR" in
   *) echo "Refusing unsafe export directory: $EXPORT_DIR" >&2; exit 1 ;;
 esac
 
+for numeric_setting in RETENTION_DAYS MAX_LOCAL_ARCHIVES MIN_FREE_GB ORPHAN_MAX_AGE_MINUTES; do
+  value="${!numeric_setting}"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "$numeric_setting must be a non-negative integer, received: $value" >&2
+    exit 1
+  }
+done
+(( MAX_LOCAL_ARCHIVES >= 1 )) || { echo "MAX_LOCAL_ARCHIVES must be at least 1" >&2; exit 1; }
+(( MIN_FREE_GB >= 1 )) || { echo "MIN_FREE_GB must be at least 1" >&2; exit 1; }
+
 exec 9>"$EXPORT_DIR/.daily-export.lock"
 if ! flock -n 9; then
   echo "Another daily export is already running; exiting without overlap."
   exit 0
 fi
+
+cleanup_orphan_artifacts() {
+  # The lock guarantees these files cannot belong to another canonical export.
+  # Only stale, narrowly named artifacts inside the validated export directory
+  # are eligible for removal.
+  find "$EXPORT_DIR" -maxdepth 1 -type f \
+    \( -name 'flow-acceleration-last24h-*.tar.gz.tmp' \
+    -o -name 'flow-acceleration-last24h-*.tar.gz.uploaded.tmp' \) \
+    -mmin "+$ORPHAN_MAX_AGE_MINUTES" -delete
+  find "$EXPORT_DIR" -mindepth 1 -maxdepth 1 -type d \
+    -name '.stage-*' -mmin "+$ORPHAN_MAX_AGE_MINUTES" \
+    -exec rm -rf -- {} +
+  while IFS= read -r -d '' marker; do
+    [[ -f "${marker%.uploaded}" ]] || rm -f -- "$marker"
+  done < <(find "$EXPORT_DIR" -maxdepth 1 -type f \
+    -name 'flow-acceleration-last24h-*.tar.gz.uploaded' -print0)
+}
+
+prune_verified_archive_count() {
+  local item marker archive index=0
+  local -a uploaded=()
+  mapfile -d '' -t uploaded < <(find "$EXPORT_DIR" -maxdepth 1 -type f \
+    -name 'flow-acceleration-last24h-*.tar.gz.uploaded' \
+    -printf '%T@ %p\0' | sort -z -nr)
+  for item in "${uploaded[@]}"; do
+    marker="${item#* }"
+    archive="${marker%.uploaded}"
+    index=$((index + 1))
+    if (( index > MAX_LOCAL_ARCHIVES )); then
+      rm -f -- "$archive" "$archive.sha256" "$marker"
+    fi
+  done
+}
+
+cleanup_orphan_artifacts
+prune_verified_archive_count
 
 STATE_FILE="$EXPORT_DIR/last-run.env"
 RUN_DATE_CST="$(TZ=Asia/Shanghai date +%F)"
@@ -69,6 +118,19 @@ case "${FORCE_RUN,,}" in
     fi
     ;;
 esac
+
+# A duplicate trigger that has nothing to do has already exited above. Only a
+# run that would create a new multi-gigabyte archive needs the free-space gate.
+AVAILABLE_KB="$(df -Pk "$EXPORT_DIR" | awk 'NR == 2 { print $4 }')"
+REQUIRED_KB=$((MIN_FREE_GB * 1024 * 1024))
+[[ "$AVAILABLE_KB" =~ ^[0-9]+$ ]] || {
+  echo "Unable to determine free disk space for $EXPORT_DIR" >&2
+  exit 1
+}
+if (( AVAILABLE_KB < REQUIRED_KB )); then
+  echo "Refusing daily export: only $((AVAILABLE_KB / 1024 / 1024)) GiB free; FLOW_BACKUP_MIN_FREE_GB=$MIN_FREE_GB" >&2
+  exit 1
+fi
 
 STAMP="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M-CST)"
 DATE_PATH="$(TZ=Asia/Shanghai date +%Y/%m/%d)"
@@ -98,6 +160,7 @@ write_state() {
 cleanup() {
   local exit_code=$?
   rm -f -- "$COS_CONFIG"
+  rm -f -- "$ARCHIVE.tmp" "$ARCHIVE.uploaded.tmp"
   case "$STAGE" in "$EXPORT_DIR"/.stage-*) rm -rf -- "$STAGE" ;; esac
   if [[ "$SUCCESS" != "1" ]]; then
     write_state FAILED "exit=$exit_code"
@@ -196,6 +259,15 @@ write_state VERIFYING
 retry timeout --foreground "$VERIFY_TIMEOUT" "$COSCLI_BIN" -c "$COS_CONFIG" ls \
   "$REMOTE_OBJECT" >/dev/null
 
+# A per-archive marker allows count-based cleanup to delete only objects that
+# passed remote verification. Failed archives remain for diagnosis until the
+# normal age-based retention rule expires.
+{
+  printf 'REMOTE=%s\n' "$REMOTE_OBJECT"
+  printf 'VERIFIED_AT=%s\n' "$(TZ=Asia/Shanghai date --iso-8601=seconds)"
+} > "$ARCHIVE.uploaded.tmp"
+mv -f -- "$ARCHIVE.uploaded.tmp" "$ARCHIVE.uploaded"
+
 ARCHIVE_SHA="$(cut -d' ' -f1 "$SHA_FILE")"
 case "${RETENTION_ENABLED,,}" in
   1|true|yes|on)
@@ -214,10 +286,21 @@ case "${RETENTION_ENABLED,,}" in
 esac
 
 find "$EXPORT_DIR" -maxdepth 1 -type f \
-  \( -name 'flow-acceleration-last24h-*.tar.gz' -o -name 'flow-acceleration-last24h-*.tar.gz.sha256' \) \
+  \( -name 'flow-acceleration-last24h-*.tar.gz' \
+  -o -name 'flow-acceleration-last24h-*.tar.gz.sha256' \
+  -o -name 'flow-acceleration-last24h-*.tar.gz.uploaded' \) \
   -mtime "+$RETENTION_DAYS" -delete
 find "$EXPORT_DIR" -maxdepth 1 -type f -name '.daily-export-*.done' \
   -mtime "+$RETENTION_DAYS" -delete
+
+# A successful retry supersedes any earlier same-day archive. Remove those
+# local duplicates only after the current object has been verified in COS.
+RUN_DATE_COMPACT="${RUN_DATE_CST//-/}"
+for duplicate in "$EXPORT_DIR"/flow-acceleration-last24h-"$RUN_DATE_COMPACT"-*.tar.gz; do
+  [[ -f "$duplicate" && "$duplicate" != "$ARCHIVE" ]] || continue
+  rm -f -- "$duplicate" "$duplicate.sha256" "$duplicate.uploaded"
+done
+prune_verified_archive_count
 
 SUCCESS=1
 write_state DONE "sha256=$ARCHIVE_SHA retention=$RETENTION_RESULT"

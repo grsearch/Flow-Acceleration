@@ -110,7 +110,7 @@ assert.strictEqual(liveContinuityT12.exitMode, 'TRAILING');
 assert.strictEqual(liveContinuityT12.minHoldMs, 10_000);
 assert.strictEqual(liveContinuityT12.trailingActivationPct, 15);
 assert.strictEqual(liveContinuityT12.trailingStopPct, 12.5);
-assert.strictEqual(liveO90.entryEnabled, true);
+assert.strictEqual(liveO90.entryEnabled, false);
 assert.strictEqual(liveO90.positionSizeSol, 0.1);
 assert.strictEqual(liveO90.postMigrationGate.windowMs, 5_000);
 assert.strictEqual(liveO90.postMigrationGate.minBuyers, 25);
@@ -188,7 +188,7 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  ['O90-M5-STAIR120', 'O-C80-D5-B2-S0-NC'],
+  ['O-C80-D5-B2-S0-NC'],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
 assert.strictEqual(config.preEntryRugRisk.templateMinLargeBuys, 4);
@@ -363,9 +363,14 @@ assert.deepStrictEqual(
     'FO_D12_R3_10S', 'FO_D12_R3_T15',
     'FO_D12_R3_Q_10S', 'FO_D12_R3_QC_10S', 'FO_D12_R3_Q_T10_H30',
     'F2_8S_NF30', 'FT_C_NF30', 'F2_NF30_H20_60S', 'F2_NF30_H20_120S',
+    'F2_NF30_H20_120S_EXEC1',
     'F_ABSORB3_8S', 'F_ABSORB5_RUNNER', 'F_REACCEL0_8S',
   ],
 );
+const launchExec1 = config.launchPullbackShadow.optimizationCohorts
+  .find((cohort) => cohort.id === 'F2_NF30_H20_120S_EXEC1');
+assert.strictEqual(launchExec1.positionSizeSol, 1);
+assert.strictEqual(launchExec1.requireExecutableCapacity, true);
 assert.strictEqual(
   config.launchPullbackShadow.optimizationCohorts
     .find((cohort) => cohort.id === 'FO_D12_R3_Q_10S').maxNetFlowSol,
@@ -670,6 +675,7 @@ assert.deepStrictEqual(
     'O90_M5_X60', 'O90_M5_X120', 'O90_M5_STAIR120',
     'O90_Q70_D30_X60', 'O90_Q70_D30_STAIR120',
     'O90_DAY0818_STAIR120', 'O_C80_DAY1218_STAIR240',
+    'O_C80_NIGHT0004_STAIR240', 'O_C80_EVENING2024_STAIR240',
   ],
 );
 assert.ok(config.graduationAccelerationShadow.entryProfiles
@@ -687,6 +693,7 @@ const migrationHandoffProfile = config.graduationAccelerationShadow.entryProfile
 assert.strictEqual(migrationHandoffProfile.migrationHandoff, true);
 assert.strictEqual(migrationHandoffProfile.postMigrationEntryGate.minBuyers, 5);
 assert.strictEqual(migrationHandoffProfile.liveStrategyId, undefined);
+assert.strictEqual(config.migrationSecondLegShadow.enabled, false);
 assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, true);
 assert.strictEqual(config.migrationSecondLegShadow.maxObservedPriceRatio, 100);
 assert.deepStrictEqual(
@@ -721,6 +728,19 @@ const o90Day = config.graduationAccelerationShadow.entryProfiles
 assert.deepStrictEqual(
   [o90Day.sessionStartHourCst, o90Day.sessionEndHourCst, o90Day.liveStrategyId],
   [8, 18, undefined],
+);
+assert.deepStrictEqual(
+  config.graduationAccelerationShadow.entryProfiles
+    .filter((profile) => profile.id.startsWith('O_C80_NIGHT')
+      || profile.id.startsWith('O_C80_EVENING'))
+    .map((profile) => [
+      profile.id, profile.sessionStartHourCst, profile.sessionEndHourCst,
+      profile.liveStrategyId,
+    ]),
+  [
+    ['O_C80_NIGHT0004_STAIR240', 0, 4, undefined],
+    ['O_C80_EVENING2024_STAIR240', 20, 24, undefined],
+  ],
 );
 assert.deepStrictEqual(
   config.graduationAccelerationShadow.trailingTiers.map((tier) => [

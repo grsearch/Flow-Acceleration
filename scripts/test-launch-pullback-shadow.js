@@ -576,6 +576,74 @@ function testExactCohortLiveSignalAndReplayGuard() {
   store.close();
 }
 
+function testOneSolExecutableCapacitySurvivesRestore() {
+  const store = makeStore();
+  let now = 5_980_000;
+  const config = makeConfig();
+  config.profiles = [];
+  config.holds = [];
+  config.positionSizeSol = 1;
+  config.costModel = { ...config.costModel, positionSizeSol: 1 };
+  config.optimizationCohorts = [{
+    id: 'F2_NF30_H20_120S_EXEC1', label: '1 SOL executable',
+    profileId: 'F2_NF30_EXEC1', referenceProfileId: 'LEGACY_7_5_R3',
+    referencePullbackPct: 7.5, referenceReboundPct: 3,
+    minNetFlowSol: 30, maxCreatorSharePct: 10, maxTop3SharePct: 100,
+    positionSizeSol: 1, requireExecutableCapacity: true,
+    maxEntryPriceJumpPct: 10, exitPolicy: 'FIXED_HOLD', fixedHoldMs: 120_000,
+    hardStopPct: 20,
+  }];
+
+  const first = new LaunchPullbackShadowSuite({ config, store, now: () => now });
+  first.start();
+  const capacityReference = reference('exec-one-sol', now, 30, 2);
+  capacityReference.referencePrice = 0.1;
+  first.onReference(capacityReference);
+
+  // Restart before the fill: position_sol must be restored from SQLite rather
+  // than becoming undefined and silently falling back to the 0.1 mark price.
+  const restored = new LaunchPullbackShadowSuite({ config, store, now: () => now });
+  restored.start();
+  const reserveTrade = (mint, timestampMs) => ({
+    ...trade(mint, timestampMs, 0.1),
+    virtualTokenReservesRaw: '1000000000', // 1,000 tokens
+    virtualSolReservesRaw: '100000000000', // 100 SOL
+  });
+  restored.observeTrade(reserveTrade('exec-one-sol', now + 200));
+  let row = store.db.prepare(`
+    SELECT status, position_sol, entry_price FROM launch_pullback_shadow_positions
+    WHERE mint='exec-one-sol'
+  `).get();
+  assert.strictEqual(row.status, 'OPEN');
+  assert.strictEqual(row.position_sol, 1);
+  assert.ok(row.entry_price > 0.1009 && row.entry_price < 0.1011,
+    '1 SOL constant-product impact must replace the 0.1 mark price');
+
+  restored.advanceTime(now + 120_200);
+  restored.observeTrade(reserveTrade('exec-one-sol', now + 120_400));
+  row = store.db.prepare(`
+    SELECT status, gross_return_pct, net_return_pct
+    FROM launch_pullback_shadow_positions WHERE mint='exec-one-sol'
+  `).get();
+  assert.strictEqual(row.status, 'CLOSED');
+  assert.ok(row.net_return_pct < row.gross_return_pct,
+    'executable 1 SOL exit impact and configured costs must reduce mark return');
+
+  now += 200_000;
+  const missingReference = reference('exec-missing-reserves', now, 30, 2);
+  missingReference.referencePrice = 0.1;
+  restored.onReference(missingReference);
+  restored.observeTrade(trade('exec-missing-reserves', now + 200, 0.1));
+  row = store.db.prepare(`
+    SELECT status, rejection_reason FROM launch_pullback_shadow_positions
+    WHERE mint='exec-missing-reserves'
+  `).get();
+  assert.deepStrictEqual(row, {
+    status: 'NO_ENTRY', rejection_reason: 'ENTRY_CAPACITY_QUOTE_MISSING',
+  });
+  store.close();
+}
+
 function reference(mint, at, netFlowSol = 20, creatorSharePct = 4) {
   return {
     mint,
@@ -710,6 +778,7 @@ testDeepCohortsStayIsolated();
 testOptimizationCohortsStayIsolated();
 testFixedHoldHardStop();
 testExactCohortLiveSignalAndReplayGuard();
+testOneSolExecutableCapacitySurvivesRestore();
 
 function testFlowConsensusAndExitVariants() {
   const store = makeStore();

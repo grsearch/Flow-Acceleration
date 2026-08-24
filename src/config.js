@@ -535,13 +535,10 @@ const config = {
         ruleVersion: 'graduation_accel_o90_m5_stair120_live_v1',
         signalSource: 'GRADUATION_ACCEL_O90_M5_STAIR120',
         enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_ENABLED', true),
-        // V2 entry key intentionally bypasses the retired server setting so
-        // this 0.1-SOL canary resumes after upgrade while remaining independently
-        // switchable without touching the global live-trading lock.
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_ENTRY_ENABLED',
-          true,
-        ),
+        // Retired after repeated executable-loss failures. Keep the strategy
+        // loaded for history and already-open exits, but stale server env values
+        // must never reopen it.
+        entryEnabled: false,
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V3_POSITION_SOL',
@@ -2834,6 +2831,31 @@ const config = {
         hardStopPct: 20,
       },
       {
+        id: 'F2_NF30_H20_120S_EXEC1',
+        label: 'F2-NF30-EXEC1 | 1 SOL executable entry/exit / H20 / fixed 120s',
+        referenceProfileId: 'LEGACY_7_5_R3',
+        referencePullbackPct: 7.5,
+        referenceReboundPct: 3,
+        profileId: 'F2_NF30_EXEC1',
+        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
+          min: 0,
+        }),
+        maxCreatorSharePct: numberEnv(
+          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        minBuyers: 0,
+        minRecentBuyers: 0,
+        minRetentionPct: 0,
+        maxTop3SharePct: 100,
+        positionSizeSol: 1,
+        requireExecutableCapacity: true,
+        exitPolicy: 'FIXED_HOLD',
+        fixedHoldMs: 120_000,
+        hardStopPct: 20,
+      },
+      {
         id: 'F_ABSORB3_8S',
         label: 'F-ABSORB3 | F2 + peak sell>=3 SOL + refill>=50% / fixed 8s',
         referenceProfileId: 'LEGACY_7_5_R3',
@@ -5092,6 +5114,26 @@ const config = {
         runnerExitMode: 'TIERED_TRAILING',
         runnerMaxHoldMs: 240_000,
       },
+      ...[
+        ['O_C80_NIGHT0004_STAIR240', 'O-C80-NIGHT-0004', 0, 4],
+        ['O_C80_EVENING2024_STAIR240', 'O-C80-EVENING-2024', 20, 24],
+      ].map(([id, labelPrefix, sessionStartHourCst, sessionEndHourCst]) => ({
+        id,
+        label: `${labelPrefix} · 北京时段 / 旧Curve80入场 / 阶梯240秒`,
+        mode: 'CURVE_MILESTONE',
+        thresholdPct: 80,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 2,
+        maxSellTx: 0,
+        requireNoCreatorSell: true,
+        sessionStartHourCst,
+        sessionEndHourCst,
+        coreExitPct: 50,
+        capacityAwareExit: true,
+        runnerExitMode: 'TIERED_TRAILING',
+        runnerMaxHoldMs: 240_000,
+      })),
     ],
     trailingTiers: [
       { activationPct: 20, drawdownPct: 10 },
@@ -5199,11 +5241,11 @@ const config = {
     }),
   },
 
-  // Forward-only B cohort selected from the 2026-08-20 M2F study. There is
-  // deliberately no unguarded A cohort: every simulated entry must pass the
-  // shared O(1) pre-entry RUG guard at the delayed fill timestamp.
+  // Retire M2F position cohorts after the negative forward sample. The
+  // independent M2F-OBS snapshot observer above remains enabled and continues
+  // collecting causal migration evidence without opening simulated positions.
   migrationSecondLegShadow: {
-    enabled: booleanEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENABLED', true),
+    enabled: false,
     // Labels the broad post-migration tape for Shadow research only. This
     // object is not consumed by LiveTradingManager or any live strategy.
     marketRegime: {

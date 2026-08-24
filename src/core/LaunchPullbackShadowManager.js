@@ -1,7 +1,11 @@
 'use strict';
 
 const { costBreakdown } = require('./CostModel');
-const { executableBuy, executableSell } = require('./ShadowExecutionModel');
+const {
+  executableBuy,
+  executableSell,
+  reservesForTrade,
+} = require('./ShadowExecutionModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
@@ -40,6 +44,10 @@ function restoredPosition(row) {
     entryMarket: row.entry_market,
     entryPrice: row.entry_price,
     entryJumpPct: row.entry_jump_pct,
+    // position_sol is persisted per cohort. Restoring it is essential for
+    // capacity-aware entry/exit quotes; falling back to an undefined value
+    // silently reduced the old calculation to mark-price simulation.
+    positionSol: finite(row.position_sol ?? row.positionSol, 1),
     highestPrice: row.highest_price,
     maxFavorableReturnPct: finite(row.max_favorable_return_pct, 0),
     exitTriggerAt: row.exit_trigger_at,
@@ -299,6 +307,7 @@ class LaunchPullbackShadowManager {
       status: STATUS.PENDING_ENTRY,
       reference_at: referenceAt,
       reference_price: referencePrice,
+      position_sol: this.config.positionSizeSol,
       entry_target_at: referenceAt + this.config.entryDelayMs,
       entry_deadline_at: referenceAt + this.config.entryDelayMs + this.config.entryTimeoutMs,
     }));
@@ -316,8 +325,7 @@ class LaunchPullbackShadowManager {
     if (position?.status === STATUS.EXIT_PENDING && this._eligibleExitTrade(position, trade, price)) {
       this._updatePeak(position, price);
       if (timestampMs >= position.exitTargetAt && timestampMs <= position.exitDeadlineAt) {
-        this._close(position, trade, price);
-        position = null;
+        if (this._close(position, trade, price)) position = null;
       }
     }
 
@@ -329,7 +337,24 @@ class LaunchPullbackShadowManager {
         mint: trade.mint,
         timestampMs,
       });
-      const entryExecution = executableBuy(trade, pending.positionSol, price);
+      // Only the new executable-capacity cohorts consume the reserve quote.
+      // Legacy cohort IDs intentionally retain their historical mark-fill
+      // definition so forward samples do not silently mix two fill models.
+      const entryExecution = executableBuy(
+        trade,
+        this.config.requireExecutableCapacity ? pending.positionSol : null,
+        price,
+      );
+      if (this.config.requireExecutableCapacity && !entryExecution.available) {
+        this.store.updateLaunchPullbackShadowPosition(pending.id, {
+          status: STATUS.NO_ENTRY,
+          rejectionReason: entryExecution.reason || 'ENTRY_CAPACITY_QUOTE_MISSING',
+        });
+        this.pendingEntries.delete(trade.mint);
+        this.metrics.rejected += 1;
+        this.metrics.lastActionAt = this.now();
+        return;
+      }
       const entryPrice = entryExecution.price ?? price;
       const entryJumpPct = ((entryPrice / pending.referencePrice) - 1) * 100;
       if (rugGuard.blocked) {
@@ -441,6 +466,7 @@ class LaunchPullbackShadowManager {
   }
 
   _eligibleExitTrade(position, trade, price) {
+    if (this.config.requireExecutableCapacity && !reservesForTrade(trade)) return false;
     if (trade.market === 'PUMP_BONDING_CURVE') return true;
     if (trade.market !== 'PUMP_AMM') return false;
     const token = this.store.getToken(trade.mint);
@@ -532,10 +558,13 @@ class LaunchPullbackShadowManager {
     const markReturnPct = ((price / position.entryPrice) - 1) * 100;
     const execution = executableSell(
       trade,
-      position.positionSol / position.entryPrice,
+      this.config.requireExecutableCapacity
+        ? position.positionSol / position.entryPrice
+        : null,
       price,
       { rugMarkReturnPct: markReturnPct },
     );
+    if (this.config.requireExecutableCapacity && !execution.available) return false;
     const executablePrice = execution.price ?? price;
     const executableReturnPct = ((executablePrice / position.entryPrice) - 1) * 100;
     const netReturnPct = executableReturnPct - this.costs.deterministicCostPct;
@@ -551,6 +580,7 @@ class LaunchPullbackShadowManager {
     this.positions.delete(position.mint);
     this.metrics.closed += 1;
     this.metrics.lastActionAt = this.now();
+    return true;
   }
 
   _markNoExit(position) {

@@ -127,6 +127,19 @@ function main() {
   assert.ok(backupScript.includes('[REDACTED]'));
   assert.ok(backupScript.includes('FLOW_BACKUP_UPLOAD_TIMEOUT'));
   assert.match(backupScript, /FLOW_BACKUP_LOCAL_RETENTION_DAYS:-2/);
+  assert.match(backupScript, /FLOW_BACKUP_MAX_LOCAL_ARCHIVES:-2/);
+  assert.match(backupScript, /FLOW_BACKUP_MIN_FREE_GB:-20/);
+  assert.match(backupScript, /FLOW_BACKUP_ORPHAN_MAX_AGE_MINUTES:-360/);
+  assert.ok(backupScript.includes('Refusing daily export:'));
+  assert.ok(
+    backupScript.indexOf('already completed; skipping duplicate trigger')
+      < backupScript.indexOf('AVAILABLE_KB="$(df -Pk'),
+    'a completed daily export must skip cleanly before the free-space gate',
+  );
+  assert.ok(backupScript.includes('prune_verified_archive_count'));
+  assert.ok(backupScript.includes("-name 'flow-acceleration-last24h-*.tar.gz.tmp'"));
+  assert.ok(backupScript.includes('rm -f -- "$ARCHIVE.tmp" "$ARCHIVE.uploaded.tmp"'));
+  assert.ok(backupScript.includes('RUN_DATE_COMPACT="${RUN_DATE_CST//-/}"'));
   assert.ok(backupScript.includes('last-run.env'));
   assert.ok(backupScript.includes('write_state VERIFYING'));
   assert.ok(backupScript.includes('write_state CLEANING'));
@@ -180,6 +193,9 @@ function main() {
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_REGION=your-region/);
   assert.match(credentialTemplate, /FLOW_BACKUP_COS_ENDPOINT=cos\.your-region\.myqcloud\.com/);
   assert.match(credentialTemplate, /FLOW_BACKUP_LOCAL_RETENTION_DAYS=2/);
+  assert.match(credentialTemplate, /FLOW_BACKUP_MAX_LOCAL_ARCHIVES=2/);
+  assert.match(credentialTemplate, /FLOW_BACKUP_MIN_FREE_GB=20/);
+  assert.match(credentialTemplate, /FLOW_BACKUP_ORPHAN_MAX_AGE_MINUTES=360/);
   db.close();
   fs.rmSync(directory, { recursive: true, force: true });
   console.log('test-daily-window-export: ok');
