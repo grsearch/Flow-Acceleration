@@ -28,6 +28,13 @@ function listEnv(name, fallback = []) {
   return raw.split(',').map((value) => value.trim()).filter(Boolean);
 }
 
+function positiveNumberListEnv(name, fallback = []) {
+  const values = listEnv(name, fallback.map(String))
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return [...new Set(values)];
+}
+
 function millisecondListEnv(name, fallbackSeconds = []) {
   const values = listEnv(name, fallbackSeconds.map(String))
     .map((value) => Number(value))
@@ -271,6 +278,80 @@ const m2fNearHighThresholds = Object.freeze({
   minHolderDiffusionIndex: 8,
   maxEstimatedImpact1SolPct: 1,
 });
+
+// The existing O-C80 live bridge deliberately keeps its 15% entry-move guard.
+// These new forward-only cohorts measure two different counterfactuals without
+// changing, signing or submitting any live order:
+// 1) wait for the first executable PumpSwap tape after graduation; and
+// 2) accept selected 40-70% curve repricing bands only after a fresh public BUY.
+const graduationRelaxedEntryShadowEnabled = booleanEnv(
+  'FLOW_GRADUATION_ACCEL_RELAXED_ENTRY_SHADOW_ENABLED',
+  true,
+);
+const graduationRelaxedCapacitySols = positiveNumberListEnv(
+  'FLOW_GRADUATION_ACCEL_RELAXED_CAPACITY_SOLS',
+  [0.1, 1],
+);
+const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
+  ...[0, 200, 500].flatMap((handoffDelayMs) => (
+    [60_000, 120_000].map((runnerMaxHoldMs) => ({
+      id: `O_C80_HO${handoffDelayMs}_X${runnerMaxHoldMs / 1_000}`,
+      label: `O-C80-HO${handoffDelayMs} · 毕业后PumpSwap接力 / 固定${runnerMaxHoldMs / 1_000}秒`,
+      studyGroup: 'O_C80_POST_GRADUATION_HANDOFF',
+      mode: 'CURVE_MILESTONE',
+      thresholdPct: 80,
+      recentWindowMs: 5_000,
+      minCurveDeltaPct: 5,
+      minBuyers: 2,
+      maxSellTx: 0,
+      requireNoCreatorSell: true,
+      migrationHandoff: true,
+      capacityAwareExit: true,
+      capacitySols: graduationRelaxedCapacitySols,
+      coreExitPct: 0,
+      postMigrationEntryGate: {
+        windowMs: handoffDelayMs,
+        // Keep the first executable post-delay trade in the causal snapshot.
+        evaluateAtFill: true,
+        captureWindowMs: 10_000,
+        minBuyers: 1,
+        minNetFlowSol: 0,
+        maxSellBuyRatio: 1,
+        maxDrawdownPct: 20,
+        maxMarketMovePct: 15,
+        maxSelfImpactPct: 10,
+      },
+      runnerExitMode: 'FIXED_HOLD',
+      runnerMaxHoldMs,
+    }))
+  )),
+  ...[[40, 50], [50, 60], [60, 70]].flatMap(([minPct, maxPct]) => (
+    [60_000, 120_000].map((runnerMaxHoldMs) => ({
+      id: `O_C80_J${minPct}_${maxPct}_X${runnerMaxHoldMs / 1_000}`,
+      label: `O-C80-J${minPct}-${maxPct} · Curve冲击${minPct}%–${maxPct}% / 新BUY确认 / 固定${runnerMaxHoldMs / 1_000}秒`,
+      studyGroup: 'O_C80_CURVE_JUMP_BAND',
+      mode: 'CURVE_MILESTONE',
+      thresholdPct: 80,
+      recentWindowMs: 5_000,
+      minCurveDeltaPct: 5,
+      minBuyers: 2,
+      maxSellTx: 0,
+      requireNoCreatorSell: true,
+      capacityAwareExit: true,
+      capacitySols: graduationRelaxedCapacitySols,
+      entryPriceJumpBand: {
+        minPct,
+        maxPct,
+        minPostSignalBuyers: 1,
+        minPostSignalNetFlowSol: 0,
+        maxPostSignalSellTx: 0,
+      },
+      coreExitPct: 0,
+      runnerExitMode: 'FIXED_HOLD',
+      runnerMaxHoldMs,
+    }))
+  )),
+] : [];
 
 const config = {
   pump: {
@@ -5134,6 +5215,7 @@ const config = {
         runnerExitMode: 'TIERED_TRAILING',
         runnerMaxHoldMs: 240_000,
       })),
+      ...graduationRelaxedEntryProfiles,
     ],
     trailingTiers: [
       { activationPct: 20, drawdownPct: 10 },
