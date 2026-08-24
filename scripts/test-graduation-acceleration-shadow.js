@@ -567,3 +567,148 @@ function testEarlyCurveAndPostMigrationHandoffRemainShadowOnly() {
 }
 
 testEarlyCurveAndPostMigrationHandoffRemainShadowOnly();
+
+function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
+  {
+    const store = makeStore();
+    const settings = config();
+    settings.capacitySols = [1];
+    settings.entryProfiles = [{
+      id: 'O_C80_J40_50_X60',
+      label: 'jump band',
+      mode: 'CURVE_MILESTONE',
+      thresholdPct: 80,
+      recentWindowMs: 5_000,
+      minCurveDeltaPct: 5,
+      minBuyers: 2,
+      maxSellTx: 0,
+      requireNoCreatorSell: true,
+      capacityAwareExit: true,
+      capacitySols: [0.1, 1],
+      entryPriceJumpBand: {
+        minPct: 40,
+        maxPct: 50,
+        minPostSignalBuyers: 1,
+        minPostSignalNetFlowSol: 0,
+        maxPostSignalSellTx: 0,
+      },
+      coreExitPct: 0,
+      runnerExitMode: 'FIXED_HOLD',
+      runnerMaxHoldMs: 60_000,
+    }];
+    const liveSignals = [];
+    const suite = new GraduationAccelerationShadowSuite({
+      config: settings,
+      store,
+      now: () => 6_000_000,
+      onLiveSignal: (event) => liveSignals.push(event),
+    });
+    suite.start();
+
+    const createBandMint = (mint, signalPrice) => {
+      suite.onCreate({ mint, creator: `${mint}-creator`, createdAt: 6_000_000 });
+      suite.observeTrade(trade({
+        mint, timestampMs: 6_000_100, price: signalPrice,
+        curvePct: 70, wallet: `${mint}-buyer-1`,
+      }));
+      suite.observeTrade(trade({
+        mint, timestampMs: 6_001_000, price: signalPrice,
+        curvePct: 80, wallet: `${mint}-buyer-2`,
+      }));
+      suite.observeTrade(trade({
+        mint, timestampMs: 6_001_200, price: 1e-7,
+        curvePct: 81, wallet: `${mint}-post-signal-buyer`,
+      }));
+    };
+
+    createBandMint('jump-band-pass', 7e-8);
+    let rows = store.db.prepare(`
+      SELECT cohort_id, status, position_sol, entry_jump_pct
+      FROM graduation_acceleration_shadow_positions WHERE mint=? ORDER BY position_sol
+    `).all('jump-band-pass');
+    assert.equal(rows.length, 2, 'profile-level capacities create independent rows');
+    assert.ok(rows.every((row) => row.status === STATUS.OPEN));
+    assert.deepStrictEqual(rows.map((row) => row.position_sol), [0.1, 1]);
+    assert.ok(rows.every((row) => row.entry_jump_pct >= 40 && row.entry_jump_pct <= 50));
+    assert.equal(suite.health().relaxedJumpBandPassed, 2);
+
+    createBandMint('jump-band-below', 1e-7);
+    rows = store.db.prepare(`
+      SELECT status, rejection_reason
+      FROM graduation_acceleration_shadow_positions WHERE mint=?
+    `).all('jump-band-below');
+    assert.ok(rows.every((row) => row.status === STATUS.NO_ENTRY));
+    assert.ok(rows.every((row) => row.rejection_reason.startsWith('ENTRY_JUMP_BELOW_BAND_')));
+    assert.equal(liveSignals.length, 0, 'relaxed jump bands never bridge to live');
+    store.close();
+  }
+
+  {
+    const store = makeStore();
+    const settings = config();
+    settings.capacitySols = [1];
+    settings.entryProfiles = [{
+      id: 'O_C80_HO0_X60',
+      label: 'first PumpSwap handoff',
+      mode: 'CURVE_MILESTONE',
+      thresholdPct: 80,
+      recentWindowMs: 5_000,
+      minCurveDeltaPct: 5,
+      minBuyers: 2,
+      maxSellTx: 0,
+      requireNoCreatorSell: true,
+      migrationHandoff: true,
+      capacityAwareExit: true,
+      capacitySols: [0.1, 1],
+      coreExitPct: 0,
+      postMigrationEntryGate: {
+        windowMs: 0,
+        evaluateAtFill: true,
+        captureWindowMs: 10_000,
+        minBuyers: 1,
+        minNetFlowSol: 0,
+        maxSellBuyRatio: 1,
+        maxDrawdownPct: 20,
+        maxMarketMovePct: 15,
+        maxSelfImpactPct: 10,
+      },
+      runnerExitMode: 'FIXED_HOLD',
+      runnerMaxHoldMs: 60_000,
+    }];
+    const liveSignals = [];
+    const suite = new GraduationAccelerationShadowSuite({
+      config: settings,
+      store,
+      now: () => 7_000_000,
+      onLiveSignal: (event) => liveSignals.push(event),
+    });
+    suite.start();
+    const mint = 'handoff-first-amm';
+    suite.onCreate({ mint, creator: 'handoff-creator', createdAt: 7_000_000 });
+    suite.observeTrade(trade({
+      mint, timestampMs: 7_000_100, price: 7e-8, curvePct: 70, wallet: 'pre-1',
+    }));
+    suite.observeTrade(trade({
+      mint, timestampMs: 7_001_000, price: 7e-8, curvePct: 80, wallet: 'pre-2',
+    }));
+    suite.onGraduated({ mint, graduated_at: 7_002_000 });
+    suite.observeTrade(trade({
+      mint, timestampMs: 7_002_300, price: 1e-7, market: 'PUMP_AMM',
+      side: 'BUY', wallet: 'first-amm-buyer', solAmount: 0.2,
+    }));
+    const rows = store.db.prepare(`
+      SELECT status, entry_market, position_sol, entry_impact_pct
+      FROM graduation_acceleration_shadow_positions WHERE mint=? ORDER BY position_sol
+    `).all(mint);
+    assert.equal(rows.length, 2);
+    assert.ok(rows.every((row) => row.status === STATUS.RUNNER));
+    assert.ok(rows.every((row) => row.entry_market === 'PUMP_AMM'));
+    assert.ok(rows[1].entry_impact_pct > rows[0].entry_impact_pct,
+      '1 SOL handoff models more AMM impact than 0.1 SOL');
+    assert.equal(suite.health().migrationHandoffPassed, 2);
+    assert.equal(liveSignals.length, 0, 'PumpSwap handoff remains Shadow-only');
+    store.close();
+  }
+}
+
+testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly();
