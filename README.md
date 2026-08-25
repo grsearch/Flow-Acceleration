@@ -365,6 +365,22 @@ Bonding Curve 成交，并按1 SOL与同笔虚拟储备计算可执行均价和�
 用图表价伪造成小亏。该路径每个 Mint 最多保留256笔、5秒的内存队列，不增加 RPC、
 不扫描历史数据库、不读取私钥，也永不签名或发送链上交易。
 
+## CYA Organic Burst Shadow COB
+
+`COB-A/B/C` 是由目标钱包 `CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o`
+的历史首次 OPEN 反推后重新前向验证的独立公共流实验。入场不读取该钱包或任何监控
+Smart Wallet 的成交；目标钱包之后的首次 OPEN 只保存为未来5秒标签。三档分别测试
+宽松有机爆发、推荐平衡组和更早的2秒正动量组：共同要求发射早期、Curve 尚未透支、
+至少4个独立买家和较高买单占比，并限制5秒涨幅；平衡组额外要求5秒净流入至少1 SOL
+且15秒涨幅低于80%，避免已经过热的末端拉升。
+
+每个信号等待200ms后的下一笔非监控钱包 Bonding Curve 成交，按1 SOL与同笔储备计算
+真实容量、成交均价和自身冲击。退出独立交叉测试：前10秒出现峰值回撤至少8%且最近
+2秒动量转负时退出，以及纯固定20秒、30秒两个右尾对照组。仓位写入独立表
+`cya_organic_burst_shadow_positions`，接口为 `GET /api/cya-organic-burst-shadow`，
+Dashboard 编号为 `COB-A/B/C`。该路径每个 Mint 最多保留256笔、15秒有界队列，复用
+现有 Universal RUG Guard，不增加 RPC，不签名，也不发送交易。
+
 ## Flow -> Smart Confirmation Shadow L
 
 该路径把 Smart Wallet 确认改成严格的前向实验：只接受 `primary_3w Rank 1`
