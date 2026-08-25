@@ -529,6 +529,45 @@ const config = {
     // and independent decision history; the retired Primary live rule is not listed.
     strategies: [
       {
+        id: 'cya_organic_burst_cob_d_fix30_live',
+        code: 'COB-D-X30',
+        label: 'CYA Organic Burst · COB-D Strict 5 SOL',
+        ruleVersion: 'cya_organic_burst_cob_d_fix30_live_v1',
+        signalSource: 'CYA_ORGANIC_BURST_COB_D',
+        enabled: booleanEnv('FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_BONDING_CURVE',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 1_000 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 30_000,
+        hardStopPct: 0,
+        maxHoldMs: 30_000,
+        sourceShadowCohortId: 'COB_D_FIX30',
+      },
+      {
         id: 'big_winner_pbr_a_x50_15_live',
         code: 'PBR-A-X50-15',
         label: 'Big Winner PBR-A · X50_15 Core + Runner',
@@ -3476,6 +3515,7 @@ const config = {
         id: 'COB_D',
         label: 'COB-D · strict 5 SOL organic pullback',
         newEntriesEnabled: true,
+        liveStrategyId: 'cya_organic_burst_cob_d_fix30_live',
         exclusiveGroup: 'COB_STRICT',
         exitProfileIds: ['FIX30'],
         minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
