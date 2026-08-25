@@ -62,7 +62,7 @@ function camelRow(row) {
 }
 
 class CyaOrganicBurstShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
@@ -71,6 +71,7 @@ class CyaOrganicBurstShadowSuite {
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
     this.smartWallets = new Set(config.smartWallets || []);
     this.targetWallet = String(config.targetWallet || '');
+    this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
     this.states = new Map();
     this.pendingEntries = new Map();
     this.positions = new Map();
@@ -93,6 +94,9 @@ class CyaOrganicBurstShadowSuite {
       closed: 0,
       noExit: 0,
       structureInvalidations: 0,
+      liveSignals: 0,
+      liveSignalErrors: 0,
+      lastLiveSignalError: null,
       lastActionAt: null,
     };
     this._initStorage();
@@ -493,6 +497,33 @@ class CyaOrganicBurstShadowSuite {
     const episodeId = `${trade.mint}:${profile.id}:${trade.timestampMs}`;
     const results = [];
     this.metrics.qualifiedSignals += 1;
+    if (profile.liveStrategyId && this.onLiveSignal) {
+      try {
+        this.onLiveSignal({
+          strategyId: profile.liveStrategyId,
+          episodeId,
+          mint: trade.mint,
+          symbol: trade.symbol || this.store.getToken(trade.mint)?.symbol || null,
+          price,
+          slot: trade.slot ?? null,
+          timestampMs: trade.timestampMs,
+          receivedAtMs: trade.receivedAtMs ?? trade.timestampMs,
+          market: trade.market,
+          virtualSolReservesRaw: trade.virtualSolReservesRaw ?? null,
+          virtualTokenReservesRaw: trade.virtualTokenReservesRaw ?? null,
+          features: {
+            ...features,
+            shadowEntryProfileId: profile.id,
+            shadowExitProfileId: profile.exitProfileIds?.[0] || null,
+          },
+        });
+        this.metrics.liveSignals += 1;
+        this.metrics.lastLiveSignalError = null;
+      } catch (error) {
+        this.metrics.liveSignalErrors += 1;
+        this.metrics.lastLiveSignalError = String(error?.message || error);
+      }
+    }
     const permittedExitIds = profile.exitProfileIds?.length
       ? new Set(profile.exitProfileIds)
       : null;
