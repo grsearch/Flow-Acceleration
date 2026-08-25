@@ -366,6 +366,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="cya-slot-flow" data-strategy-code="CSF-E510-Q">
               <b><span class="strategy-code">CSF-E510-Q</span>CYA Slot Flow</b><small>严格5–10秒公共流前向组；旧宽松组停止新开仓</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-organic-burst" data-strategy-code="COB-A/B/C">
+              <b><span class="strategy-code">COB-A/B/C</span>CYA Organic Burst</b><small>非监控钱包有机资金爆发；1 SOL容量；三种退出独立对照</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
               <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun（已停）</b><small>0胜率且样本稀疏；历史数据保留，不再新增</small>
             </button>
@@ -870,6 +873,27 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Slot</th><th>Buyers / Flow</th><th>Buy占比 / Top1</th><th>CYA标签</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>投入 / 加仓</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="cya-slot-flow-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="cya-organic-burst" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>CYA Organic Burst Shadow COB-A / B / C</h2>
+                <p>只使用非监控钱包的公开成交形成早期有机资金爆发信号；CYA 首次 OPEN 仅作未来标签，永不参与判定或发送交易。</p>
+              </div>
+              <div class="strategy-expression" id="cya-organic-burst-expression">COB-A/B/C 早期公共流入场 × INV10/FIX20/FIX30 独立退出</div>
+              <div class="strategy-metric-groups" id="cya-organic-burst-metrics"></div>
+              <div class="section-title"><h2>有机爆发入场 × 右尾退出</h2><p>200ms 后按 1 SOL 储备容量模拟成交；前10秒结构失效与固定20/30秒分别计数。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / 100</th><th>CYA 5s标签</th><th>Flow / 容量</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="cya-organic-burst-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>监控钱包成交不进入信号特征，但仍用于持仓价格路径和未来首次 OPEN 标签。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Curve</th><th>Buyers / NetFlow</th><th>Buy占比 / 2s / 5s / 15s</th><th>CYA标签</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="cya-organic-burst-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1601,6 +1625,32 @@
         const targetLabel = row.target_open_at ? age(row.target_open_delay_ms) : '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.management_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.signal_age_ms)}<br><span class="table-note">${number(row.source_slot)} → ${number(row.trigger_slot)}</span></td><td>${number(row.public_buyers_5s)} / ${number(row.public_net_flow_5s,2)} SOL<br><span class="table-note">源Slot ${number(row.source_slot_buyers)}人 / ${number(row.source_slot_net_flow,2)} SOL</span></td><td>${rate(row.buy_tx_share_pct)} / ${rate(row.largest_buyer_share_pct)}</td><td>${targetLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${number(row.total_invested_sol || row.position_sol,3)} SOL / ${number(row.add_count)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="11" class="empty">暂无 CYA Slot Flow 模拟仓位。</td></tr>';
+    }
+
+    function renderCyaOrganicBurstShadow(data) {
+      const runtime = data.runtime || {};
+      const strategy = runtime.strategy || {};
+      const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#cya-organic-burst-expression').textContent = `${(runtime.entryProfiles || []).map(row => row.id).join(' / ')}：非监控钱包公共流；${age(strategy.entryDelayMs)} 后按 ${number(strategy.positionSizeSol,2)} SOL 容量成交；CYA 首次 OPEN 只作未来标签。`;
+      renderMetricGroups('#cya-organic-burst-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW COB' : '关闭', '独立表；不签名、不发送交易'],
+        ['全部 / 公共成交', `${number(runtime.observedTrades)} / ${number(runtime.observedPublicTrades)}`, `排除监控钱包 ${number(runtime.excludedSmartTrades)} · 评估 ${number(runtime.evaluatedStates)}`],
+        ['合格信号 / CYA标签', `${number(runtime.qualifiedSignals)} / ${number(runtime.targetOpenLabels)}`, '只标记未来首次 OPEN，ADD 不参与'],
+        ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
+        ['结构失效退出', number(runtime.structureInvalidations), '仅 INV10 组使用；FIX20/FIX30 保持纯时间对照'],
+        ['RUG / 跳价 / 无成交', `${number(runtime.rugGuardRejected)} / ${number(runtime.priceJump)} / ${number(runtime.noEntry)}`, `每 Mint 队列≤${number(strategy.boundedPerMintTradeQueue || 256)}`],
+      ], []);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#cya-organic-burst-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td><td>${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${rate(row.target_open_5s_rate_pct)}</td><td>${number(row.average_buyers_5s,1)}人 / ${number(row.average_net_flow_5s,2)} SOL<br><span class="table-note">Buy ${rate(row.average_buy_tx_share_pct)} · 入/出冲击 ${pct(row.average_entry_impact_pct)} / ${pct(row.average_exit_impact_pct)}</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="9" class="empty">等待 CYA Organic Burst 公共流样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#cya-organic-burst-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const targetLabel = row.target_open_at ? age(row.target_open_delay_ms) : '—';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.buyers_5s)} / ${number(row.net_flow_5s,2)} SOL</td><td>${rate(row.buy_tx_share_pct)} / ${pct(row.return_2s_pct)} / ${pct(row.return_5s_pct)} / ${pct(row.return_15s_pct)}</td><td>${targetLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="10" class="empty">暂无 CYA Organic Burst 模拟仓位。</td></tr>';
     }
 
     function renderSameSlotDumpBackrunShadow(data) {
@@ -2616,6 +2666,9 @@
         ],
         'cya-slot-flow': requestContext => [
           loadDashboard('/api/cya-slot-flow-shadow?positionLimit=50', renderCyaSlotFlowShadow, requestContext),
+        ],
+        'cya-organic-burst': requestContext => [
+          loadDashboard('/api/cya-organic-burst-shadow?positionLimit=50', renderCyaOrganicBurstShadow, requestContext),
         ],
         'same-slot-dump-backrun': requestContext => [
           loadDashboard('/api/same-slot-dump-backrun-shadow?positionLimit=50', renderSameSlotDumpBackrunShadow, requestContext),
