@@ -3431,6 +3431,7 @@ const config = {
       {
         id: 'COB_A',
         label: 'COB-A · broad organic burst',
+        newEntriesEnabled: false,
         minAgeMs: 2_000, maxAgeMs: 15_000, maxCurvePct: 60,
         minBuyers5s: 4, minNetFlow5sSol: null, minBuyTxSharePct: 60,
         minReturn2sPct: -5, minReturn5sPct: 5, maxReturn5sPct: 60,
@@ -3439,6 +3440,7 @@ const config = {
       {
         id: 'COB_B',
         label: 'COB-B · recommended balanced burst',
+        newEntriesEnabled: false,
         minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: 55,
         minBuyers5s: 4, minNetFlow5sSol: 1, minBuyTxSharePct: 65,
         minReturn2sPct: null, minReturn5sPct: 10, maxReturn5sPct: 60,
@@ -3447,10 +3449,41 @@ const config = {
       {
         id: 'COB_C',
         label: 'COB-C · early positive 2s burst',
+        newEntriesEnabled: false,
         minAgeMs: 2_000, maxAgeMs: 8_000, maxCurvePct: 50,
         minBuyers5s: 4, minNetFlow5sSol: null, minBuyTxSharePct: 65,
         minReturn2sPct: 0, minReturn5sPct: 10, maxReturn5sPct: 60,
         maxReturn15sPct: null,
+      },
+      // Strict forward-only replacements. They are mutually exclusive per
+      // Mint: >=7 SOL is assigned to F first; 5-7 SOL is assigned to D.
+      // Both use only the 30-second fixed hold so the weak INV10/FIX20 exits
+      // cannot multiply signals or contaminate the new forward sample.
+      {
+        id: 'COB_F',
+        label: 'COB-F · strict 7 SOL organic pullback',
+        newEntriesEnabled: true,
+        exclusiveGroup: 'COB_STRICT',
+        exitProfileIds: ['FIX30'],
+        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
+        minBuyers5s: 10, minNetFlow5sSol: 7,
+        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
+        minReturn2sPct: 0, maxReturn2sPct: 40,
+        minReturn5sPct: null, maxReturn5sPct: null,
+        maxReturn15sPct: null, minDrawdown15sPct: 2,
+      },
+      {
+        id: 'COB_D',
+        label: 'COB-D · strict 5 SOL organic pullback',
+        newEntriesEnabled: true,
+        exclusiveGroup: 'COB_STRICT',
+        exitProfileIds: ['FIX30'],
+        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
+        minBuyers5s: 10, minNetFlow5sSol: 5,
+        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
+        minReturn2sPct: 0, maxReturn2sPct: 40,
+        minReturn5sPct: null, maxReturn5sPct: null,
+        maxReturn15sPct: null, minDrawdown15sPct: 2,
       },
     ],
     exitProfiles: [
