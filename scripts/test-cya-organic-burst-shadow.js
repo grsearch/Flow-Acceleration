@@ -10,6 +10,7 @@ function main() {
   let sequence = 0;
   const targetWallet = 'cya-target-wallet';
   const otherSmartWallet = 'other-smart-wallet';
+  const liveSignals = [];
   const mint = 'CyaOrganicBurst11111111111111111111111111';
   const store = new ResearchStore({
     dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
@@ -65,6 +66,7 @@ function main() {
       },
       {
         id: 'COB_D', label: 'strict 5 SOL', newEntriesEnabled: true,
+        liveStrategyId: 'cya_organic_burst_cob_d_fix30_live',
         exclusiveGroup: 'COB_STRICT', exitProfileIds: ['FIX30'],
         minAgeMs: 2_000, maxAgeMs: 10_000, minBuyers5s: 10,
         minNetFlow5sSol: 5, minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
@@ -87,7 +89,12 @@ function main() {
       positionSizeSol: 1, entryFailureRatePct: 0, entryFailureCostPct: 0,
     },
   };
-  const suite = new CyaOrganicBurstShadowSuite({ config, store, now: () => now });
+  const suite = new CyaOrganicBurstShadowSuite({
+    config,
+    store,
+    now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
   suite.start();
 
   const trade = (offset, side, sol, wallet, price) => {
@@ -111,28 +118,34 @@ function main() {
     [-700, 0.000000124], [-600, 0.000000125], [-500, 0.000000124],
   ];
   setup.forEach(([offset, tradePrice], index) => {
-    trade(offset, 'BUY', 1, `public-${index + 1}`, tradePrice);
+    trade(offset, 'BUY', 0.6, `public-${index + 1}`, tradePrice);
   });
-  trade(-400, 'SELL', 1, 'public-seller', 0.000000118);
+  trade(-400, 'SELL', 0.5, 'public-seller', 0.000000118);
 
   // Monitored-wallet flow is excluded from all causal entry features.
   const excluded = trade(-250, 'BUY', 50, targetWallet, 0.000000116);
   assert.strictEqual(excluded.signals.length, 0);
   assert.strictEqual(suite.health().excludedSmartTrades, 1);
 
-  const signal = trade(0, 'BUY', 1, 'public-10', 0.000000120);
-  assert.strictEqual(signal.signals.length, 1, 'COB-F must win the strict same-Mint group');
+  const signal = trade(0, 'BUY', 0.6, 'public-10', 0.000000120);
+  assert.strictEqual(signal.signals.length, 1, 'COB-D should qualify in the 5-7 SOL band');
+  assert.strictEqual(liveSignals.length, 1, 'COB-D must emit exactly one independent live signal');
+  assert.strictEqual(liveSignals[0].strategyId, 'cya_organic_burst_cob_d_fix30_live');
+  assert.strictEqual(liveSignals[0].mint, mint);
+  assert.strictEqual(liveSignals[0].features.shadowEntryProfileId, 'COB_D');
+  assert.strictEqual(liveSignals[0].features.shadowExitProfileId, 'FIX30');
   assert.strictEqual(store.db.prepare(
     'SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions',
   ).get().n, 1);
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions
-    WHERE entry_profile_id='COB_F' AND exit_profile_id='FIX30'
-      AND buyers_5s=10 AND ABS(net_flow_5s-9)<0.000001
+    WHERE entry_profile_id='COB_D' AND exit_profile_id='FIX30'
+      AND buyers_5s=10 AND ABS(net_flow_5s-5.5)<0.000001
       AND buy_tx_5s=10 AND sell_tx_5s=1
   `).get().n, 1, 'monitored-wallet trade must not contaminate public-flow features');
   assert.ok(suite.health().retiredEntrySignalsSuppressed > 0);
-  assert.ok(suite.health().exclusiveSignalsSuppressed > 0);
+  assert.strictEqual(suite.health().liveSignals, 1);
+  assert.strictEqual(suite.health().liveSignalErrors, 0);
 
   // A monitored-wallet trade after the delay cannot fill a pending entry.
   trade(225, 'BUY', 20, targetWallet, 0.000000122);
