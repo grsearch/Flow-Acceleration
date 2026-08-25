@@ -648,7 +648,7 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
     const settings = config();
     settings.capacitySols = [1];
     settings.entryProfiles = [{
-      id: 'O_C80_HO0_X60',
+      id: 'O_C80_HO500_X60',
       label: 'first PumpSwap handoff',
       mode: 'CURVE_MILESTONE',
       thresholdPct: 80,
@@ -658,11 +658,13 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
       maxSellTx: 0,
       requireNoCreatorSell: true,
       migrationHandoff: true,
+      handoffLiveStrategyId: 'graduation_accel_o_c80_ho500_x60_recovery_live',
+      liveBridgeCapacitySol: 1,
       capacityAwareExit: true,
       capacitySols: [0.1, 1],
       coreExitPct: 0,
       postMigrationEntryGate: {
-        windowMs: 0,
+        windowMs: 500,
         evaluateAtFill: true,
         captureWindowMs: 10_000,
         minBuyers: 1,
@@ -693,7 +695,7 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
     }));
     suite.onGraduated({ mint, graduated_at: 7_002_000 });
     suite.observeTrade(trade({
-      mint, timestampMs: 7_002_300, price: 1e-7, market: 'PUMP_AMM',
+      mint, timestampMs: 7_002_600, price: 1e-7, market: 'PUMP_AMM',
       side: 'BUY', wallet: 'first-amm-buyer', solAmount: 0.2,
     }));
     const rows = store.db.prepare(`
@@ -706,7 +708,13 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
     assert.ok(rows[1].entry_impact_pct > rows[0].entry_impact_pct,
       '1 SOL handoff models more AMM impact than 0.1 SOL');
     assert.equal(suite.health().migrationHandoffPassed, 2);
-    assert.equal(liveSignals.length, 0, 'PumpSwap handoff remains Shadow-only');
+    assert.equal(liveSignals.length, 1, 'only the selected 1 SOL cohort bridges to recovery live');
+    assert.equal(
+      liveSignals[0].strategyId,
+      'graduation_accel_o_c80_ho500_x60_recovery_live',
+    );
+    assert.equal(liveSignals[0].market, 'PUMP_AMM');
+    assert.ok(liveSignals[0].features.shadowEntryImpactPct > 0);
     store.close();
   }
 }

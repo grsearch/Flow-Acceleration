@@ -7,6 +7,10 @@ class LaunchPullbackShadowSuite {
     this.config = config;
     this.managers = new Map();
     this.flowSignals = new Map();
+    this.retiredCohortIds = new Set(config.retiredCohortIds || []);
+    const newEntriesEnabled = (cohortId, cohort = null) => (
+      cohort?.newEntriesEnabled !== false && !this.retiredCohortIds.has(cohortId)
+    );
     this.flowSignalRetentionMs = Math.max(
       60_000,
       ...(config.optimizationCohorts || [])
@@ -20,6 +24,7 @@ class LaunchPullbackShadowSuite {
             ...config,
             ...profile,
             cohortId,
+            newEntriesEnabled: newEntriesEnabled(cohortId, profile),
             cohortLabel: `${profile.label} · ${hold.label}`,
             profileId: profile.id,
             referenceProfileId: 'LEGACY_7_5_R3',
@@ -32,6 +37,7 @@ class LaunchPullbackShadowSuite {
             trailingCohorts: undefined,
             deepCohorts: undefined,
             optimizationCohorts: undefined,
+            retiredCohortIds: undefined,
           },
           store,
           now,
@@ -53,6 +59,7 @@ class LaunchPullbackShadowSuite {
           ...profile,
           ...cohort,
           cohortId: cohort.id,
+          newEntriesEnabled: newEntriesEnabled(cohort.id, cohort),
           cohortLabel: cohort.label,
           profileId: profile.id,
           referenceProfileId: 'LEGACY_7_5_R3',
@@ -64,6 +71,7 @@ class LaunchPullbackShadowSuite {
           trailingCohorts: undefined,
           deepCohorts: undefined,
           optimizationCohorts: undefined,
+          retiredCohortIds: undefined,
         },
         store,
         now,
@@ -80,6 +88,7 @@ class LaunchPullbackShadowSuite {
           ...config,
           ...cohort,
           cohortId: cohort.cohortId,
+          newEntriesEnabled: newEntriesEnabled(cohort.cohortId, cohort),
           cohortLabel: cohort.label,
           profileId: cohort.profileId,
           referenceProfileId: cohort.id,
@@ -91,6 +100,7 @@ class LaunchPullbackShadowSuite {
           trailingCohorts: undefined,
           deepCohorts: undefined,
           optimizationCohorts: undefined,
+          retiredCohortIds: undefined,
         },
         store,
         now,
@@ -107,6 +117,7 @@ class LaunchPullbackShadowSuite {
           ...config,
           ...cohort,
           cohortId: cohort.id,
+          newEntriesEnabled: newEntriesEnabled(cohort.id, cohort),
           cohortLabel: cohort.label,
           profileId: cohort.profileId,
           referenceProfileId: cohort.referenceProfileId,
@@ -117,6 +128,7 @@ class LaunchPullbackShadowSuite {
           trailingCohorts: undefined,
           deepCohorts: undefined,
           optimizationCohorts: undefined,
+          retiredCohortIds: undefined,
         },
         store,
         now,
@@ -228,6 +240,7 @@ class LaunchPullbackShadowSuite {
       enabled: this.config.enabled,
       mode: 'SHADOW_F',
       sendsTransactions: false,
+      retiredCohortIds: [...this.retiredCohortIds],
       cohorts,
       referenceGroups,
       pendingEntries: sum('pendingEntries'),

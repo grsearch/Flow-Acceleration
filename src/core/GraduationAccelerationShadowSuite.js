@@ -1024,10 +1024,47 @@ class GraduationAccelerationShadowSuite {
       maxFavorableReturnPct: 0,
       maxAdverseReturnPct: 0,
     });
+    this._emitMigrationHandoffLiveSignal(pending, profile, trade, price, gate, execution);
     this.pendingEntries.delete(pending.id);
     this.positions.set(pending.id, pending);
     this.metrics.opened += 1;
     this.metrics.migrationHandoffPassed += 1;
+  }
+
+  _emitMigrationHandoffLiveSignal(position, profile, trade, price, gate, execution) {
+    if (!this.onLiveSignal || !profile?.handoffLiveStrategyId) return;
+    const bridgeCapacity = finite(profile.liveBridgeCapacitySol, 1);
+    if (Math.abs(position.positionSol - bridgeCapacity) > 1e-9) return;
+    try {
+      this.onLiveSignal({
+        strategyId: profile.handoffLiveStrategyId,
+        episodeId: `${position.episodeId}:HANDOFF`,
+        mint: position.mint,
+        symbol: position.symbol,
+        price,
+        slot: trade.slot,
+        timestampMs: trade.timestampMs,
+        receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+        market: 'PUMP_AMM',
+        poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+        poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+        virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+        features: {
+          sourceShadowCohortId: position.cohortId,
+          signalCurvePct: position.signalCurvePct,
+          graduatedAt: position.graduatedAt,
+          migrationHandoff: true,
+          handoffDelayMs: trade.timestampMs - position.graduatedAt,
+          handoffBuyers: gate.buyers,
+          handoffNetFlowSol: gate.netFlowSol,
+          handoffSellBuyRatio: gate.sellBuyRatio,
+          handoffDrawdownPct: gate.drawdownPct,
+          shadowEntryImpactPct: execution.impactPct,
+        },
+      });
+    } catch (error) {
+      this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
+    }
   }
 
   _postMigrationEntryGateDecision(position, profile, now) {

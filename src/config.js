@@ -306,6 +306,10 @@ const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
       maxSellTx: 0,
       requireNoCreatorSell: true,
       migrationHandoff: true,
+      handoffLiveStrategyId: handoffDelayMs === 500 && runnerMaxHoldMs === 60_000
+        ? 'graduation_accel_o_c80_ho500_x60_recovery_live'
+        : null,
+      liveBridgeCapacitySol: 1,
       capacityAwareExit: true,
       capacitySols: graduationRelaxedCapacitySols,
       coreExitPct: 0,
@@ -325,6 +329,40 @@ const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
       runnerMaxHoldMs,
     }))
   )),
+  ...[
+    ['DAY0420', 4, 20],
+    ['OFF2004', 20, 4],
+  ].map(([sessionId, sessionStartHourCst, sessionEndHourCst]) => ({
+    id: `O_C80_HO500_X60_${sessionId}`,
+    label: `O-C80-HO500-${sessionId} · PumpSwap接力 / 固定60秒 / 北京时段分层`,
+    studyGroup: 'O_C80_POST_GRADUATION_HANDOFF_TIME',
+    mode: 'CURVE_MILESTONE',
+    thresholdPct: 80,
+    recentWindowMs: 5_000,
+    minCurveDeltaPct: 5,
+    minBuyers: 2,
+    maxSellTx: 0,
+    requireNoCreatorSell: true,
+    migrationHandoff: true,
+    capacityAwareExit: true,
+    capacitySols: graduationRelaxedCapacitySols,
+    sessionStartHourCst,
+    sessionEndHourCst,
+    coreExitPct: 0,
+    postMigrationEntryGate: {
+      windowMs: 500,
+      evaluateAtFill: true,
+      captureWindowMs: 10_000,
+      minBuyers: 1,
+      minNetFlowSol: 0,
+      maxSellBuyRatio: 1,
+      maxDrawdownPct: 20,
+      maxMarketMovePct: 15,
+      maxSelfImpactPct: 10,
+    },
+    runnerExitMode: 'FIXED_HOLD',
+    runnerMaxHoldMs: 60_000,
+  })),
   ...[[40, 50], [50, 60], [60, 70]].flatMap(([minPct, maxPct]) => (
     [60_000, 120_000].map((runnerMaxHoldMs) => ({
       id: `O_C80_J${minPct}_${maxPct}_X${runnerMaxHoldMs / 1_000}`,
@@ -864,6 +902,53 @@ const config = {
           { activationPct: 300, drawdownPct: 30 },
         ],
         sourceShadowCohortId: 'O_C80_D5_B2_S0_NC:1SOL',
+      },
+      {
+        id: 'graduation_accel_o_c80_ho500_x60_recovery_live',
+        code: 'O-C80-HO500-X60-R',
+        label: 'Graduation Acceleration O · PumpSwap 500ms Recovery',
+        ruleVersion: 'graduation_accel_o_c80_ho500_x60_recovery_live_v1',
+        signalSource: 'GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY',
+        enabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_ENABLED',
+          true,
+        ),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 1_000 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        maxShadowEntryImpactPct: numberEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_SHADOW_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 60_000,
+        hardStopPct: 30,
+        maxHoldMs: 60_000,
+        sourceShadowCohortId: 'O_C80_HO500_X60:1SOL',
       },
       {
         id: 'post_gd20_35_r1_5_5_age60_xleg_v3',
@@ -1419,7 +1504,11 @@ const config = {
   // the first later Bonding Curve trade. This intentionally does not reuse the
   // retrospective smart_signal_confirmations label as an earlier entry price.
   flowSmartConfirmShadow: {
-    enabled: booleanEnv('FLOW_SMART_CONFIRM_SHADOW_ENABLED', true),
+    // The completed forward sample remained negative. Keep the table/API for
+    // historical analysis, but require the explicit proven-negative override
+    // before this retired experiment can create more positions.
+    enabled: provenNegativeShadowsEnabled
+      && booleanEnv('FLOW_SMART_CONFIRM_SHADOW_ENABLED', true),
     positionSizeSol: shadowPositionEnv('FLOW_SMART_CONFIRM_SHADOW_POSITION_SOL'),
     minSmartOpenSol: numberEnv('FLOW_SMART_CONFIRM_SHADOW_MIN_OPEN_SOL', 0.1, { min: 0 }),
     entryDelayMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
@@ -2182,7 +2271,7 @@ const config = {
       {
         id: 'PP20_B45',
         label: 'PP20-B45 · 首次回踩8–20% / Buyers10≥45',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
@@ -2216,7 +2305,7 @@ const config = {
       {
         id: 'PP20_QUALITY',
         label: 'PP20-Quality · AGE≤30s / Buyers3≥15 / Buyers10≥45 / Sell3≤2.5',
-        newEntriesEnabled: true,
+        newEntriesEnabled: false,
         family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 30_000,
         qualificationMaxAgeMs: 30_000,
         minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
@@ -2347,6 +2436,24 @@ const config = {
     bigWinnerPct: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_BIG_WINNER_PCT', 50, {
       min: 1,
     }),
+    // These cohorts have stable, large negative samples. They remain defined so
+    // their historical rows and any already-open position can still be restored,
+    // but LaunchPullbackShadowSuite no longer creates new positions for them.
+    // Only the three 30-SOL right-tail execution controls keep collecting data.
+    retiredCohortIds: [
+      'F1_3S', 'F1_8S', 'F2_3S', 'F2_8S', 'F3_3S', 'F3_8S',
+      'FQ1_3S', 'FQ1_8S', 'FQ2_3S', 'FQ2_8S',
+      'FT_A', 'FT_B', 'FT_C', 'FT_D', 'FQ_X15', 'FQ_X30',
+      'FD10_R3_5S', 'FD12_5_R3_5S', 'FD12_5_R5_5S', 'FD15_R5_5S',
+      'FC_BASE_X12', 'FC_STRICT_NF20_X12', 'FC_BASE_STAIR60',
+      'FC_BASE_WEAK3_X12', 'FC_BASE_WEAK5_X12',
+      'FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15',
+      'FO_RB10_30S', 'FO_RB10_T20', 'FO_RB10_H20_60S', 'FO_RB10_H20_120S',
+      'FO_D12_R3_10S', 'FO_D12_R3_T15', 'FO_D12_R3_Q_10S',
+      'FO_D12_R3_QC_10S', 'FO_D12_R3_Q_T10_H30',
+      'F2_8S_NF30', 'FT_C_NF30',
+      'F_ABSORB3_8S', 'F_ABSORB5_RUNNER', 'F_REACCEL0_8S',
+    ],
     profiles: [
       {
         id: 'F1',
@@ -3657,6 +3764,15 @@ const config = {
   migratedDropReboundShadow: {
     enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
     gfrEnabled: migratedReboundGfrEnabled,
+    // Cohort-level retirement keeps the useful G/GQ/GFR controls running while
+    // stopping only the repeatedly negative combinations. Prefix matching also
+    // covers their capacity suffixes (for example _0P1SOL and _1SOL).
+    retiredCohortPrefixes: [
+      'POST_GD25_35_RUG_GUARD_T20_24_',
+      'POST_GE30_R23_F1_G1_B50_H60',
+      'POST_GE30_R23_F1_G1_B75_H30',
+      'POST_GE30_D25_32_R24_F1_04_24_V2_TIME_R2_H15',
+    ],
     lifecycleStages: [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ],
@@ -3849,7 +3965,7 @@ const config = {
         capacityAware: true,
         positionSols: listEnv(
           'FLOW_MIGRATED_REBOUND_F23_EXEC_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25'],
+          ['0.05', '0.1', '0.25', '0.5', '1'],
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
       {
@@ -3868,7 +3984,7 @@ const config = {
         capacityAware: true,
         positionSols: listEnv(
           'FLOW_MIGRATED_REBOUND_F23_EXEC_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25'],
+          ['0.05', '0.1', '0.25', '0.5', '1'],
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
       {
@@ -4386,11 +4502,11 @@ const config = {
     exitProfiles: [
       {
         id: 'E60', label: '固定60秒', exitMode: 'FIXED_HOLD', fixedHoldMs: 60_000,
-        hardStopPct: 20, maxHoldMs: 60_000,
+        hardStopPct: 20, maxHoldMs: 60_000, newEntriesEnabled: false,
       },
       {
         id: 'E120', label: '固定120秒', exitMode: 'FIXED_HOLD', fixedHoldMs: 120_000,
-        hardStopPct: 20, maxHoldMs: 120_000,
+        hardStopPct: 20, maxHoldMs: 120_000, newEntriesEnabled: false,
       },
       {
         // New id creates a clean forward sample after Universal RUG Guard was
@@ -4401,11 +4517,12 @@ const config = {
         fixedHoldMs: 120_000,
         hardStopPct: 20,
         maxHoldMs: 120_000,
+        newEntriesEnabled: false,
       },
       {
         id: 'T10', label: '5秒保护 / +10%激活 / 回撤10%', exitMode: 'TRAILING',
         minHoldMs: 5_000, trailingActivationPct: 10, trailingStopPct: 10,
-        hardStopPct: 20, maxHoldMs: 120_000,
+        hardStopPct: 20, maxHoldMs: 120_000, newEntriesEnabled: false,
       },
       {
         id: 'T12_5', label: '10秒保护 / +15%激活 / 回撤12.5%', exitMode: 'TRAILING',
@@ -4415,12 +4532,12 @@ const config = {
       {
         id: 'FLOW', label: '10秒保护 / 3秒订单流转弱', exitMode: 'FLOW_FADE',
         minHoldMs: 10_000, minSellBuyRatio: 1.2, maxNetFlowSol: -2,
-        hardStopPct: 20, maxHoldMs: 180_000,
+        hardStopPct: 20, maxHoldMs: 180_000, newEntriesEnabled: false,
       },
       {
         id: 'RUNNER', label: '15秒保护 / +20%激活 / 自适应尾仓',
         exitMode: 'ADAPTIVE_TRAILING', minHoldMs: 15_000, trailingActivationPct: 20,
-        hardStopPct: 25, maxHoldMs: 300_000,
+        hardStopPct: 25, maxHoldMs: 300_000, newEntriesEnabled: false,
         trailingTiers: [
           { belowPct: 50, stopPct: 12.5 },
           { belowPct: 100, stopPct: 20 },
@@ -4439,6 +4556,7 @@ const config = {
         minStrongBuyers: 3,
         hardStopPct: 20,
         maxHoldMs: 180_000,
+        newEntriesEnabled: false,
       },
     ],
     costModel: normalizeCostModel({
@@ -5632,7 +5750,10 @@ const config = {
   sameSlotDumpBackrunShadow: {
     // The completed-slot export produced zero winners across every tested
     // horizon. Keep the historical table/API but stop generating new rows.
-    enabled: booleanEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_SHADOW_ENABLED', false),
+    // This is intentionally hard-disabled: an old server .env=true must not
+    // silently reactivate a retired strategy after an ordinary code update.
+    retired: true,
+    enabled: false,
     positionSizeSol: numberEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_POSITION_SOL', 0.1, {
       min: 0.01,
       max: 10,

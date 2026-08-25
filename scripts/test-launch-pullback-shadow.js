@@ -872,3 +872,29 @@ function testFlowConsensusAndExitVariants() {
 }
 
 testFlowConsensusAndExitVariants();
+
+function testRetiredCohortStopsOnlyNewEntries() {
+  const store = makeStore();
+  const now = 7_000_000;
+  const settings = makeConfig();
+  settings.retiredCohortIds = ['F1_3S'];
+  const suite = new LaunchPullbackShadowSuite({
+    config: settings,
+    store,
+    now: () => now,
+  });
+  suite.start();
+  suite.onReference(reference('retired-cohort', now));
+
+  const count = (cohortId) => store.db.prepare(`
+    SELECT COUNT(*) AS n FROM launch_pullback_shadow_positions
+    WHERE mint='retired-cohort' AND cohort_id=?
+  `).get(cohortId).n;
+  assert.strictEqual(count('F1_3S'), 0, 'retired cohort must not create a new row');
+  assert.strictEqual(count('F1_8S'), 1, 'non-retired cohorts must continue collecting');
+  const retiredHealth = suite.health().cohorts.find((cohort) => cohort.cohortId === 'F1_3S');
+  assert.strictEqual(retiredHealth.newEntriesEnabled, false);
+  store.close();
+}
+
+testRetiredCohortStopsOnlyNewEntries();

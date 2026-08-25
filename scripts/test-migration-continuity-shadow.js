@@ -30,6 +30,7 @@ function config() {
       { id: 'E60', exitMode: 'FIXED_HOLD', fixedHoldMs: 60_000, hardStopPct: 20, maxHoldMs: 60_000 },
       { id: 'T10', exitMode: 'TRAILING', minHoldMs: 5_000, trailingActivationPct: 10, trailingStopPct: 10, hardStopPct: 20, maxHoldMs: 120_000 },
       { id: 'FLOW', exitMode: 'FLOW_FADE', minHoldMs: 10_000, minSellBuyRatio: 1.2, maxNetFlowSol: -2, hardStopPct: 20, maxHoldMs: 180_000 },
+      { id: 'RETIRED', newEntriesEnabled: false, exitMode: 'FIXED_HOLD', fixedHoldMs: 60_000, hardStopPct: 20, maxHoldMs: 60_000 },
     ],
     costModel: {
       platformFeePct: 1, buySlippagePct: 0, sellSlippagePct: 0,

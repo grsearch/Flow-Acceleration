@@ -21,8 +21,6 @@ LOG_LINES="${FLOW_BACKUP_LOG_LINES:-20000}"
 EXPORT_TIMEOUT="${FLOW_BACKUP_EXPORT_TIMEOUT:-2h}"
 UPLOAD_TIMEOUT="${FLOW_BACKUP_UPLOAD_TIMEOUT:-30m}"
 VERIFY_TIMEOUT="${FLOW_BACKUP_VERIFY_TIMEOUT:-5m}"
-RETENTION_ENABLED="${FLOW_RETENTION_CLEANUP_ENABLED:-true}"
-RETENTION_TIMEOUT="${FLOW_RETENTION_TIMEOUT:-1h}"
 
 for required in flock tar gzip sha256sum mktemp date tail find sort xargs sed nice systemctl journalctl sleep timeout df awk; do
   command -v "$required" >/dev/null 2>&1 || { echo "Missing required command: $required" >&2; exit 1; }
@@ -269,21 +267,11 @@ retry timeout --foreground "$VERIFY_TIMEOUT" "$COSCLI_BIN" -c "$COS_CONFIG" ls \
 mv -f -- "$ARCHIVE.uploaded.tmp" "$ARCHIVE.uploaded"
 
 ARCHIVE_SHA="$(cut -d' ' -f1 "$SHA_FILE")"
-case "${RETENTION_ENABLED,,}" in
-  1|true|yes|on)
-    echo "COS object verified; starting low-priority retention cleanup"
-    write_state CLEANING "sha256=$ARCHIVE_SHA"
-    timeout --foreground "$RETENTION_TIMEOUT" nice -n 15 "$NODE_BIN" \
-      "$PROJECT_DIR/scripts/cleanup-research-retention.js" \
-      "--db=$DB_PATH" \
-      "--state=$STATE_FILE" \
-      "--report=$EXPORT_DIR/retention-last-run.json"
-    RETENTION_RESULT=completed
-    ;;
-  *)
-    RETENTION_RESULT=disabled
-    ;;
-esac
+# Do not run retention against the live SQLite database from this external
+# process. A large DELETE can retain the writer lock long enough for a service
+# restart to fail repeatedly with SQLITE_BUSY. Retention remains available as
+# an explicit offline-maintenance command, outside the daily export timer.
+RETENTION_RESULT=not_run_online
 
 find "$EXPORT_DIR" -maxdepth 1 -type f \
   \( -name 'flow-acceleration-last24h-*.tar.gz' \
@@ -303,7 +291,7 @@ done
 prune_verified_archive_count
 
 SUCCESS=1
-write_state DONE "sha256=$ARCHIVE_SHA retention=$RETENTION_RESULT"
+write_state DONE "sha256=$ARCHIVE_SHA db_retention=$RETENTION_RESULT"
 {
   printf 'RUN_DATE_CST=%s\n' "$RUN_DATE_CST"
   printf 'REMOTE=%s\n' "$REMOTE_OBJECT"

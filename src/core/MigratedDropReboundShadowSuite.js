@@ -162,6 +162,9 @@ class MigratedDropReboundShadowSuite {
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((profile) => [profile.id, profile]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
+    this.retiredCohortPrefixes = (config.retiredCohortPrefixes || [])
+      .map((prefix) => String(prefix || '').trim())
+      .filter(Boolean);
     this.lifecycleStages = config.lifecycleStages || [
       { id: 'PRE_MIGRATION', label: '毕业前', market: 'PUMP_BONDING_CURVE' },
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
@@ -727,6 +730,7 @@ class MigratedDropReboundShadowSuite {
       for (const positionSol of positionSols) {
         const capacitySuffix = positionSols.length > 1 ? `_${capacityId(positionSol)}` : '';
         const cohortId = `${stageCode}_${profile.id}_${exitProfile.id}${capacitySuffix}`;
+        if (this.retiredCohortPrefixes.some((prefix) => cohortId.startsWith(prefix))) continue;
         const costs = costBreakdown({
           ...this.config.costModel,
           positionSizeSol: positionSol,

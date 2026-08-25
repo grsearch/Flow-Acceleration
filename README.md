@@ -710,9 +710,9 @@ systemctl list-timers flow-acceleration-backup.timer --all
 
 Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 07:00 运行，即使服务器位于其他时区也不会按当地时间偏移。`flock` 会阻止任务重叠；成功后还会写入按北京时间日期命名的完成标记，同一天再次误触发时直接退出，不会重新导出或上传。只有确需人工覆盖当天归档时才可临时设置 `FLOW_BACKUP_FORCE_RUN=1`。导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予私有 Bucket 前缀所需的上传和查询权限。
 
-远端验证通过后，状态会先进入 `CLEANING`，再运行 `scripts/cleanup-research-retention.js`。默认保留 48 小时 Raw Trade，每批删除 25,000 行、每日最多 5,000,000 行，并在批次间让出磁盘；上传失败、校验文件缺失、状态过期或数据库繁忙超过重试上限时均停止清理。原本位于实时服务启动路径的 `PRAGMA optimize` 已移动到此低优先级维护任务，并设置较小的分析上限。报告写入 `data/exports/retention-last-run.json`。维护过程明确不执行 `wal_checkpoint` 或 `VACUUM`，所以 SQLite 文件不会立刻从磁盘缩小，但释放的页会被后续写入复用，数据库不再持续无上限增长。已有大型数据库如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
+远端验证通过后，每日导出任务直接进入 `DONE`，不会再从外部进程清理在线 SQLite 主库。`scripts/cleanup-research-retention.js` 仅保留为停服维护工具；必须在明确停止实时服务后手动执行。这样可避免大型 `DELETE` 持有写锁时，主服务恰好重启并因 `SQLITE_BUSY` 陷入崩溃循环。维护过程仍禁止 `wal_checkpoint` 或 `VACUUM`；已有大型数据库如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
 
-安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传、验证与清理均有独立超时和失败保护，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`CLEANING`、`DONE` 或 `FAILED`），COSCLI 或清理任务卡住时不会无限占用下一次任务。
+安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传和验证均有独立超时与失败保护，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`DONE` 或 `FAILED`），COSCLI 卡住时不会无限占用下一次任务。
 
 部分服务器曾由 OpenClaw 临时创建 `flow-daily-export.service/timer`，其中某些旧 service 与主采集服务绑定并带有自动重启，可能在主服务重启时反复导出。标准安装器只会在 `flow-acceleration-backup.timer` 已通过校验并成功启用后，立即停止并禁用旧 service 与 timer。正式备份 service 不依赖 `flow-acceleration.service` 的生命周期，主服务重启不会再次触发导出；配置不完整时旧调度保持不变，避免迁移过程造成备份空窗。
 

@@ -304,6 +304,7 @@ class MigrationContinuityShadowSuite {
       }
     }
     for (const exitProfile of this.exitProfiles.values()) {
+      if (exitProfile.newEntriesEnabled === false) continue;
       const saved = this.store.createMigrationContinuityShadowPosition({
         cohortId: `MC_C5_${exitProfile.id}`,
         exitProfileId: exitProfile.id,

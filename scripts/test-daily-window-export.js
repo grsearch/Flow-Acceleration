@@ -142,8 +142,10 @@ function main() {
   assert.ok(backupScript.includes('RUN_DATE_COMPACT="${RUN_DATE_CST//-/}"'));
   assert.ok(backupScript.includes('last-run.env'));
   assert.ok(backupScript.includes('write_state VERIFYING'));
-  assert.ok(backupScript.includes('write_state CLEANING'));
-  assert.ok(backupScript.includes('cleanup-research-retention.js'));
+  assert.ok(backupScript.includes('RETENTION_RESULT=not_run_online'));
+  assert.ok(backupScript.includes('db_retention=$RETENTION_RESULT'));
+  assert.ok(!backupScript.includes('write_state CLEANING'));
+  assert.ok(!backupScript.includes('cleanup-research-retention.js'));
   assert.match(backupScript, /timeout --foreground "\$UPLOAD_TIMEOUT"/);
   assert.match(backupScript, /mktemp --suffix=\.yaml/);
   assert.match(backupScript, /--fail-output=false/);

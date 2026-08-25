@@ -78,6 +78,9 @@ const livePbrA = config.liveTrading.strategies.find((strategy) => (
 const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
 ));
+const liveGraduationRecovery = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'graduation_accel_o_c80_ho500_x60_recovery_live'
+));
 const liveQualityLeader = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'quality_leader_ql_strict_protected_live'
 ));
@@ -140,6 +143,12 @@ assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveGraduationAccel.maxEntrySelfImpactPct, 10);
 assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
+assert.strictEqual(liveGraduationRecovery.entryEnabled, true);
+assert.strictEqual(liveGraduationRecovery.positionSizeSol, 0.1);
+assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');
+assert.strictEqual(liveGraduationRecovery.exitMode, 'FIXED_HOLD');
+assert.strictEqual(liveGraduationRecovery.fixedHoldMs, 60_000);
+assert.strictEqual(liveGraduationRecovery.sourceShadowCohortId, 'O_C80_HO500_X60:1SOL');
 assert.strictEqual(liveV3.positionSizeSol, 0.1);
 assert.strictEqual(liveV3.entryEnabled, false);
 assert.strictEqual(liveGd25F1.positionSizeSol, 0.1);
@@ -188,7 +197,7 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  ['O-C80-D5-B2-S0-NC'],
+  ['O-C80-D5-B2-S0-NC', 'O-C80-HO500-X60-R'],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
 assert.strictEqual(config.preEntryRugRisk.templateMinLargeBuys, 4);
@@ -273,7 +282,7 @@ assert.ok(
   Math.abs(costBreakdown(config.smartOpenShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
-assert.strictEqual(config.flowSmartConfirmShadow.enabled, true);
+assert.strictEqual(config.flowSmartConfirmShadow.enabled, false);
 assert.strictEqual(config.flowSmartConfirmShadow.positionSizeSol, 1);
 assert.deepStrictEqual(
   config.flowSmartConfirmShadow.cohorts.map((cohort) => [cohort.id, cohort.maxConfirmationDelayMs]),
@@ -353,6 +362,14 @@ assert.deepStrictEqual(
   config.launchPullbackShadow.holds.map((hold) => [hold.id, hold.fixedHoldMs]),
   [['3S', 3_000], ['8S', 8_000]],
 );
+const retiredLaunchCohorts = new Set(config.launchPullbackShadow.retiredCohortIds);
+assert.ok([
+  'F1_3S', 'FT_C', 'FD12_5_R5_5S', 'FO_RB10_30S',
+  'F2_8S_NF30', 'F_REACCEL0_8S',
+].every((id) => retiredLaunchCohorts.has(id)));
+assert.ok([
+  'F2_NF30_H20_60S', 'F2_NF30_H20_120S', 'F2_NF30_H20_120S_EXEC1',
+].every((id) => !retiredLaunchCohorts.has(id)));
 assert.deepStrictEqual(
   config.launchPullbackShadow.optimizationCohorts.map((cohort) => cohort.id),
   [
@@ -512,13 +529,19 @@ assert.deepStrictEqual(gqProfile.positionSols, [0.05, 0.25, 0.5, 1]);
 assert.deepStrictEqual(
   config.migratedDropReboundShadow.entryProfiles
     .find((profile) => profile.id === 'GE30_R23_F3_EXEC').positionSols,
-  [0.05, 0.1, 0.25],
+  [0.05, 0.1, 0.25, 0.5, 1],
 );
 const gfrProfiles = config.migratedDropReboundShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('GFR_'));
 assert.strictEqual(config.migratedDropReboundShadow.gfrEnabled, true);
 assert.strictEqual(config.migratedDropReboundShadow.fastFlowMaxTradesPerMint, 512);
 assert.strictEqual(config.migratedDropReboundShadow.fastFlowSweepMs, 5_000);
+assert.ok([
+  'POST_GD25_35_RUG_GUARD_T20_24_',
+  'POST_GE30_R23_F1_G1_B50_H60',
+  'POST_GE30_R23_F1_G1_B75_H30',
+  'POST_GE30_D25_32_R24_F1_04_24_V2_TIME_R2_H15',
+].every((prefix) => config.migratedDropReboundShadow.retiredCohortPrefixes.includes(prefix)));
 assert.deepStrictEqual(
   gfrProfiles.map((profile) => [
     profile.id,
@@ -576,7 +599,7 @@ assert.deepStrictEqual(
   ['PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY'].map((id) => (
     bigWinnerEntryProfiles.get(id)?.newEntriesEnabled
   )),
-  [true, false, true],
+  [false, false, false],
 );
 assert.strictEqual(bigWinnerEntryProfiles.get('PP20_B45').minBuyers10s, 45);
 assert.strictEqual(bigWinnerEntryProfiles.get('PP20_EARLY_BREADTH').maxAgeMs, 25_000);
@@ -607,6 +630,7 @@ assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
   minBuyers: 20, minNetFlowSol: 5, minReturnPct: 5, maxSellBuyRatio: 0.6,
 });
 assert.strictEqual(config.sameSlotDumpBackrunShadow.enabled, false);
+assert.strictEqual(config.sameSlotDumpBackrunShadow.retired, true);
 const csfProfiles = new Map(config.cyaSlotFlowShadow.entryProfiles.map((profile) => (
   [profile.id, profile]
 )));
@@ -619,6 +643,11 @@ assert.deepStrictEqual(
   config.migrationContinuityShadow.exitProfiles.map((profile) => profile.id),
   ['E60', 'E120', 'E120_GUARD_V2', 'T10', 'T12_5', 'FLOW', 'RUNNER', 'AH60_180'],
 );
+const migrationExitProfiles = new Map(config.migrationContinuityShadow.exitProfiles
+  .map((profile) => [profile.id, profile]));
+assert.ok(['E60', 'E120', 'E120_GUARD_V2', 'T10', 'FLOW', 'RUNNER', 'AH60_180']
+  .every((id) => migrationExitProfiles.get(id)?.newEntriesEnabled === false));
+assert.notStrictEqual(migrationExitProfiles.get('T12_5')?.newEntriesEnabled, false);
 assert.strictEqual(config.holderGrowthShadow.enabled, false);
 assert.deepStrictEqual(
   config.holderGrowthShadow.entryProfiles.map((profile) => [profile.id, profile.horizonMs]),
@@ -679,6 +708,7 @@ assert.deepStrictEqual(
     'O_C80_HO0_X60', 'O_C80_HO0_X120',
     'O_C80_HO200_X60', 'O_C80_HO200_X120',
     'O_C80_HO500_X60', 'O_C80_HO500_X120',
+    'O_C80_HO500_X60_DAY0420', 'O_C80_HO500_X60_OFF2004',
     'O_C80_J40_50_X60', 'O_C80_J40_50_X120',
     'O_C80_J50_60_X60', 'O_C80_J50_60_X120',
     'O_C80_J60_70_X60', 'O_C80_J60_70_X120',
@@ -686,16 +716,25 @@ assert.deepStrictEqual(
 );
 const relaxedGraduationProfiles = config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.studyGroup?.startsWith('O_C80_'));
-assert.strictEqual(relaxedGraduationProfiles.length, 12);
+assert.strictEqual(relaxedGraduationProfiles.length, 14);
 assert.ok(relaxedGraduationProfiles.every((profile) => (
   !profile.liveStrategyId
   && profile.capacityAwareExit === true
   && JSON.stringify(profile.capacitySols) === JSON.stringify([0.1, 1])
 )));
 assert.strictEqual(relaxedGraduationProfiles
-  .filter((profile) => profile.migrationHandoff).length, 6);
+  .filter((profile) => profile.migrationHandoff).length, 8);
 assert.strictEqual(relaxedGraduationProfiles
   .filter((profile) => profile.entryPriceJumpBand).length, 6);
+const recoveryBridgeProfiles = relaxedGraduationProfiles
+  .filter((profile) => profile.handoffLiveStrategyId);
+assert.deepStrictEqual(recoveryBridgeProfiles.map((profile) => profile.id), ['O_C80_HO500_X60']);
+assert.strictEqual(recoveryBridgeProfiles[0].liveBridgeCapacitySol, 1);
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.entryProfiles
+    .find((profile) => profile.id === 'GE30_R23_F3_EXEC').positionSols,
+  [0.05, 0.1, 0.25, 0.5, 1],
+);
 assert.ok(config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('O_C80_P'))
   .every((profile) => !profile.liveStrategyId && profile.capacityAwareExit === true));

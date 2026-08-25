@@ -95,6 +95,7 @@ class LaunchPullbackShadowManager {
   health() {
     return {
       enabled: this.config.enabled,
+      newEntriesEnabled: this.config.newEntriesEnabled !== false,
       mode: 'SHADOW',
       cohortId: this.config.cohortId,
       cohortLabel: this.config.cohortLabel,
@@ -160,7 +161,9 @@ class LaunchPullbackShadowManager {
   }
 
   onReference(reference) {
-    if (!this.config.enabled || !reference?.mint) return null;
+    if (!this.config.enabled || this.config.newEntriesEnabled === false || !reference?.mint) {
+      return null;
+    }
     const referenceProfileId = reference.referenceProfileId || 'LEGACY_7_5_R3';
     if (referenceProfileId !== (this.config.referenceProfileId || 'LEGACY_7_5_R3')) return null;
     const referenceAt = finite(reference.referenceAt);

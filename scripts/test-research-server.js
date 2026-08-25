@@ -807,6 +807,8 @@ async function main() {
         ['O_C80_DAY1218_STAIR240', 12, 18],
         ['O_C80_NIGHT0004_STAIR240', 0, 4],
         ['O_C80_EVENING2024_STAIR240', 20, 24],
+        ['O_C80_HO500_X60_DAY0420', 4, 20],
+        ['O_C80_HO500_X60_OFF2004', 20, 4],
       ],
     );
     assert.ok(Array.isArray(graduationAcceleration.cohorts));
