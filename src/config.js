@@ -3390,6 +3390,107 @@ const config = {
     }),
   },
 
+  // Forward-only public-flow experiment reconstructed from the profitable CYA
+  // wallet's earliest entries. Smart-wallet transactions never contribute to
+  // the causal signal; CYA's later OPEN is retained only as a future label.
+  // All cohorts use reserve-priced 1 SOL execution and a bounded 15s queue.
+  cyaOrganicBurstShadow: {
+    enabled: booleanEnv('FLOW_CYA_ORGANIC_BURST_SHADOW_ENABLED', true),
+    targetWallet: process.env.FLOW_CYA_ORGANIC_BURST_TARGET_WALLET
+      || 'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o',
+    positionSizeSol: shadowPositionEnv('FLOW_CYA_ORGANIC_BURST_POSITION_SOL'),
+    featureWindowMs: integerEnv('FLOW_CYA_ORGANIC_BURST_FEATURE_WINDOW_MS', 15_000, {
+      min: 5_000, max: 30_000,
+    }),
+    maxTradesPerMint: integerEnv('FLOW_CYA_ORGANIC_BURST_MAX_TRADES_PER_MINT', 256, {
+      min: 32, max: 2_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_CYA_ORGANIC_BURST_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 60_000, max: 60 * 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_CYA_ORGANIC_BURST_EPISODE_COOLDOWN_MS', 10 * 60_000, {
+      min: 1_000,
+    }),
+    targetLabelWindowMs: integerEnv('FLOW_CYA_ORGANIC_BURST_TARGET_LABEL_WINDOW_MS', 15_000, {
+      min: 1_000, max: 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_ORGANIC_BURST_MAX_ENTRY_JUMP_PCT', 35, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_CYA_ORGANIC_BURST_MAX_ENTRY_DROP_PCT', 35, {
+      min: 0, max: 100,
+    }),
+    maxEntryImpactPct: numberEnv('FLOW_CYA_ORGANIC_BURST_MAX_ENTRY_IMPACT_PCT', 25, {
+      min: 0, max: 1_000,
+    }),
+    entryProfiles: [
+      {
+        id: 'COB_A',
+        label: 'COB-A · broad organic burst',
+        minAgeMs: 2_000, maxAgeMs: 15_000, maxCurvePct: 60,
+        minBuyers5s: 4, minNetFlow5sSol: null, minBuyTxSharePct: 60,
+        minReturn2sPct: -5, minReturn5sPct: 5, maxReturn5sPct: 60,
+        maxReturn15sPct: null,
+      },
+      {
+        id: 'COB_B',
+        label: 'COB-B · recommended balanced burst',
+        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: 55,
+        minBuyers5s: 4, minNetFlow5sSol: 1, minBuyTxSharePct: 65,
+        minReturn2sPct: null, minReturn5sPct: 10, maxReturn5sPct: 60,
+        maxReturn15sPct: 80,
+      },
+      {
+        id: 'COB_C',
+        label: 'COB-C · early positive 2s burst',
+        minAgeMs: 2_000, maxAgeMs: 8_000, maxCurvePct: 50,
+        minBuyers5s: 4, minNetFlow5sSol: null, minBuyTxSharePct: 65,
+        minReturn2sPct: 0, minReturn5sPct: 10, maxReturn5sPct: 60,
+        maxReturn15sPct: null,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'INV10_X30',
+        label: 'first 10s structure invalidation / max 30s',
+        maxHoldMs: 30_000,
+        structureInvalidationEnabled: true,
+        minInvalidationHoldMs: 1_000,
+        invalidationWindowMs: 10_000,
+        invalidationDrawdownPct: 8,
+        maxInvalidationReturn2sPct: 0,
+      },
+      {
+        id: 'FIX20',
+        label: 'fixed 20s control',
+        maxHoldMs: 20_000,
+        structureInvalidationEnabled: false,
+        minInvalidationHoldMs: 0,
+        invalidationWindowMs: 0,
+        invalidationDrawdownPct: 0,
+        maxInvalidationReturn2sPct: 0,
+      },
+      {
+        id: 'FIX30',
+        label: 'fixed 30s right-tail control',
+        maxHoldMs: 30_000,
+        structureInvalidationEnabled: false,
+        minInvalidationHoldMs: 0,
+        invalidationWindowMs: 0,
+        invalidationDrawdownPct: 0,
+        maxInvalidationReturn2sPct: 0,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_CYA_ORGANIC_BURST_POSITION_SOL'),
+    }),
+  },
+
   // Independent early Bonding Curve research derived from the original CYA
   // hypothesis. This retired K matrix is kept separate so its historical rows
   // never mix with the new completed-slot CSF experiment.
