@@ -587,7 +587,9 @@ class CyaOrganicBurstShadowSuite {
           features: {
             ...features,
             shadowEntryProfileId: profile.id,
-            shadowExitProfileId: profile.exitProfileIds?.[0] || null,
+            shadowExitProfileId: profile.liveExitProfileId
+              || profile.exitProfileIds?.[0]
+              || null,
           },
         });
         this.metrics.liveSignals += 1;

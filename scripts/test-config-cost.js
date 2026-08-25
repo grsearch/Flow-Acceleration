@@ -82,6 +82,9 @@ const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
 const liveCobD = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'cya_organic_burst_cob_d_fix30_live'
 ));
+const liveCobF = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'cya_organic_burst_cob_f_core25_runner_live'
+));
 const liveGraduationRecovery = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_ho500_x60_recovery_live'
 ));
@@ -147,6 +150,23 @@ assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveGraduationAccel.maxEntrySelfImpactPct, 10);
 assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
+assert.strictEqual(liveCobF.entryEnabled, true);
+assert.strictEqual(liveCobF.positionSizeSol, 0.1);
+assert.strictEqual(liveCobF.market, 'PUMP_BONDING_CURVE');
+assert.strictEqual(liveCobF.code, 'COB-F-C25-R75-X120');
+assert.strictEqual(liveCobF.ruleVersion, 'cya_organic_burst_cob_f_core25_runner_live_v1');
+assert.strictEqual(liveCobF.exitMode, 'CORE_RUNNER');
+assert.strictEqual(liveCobF.coreActivationPct, 20);
+assert.strictEqual(liveCobF.coreExitPct, 25);
+assert.strictEqual(liveCobF.trailingActivationPct, 20);
+assert.strictEqual(liveCobF.baseTrailingDrawdownPct, 15);
+assert.deepStrictEqual(liveCobF.trailingTiers, [
+  { activationPct: 50, drawdownPct: 20 },
+  { activationPct: 100, drawdownPct: 25 },
+]);
+assert.strictEqual(liveCobF.hardStopPct, 0);
+assert.strictEqual(liveCobF.maxHoldMs, 120_000);
+assert.strictEqual(liveCobF.sourceShadowCohortId, 'COB_F_CORE25_R75_X120');
 assert.strictEqual(liveCobD.entryEnabled, true);
 assert.strictEqual(liveCobD.positionSizeSol, 0.1);
 assert.strictEqual(liveCobD.market, 'PUMP_BONDING_CURVE');
@@ -214,7 +234,12 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  ['COB-D-T30-D10-X60', 'O-C80-D5-B2-S0-NC', 'O-C80-HO500-X60-R'],
+  [
+    'COB-F-C25-R75-X120',
+    'COB-D-T30-D10-X60',
+    'O-C80-D5-B2-S0-NC',
+    'O-C80-HO500-X60-R',
+  ],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
 assert.strictEqual(config.preEntryRugRisk.templateMinLargeBuys, 4);

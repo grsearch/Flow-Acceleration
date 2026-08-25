@@ -127,6 +127,20 @@ async function main() {
         { activationPct: 40, drawdownPct: 15 },
       ],
     },
+    {
+      id: 'cya_organic_burst_cob_f_core25_runner_live', enabled: true, entryEnabled: true,
+      signalSource: 'CYA_ORGANIC_BURST_COB_F', ruleVersion: 'cob-f-live-test',
+      market: 'PUMP_BONDING_CURVE', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+      maxEntrySelfImpactPct: 10, exitMode: 'CORE_RUNNER', hardStopPct: 0,
+      coreActivationPct: 20, coreExitPct: 25,
+      trailingActivationPct: 20, baseTrailingDrawdownPct: 15,
+      trailingTiers: [
+        { activationPct: 50, drawdownPct: 20 },
+        { activationPct: 100, drawdownPct: 25 },
+      ],
+      maxHoldMs: 120_000,
+    },
   ];
   const manager = new LiveTradingManager({
     config: runtimeConfig(strategies), store, now: () => now,
@@ -430,6 +444,44 @@ async function main() {
   assert.strictEqual(gateStopPosition.status, 'CLOSED');
   assert.strictEqual(gateStopPosition.exit_reason, 'HARD_STOP',
     'post-migration gate waiting must never suppress the hard stop');
+
+  const cobFMint = 'cob-f-live-mint';
+  store.recordCreate({
+    mint: cobFMint, symbol: 'COBF', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[8].id, episodeId: 'cob-f:1', mint: cobFMint,
+    symbol: 'COBF', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { shadowEntryProfileId: 'COB_F', shadowExitProfileId: 'CORE25_R75_X120' },
+  });
+  await waitForQueue();
+  now += 1_000;
+  manager.observeTrade({
+    mint: cobFMint, market: 'PUMP_BONDING_CURVE', price: 1.21, timestampMs: now,
+  });
+  await waitForQueue();
+  let cobFDashboard = store.liveTradingDashboard({ strategyId: strategies[8].id });
+  assert.ok(cobFDashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'),
+    'COB-F must sell the 25% core after +20%');
+  assert.strictEqual(cobFDashboard.positions[0].status, 'OPEN');
+  assert.strictEqual(String(cobFDashboard.positions[0].token_amount_raw), '75000',
+    'COB-F must retain the 75% runner');
+
+  now += 1_000;
+  manager.observeTrade({
+    mint: cobFMint, market: 'PUMP_BONDING_CURVE', price: 1.6, timestampMs: now,
+  });
+  now += 1_000;
+  manager.observeTrade({
+    mint: cobFMint, market: 'PUMP_BONDING_CURVE', price: 1.27, timestampMs: now,
+  });
+  await waitForQueue();
+  cobFDashboard = store.liveTradingDashboard({ strategyId: strategies[8].id });
+  assert.strictEqual(cobFDashboard.positions[0].status, 'CLOSED');
+  assert.strictEqual(cobFDashboard.positions[0].exit_reason, 'CORE_RUNNER_TRAIL_D20');
 
   const taxonomyStrategyId = 'entry_failure_taxonomy_test';
   const migrated = store.createLivePosition({

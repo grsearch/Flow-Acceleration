@@ -59,6 +59,8 @@ function main() {
       },
       {
         id: 'COB_F', label: 'strict 7 SOL', newEntriesEnabled: true,
+        liveStrategyId: 'cya_organic_burst_cob_f_core25_runner_live',
+        liveExitProfileId: 'CORE25_R75_X120',
         exclusiveGroup: 'COB_STRICT',
         exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, minBuyers5s: 10,
@@ -229,6 +231,24 @@ function main() {
   assert.ok(dashboard.cohorts.every((row) => row.target_open_5s_rate_pct === 100));
   assert.deepStrictEqual(suite.health().activeEntryProfiles.map((row) => row.id), ['COB_F', 'COB_D']);
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
+
+  // COB-F keeps all four Shadow exits but promotes only its 25/75 runner cohort.
+  now = base + 40_000;
+  suite._recordSignal(
+    suite.entryProfiles.get('COB_F'),
+    {
+      mint: 'cob-f-live-bridge', symbol: 'COBF', timestampMs: now,
+      receivedAtMs: now, slot: 300, market: 'PUMP_BONDING_CURVE',
+      virtualSolReservesRaw: '1000000000000',
+      virtualTokenReservesRaw: '1000000000000000',
+    },
+    0.0000002,
+    { buyers5s: 12, netFlow5s: 8, buyTxSharePct: 80, return2sPct: 10, drawdown15sPct: 3 },
+  );
+  assert.strictEqual(liveSignals.length, 2);
+  assert.strictEqual(liveSignals[1].strategyId, 'cya_organic_burst_cob_f_core25_runner_live');
+  assert.strictEqual(liveSignals[1].features.shadowEntryProfileId, 'COB_F');
+  assert.strictEqual(liveSignals[1].features.shadowExitProfileId, 'CORE25_R75_X120');
   store.close();
   console.log('CYA Organic Burst Shadow tests: PASS');
 }

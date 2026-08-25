@@ -1332,8 +1332,11 @@
       const isQualityLeaderLive = strategy.signalSource === 'QUALITY_LEADER_QL_STRICT_PROTECTED';
       const isLaunchPullbackLive = strategy.signalSource === 'LAUNCH_PULLBACK_FO_RB10_30S';
       const isPbrLive = strategy.signalSource === 'BIG_WINNER_PBR_A';
+      const isCyaOrganicBurstLive = String(strategy.signalSource || '')
+        .startsWith('CYA_ORGANIC_BURST_COB_');
+      const isCobFLive = strategy.signalSource === 'CYA_ORGANIC_BURST_COB_F';
       const isBondingCurveLive = isGraduationAccelLive || isQualityLeaderLive
-        || isLaunchPullbackLive;
+        || isLaunchPullbackLive || isCyaOrganicBurstLive;
       const mintOpportunityCopy = strategy.maxSignalsPerMint
         ? `每Mint只取首次机会（最多${number(strategy.maxSignalsPerMint)}个匹配信号）`
         : `每Mint最多成功开仓${number(strategy.maxEntriesPerMint || 1)}次`;
@@ -1358,6 +1361,11 @@
       if (isPbrLive) {
         strategyExpression = 'PBR-A：第一波≥40% → 回撤12%–25% → 反弹2%–10% + 3秒净流入≥3 SOL / Buyers≥4 → +20%卖50%，余仓15/20/25%自适应回撤';
       }
+      if (isCyaOrganicBurstLive) {
+        strategyExpression = isCobFLive
+          ? 'COB-F：发射后2–10秒，Buyers5≥10、NetFlow5≥7 SOL、买入占比70%–95%、健康回撤≥2% → +20%卖25%，75%阶梯Runner'
+          : 'COB-D：发射后2–10秒，Buyers5≥10、NetFlow5≥5 SOL、买入占比70%–95%、健康回撤≥2% → 快速止盈或移动止盈';
+      }
       document.querySelector('#live-strategy-expression').textContent = strategyExpression;
       const wallets = data.monitoredWallets || [];
       let venueCopy = isGraduationAccelLive
@@ -1365,6 +1373,7 @@
         : '使用 PumpSwap 固定 SOL 买入与卖出';
       if (isQualityLeaderLive) venueCopy = '毕业前使用 Bonding Curve 买入；毕业前后均卖出全部链上余额';
       if (isLaunchPullbackLive) venueCopy = '毕业前使用 Bonding Curve 买入；到期按所在市场卖出全部链上余额';
+      if (isCyaOrganicBurstLive) venueCopy = '毕业前使用 Bonding Curve 买入；按当前所在市场执行分批或整仓退出';
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>${venueCopy}</b><br>单笔 ${number(strategy.positionSizeSol,4)} SOL；Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究。`;
 
       const matchRate = stats.decisions > 0 ? stats.matched / stats.decisions * 100 : null;
@@ -1386,7 +1395,11 @@
       const commitmentPath = execution.readCommitment && execution.confirmationCommitment
         ? `${execution.readCommitment} → ${execution.confirmationCommitment}`
         : execution.commitment || '—';
-      const liveEntryRows = isPbrLive ? [
+      const liveEntryRows = isCyaOrganicBurstLive ? [
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', isCobFLive ? 'COB-F Strict 7 SOL Organic Pullback' : 'COB-D Strict 5 SOL Organic Pullback'], ['市场', 'PUMP_BONDING_CURVE'],
+        ['发射后窗口', '2–10秒'], ['独立买家', '5秒≥10'], ['5秒净流入', isCobFLive ? '≥7 SOL' : '≥5 SOL'], ['买入占比', '70%–95%'],
+        ['2秒涨幅 / 15秒回撤', '0%–40% / ≥2%'], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isPbrLive ? [
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'PBR-A 首次强势回调后二次加速'], ['市场', 'PUMP_AMM'],
         ['第一波涨幅', '≥40%'], ['回撤区间', '12%–25%'], ['低点反弹', '2%–10%'], ['3秒净流入 / Buyers', '≥3 SOL / ≥4'],
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
@@ -1416,7 +1429,15 @@
         ['毕业后窗口', age(strategy.trackingAgeMs)], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)],
         ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)], ['机会限制', mintOpportunityCopy],
       ];
-      const liveExitRows = isPbrLive ? [
+      const liveExitRows = isCobFLive ? [
+        ['策略模式', '25% Core + 75% Stair Runner'], ['Core触发 / 卖出', `${rate(strategy.coreActivationPct)} / ${rate(strategy.coreExitPct)}`],
+        ['峰值≥20% / ≥50% / ≥100%', '回撤15% / 20% / 25%'], ['固定止盈', '仅Core分批'],
+        ['硬止损', '无'], ['最大持仓兜底', age(strategy.maxHoldMs)],
+      ] : isCyaOrganicBurstLive ? [
+        ['策略模式', '快速止盈 + 移动止盈'], ['快速止盈', `${rate(strategy.fastTakeProfitPct)} / ${age(strategy.fastTakeProfitWindowMs)}`],
+        ['移动止盈激活 / 回撤', `${rate(strategy.trailingActivationPct)} / ${rate(strategy.trailingStopPct)}`],
+        ['硬止损', rate(strategy.hardStopPct)], ['最大持仓兜底', age(strategy.maxHoldMs)],
+      ] : isPbrLive ? [
         ['策略模式', '50% Core + 50% Runner'], ['Core触发 / 卖出', `${rate(strategy.coreActivationPct)} / ${rate(strategy.coreExitPct)}`],
         ['Runner激活', rate(strategy.trailingActivationPct)], ['基础峰值回撤', rate(strategy.baseTrailingDrawdownPct)],
         ['峰值≥80% / ≥150%', '回撤20% / 25%'], ['Core前硬止损', rate(strategy.hardStopPct)],
@@ -1462,7 +1483,9 @@
         ]],
         ['链上执行', [
           ['买入模式', isBondingCurveLive ? 'Bonding Curve 固定SOL硬上限' : 'PumpSwap 固定SOL硬上限'], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
-          ['卖出数量', (isGraduationAccelLive || isPbrLive) ? '当前批次 Core 50% + Runner' : '当前仓位批次 100%'], ['卖后余额核对', '当前批次残余自动重试'],
+          ['卖出数量', isCobFLive
+            ? '盈利20%卖25%，余75% Runner'
+            : ((isGraduationAccelLive || isPbrLive) ? `当前批次 Core ${number(strategy.coreExitPct || 50)}% + Runner` : '当前仓位批次 100%')], ['卖后余额核对', '当前批次残余自动重试'],
           ['买/卖优先费', `${number(runtime.priorityFeeSol,6)} SOL / 笔`],
         ]],
       ];

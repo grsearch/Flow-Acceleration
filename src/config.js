@@ -534,6 +534,52 @@ const config = {
     // and independent decision history; the retired Primary live rule is not listed.
     strategies: [
       {
+        id: 'cya_organic_burst_cob_f_core25_runner_live',
+        code: 'COB-F-C25-R75-X120',
+        label: 'CYA Organic Burst · COB-F Strict 7 SOL · 25/75 Stair Runner',
+        ruleVersion: 'cya_organic_burst_cob_f_core25_runner_live_v1',
+        signalSource: 'CYA_ORGANIC_BURST_COB_F',
+        enabled: booleanEnv('FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_BONDING_CURVE',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 1_000 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'CORE_RUNNER',
+        hardStopPct: 0,
+        coreActivationPct: 20,
+        coreExitPct: 25,
+        trailingActivationPct: 20,
+        baseTrailingDrawdownPct: 15,
+        trailingTiers: [
+          { activationPct: 50, drawdownPct: 20 },
+          { activationPct: 100, drawdownPct: 25 },
+        ],
+        maxHoldMs: 120_000,
+        sourceShadowCohortId: 'COB_F_CORE25_R75_X120',
+      },
+      {
         id: 'cya_organic_burst_cob_d_fix30_live',
         code: 'COB-D-T30-D10-X60',
         label: 'CYA Organic Burst · COB-D Strict 5 SOL · Fast TP + Trailing',
@@ -3519,6 +3565,8 @@ const config = {
         id: 'COB_F',
         label: 'COB-F · strict 7 SOL organic pullback',
         newEntriesEnabled: true,
+        liveStrategyId: 'cya_organic_burst_cob_f_core25_runner_live',
+        liveExitProfileId: 'CORE25_R75_X120',
         exclusiveGroup: 'COB_STRICT',
         exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
@@ -6175,7 +6223,9 @@ function validateConfig() {
     if (!config.liveTrading.privateKey) {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
-    if (!process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL
+    if (!process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_POSITION_SOL
+      && !process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_POSITION_SOL
+      && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V3_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL
