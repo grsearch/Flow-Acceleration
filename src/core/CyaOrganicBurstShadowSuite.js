@@ -82,6 +82,8 @@ class CyaOrganicBurstShadowSuite {
       excludedSmartTrades: 0,
       evaluatedStates: 0,
       qualifiedSignals: 0,
+      retiredEntrySignalsSuppressed: 0,
+      exclusiveSignalsSuppressed: 0,
       replaySignalsSuppressed: 0,
       targetOpenLabels: 0,
       rugGuardRejected: 0,
@@ -256,7 +258,15 @@ class CyaOrganicBurstShadowSuite {
       FROM cya_organic_burst_shadow_positions WHERE signal_at>=?
       GROUP BY mint, entry_profile_id
     `).all(this.now() - this.config.stateRetentionMs);
-    for (const row of recent) this.lastEpisodes.set(`${row.mint}:${row.entry_profile_id}`, Number(row.signal_at));
+    for (const row of recent) {
+      const signalAt = Number(row.signal_at);
+      const profile = this.entryProfiles.get(row.entry_profile_id);
+      this.lastEpisodes.set(`${row.mint}:${row.entry_profile_id}`, signalAt);
+      if (profile?.exclusiveGroup) {
+        const groupKey = `${row.mint}:GROUP:${profile.exclusiveGroup}`;
+        this.lastEpisodes.set(groupKey, Math.max(this.lastEpisodes.get(groupKey) || 0, signalAt));
+      }
+    }
     this.advanceTime(this.now());
   }
 
@@ -272,6 +282,9 @@ class CyaOrganicBurstShadowSuite {
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
       entryProfiles: [...this.entryProfiles.values()],
+      activeEntryProfiles: [...this.entryProfiles.values()].filter(
+        (profile) => profile.newEntriesEnabled !== false,
+      ),
       exitProfiles: [...this.exitProfiles.values()],
       strategy: {
         name: 'CYA Organic Burst',
@@ -281,6 +294,9 @@ class CyaOrganicBurstShadowSuite {
         publicFlowOnly: true,
         boundedPerMintTradeQueue: this.config.maxTradesPerMint,
         isolatedPositionTable: 'cya_organic_burst_shadow_positions',
+        sameMintExclusiveGroups: [...new Set(
+          [...this.entryProfiles.values()].map((profile) => profile.exclusiveGroup).filter(Boolean),
+        )],
       },
       ...this.metrics,
     };
@@ -437,10 +453,13 @@ class CyaOrganicBurstShadowSuite {
       && min(features.buyers5s, profile.minBuyers5s)
       && min(features.netFlow5s, profile.minNetFlow5sSol)
       && min(features.buyTxSharePct, profile.minBuyTxSharePct)
+      && max(features.buyTxSharePct, profile.maxBuyTxSharePct)
       && min(features.return2sPct, profile.minReturn2sPct)
+      && max(features.return2sPct, profile.maxReturn2sPct)
       && min(features.return5sPct, profile.minReturn5sPct)
       && max(features.return5sPct, profile.maxReturn5sPct)
-      && max(features.return15sPct, profile.maxReturn15sPct);
+      && max(features.return15sPct, profile.maxReturn15sPct)
+      && min(features.drawdown15sPct, profile.minDrawdown15sPct);
   }
 
   _evaluate(trade, price) {
@@ -448,11 +467,23 @@ class CyaOrganicBurstShadowSuite {
     this.metrics.evaluatedStates += 1;
     const results = [];
     for (const profile of this.entryProfiles.values()) {
-      const key = `${trade.mint}:${profile.id}`;
+      if (profile.newEntriesEnabled === false) {
+        if (this._matches(profile, features)) this.metrics.retiredEntrySignalsSuppressed += 1;
+        continue;
+      }
+      const key = profile.exclusiveGroup
+        ? `${trade.mint}:GROUP:${profile.exclusiveGroup}`
+        : `${trade.mint}:${profile.id}`;
       const prior = this.lastEpisodes.get(key);
-      if (prior != null && trade.timestampMs - prior < this.config.episodeCooldownMs) continue;
+      if (prior != null && trade.timestampMs - prior < this.config.episodeCooldownMs) {
+        if (profile.exclusiveGroup && this._matches(profile, features)) {
+          this.metrics.exclusiveSignalsSuppressed += 1;
+        }
+        continue;
+      }
       if (!this._matches(profile, features)) continue;
       this.lastEpisodes.set(key, trade.timestampMs);
+      this.lastEpisodes.set(`${trade.mint}:${profile.id}`, trade.timestampMs);
       results.push(...this._recordSignal(profile, trade, price, features));
     }
     return results;
@@ -462,7 +493,11 @@ class CyaOrganicBurstShadowSuite {
     const episodeId = `${trade.mint}:${profile.id}:${trade.timestampMs}`;
     const results = [];
     this.metrics.qualifiedSignals += 1;
+    const permittedExitIds = profile.exitProfileIds?.length
+      ? new Set(profile.exitProfileIds)
+      : null;
     for (const exit of this.exitProfiles.values()) {
+      if (permittedExitIds && !permittedExitIds.has(exit.id)) continue;
       const now = this.now();
       const cohortId = `${profile.id}_${exit.id}`;
       const result = this.insert.run({
