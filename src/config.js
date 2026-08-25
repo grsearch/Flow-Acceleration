@@ -542,7 +542,7 @@ const config = {
         enabled: booleanEnv('FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_ENABLED', true),
         entryEnabled: booleanEnv(
           'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_ENTRY_ENABLED',
-          true,
+          false,
         ),
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
@@ -588,7 +588,7 @@ const config = {
         enabled: booleanEnv('FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_ENABLED', true),
         entryEnabled: booleanEnv(
           'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_ENTRY_ENABLED',
-          true,
+          false,
         ),
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(

@@ -150,7 +150,8 @@ assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveGraduationAccel.maxEntrySelfImpactPct, 10);
 assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
-assert.strictEqual(liveCobF.entryEnabled, true);
+assert.strictEqual(liveCobF.enabled, true);
+assert.strictEqual(liveCobF.entryEnabled, false);
 assert.strictEqual(liveCobF.positionSizeSol, 0.1);
 assert.strictEqual(liveCobF.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveCobF.code, 'COB-F-C25-R75-X120');
@@ -167,7 +168,8 @@ assert.deepStrictEqual(liveCobF.trailingTiers, [
 assert.strictEqual(liveCobF.hardStopPct, 0);
 assert.strictEqual(liveCobF.maxHoldMs, 120_000);
 assert.strictEqual(liveCobF.sourceShadowCohortId, 'COB_F_CORE25_R75_X120');
-assert.strictEqual(liveCobD.entryEnabled, true);
+assert.strictEqual(liveCobD.enabled, true);
+assert.strictEqual(liveCobD.entryEnabled, false);
 assert.strictEqual(liveCobD.positionSizeSol, 0.1);
 assert.strictEqual(liveCobD.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveCobD.code, 'COB-D-T30-D10-X60');
@@ -180,6 +182,10 @@ assert.strictEqual(liveCobD.trailingStopPct, 10);
 assert.strictEqual(liveCobD.hardStopPct, 20);
 assert.strictEqual(liveCobD.maxHoldMs, 60_000);
 assert.strictEqual(liveCobD.sourceShadowCohortId, 'COB_D_T30_10_X60');
+assert.strictEqual(config.cyaOrganicBurstShadow.enabled, true);
+assert.ok(config.cyaOrganicBurstShadow.entryProfiles
+  .filter((profile) => ['COB_D', 'COB_F'].includes(profile.id))
+  .every((profile) => profile.newEntriesEnabled === true));
 assert.strictEqual(liveGraduationRecovery.entryEnabled, true);
 assert.strictEqual(liveGraduationRecovery.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');
@@ -235,8 +241,6 @@ assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
   [
-    'COB-F-C25-R75-X120',
-    'COB-D-T30-D10-X60',
     'O-C80-D5-B2-S0-NC',
     'O-C80-HO500-X60-R',
   ],

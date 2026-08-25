@@ -1026,6 +1026,8 @@ class CyaOrganicBurstShadowSuite {
         SUM(status='PRICE_JUMP') price_jump, SUM(status='NO_ENTRY') no_entry,
         SUM(status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING')) active,
         SUM(status='CLOSED') resolved, SUM(status='NO_EXIT') no_exit,
+        SUM(status='CLOSED' AND net_return_pct IS NOT NULL) priced_exits,
+        SUM(status='CLOSED' AND net_return_pct IS NULL) closed_without_return,
         AVG(age_ms) average_age_ms, AVG(curve_pct) average_curve_pct,
         AVG(buyers_5s) average_buyers_5s, AVG(net_flow_5s) average_net_flow_5s,
         AVG(buy_tx_share_pct) average_buy_tx_share_pct,
@@ -1057,10 +1059,33 @@ class CyaOrganicBurstShadowSuite {
       const losses = values.filter((value) => value < 0);
       const profit = wins.reduce((sum, value) => sum + value, 0);
       const loss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+      const netReturnSum = values.reduce((sum, value) => sum + value, 0);
+      const entered = Number(group.resolved || 0) + Number(group.no_exit || 0)
+        + Number(group.active || 0);
+      const completedEntered = Number(group.resolved || 0) + Number(group.no_exit || 0);
+      const unpricedExits = Number(group.no_exit || 0) + Number(group.closed_without_return || 0);
+      const pricedExits = Number(group.priced_exits || 0);
+      const pricedAndUnpricedExits = pricedExits + unpricedExits;
+      const stressAverage = (assumedNoExitReturnPct) => (
+        pricedAndUnpricedExits > 0
+          ? (netReturnSum + unpricedExits * assumedNoExitReturnPct) / pricedAndUnpricedExits
+          : null
+      );
       const middle = Math.floor(values.length / 2);
       const top5Profit = [...wins].sort((a, b) => b - a).slice(0, 5).reduce((sum, value) => sum + value, 0);
       return {
         ...group,
+        entered,
+        completed_entered: completedEntered,
+        unpriced_exits: unpricedExits,
+        entry_coverage_pct: Number(group.signals) > 0 ? entered / Number(group.signals) * 100 : null,
+        exit_price_coverage_pct: completedEntered > 0 ? pricedExits / completedEntered * 100 : null,
+        priced_signal_coverage_pct: Number(group.signals) > 0
+          ? pricedExits / Number(group.signals) * 100 : null,
+        no_exit_rate_pct: completedEntered > 0 ? unpricedExits / completedEntered * 100 : null,
+        stress_average_net_return_30_pct: stressAverage(-30),
+        stress_average_net_return_50_pct: stressAverage(-50),
+        stress_average_net_return_80_pct: stressAverage(-80),
         median_net_return_pct: values.length
           ? (values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2) : null,
         profit_factor: loss > 0 ? profit / loss : (profit > 0 ? null : 0),

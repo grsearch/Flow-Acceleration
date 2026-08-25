@@ -229,6 +229,15 @@ function main() {
   assert.strictEqual(dashboard.cohorts.length, 4);
   assert.strictEqual(dashboard.positions.length, 4);
   assert.ok(dashboard.cohorts.every((row) => row.target_open_5s_rate_pct === 100));
+  const fixed30Cohort = dashboard.cohorts.find((row) => row.exit_profile_id === 'FIX30');
+  assert.strictEqual(fixed30Cohort.priced_exits, 1);
+  assert.strictEqual(fixed30Cohort.unpriced_exits, 0);
+  assert.strictEqual(fixed30Cohort.entry_coverage_pct, 100);
+  assert.strictEqual(fixed30Cohort.exit_price_coverage_pct, 100);
+  assert.strictEqual(
+    fixed30Cohort.stress_average_net_return_80_pct,
+    fixed30Cohort.average_net_return_pct,
+  );
   assert.deepStrictEqual(suite.health().activeEntryProfiles.map((row) => row.id), ['COB_F', 'COB_D']);
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
 

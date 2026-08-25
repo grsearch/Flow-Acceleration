@@ -61,6 +61,8 @@ function buildCohortSummary(rows) {
         no_exit: 0,
         no_entry: 0,
         price_jump: 0,
+        active: 0,
+        closed_without_return: 0,
         returns: [],
       };
       groups.set(key, group);
@@ -71,8 +73,10 @@ function buildCohortSummary(rows) {
     if (row.status === 'NO_EXIT') group.no_exit += 1;
     if (row.status === 'NO_ENTRY') group.no_entry += 1;
     if (row.status === 'PRICE_JUMP') group.price_jump += 1;
+    if (['PENDING_ENTRY', 'OPEN', 'EXIT_PENDING'].includes(row.status)) group.active += 1;
     const value = finite(row.net_return_pct);
     if (row.status === 'CLOSED' && value != null) group.returns.push(value);
+    if (row.status === 'CLOSED' && value == null) group.closed_without_return += 1;
   }
 
   return [...groups.values()].map((group) => {
@@ -80,6 +84,17 @@ function buildCohortSummary(rows) {
     const positive = wins.reduce((sum, value) => sum + value, 0);
     const negative = Math.abs(group.returns.filter((value) => value < 0)
       .reduce((sum, value) => sum + value, 0));
+    const netReturnSum = group.returns.reduce((sum, value) => sum + value, 0);
+    const entered = group.closed + group.no_exit + group.active;
+    const completedEntered = group.closed + group.no_exit;
+    const unpricedExits = group.no_exit + group.closed_without_return;
+    const pricedExits = group.returns.length;
+    const pricedAndUnpricedExits = pricedExits + unpricedExits;
+    const stressAverage = (assumedNoExitReturnPct) => (
+      pricedAndUnpricedExits > 0
+        ? rounded((netReturnSum + unpricedExits * assumedNoExitReturnPct) / pricedAndUnpricedExits)
+        : null
+    );
     return {
       entry_profile_id: group.entry_profile_id,
       exit_profile_id: group.exit_profile_id,
@@ -89,6 +104,22 @@ function buildCohortSummary(rows) {
       no_exit: group.no_exit,
       no_entry: group.no_entry,
       price_jump: group.price_jump,
+      active: group.active,
+      entered,
+      completed_entered: completedEntered,
+      priced_exits: pricedExits,
+      closed_without_return: group.closed_without_return,
+      unpriced_exits: unpricedExits,
+      entry_coverage_pct: group.signals ? rounded(entered / group.signals * 100) : null,
+      exit_price_coverage_pct: completedEntered
+        ? rounded(pricedExits / completedEntered * 100) : null,
+      priced_signal_coverage_pct: group.signals
+        ? rounded(pricedExits / group.signals * 100) : null,
+      no_exit_rate_pct: completedEntered
+        ? rounded(unpricedExits / completedEntered * 100) : null,
+      stress_average_net_return_30_pct: stressAverage(-30),
+      stress_average_net_return_50_pct: stressAverage(-50),
+      stress_average_net_return_80_pct: stressAverage(-80),
       wins: wins.length,
       win_rate_pct: group.returns.length ? rounded(wins.length / group.returns.length * 100) : null,
       average_net_return_pct: group.returns.length

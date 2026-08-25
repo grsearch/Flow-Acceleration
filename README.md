@@ -380,9 +380,14 @@ Smart Wallet 的成交；目标钱包之后的首次 OPEN 只保存为未来5秒
 5秒保护后的2/3资金衰减、`+30%` 激活且峰值回撤 `10%`、以及 `+20%` 卖25%后
 75%阶梯Runner。INV10/FIX20及原来的多重交叉只用于旧 `COB-A/B/C` 历史与活动仓位管理。仓位写入独立表
 `cya_organic_burst_shadow_positions`，接口为 `GET /api/cya-organic-burst-shadow`，
-Dashboard 编号为 `COB-D/F`。`COB-F:CORE25_R75_X120` 同时提升为独立实盘
-`COB-F-C25-R75-X120`：单笔0.1 SOL，盈利20%卖出25%，剩余75%按峰值
-20%/50%/100%对应15%/20%/25%回撤保护，120秒兜底。Shadow仍按1 SOL独立统计。
+Dashboard 编号为 `COB-D/F`。`COB-F:CORE25_R75_X120` 的实盘定义和历史记录
+继续保留，但 `COB-F-C25-R75-X120` 已停止新开仓；若仍有活动实盘仓位，原25% Core、
+75% Runner与120秒兜底规则仍负责退出。Shadow继续按1 SOL独立统计。
+COB Dashboard 与专项导出的收益口径会把 `CLOSED`、`NO_EXIT`、`NO_ENTRY` 和
+`PRICE_JUMP` 分开：原始平均收益、胜率和 PF 只描述有真实退出价的样本，同时显示
+入场覆盖率、退出价覆盖率，以及将未取得退出价的已入场样本分别按 `-30%`、`-50%`、
+`-80%` 计入后的 S30/S50/S80 压力平均收益。系统不会修改旧仓位，也不会把
+`NO_EXIT` 写成伪造的链上亏损。
 该路径每个 Mint 最多保留256笔、15秒有界队列，复用
 现有 Universal RUG Guard，不增加 RPC，不签名，也不发送交易。
 
@@ -608,21 +613,22 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-当前 `COB-F-C25-R75-X120`、`COB-D-T30-D10-X60`、`O-C80-D5-B2-S0-NC` 与 `O-C80-HO500-X60-R`
-允许产生新实盘仓位，单笔都为 `0.1 SOL`；对应 Shadow 仍保持 `1 SOL`，且实盘入场统一经过
-内存态跨 Mint RUG Guard。
+当前仅 `O-C80-D5-B2-S0-NC` 与 `O-C80-HO500-X60-R` 允许产生新实盘仓位，
+单笔都为 `0.1 SOL`；对应 Shadow 仍保持 `1 SOL`，且实盘入场统一经过内存态跨 Mint RUG Guard。
+`COB-F-C25-R75-X120` 与 `COB-D-T30-D10-X60` 已停止新开仓，但保留历史展示、
+存量仓位退出和各自1 SOL Shadow研究。
 `PBR-A-X50-15` 与 `GFR-300-HS20-H30` 已于 2026-08-22 在代码层
 锁死新开仓；旧服务器 `.env` 无法误开启，但历史记录和存量仓位退出继续保留。
 其余旧实盘定义同样只用于历史展示与存量退出：
 
 ```text
-COB-F-C25-R75-X120 / cya_organic_burst_cob_f_core25_runner_live（开启）
+COB-F-C25-R75-X120 / cya_organic_burst_cob_f_core25_runner_live（停止新开仓）
 发射后2–10秒、Buyers5≥10、NetFlow5≥7 SOL、买入占比70%–95%
 → 最近2秒涨幅0%–40%、距15秒峰值回撤≥2% → Bonding Curve买入0.1 SOL
 → +20%卖25% Core；75% Runner按峰值20/50/100%启用15/20/25%回撤；120秒退出
 → 同信号Shadow继续按1 SOL运行 CORE25_R75_X120 及其他独立退出对照
 
-COB-D-T30-D10-X60 / cya_organic_burst_cob_d_fix30_live（开启；ID兼容历史）
+COB-D-T30-D10-X60 / cya_organic_burst_cob_d_fix30_live（停止新开仓；ID兼容历史）
 发射后2–10秒、Buyers5≥10、NetFlow5≥5 SOL、买入占比70%–95%
 → 最近2秒涨幅0%–40%、距15秒峰值回撤≥2% → Bonding Curve买入0.1 SOL
 → 买入后前2秒内达到+10%立即全额止盈
