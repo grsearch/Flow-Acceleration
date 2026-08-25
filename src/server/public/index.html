@@ -366,8 +366,8 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="cya-slot-flow" data-strategy-code="CSF-E510-Q">
               <b><span class="strategy-code">CSF-E510-Q</span>CYA Slot Flow</b><small>严格5–10秒公共流前向组；旧宽松组停止新开仓</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-organic-burst" data-strategy-code="COB-A/B/C">
-              <b><span class="strategy-code">COB-A/B/C</span>CYA Organic Burst</b><small>非监控钱包有机资金爆发；1 SOL容量；三种退出独立对照</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-organic-burst" data-strategy-code="COB-D/F">
+              <b><span class="strategy-code">COB-D/F</span>CYA Organic Burst</b><small>严格公共流 + 健康回撤；同Mint互斥；仅FIX30</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
               <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun（已停）</b><small>0胜率且样本稀疏；历史数据保留，不再新增</small>
@@ -880,12 +880,12 @@
           <div class="strategy-pane" data-live-strategy-pane="cya-organic-burst" hidden>
             <article class="card record-section">
               <div class="section-title">
-                <h2>CYA Organic Burst Shadow COB-A / B / C</h2>
-                <p>只使用非监控钱包的公开成交形成早期有机资金爆发信号；CYA 首次 OPEN 仅作未来标签，永不参与判定或发送交易。</p>
+                <h2>CYA Organic Burst Shadow COB-D / F（A/B/C 历史保留）</h2>
+                <p>只使用非监控钱包的公开成交形成严格有机资金爆发信号；同一 Mint 只进入一个新组，CYA 首次 OPEN 仅作未来标签。</p>
               </div>
-              <div class="strategy-expression" id="cya-organic-burst-expression">COB-A/B/C 早期公共流入场 × INV10/FIX20/FIX30 独立退出</div>
+              <div class="strategy-expression" id="cya-organic-burst-expression">COB-D/F 严格公共流 + 健康回撤入场 × FIX30</div>
               <div class="strategy-metric-groups" id="cya-organic-burst-metrics"></div>
-              <div class="section-title"><h2>有机爆发入场 × 右尾退出</h2><p>200ms 后按 1 SOL 储备容量模拟成交；前10秒结构失效与固定20/30秒分别计数。</p></div>
+              <div class="section-title"><h2>有机爆发入场 × 右尾退出</h2><p>200ms 后按 1 SOL 储备容量模拟成交；新 D/F 组仅固定30秒，旧 A/B/C 继续显示历史结果。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / 100</th><th>CYA 5s标签</th><th>Flow / 容量</th><th>MFE / MAE</th></tr></thead>
                 <tbody id="cya-organic-burst-cohort-rows"></tbody>
@@ -1632,13 +1632,15 @@
       const strategy = runtime.strategy || {};
       const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
       const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
-      document.querySelector('#cya-organic-burst-expression').textContent = `${(runtime.entryProfiles || []).map(row => row.id).join(' / ')}：非监控钱包公共流；${age(strategy.entryDelayMs)} 后按 ${number(strategy.positionSizeSol,2)} SOL 容量成交；CYA 首次 OPEN 只作未来标签。`;
+      const activeEntryProfiles = runtime.activeEntryProfiles || runtime.entryProfiles || [];
+      document.querySelector('#cya-organic-burst-expression').textContent = `${activeEntryProfiles.map(row => row.id).join(' / ')}：严格非监控钱包公共流，同 Mint 互斥；${age(strategy.entryDelayMs)} 后按 ${number(strategy.positionSizeSol,2)} SOL 容量成交；CYA OPEN 只作未来标签。`;
       renderMetricGroups('#cya-organic-burst-metrics', [
         ['运行模式', runtime.enabled ? 'SHADOW COB' : '关闭', '独立表；不签名、不发送交易'],
         ['全部 / 公共成交', `${number(runtime.observedTrades)} / ${number(runtime.observedPublicTrades)}`, `排除监控钱包 ${number(runtime.excludedSmartTrades)} · 评估 ${number(runtime.evaluatedStates)}`],
         ['合格信号 / CYA标签', `${number(runtime.qualifiedSignals)} / ${number(runtime.targetOpenLabels)}`, '只标记未来首次 OPEN，ADD 不参与'],
         ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
-        ['结构失效退出', number(runtime.structureInvalidations), '仅 INV10 组使用；FIX20/FIX30 保持纯时间对照'],
+        ['旧组 / 互斥抑制', `${number(runtime.retiredEntrySignalsSuppressed)} / ${number(runtime.exclusiveSignalsSuppressed)}`, 'A/B/C停止新增；D/F同Mint只计一次'],
+        ['结构失效退出', number(runtime.structureInvalidations), '仅历史 INV10 组；D/F 均使用 FIX30'],
         ['RUG / 跳价 / 无成交', `${number(runtime.rugGuardRejected)} / ${number(runtime.priceJump)} / ${number(runtime.noEntry)}`, `每 Mint 队列≤${number(strategy.boundedPerMintTradeQueue || 256)}`],
       ], []);
       const cohorts = data.cohorts || [];
