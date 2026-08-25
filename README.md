@@ -604,14 +604,19 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-当前只有 `O-C80-D5-B2-S0-NC` 允许产生新实盘仓位，
-单笔都为 `0.1 SOL`；两者对应 Shadow 仍保持 `1 SOL`，且实盘入场统一经过
+当前 `COB-D-X30`、`O-C80-D5-B2-S0-NC` 与 `O-C80-HO500-X60-R`
+允许产生新实盘仓位，单笔都为 `0.1 SOL`；对应 Shadow 仍保持 `1 SOL`，且实盘入场统一经过
 内存态跨 Mint RUG Guard。
 `PBR-A-X50-15` 与 `GFR-300-HS20-H30` 已于 2026-08-22 在代码层
 锁死新开仓；旧服务器 `.env` 无法误开启，但历史记录和存量仓位退出继续保留。
 其余旧实盘定义同样只用于历史展示与存量退出：
 
 ```text
+COB-D-X30 / cya_organic_burst_cob_d_fix30_live（开启）
+发射后2–10秒、Buyers5≥10、NetFlow5≥5 SOL、买入占比70%–95%
+→ 最近2秒涨幅0%–40%、距15秒峰值回撤≥2% → Bonding Curve买入0.1 SOL
+→ 不设固定止盈或移动止盈，固定持有30秒；同信号Shadow仍按1 SOL独立统计
+
 M-C5-E120 / migration_continuity_mc_c5_e120_live（停止新开仓）
 毕业后5秒 Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6
 → PumpSwap买入0.1 SOL → 20%硬止损或固定120秒卖出
