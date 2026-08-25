@@ -78,6 +78,9 @@ const livePbrA = config.liveTrading.strategies.find((strategy) => (
 const liveGraduationAccel = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
 ));
+const liveCobD = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'cya_organic_burst_cob_d_fix30_live'
+));
 const liveGraduationRecovery = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_ho500_x60_recovery_live'
 ));
@@ -143,6 +146,13 @@ assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveGraduationAccel.maxEntrySelfImpactPct, 10);
 assert.strictEqual(liveGraduationAccel.exitMode, 'GRADUATION_CORE_RUNNER');
 assert.strictEqual(liveGraduationAccel.coreExitPct, 50);
+assert.strictEqual(liveCobD.entryEnabled, true);
+assert.strictEqual(liveCobD.positionSizeSol, 0.1);
+assert.strictEqual(liveCobD.market, 'PUMP_BONDING_CURVE');
+assert.strictEqual(liveCobD.exitMode, 'FIXED_HOLD');
+assert.strictEqual(liveCobD.fixedHoldMs, 30_000);
+assert.strictEqual(liveCobD.hardStopPct, 0);
+assert.strictEqual(liveCobD.sourceShadowCohortId, 'COB_D_FIX30');
 assert.strictEqual(liveGraduationRecovery.entryEnabled, true);
 assert.strictEqual(liveGraduationRecovery.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');
@@ -197,7 +207,7 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  ['O-C80-D5-B2-S0-NC', 'O-C80-HO500-X60-R'],
+  ['COB-D-X30', 'O-C80-D5-B2-S0-NC', 'O-C80-HO500-X60-R'],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
 assert.strictEqual(config.preEntryRugRisk.templateMinLargeBuys, 4);
