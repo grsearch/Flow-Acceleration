@@ -712,6 +712,8 @@ Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 07:00 运行，�
 
 远端验证通过后，每日导出任务直接进入 `DONE`，不会再从外部进程清理在线 SQLite 主库。`scripts/cleanup-research-retention.js` 仅保留为停服维护工具；必须在明确停止实时服务后手动执行。这样可避免大型 `DELETE` 持有写锁时，主服务恰好重启并因 `SQLITE_BUSY` 陷入崩溃循环。维护过程仍禁止 `wal_checkpoint` 或 `VACUUM`；已有大型数据库如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
 
+为避免大库维护长时间停机，同一份已验证 COS 归档在 24 小时内只允许完成一轮清理，且单轮硬上限为 5,000,000 行；即使传入更大的 `--max-rows` 也不会突破该上限。`--dry-run` 不覆盖最近一次正式维护记录。只有在明确批准的故障恢复场景下才能使用 `--force` 绕过同归档保护。System Health 会显示最近维护时间、实际删除行数和 SQLite 可复用空间。
+
 安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传和验证均有独立超时与失败保护，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`DONE` 或 `FAILED`），COSCLI 卡住时不会无限占用下一次任务。
 
 部分服务器曾由 OpenClaw 临时创建 `flow-daily-export.service/timer`，其中某些旧 service 与主采集服务绑定并带有自动重启，可能在主服务重启时反复导出。标准安装器只会在 `flow-acceleration-backup.timer` 已通过校验并成功启用后，立即停止并禁用旧 service 与 timer。正式备份 service 不依赖 `flow-acceleration.service` 的生命周期，主服务重启不会再次触发导出；配置不完整时旧调度保持不变，避免迁移过程造成备份空窗。

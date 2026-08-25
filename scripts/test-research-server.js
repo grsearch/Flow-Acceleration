@@ -183,6 +183,8 @@ async function main() {
   assert.ok(dashboard.includes('strategyViewCache'));
   assert.ok(dashboard.includes('id="strategy-load-status"'));
   assert.ok(dashboard.includes('if (document.hidden && !force) return;'));
+  assert.ok(dashboard.includes("['历史清理', retentionStatus]"));
+  assert.ok(dashboard.includes('同归档 ${age(retention?.repeatGuardMs || 86400000)} 仅1轮'));
   assert.ok(dashboard.includes("loadDashboard('/api/signals?limit=50'"));
   assert.ok(dashboard.includes('positionLimit=30&orderLimit=30&decisionLimit=30'));
   assert.ok(dashboard.includes("document.addEventListener('visibilitychange'"));

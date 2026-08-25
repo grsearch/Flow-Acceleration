@@ -12,18 +12,49 @@ const DEFAULTS = Object.freeze({
   pauseMs: 250,
   busyTimeoutMs: 5_000,
   gateMaxAgeMs: 6 * 60 * 60_000,
+  repeatGuardMs: 24 * 60 * 60_000,
 });
+
+const HARD_MAX_ROWS_PER_RUN = 5_000_000;
 
 function parseArgs(argv) {
   const result = {};
   for (const value of argv) {
     if (value === '--dry-run') result.dryRun = true;
+    else if (value === '--force') result.force = true;
     else if (value.startsWith('--')) {
       const index = value.indexOf('=');
       if (index > 2) result[value.slice(2, index)] = value.slice(index + 1);
     }
   }
   return result;
+}
+
+function readJsonIfPresent(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    throw new Error(`Retention report is unreadable: ${error.message}`);
+  }
+}
+
+function assertNotRepeated({ reportPath, gate, now, repeatGuardMs, force = false }) {
+  if (force) return null;
+  const previous = readJsonIfPresent(reportPath);
+  if (!previous || previous.mode !== 'COS_GATED_RETENTION') return previous;
+  const completedAtMs = Number(previous.completedAtMs);
+  const sameArchive = previous.cosGate?.sha256 === gate.sha256;
+  const elapsedMs = Math.abs(now - completedAtMs);
+  if (sameArchive && Number.isFinite(completedAtMs)
+    && elapsedMs < repeatGuardMs) {
+    const retryAt = new Date(completedAtMs + repeatGuardMs).toISOString();
+    throw new Error(
+      `This COS archive already completed one retention run; retry after ${retryAt} `
+      + 'or use --force only for an explicitly approved recovery',
+    );
+  }
+  return previous;
 }
 
 function positiveNumber(value, fallback, { integer = false, min = 0 } = {}) {
@@ -115,12 +146,14 @@ function assertRawTradesSchema(db) {
 async function cleanupResearchRetention(options = {}) {
   const now = positiveNumber(options.now, Date.now(), { integer: true, min: 1 });
   const hotRawHours = positiveNumber(options.hotRawHours, DEFAULTS.hotRawHours, { min: 24 });
-  const batchRows = positiveNumber(options.batchRows, DEFAULTS.batchRows, {
+  const requestedBatchRows = positiveNumber(options.batchRows, DEFAULTS.batchRows, {
     integer: true, min: 100,
   });
-  const maxRows = positiveNumber(options.maxRows, DEFAULTS.maxRows, {
+  const batchRows = Math.min(requestedBatchRows, HARD_MAX_ROWS_PER_RUN);
+  const requestedMaxRows = positiveNumber(options.maxRows, DEFAULTS.maxRows, {
     integer: true, min: batchRows,
   });
+  const maxRows = Math.min(requestedMaxRows, HARD_MAX_ROWS_PER_RUN);
   const maxRunMs = positiveNumber(options.maxRunMs, DEFAULTS.maxRunMs, {
     integer: true, min: 1_000,
   });
@@ -139,10 +172,19 @@ async function cleanupResearchRetention(options = {}) {
     options.reportPath || path.join(path.dirname(dbPath), 'exports', 'retention-last-run.json'),
   );
   const dryRun = Boolean(options.dryRun);
+  const force = Boolean(options.force);
+  const repeatGuardMs = positiveNumber(
+    options.repeatGuardMs,
+    DEFAULTS.repeatGuardMs,
+    { integer: true, min: 60_000 },
+  );
 
   const gate = validateCosGate(statePath, now, positiveNumber(
     options.gateMaxAgeMs, DEFAULTS.gateMaxAgeMs, { integer: true, min: 60_000 },
   ));
+  if (!dryRun) {
+    assertNotRepeated({ reportPath, gate, now, repeatGuardMs, force });
+  }
   if (!fs.existsSync(dbPath)) throw new Error(`Research database not found: ${dbPath}`);
 
   const startedAt = Date.now();
@@ -227,6 +269,13 @@ async function cleanupResearchRetention(options = {}) {
     hotRawHours,
     batchRows,
     maxRows,
+    limits: {
+      requestedBatchRows,
+      requestedMaxRows,
+      hardMaxRowsPerRun: HARD_MAX_ROWS_PER_RUN,
+      repeatGuardMs,
+      forceOverride: force,
+    },
     deletedRows,
     batches,
     busyRetries,
@@ -255,12 +304,18 @@ async function cleanupResearchRetention(options = {}) {
       optimizeExecuted,
       databaseFileShrunk: false,
       freedPagesRemainReusableBySqlite: true,
+      oneRunPerArchiveGuard: true,
+      hardMaxRowsPerRun: HARD_MAX_ROWS_PER_RUN,
     },
   };
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  const temporary = `${reportPath}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, reportPath);
+  // A dry run is printed to stdout but deliberately does not replace the last
+  // completed maintenance report. The report is also the 24-hour replay lock.
+  if (!dryRun) {
+    fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+    const temporary = `${reportPath}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, reportPath);
+  }
   return report;
 }
 
@@ -278,6 +333,7 @@ async function main() {
     busyTimeoutMs: input['busy-timeout-ms'] || process.env.FLOW_RETENTION_BUSY_TIMEOUT_MS,
     gateMaxAgeMs: input['gate-max-age-ms'] || process.env.FLOW_RETENTION_GATE_MAX_AGE_MS,
     dryRun: input.dryRun,
+    force: input.force,
   });
   console.log(JSON.stringify(result, null, 2));
 }
@@ -291,6 +347,8 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULTS,
+  HARD_MAX_ROWS_PER_RUN,
+  assertNotRepeated,
   cleanupResearchRetention,
   parseArgs,
   readStateFile,

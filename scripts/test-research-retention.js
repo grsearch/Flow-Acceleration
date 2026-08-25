@@ -8,6 +8,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const {
   DEFAULTS,
+  HARD_MAX_ROWS_PER_RUN,
   cleanupResearchRetention,
   validateCosGate,
 } = require('./cleanup-research-retention');
@@ -85,6 +86,7 @@ async function main() {
   });
   assert.strictEqual(dryRun.deletedRows, 0);
   assert.strictEqual(dryRun.stopReason, 'DRY_RUN');
+  assert.strictEqual(fs.existsSync(reportPath), false, 'dry run must not replace the formal report');
 
   const result = await cleanupResearchRetention({
     dbPath,
@@ -105,6 +107,41 @@ async function main() {
   assert.strictEqual(result.hotRawHours, 48);
   assert.strictEqual(result.optimize.executed, true);
   assert.strictEqual(result.optimize.error, null);
+  assert.strictEqual(result.limits.hardMaxRowsPerRun, 5_000_000);
+  assert.strictEqual(HARD_MAX_ROWS_PER_RUN, 5_000_000);
+
+  await assert.rejects(
+    () => cleanupResearchRetention({
+      dbPath,
+      statePath: gate.statePath,
+      reportPath,
+      now,
+      pauseMs: 0,
+    }),
+    /already completed one retention run/,
+  );
+  const cappedDryRun = await cleanupResearchRetention({
+    dbPath,
+    statePath: gate.statePath,
+    reportPath,
+    now,
+    maxRows: 9_000_000,
+    pauseMs: 0,
+    dryRun: true,
+  });
+  assert.strictEqual(cappedDryRun.maxRows, 5_000_000);
+  assert.strictEqual(cappedDryRun.limits.requestedMaxRows, 9_000_000);
+
+  const forced = await cleanupResearchRetention({
+    dbPath,
+    statePath: gate.statePath,
+    reportPath,
+    now,
+    pauseMs: 0,
+    force: true,
+  });
+  assert.strictEqual(forced.deletedRows, 0);
+  assert.strictEqual(forced.limits.forceOverride, true);
 
   const verify = new Database(dbPath, { readonly: true });
   assert.deepStrictEqual(

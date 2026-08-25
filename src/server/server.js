@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const { runBacktest } = require('../core/FlowBacktester');
@@ -19,6 +20,35 @@ function boolean(value, fallback = false) {
   if (value == null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function loadRetentionMaintenance(dbPath) {
+  if (!dbPath || dbPath === ':memory:') return null;
+  const reportPath = path.join(
+    path.dirname(path.resolve(dbPath)),
+    'exports',
+    'retention-last-run.json',
+  );
+  if (!fs.existsSync(reportPath)) return null;
+  try {
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    if (report.mode !== 'COS_GATED_RETENTION') return null;
+    return {
+      status: 'COMPLETED',
+      completedAtMs: Number(report.completedAtMs) || null,
+      deletedRows: Number(report.deletedRows) || 0,
+      stopReason: report.stopReason || null,
+      reusableBytes: Number(report.pages?.after?.reusableBytes) || 0,
+      archiveSha256: report.cosGate?.sha256 || null,
+      hardMaxRowsPerRun: Number(report.limits?.hardMaxRowsPerRun) || 5_000_000,
+      repeatGuardMs: Number(report.limits?.repeatGuardMs) || 24 * 60 * 60_000,
+    };
+  } catch (error) {
+    return {
+      status: 'REPORT_ERROR',
+      error: error.message,
+    };
+  }
 }
 
 class ResearchServer {
@@ -79,6 +109,7 @@ class ResearchServer {
     this.qualityLeaderShadow = qualityLeaderShadow;
     this.bigWinnerShadow = bigWinnerShadow;
     this.graduationAccelerationShadow = graduationAccelerationShadow;
+    this.retentionMaintenance = loadRetentionMaintenance(this.store?.config?.dbPath);
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -743,7 +774,10 @@ class ResearchServer {
         engine,
         labels: this.labeler.stats(),
         stream: this.stream.health(),
-        database: this.store.healthSnapshot(),
+        database: {
+          ...this.store.healthSnapshot(),
+          retentionMaintenance: this.retentionMaintenance,
+        },
         trading: this.trader?.health() || null,
         signalShadow: this.signalShadow?.health() || null,
         flowFirstShadow: this.flowFirstShadow?.health() || null,
