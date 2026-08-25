@@ -59,7 +59,8 @@ function main() {
       },
       {
         id: 'COB_F', label: 'strict 7 SOL', newEntriesEnabled: true,
-        exclusiveGroup: 'COB_STRICT', exitProfileIds: ['FIX30'],
+        exclusiveGroup: 'COB_STRICT',
+        exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, minBuyers5s: 10,
         minNetFlow5sSol: 7, minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
         minReturn2sPct: 0, maxReturn2sPct: 40, minDrawdown15sPct: 2,
@@ -67,7 +68,8 @@ function main() {
       {
         id: 'COB_D', label: 'strict 5 SOL', newEntriesEnabled: true,
         liveStrategyId: 'cya_organic_burst_cob_d_fix30_live',
-        exclusiveGroup: 'COB_STRICT', exitProfileIds: ['FIX30'],
+        exclusiveGroup: 'COB_STRICT',
+        exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, minBuyers5s: 10,
         minNetFlow5sSol: 5, minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
         minReturn2sPct: 0, maxReturn2sPct: 40, minDrawdown15sPct: 2,
@@ -81,7 +83,31 @@ function main() {
         maxInvalidationReturn2sPct: 0,
       },
       { id: 'FIX20', label: 'fixed 20s', maxHoldMs: 20_000, structureInvalidationEnabled: false },
-      { id: 'FIX30', label: 'fixed 30s', maxHoldMs: 30_000, structureInvalidationEnabled: false },
+      {
+        id: 'FIX30', label: 'fixed 30s', mode: 'FIXED_HOLD',
+        maxHoldMs: 30_000, structureInvalidationEnabled: false,
+      },
+      {
+        id: 'FLOWFADE_X60', label: 'flow fade', mode: 'FLOW_FADE',
+        minHoldMs: 5_000, maxHoldMs: 60_000, minFadeVotes: 2,
+        minSellBuyFlowRatio: 0.8, maxBuyerRetentionRatio: 0.5,
+        structureInvalidationEnabled: false,
+      },
+      {
+        id: 'T30_10_X60', label: 'trailing', mode: 'TRAILING',
+        hardStopPct: 20, minHoldMs: 0, trailingActivationPct: 30,
+        trailingStopPct: 10, maxHoldMs: 60_000, structureInvalidationEnabled: false,
+      },
+      {
+        id: 'CORE25_R75_X120', label: 'core runner', mode: 'CORE_RUNNER',
+        coreActivationPct: 20, coreWeightPct: 25, maxHoldMs: 120_000,
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 15 },
+          { activationPct: 50, drawdownPct: 20 },
+          { activationPct: 100, drawdownPct: 25 },
+        ],
+        structureInvalidationEnabled: false,
+      },
     ],
     costModel: {
       platformFeePct: 1, buySlippagePct: 0, sellSlippagePct: 0, priceImpactPct: 0,
@@ -128,15 +154,15 @@ function main() {
   assert.strictEqual(suite.health().excludedSmartTrades, 1);
 
   const signal = trade(0, 'BUY', 0.6, 'public-10', 0.000000120);
-  assert.strictEqual(signal.signals.length, 1, 'COB-D should qualify in the 5-7 SOL band');
+  assert.strictEqual(signal.signals.length, 4, 'COB-D should open four isolated exit cohorts');
   assert.strictEqual(liveSignals.length, 1, 'COB-D must emit exactly one independent live signal');
   assert.strictEqual(liveSignals[0].strategyId, 'cya_organic_burst_cob_d_fix30_live');
   assert.strictEqual(liveSignals[0].mint, mint);
   assert.strictEqual(liveSignals[0].features.shadowEntryProfileId, 'COB_D');
-  assert.strictEqual(liveSignals[0].features.shadowExitProfileId, 'FIX30');
+  assert.strictEqual(liveSignals[0].features.shadowExitProfileId, 'T30_10_X60');
   assert.strictEqual(store.db.prepare(
     'SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions',
-  ).get().n, 1);
+  ).get().n, 4);
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions
     WHERE entry_profile_id='COB_D' AND exit_profile_id='FIX30'
@@ -151,19 +177,19 @@ function main() {
   trade(225, 'BUY', 20, targetWallet, 0.000000122);
   assert.strictEqual(suite.health().opened, 0);
   trade(250, 'BUY', 0.2, 'public-fill', 0.000000122);
-  assert.strictEqual(suite.health().opened, 1);
+  assert.strictEqual(suite.health().opened, 4);
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions
     WHERE status='OPEN' AND entry_impact_pct IS NOT NULL AND total_invested_sol=1
-  `).get().n, 1);
+  `).get().n, 4);
 
   // CYA's first OPEN remains a future label only.
   now = base + 500;
   assert.strictEqual(suite.onSmartWalletEvent({
     mint, wallet: targetWallet, side: 'BUY', positionPhase: 'OPEN', timestampMs: now,
-  }), 1);
+  }), 4);
 
-  // New strict cohorts use only the fixed 30-second right-tail control.
+  // FIX30 remains the historical control while the new exits remain isolated.
   now = base + 30_500;
   suite.advanceTime(now);
   trade(30_750, 'BUY', 0.1, 'public-fix30-exit', 0.000000240);
@@ -172,18 +198,34 @@ function main() {
     WHERE status='CLOSED' AND exit_reason='MAX_HOLD'
   `).get().n, 1);
 
+  // The runner takes 25% at +20%; live-matched trailing activates at +30%
+  // and exits after a 10% peak drawdown.
+  trade(31_000, 'BUY', 0.1, 'public-core-fill', 0.000000240);
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions
+    WHERE exit_profile_id='CORE25_R75_X120' AND core_exit_at IS NOT NULL
+      AND core_weight_pct=25 AND core_proceeds_sol>0
+  `).get().n, 1);
+  trade(31_100, 'BUY', 0.1, 'public-trailing-trigger', 0.000000210);
+  trade(31_350, 'BUY', 0.1, 'public-trailing-fill', 0.000000210);
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions
+    WHERE exit_profile_id='T30_10_X60' AND status='CLOSED'
+      AND exit_reason='TRAILING_T30_D10'
+  `).get().n, 1);
+
   // Burst memory remains bounded and same-Mint episode cooldown prevents duplicates.
   for (let index = 0; index < 80; index += 1) {
-    trade(31_000 + index, 'BUY', 0.01, `burst-${index}`, 0.000000240);
+    trade(31_500 + index, 'BUY', 0.01, `burst-${index}`, 0.000000210);
   }
   assert.ok(suite.states.get(mint).trades.length <= config.maxTradesPerMint);
   assert.strictEqual(store.db.prepare(
     'SELECT COUNT(*) n FROM cya_organic_burst_shadow_positions',
-  ).get().n, 1);
+  ).get().n, 4);
 
   const dashboard = suite.dashboard({ positionLimit: 20 });
-  assert.strictEqual(dashboard.cohorts.length, 1);
-  assert.strictEqual(dashboard.positions.length, 1);
+  assert.strictEqual(dashboard.cohorts.length, 4);
+  assert.strictEqual(dashboard.positions.length, 4);
   assert.ok(dashboard.cohorts.every((row) => row.target_open_5s_rate_pct === 100));
   assert.deepStrictEqual(suite.health().activeEntryProfiles.map((row) => row.id), ['COB_F', 'COB_D']);
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);

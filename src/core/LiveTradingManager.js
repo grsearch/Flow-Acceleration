@@ -118,6 +118,7 @@ class LiveTradingManager {
     this.settlementSweepPromise = null;
     this.nextSettlementSweepAt = 0;
     this.coreExitPending = new Set();
+    this.mintExitQueues = new Map();
     this.graduationGateTrades = new Map();
     this.entryQueue = Promise.resolve();
     this.stopping = false;
@@ -141,6 +142,27 @@ class LiveTradingManager {
     };
   }
 
+  _addPosition(position) {
+    this.positions.set(Number(position.id), position);
+  }
+
+  _removePosition(position) {
+    this.positions.delete(Number(position?.id));
+  }
+
+  _hasPosition(position) {
+    return this.positions.has(Number(position?.id));
+  }
+
+  _positionsForMint(mint) {
+    if (!mint) return [];
+    return [...this.positions.values()].filter((position) => position.mint === mint);
+  }
+
+  _hasActiveMint(mint) {
+    return this._positionsForMint(mint).length > 0;
+  }
+
   start() {
     for (const row of this.store.activeLivePositions()) {
       const position = restoredPosition(row);
@@ -155,7 +177,7 @@ class LiveTradingManager {
         position.coreExitAttempted = Boolean(lastSell);
         if (position.coreExited) position.highestPrice = Number(row.highest_price) || 0;
       }
-      this.positions.set(position.mint, position);
+      this._addPosition(position);
       if (position.mode === 'LIVE' && this.mode !== 'LIVE') {
         this.metrics.lastError = 'ACTIVE_LIVE_POSITION_REQUIRES_LIVE_MODE';
         continue;
@@ -188,13 +210,13 @@ class LiveTradingManager {
     // account index. Recheck those exact historical false-empty rows on boot.
     if (this.mode === 'LIVE' && typeof this.store.confirmedEmptyLivePositions === 'function') {
       for (const row of this.store.confirmedEmptyLivePositions()) {
-        if (this.positions.has(row.mint)) continue;
+        if (this.positions.has(Number(row.id))) continue;
         const position = restoredPosition(row);
         position.strategy = this.strategies.get(position.strategyId) || null;
         position.status = 'EXIT_FAILED';
         position.tokenAmountRaw = null;
         position.exitReason = 'ENTRY_CONFIRMATION_UNKNOWN';
-        this.positions.set(position.mint, position);
+        this._addPosition(position);
         this.store.reopenLivePositionForReconciliation(
           position.id,
           'Rechecking a legacy confirmed-empty entry against transaction metadata',
@@ -296,6 +318,7 @@ class LiveTradingManager {
           .filter((position) => position.strategyId === strategy.id).length,
       })),
       maxConcurrentPositions: this.config.maxConcurrentPositions,
+      maxConcurrentPositionsPerMint: this.config.maxConcurrentPositionsPerMint,
       minWalletReserveSol: this.config.minWalletReserveSol,
       buySlippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
       sellSlippagePct: this.config.sellSlippagePct ?? this.config.slippagePct,
@@ -368,19 +391,20 @@ class LiveTradingManager {
         graduatedAt: Math.min(graduatedAt, current?.graduatedAt || graduatedAt),
       });
     }
-    const position = this.positions.get(token.mint);
-    if (position?.strategy?.exitMode === 'GRADUATION_CORE_RUNNER') {
-      position.graduatedAt = position.graduatedAt || graduatedAt;
-      this._scheduleMaxHold(position);
-    } else if (position?.strategy?.exitMode === 'QUALITY_PROTECTED_RUNNER') {
-      position.graduatedAt = position.graduatedAt || graduatedAt;
+    for (const position of this._positionsForMint(token.mint)) {
+      if (position?.strategy?.exitMode === 'GRADUATION_CORE_RUNNER') {
+        position.graduatedAt = position.graduatedAt || graduatedAt;
+        this._scheduleMaxHold(position);
+      } else if (position?.strategy?.exitMode === 'QUALITY_PROTECTED_RUNNER') {
+        position.graduatedAt = position.graduatedAt || graduatedAt;
+      }
     }
   }
 
   trackedMints(now = this.now()) {
     for (const [mint, token] of this.tracked) {
       if (now - token.graduatedAt <= this._maxTrackingAgeMs()) continue;
-      if (this.positions.has(mint)) continue;
+      if (this._hasActiveMint(mint)) continue;
       this.tracked.delete(mint);
       for (const states of this.detectors.values()) states.delete(mint);
       this.ammPriceStates.delete(mint);
@@ -412,10 +436,13 @@ class LiveTradingManager {
       }
     }
 
-    const position = this.positions.get(observedTrade?.mint);
-    if (!position || !Number.isFinite(observedTrade.price) || observedTrade.price <= 0) {
-      return;
+    if (!Number.isFinite(observedTrade?.price) || observedTrade.price <= 0) return;
+    for (const position of this._positionsForMint(observedTrade.mint)) {
+      this._observePositionTrade(position, observedTrade);
     }
+  }
+
+  _observePositionTrade(position, observedTrade) {
     if (position.status !== 'OPEN') return;
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     const graduatedAt = Number(this.store.getToken(observedTrade.mint)?.graduated_at)
@@ -577,6 +604,15 @@ class LiveTradingManager {
   _track(promise) {
     this.pending.add(promise);
     promise.finally(() => this.pending.delete(promise));
+  }
+
+  _queueMintExit(mint, task) {
+    const previous = this.mintExitQueues.get(mint) || Promise.resolve();
+    const current = previous.catch(() => null).then(task);
+    this.mintExitQueues.set(mint, current);
+    return current.finally(() => {
+      if (this.mintExitQueues.get(mint) === current) this.mintExitQueues.delete(mint);
+    });
   }
 
   _rememberError(error) {
@@ -785,7 +821,13 @@ class LiveTradingManager {
     const maxSignalAgeMs = strategy?.maxSignalAgeMs || this.config.maxSignalAgeMs;
     if (Number.isFinite(receivedAt)
       && this.now() - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
-    if (this.positions.has(event.mint)) return 'ACTIVE_MINT';
+    const maxPerMint = Math.max(
+      1,
+      Number(this.config.maxConcurrentPositionsPerMint) || 3,
+    );
+    if (this._positionsForMint(event.mint).length >= maxPerMint) {
+      return 'MAX_POSITIONS_PER_MINT';
+    }
     if (this.positions.size >= this.config.maxConcurrentPositions) return 'MAX_POSITIONS';
     const maxEntriesPerMint = Math.max(1, Number(strategy?.maxEntriesPerMint) || 1);
     const successfulEntries = typeof this.store.successfulLiveEntryCountForMintStrategy === 'function'
@@ -829,6 +871,7 @@ class LiveTradingManager {
       return;
     }
 
+    const allowExistingBalance = this._hasActiveMint(event.mint);
     let position;
     try {
       position = this.store.createLivePosition({
@@ -847,10 +890,14 @@ class LiveTradingManager {
       position.tokenAmountRaw = null;
       position.openedAt = null;
       position.strategy = strategy;
-      this.positions.set(position.mint, position);
+      this._addPosition(position);
     } catch (error) {
       this.metrics.riskRejected += 1;
-      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', 'ACTIVE_MINT');
+      this.store.updateLiveStrategyDecision(
+        decision.id,
+        'RISK_REJECTED',
+        error.code || 'POSITION_CREATE_FAILED',
+      );
       return;
     }
 
@@ -888,6 +935,7 @@ class LiveTradingManager {
           referencePrice: event.price,
           maxPriceJumpPct: strategy.maxEntryPriceJumpPct,
           signalSlot: event.slot,
+          allowExistingBalance,
         });
       } else {
         result = await this.executor.buyAmm({
@@ -900,6 +948,7 @@ class LiveTradingManager {
           signalPoolBaseReservesRaw: event.poolBaseReservesRaw,
           signalPoolQuoteReservesRaw: event.poolQuoteReservesRaw,
           signalVirtualQuoteReservesRaw: event.virtualQuoteReservesRaw,
+          allowExistingBalance,
         });
       }
       const openedAt = this.now();
@@ -1023,7 +1072,7 @@ class LiveTradingManager {
         exitReason: rejectionReason,
       });
       this.store.updateLiveStrategyDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
-      this.positions.delete(position.mint);
+      this._removePosition(position);
       this.metrics.entryFailures += 1;
       if (error.code === 'CURVE_COMPLETE') this.metrics.entryMigrationsBeforeSubmit += 1;
       else if (transactionFailed) this.metrics.entryTransactionFailures += 1;
@@ -1047,6 +1096,8 @@ class LiveTradingManager {
           result = await this.executor.reconcileBuy({
             mint: position.mint,
             signature: position.entrySignature || null,
+            allowExistingBalance: this._positionsForMint(position.mint)
+              .some((other) => Number(other.id) !== Number(position.id)),
           });
         } catch (error) {
           lastError = error;
@@ -1082,7 +1133,7 @@ class LiveTradingManager {
         exitError: null,
       });
       this._updatePositionDecision(position, 'ENTRY_FAILED', failure);
-      this.positions.delete(position.mint);
+      this._removePosition(position);
       this.metrics.entryFailures += 1;
       this.metrics.entryTransactionFailures += 1;
       this.metrics.lastActionAt = reconciledAt;
@@ -1160,7 +1211,7 @@ class LiveTradingManager {
         exitError: null,
       });
       this._updatePositionDecision(position, 'ENTRY_FAILED', 'ENTRY_EXPIRED_UNOBSERVED');
-      this.positions.delete(position.mint);
+      this._removePosition(position);
       this.metrics.entryFailures += 1;
       this.metrics.entryTransactionFailures += 1;
       this.metrics.lastActionAt = reconciledAt;
@@ -1201,7 +1252,7 @@ class LiveTradingManager {
     if (this.timers.has(position.id)) clearTimeout(this.timers.get(position.id));
     const timer = setTimeout(() => {
       this.timers.delete(position.id);
-      if (this.stopping || !this.positions.has(position.mint)) return;
+      if (this.stopping || !this._hasPosition(position)) return;
       this._track(this._recoverUnknownEntry(position, {
         orderId,
         initialError: position.entryError,
@@ -1312,7 +1363,11 @@ class LiveTradingManager {
       return;
     }
     if (strategy.exitMode === 'TRAILING') {
-      if (strategy.hardStopPct > 0 && grossReturnPct <= -strategy.hardStopPct) {
+      if (strategy.fastTakeProfitPct > 0
+        && ageMs <= strategy.fastTakeProfitWindowMs
+        && grossReturnPct >= strategy.fastTakeProfitPct) {
+        reason = 'FAST_TAKE_PROFIT';
+      } else if (strategy.hardStopPct > 0 && grossReturnPct <= -strategy.hardStopPct) {
         reason = 'HARD_STOP';
       } else if (ageMs >= (strategy.minHoldMs || 0)
         && peakReturnPct >= strategy.trailingActivationPct
@@ -1474,7 +1529,10 @@ class LiveTradingManager {
       || this.coreExitPending.has(position.id)) return;
     position.coreExitAttempted = true;
     this.coreExitPending.add(position.id);
-    const promise = this._takeGraduationCore(position)
+    const promise = this._queueMintExit(
+      position.mint,
+      () => this._takeGraduationCore(position),
+    )
       .catch((error) => this._rememberError(error))
       .finally(() => this.coreExitPending.delete(position.id));
     this._track(promise);
@@ -1502,9 +1560,13 @@ class LiveTradingManager {
       if (result.alreadyEmpty || result.balanceVerified === false) {
         throw new Error(result.balanceCheckError || 'Graduation core exit balance is unavailable');
       }
-      const remainingRaw = result.remainingTokenAmountRaw == null
-        ? balanceRaw - sellRaw
-        : BigInt(result.remainingTokenAmountRaw);
+      // The executor reports the wallet's aggregate balance for this Mint. When
+      // several live position lots share a Mint, only subtract the amount sold
+      // from this position's own lot.
+      const soldRaw = result.alreadyEmpty
+        ? 0n
+        : BigInt(result.tokenAmountRaw || sellRaw);
+      const remainingRaw = balanceRaw > soldRaw ? balanceRaw - soldRaw : 0n;
       if (remainingRaw <= 0n) {
         throw new Error('Core exit unexpectedly sold the complete position');
       }
@@ -1603,7 +1665,10 @@ class LiveTradingManager {
       exitPrice: observedPrice,
       exitRequestedAt: this.now(),
     });
-    const promise = this._exit(position, reason, observedPrice)
+    const promise = this._queueMintExit(
+      position.mint,
+      () => this._exit(position, reason, observedPrice),
+    )
       .catch((error) => this._rememberError(error));
     this._track(promise);
   }
@@ -1624,22 +1689,26 @@ class LiveTradingManager {
           }
           : await this.executor.sell({
             mint: position.mint,
+            tokenAmountRaw: position.tokenAmountRaw,
           });
         if (result.alreadyEmpty
           && ['ENTRY_CONFIRMATION_UNKNOWN', 'RESTART_RECOVERY'].includes(reason)) {
           throw new Error('Entry state is still unresolved; no token balance is visible yet');
         }
         const closedAt = this.now();
-        const remainingTokenAmountRaw = result.remainingTokenAmountRaw == null
-          ? null
-          : BigInt(result.remainingTokenAmountRaw);
-        const residualBalance = remainingTokenAmountRaw !== null
-          && remainingTokenAmountRaw > 0n;
+        const requestedPositionRaw = BigInt(position.tokenAmountRaw || 0);
+        const soldPositionRaw = result.alreadyEmpty
+          ? requestedPositionRaw
+          : BigInt(result.tokenAmountRaw || 0);
+        const remainingPositionRaw = requestedPositionRaw > soldPositionRaw
+          ? requestedPositionRaw - soldPositionRaw
+          : 0n;
+        const residualBalance = remainingPositionRaw > 0n;
         const balanceUnverified = result.balanceVerified === false;
         const incompleteReason = balanceUnverified
           ? `Sell confirmed but balance verification failed: ${result.balanceCheckError || 'unknown error'}`
           : residualBalance
-            ? `Sell confirmed with ${remainingTokenAmountRaw.toString()} raw tokens remaining`
+            ? `Sell confirmed with ${remainingPositionRaw.toString()} raw tokens remaining in this position lot`
             : null;
         const orderStatus = result.alreadyEmpty
           ? 'ALREADY_EMPTY'
@@ -1702,7 +1771,7 @@ class LiveTradingManager {
         }
         this._updatePositionDecision(position, 'CLOSED', reason);
         position.status = 'CLOSED';
-        this.positions.delete(position.mint);
+        this._removePosition(position);
         this.graduationGateTrades.delete(position.id);
         const timer = this.timers.get(position.id);
         if (timer) clearTimeout(timer);

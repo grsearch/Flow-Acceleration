@@ -309,13 +309,16 @@ function classifyBuyReconciliation(status, tokenBalanceRaw, {
   const transactionDelta = transactionTokenDeltaRaw == null
     ? 0n
     : BigInt(transactionTokenDeltaRaw || 0);
-  const recoveredAmount = tokenBalance > 0n ? tokenBalance : transactionDelta;
+  // With multiple independent lots for one Mint, the wallet balance is the
+  // aggregate of every lot. A transaction receipt identifies this buy's exact
+  // delta, so it must take precedence whenever it is available.
+  const recoveredAmount = transactionDelta > 0n ? transactionDelta : tokenBalance;
   if (recoveredAmount > 0n) {
     return {
       state: 'CONFIRMED',
       tokenAmountRaw: recoveredAmount.toString(),
       confirmationStatus: status?.confirmationStatus || null,
-      recoveredFrom: tokenBalance > 0n ? 'WALLET_BALANCE' : 'TRANSACTION_META',
+      recoveredFrom: transactionDelta > 0n ? 'TRANSACTION_META' : 'WALLET_BALANCE',
     };
   }
   if (status?.err) {
@@ -609,7 +612,7 @@ class PumpTradeExecutor {
     }
   }
 
-  async reconcileBuy({ mint: mintValue, signature = null }) {
+  async reconcileBuy({ mint: mintValue, signature = null, allowExistingBalance = false }) {
     const mint = new PublicKey(mintValue);
     const tokenProgram = await this._tokenProgram(mint);
     const [statusResponse, tokenBalance, transactionResponse] = await Promise.all([
@@ -630,7 +633,7 @@ class PumpTradeExecutor {
       mint.toBase58(),
       this.signer.publicKey.toBase58(),
     );
-    return classifyBuyReconciliation(status, tokenBalance.amount, {
+    return classifyBuyReconciliation(status, allowExistingBalance ? 0n : tokenBalance.amount, {
       transactionTokenDeltaRaw: transactionDelta,
       transactionObserved: transactionResponse != null,
       balanceObserved: tokenBalance.observed,
@@ -643,6 +646,7 @@ class PumpTradeExecutor {
     referencePrice,
     maxPriceJumpPct,
     signalSlot = null,
+    allowExistingBalance = false,
   }) {
     const startedAt = Date.now();
     const minimumContextSlot = normalizedSlot(signalSlot);
@@ -657,6 +661,7 @@ class PumpTradeExecutor {
       preflightCommitment: this.readCommitment,
       confirmationCommitment: this.confirmationCommitment,
       skipPreflight: false,
+      allowExistingBalance,
       startedAt,
       timelineMs: {},
     };
@@ -705,7 +710,7 @@ class PumpTradeExecutor {
         blockhashContextSlot: blockhashResponse.context.slot,
       };
       mark('state_and_blockhash_ready_ms');
-      if (balanceBefore > 0n) {
+      if (balanceBefore > 0n && !allowExistingBalance) {
         throw errorWithCode(
           'Trading wallet already holds this mint',
           'WALLET_ALREADY_HOLDS_MINT',
@@ -785,9 +790,25 @@ class PumpTradeExecutor {
         tokenProgram,
         this.confirmationCommitment,
       );
-      const acquired = balanceAfter > balanceBefore
-        ? balanceAfter - balanceBefore
-        : BigInt(amount.toString());
+      let acquired = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
+      if (allowExistingBalance || acquired <= 0n) {
+        const reconciled = await this.reconcileBuy({
+          mint: mint.toBase58(),
+          signature,
+          allowExistingBalance,
+        });
+        if (reconciled.state === 'CONFIRMED' && BigInt(reconciled.tokenAmountRaw) > 0n) {
+          acquired = BigInt(reconciled.tokenAmountRaw);
+          execution.receiptRecoveredFrom = reconciled.recoveredFrom;
+        } else if (allowExistingBalance || acquired <= 0n) {
+          const error = errorWithCode(
+            'Bonding Curve buy confirmed; token receipt is awaiting RPC reconciliation',
+            'CONFIRMATION_PENDING',
+          );
+          error.signature = signature;
+          throw error;
+        }
+      }
       const acquiredTokens = Number(acquired) / 1e6;
       const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
       mark('balance_reconciled_ms');
@@ -823,6 +844,7 @@ class PumpTradeExecutor {
     signalPoolBaseReservesRaw = null,
     signalPoolQuoteReservesRaw = null,
     signalVirtualQuoteReservesRaw = null,
+    allowExistingBalance = false,
   }) {
     const startedAt = Date.now();
     const execution = {
@@ -834,6 +856,7 @@ class PumpTradeExecutor {
       readCommitment: this.readCommitment,
       confirmationCommitment: this.confirmationCommitment,
       skipPreflight: false,
+      allowExistingBalance,
       startedAt,
       timelineMs: {},
     };
@@ -845,7 +868,7 @@ class PumpTradeExecutor {
       const mint = new PublicKey(mintValue);
       const tokenProgram = await this._tokenProgram(mint);
       const balanceBefore = await this._tokenBalanceRaw(mint, tokenProgram);
-      if (balanceBefore > 0n) {
+      if (balanceBefore > 0n && !allowExistingBalance) {
         throw errorWithCode(
           'Trading wallet already holds this mint',
           'WALLET_ALREADY_HOLDS_MINT',
@@ -976,15 +999,16 @@ class PumpTradeExecutor {
         tokenProgram,
         this.confirmationCommitment,
       );
-      const acquired = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
-      if (acquired <= 0n) {
+      let acquired = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
+      if (allowExistingBalance || acquired <= 0n) {
         const reconciled = await this.reconcileBuy({
           mint: mint.toBase58(),
           signature,
+          allowExistingBalance,
         });
         if (reconciled.state === 'CONFIRMED' && BigInt(reconciled.tokenAmountRaw) > 0n) {
-          const recovered = BigInt(reconciled.tokenAmountRaw);
-          const acquiredTokens = Number(recovered) / (10 ** decimals);
+          acquired = BigInt(reconciled.tokenAmountRaw);
+          const acquiredTokens = Number(acquired) / (10 ** decimals);
           const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
           mark('balance_reconciled_ms');
           mark('total_ms');
@@ -992,7 +1016,7 @@ class PumpTradeExecutor {
           return {
             signature,
             venue: 'PUMP_AMM',
-            tokenAmountRaw: recovered.toString(),
+            tokenAmountRaw: acquired.toString(),
             quotedTokenAmountRaw: quoted.base.toString(),
             minimumTokenAmountRaw: minBaseOut.toString(),
             expectedPrice: filledPrice,
@@ -1000,12 +1024,14 @@ class PumpTradeExecutor {
             execution: { ...execution, receiptRecoveredFrom: reconciled.recoveredFrom },
           };
         }
-        const error = errorWithCode(
-          'PumpSwap buy confirmed; token receipt is awaiting RPC reconciliation',
-          'CONFIRMATION_PENDING',
-        );
-        error.signature = signature;
-        throw error;
+        if (allowExistingBalance || acquired <= 0n) {
+          const error = errorWithCode(
+            'PumpSwap buy confirmed; token receipt is awaiting RPC reconciliation',
+            'CONFIRMATION_PENDING',
+          );
+          error.signature = signature;
+          throw error;
+        }
       }
       const acquiredTokens = Number(acquired) / (10 ** decimals);
       const filledPrice = acquiredTokens > 0 ? solAmount / acquiredTokens : expectedPrice;
@@ -1070,9 +1096,9 @@ class PumpTradeExecutor {
       );
     }
     const walletBalance = balanceSnapshot.amount;
-    // Entry rejects pre-existing holdings for the mint, so the live wallet balance belongs
-    // to this position. Full exits keep selling the complete current balance; explicitly
-    // sized exits are reserved for durable partial-exit strategies.
+    // Explicitly sized exits isolate one logical position lot when multiple live
+    // positions share a Mint. Omitting the size remains available for operational
+    // or manual full-wallet liquidation.
     const requestedRaw = tokenAmountRaw == null ? walletBalance : BigInt(tokenAmountRaw);
     const sellRaw = requestedRaw < walletBalance ? requestedRaw : walletBalance;
     if (sellRaw <= 0n) {

@@ -376,8 +376,9 @@ Smart Wallet 的成交；目标钱包之后的首次 OPEN 只保存为未来5秒
 优先计入F，否则5–7 SOL计入D，避免重复开仓和重复统计。
 
 每个信号等待200ms后的下一笔非监控钱包 Bonding Curve 成交，按1 SOL与同笔储备计算
-真实容量、成交均价和自身冲击。`COB-D/F` 仅使用固定30秒退出；INV10/FIX20及原来的
-多重交叉只用于旧 `COB-A/B/C` 历史与活动仓位管理。仓位写入独立表
+真实容量、成交均价和自身冲击。`COB-D/F` 保留固定30秒基准，并独立测试三种新退出：
+5秒保护后的2/3资金衰减、`+30%` 激活且峰值回撤 `10%`、以及 `+20%` 卖25%后
+75%阶梯Runner。INV10/FIX20及原来的多重交叉只用于旧 `COB-A/B/C` 历史与活动仓位管理。仓位写入独立表
 `cya_organic_burst_shadow_positions`，接口为 `GET /api/cya-organic-burst-shadow`，
 Dashboard 编号为 `COB-D/F`。该路径每个 Mint 最多保留256笔、15秒有界队列，复用
 现有 Universal RUG Guard，不增加 RPC，不签名，也不发送交易。
@@ -604,7 +605,7 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-当前 `COB-D-X30`、`O-C80-D5-B2-S0-NC` 与 `O-C80-HO500-X60-R`
+当前 `COB-D-T30-D10-X60`、`O-C80-D5-B2-S0-NC` 与 `O-C80-HO500-X60-R`
 允许产生新实盘仓位，单笔都为 `0.1 SOL`；对应 Shadow 仍保持 `1 SOL`，且实盘入场统一经过
 内存态跨 Mint RUG Guard。
 `PBR-A-X50-15` 与 `GFR-300-HS20-H30` 已于 2026-08-22 在代码层
@@ -612,10 +613,12 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 其余旧实盘定义同样只用于历史展示与存量退出：
 
 ```text
-COB-D-X30 / cya_organic_burst_cob_d_fix30_live（开启）
+COB-D-T30-D10-X60 / cya_organic_burst_cob_d_fix30_live（开启；ID兼容历史）
 发射后2–10秒、Buyers5≥10、NetFlow5≥5 SOL、买入占比70%–95%
 → 最近2秒涨幅0%–40%、距15秒峰值回撤≥2% → Bonding Curve买入0.1 SOL
-→ 不设固定止盈或移动止盈，固定持有30秒；同信号Shadow仍按1 SOL独立统计
+→ 买入后前2秒内达到+10%立即全额止盈
+→ 否则按-20%硬止损；+30%激活移动止盈、峰值回撤10%退出；60秒强制退出
+→ 同信号Shadow仍按1 SOL交叉测试 FIX30 / FlowFade / T30-D10 / 25-75 Runner
 
 M-C5-E120 / migration_continuity_mc_c5_e120_live（停止新开仓）
 毕业后5秒 Buyers≥20、净流入≥5 SOL、涨幅≥5%、Sell/Buy≤0.6
@@ -660,7 +663,7 @@ M/O 及 GD25 的 Shadow 记录仍照常生成，实盘决策另行写入 `live_s
 
 `FLOW_LIVE_TRADING_SAFETY_LOCK` 默认为 `true`，优先级高于旧服务器 `.env` 中的 `FLOW_LIVE_TRADING_ENABLED=true`。因此升级并重启后，旧配置不会意外恢复签名或链上发单；Dashboard 会明确显示安全锁已开启。
 
-O-C80 使用 Bonding Curve 固定 SOL 输入；O90 与 M-C5-T12.5 仅保留历史和存量退出。滑点只降低最少可接受 Token 数，不允许超额花费。程序限制同 Mint 单仓、最多3个并发仓位、钱包 SOL 保留额和信号新鲜度。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
+O-C80 使用 Bonding Curve 固定 SOL 输入；O90 与 M-C5-T12.5 仅保留历史和存量退出。滑点只降低最少可接受 Token 数，不允许超额花费。程序默认最多同时持有10个实盘仓位（`FLOW_LIVE_MAX_POSITIONS`），同一 Mint 最多持有3个独立仓位批次（`FLOW_LIVE_MAX_CONCURRENT_POSITIONS_PER_MINT`），并继续保留钱包 SOL 余额和信号新鲜度保护。每个仓位按自己实际买到的 Token 数量退出，避免同 Mint 的某个策略卖掉其他策略仓位。买卖滑点分别由 `FLOW_LIVE_BUY_SLIPPAGE_PCT`（默认10%）与 `FLOW_LIVE_SELL_SLIPPAGE_PCT`（默认15%）控制；买卖总优先费目标由 `FLOW_LIVE_PRIORITY_FEE_SOL` 控制，默认每笔 `0.0005 SOL`。
 
 实盘硬止损同时检查边际价格与数据流携带的储备状态。只要按整仓代币计算的可执行回收额先跌破硬止损，系统就以 `EXECUTABLE_HARD_STOP` 退出；Bonding Curve 报价还会受真实 SOL 储备上限约束。紧急退出遇到滑点或旧报价失败后按 `FLOW_LIVE_EMERGENCY_EXIT_RETRY_DELAY_MS`（默认100ms）刷新状态重试，不增加买入路径的 RPC 或延迟。
 

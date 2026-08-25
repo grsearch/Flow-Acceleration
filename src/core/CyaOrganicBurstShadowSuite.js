@@ -55,6 +55,16 @@ function camelRow(row) {
     lastMarket: row.last_market,
     maxFavorableReturnPct: finite(row.max_favorable_return_pct, 0),
     maxAdverseReturnPct: finite(row.max_adverse_return_pct, 0),
+    coreExitTargetAt: finite(row.core_exit_target_at, 0),
+    coreExitDeadlineAt: finite(row.core_exit_deadline_at, 0),
+    coreExitAt: finite(row.core_exit_at),
+    coreExitPrice: finite(row.core_exit_price),
+    coreExitMarketPrice: finite(row.core_exit_market_price),
+    coreExitImpactPct: finite(row.core_exit_impact_pct),
+    coreProceedsSol: finite(row.core_proceeds_sol, 0),
+    coreWeightPct: finite(row.core_weight_pct, 0),
+    runnerStopPrice: finite(row.runner_stop_price),
+    runnerTier: row.runner_tier,
     exitTargetAt: finite(row.exit_target_at),
     exitDeadlineAt: finite(row.exit_deadline_at),
     exitReason: row.exit_reason,
@@ -94,6 +104,10 @@ class CyaOrganicBurstShadowSuite {
       closed: 0,
       noExit: 0,
       structureInvalidations: 0,
+      flowFadeExits: 0,
+      trailingExits: 0,
+      coreExits: 0,
+      runnerExits: 0,
       liveSignals: 0,
       liveSignalErrors: 0,
       lastLiveSignalError: null,
@@ -156,6 +170,16 @@ class CyaOrganicBurstShadowSuite {
         recent_return_2s_pct REAL,
         max_favorable_return_pct REAL,
         max_adverse_return_pct REAL,
+        core_exit_target_at INTEGER,
+        core_exit_deadline_at INTEGER,
+        core_exit_at INTEGER,
+        core_exit_price REAL,
+        core_exit_market_price REAL,
+        core_exit_impact_pct REAL,
+        core_proceeds_sol REAL,
+        core_weight_pct REAL,
+        runner_stop_price REAL,
+        runner_tier TEXT,
         exit_trigger_at INTEGER,
         exit_target_at INTEGER,
         exit_deadline_at INTEGER,
@@ -180,6 +204,23 @@ class CyaOrganicBurstShadowSuite {
       CREATE INDEX IF NOT EXISTS idx_cya_organic_burst_profiles
         ON cya_organic_burst_shadow_positions(entry_profile_id, exit_profile_id);
     `);
+    const columns = new Set(this.store.db.prepare(
+      'PRAGMA table_info(cya_organic_burst_shadow_positions)',
+    ).all().map((row) => row.name));
+    const additions = [
+      ['core_exit_target_at', 'INTEGER'], ['core_exit_deadline_at', 'INTEGER'],
+      ['core_exit_at', 'INTEGER'], ['core_exit_price', 'REAL'],
+      ['core_exit_market_price', 'REAL'], ['core_exit_impact_pct', 'REAL'],
+      ['core_proceeds_sol', 'REAL'], ['core_weight_pct', 'REAL'],
+      ['runner_stop_price', 'REAL'], ['runner_tier', 'TEXT'],
+    ];
+    for (const [name, definition] of additions) {
+      if (!columns.has(name)) {
+        this.store.db.exec(
+          `ALTER TABLE cya_organic_burst_shadow_positions ADD COLUMN ${name} ${definition}`,
+        );
+      }
+    }
     this.insert = this.store.db.prepare(`
       INSERT OR IGNORE INTO cya_organic_burst_shadow_positions (
         cohort_id, entry_profile_id, exit_profile_id, episode_id, mint, symbol,
@@ -221,6 +262,16 @@ class CyaOrganicBurstShadowSuite {
         recent_return_2s_pct=COALESCE(@recentReturn2sPct,recent_return_2s_pct),
         max_favorable_return_pct=COALESCE(@maxFavorableReturnPct,max_favorable_return_pct),
         max_adverse_return_pct=COALESCE(@maxAdverseReturnPct,max_adverse_return_pct),
+        core_exit_target_at=COALESCE(@coreExitTargetAt,core_exit_target_at),
+        core_exit_deadline_at=COALESCE(@coreExitDeadlineAt,core_exit_deadline_at),
+        core_exit_at=COALESCE(@coreExitAt,core_exit_at),
+        core_exit_price=COALESCE(@coreExitPrice,core_exit_price),
+        core_exit_market_price=COALESCE(@coreExitMarketPrice,core_exit_market_price),
+        core_exit_impact_pct=COALESCE(@coreExitImpactPct,core_exit_impact_pct),
+        core_proceeds_sol=COALESCE(@coreProceedsSol,core_proceeds_sol),
+        core_weight_pct=COALESCE(@coreWeightPct,core_weight_pct),
+        runner_stop_price=COALESCE(@runnerStopPrice,runner_stop_price),
+        runner_tier=COALESCE(@runnerTier,runner_tier),
         exit_trigger_at=COALESCE(@exitTriggerAt,exit_trigger_at),
         exit_target_at=COALESCE(@exitTargetAt,exit_target_at),
         exit_deadline_at=COALESCE(@exitDeadlineAt,exit_deadline_at),
@@ -366,6 +417,12 @@ class CyaOrganicBurstShadowSuite {
         this.metrics.noExit += 1;
       } else if (position.status === STATUS.OPEN) {
         const exit = this.exitProfiles.get(position.exitProfileId);
+        if (!exit) continue;
+        if (position.coreExitTargetAt > 0 && now > position.coreExitDeadlineAt) {
+          position.coreExitTargetAt = 0;
+          position.coreExitDeadlineAt = 0;
+          this._patch(position.id, { coreExitTargetAt: 0, coreExitDeadlineAt: 0 });
+        }
         if (now - position.entryAt >= exit.maxHoldMs) {
           this._requestExit(position, position.entryAt + exit.maxHoldMs, 'MAX_HOLD');
         }
@@ -420,25 +477,41 @@ class CyaOrganicBurstShadowSuite {
     const rows15 = all.filter((row) => row.timestampMs >= timestampMs - 15_000 && row.timestampMs <= timestampMs);
     const rows5 = rows15.filter((row) => row.timestampMs >= timestampMs - 5_000);
     const rows2 = rows15.filter((row) => row.timestampMs >= timestampMs - 2_000);
+    const previousRows2 = rows15.filter((row) => row.timestampMs >= timestampMs - 4_000
+      && row.timestampMs < timestampMs - 2_000);
     const buys5 = rows5.filter((row) => row.side === 'BUY');
     const sells5 = rows5.filter((row) => row.side === 'SELL');
+    const buys2 = rows2.filter((row) => row.side === 'BUY');
+    const sells2 = rows2.filter((row) => row.side === 'SELL');
+    const previousBuys2 = previousRows2.filter((row) => row.side === 'BUY');
+    const previousSells2 = previousRows2.filter((row) => row.side === 'SELL');
     const latest = rows15[rows15.length - 1];
     const token = this.store.getToken(mint);
     const createdAt = finite(token?.created_at ?? token?.createdAt);
     const buyFlow5s = buys5.reduce((sum, row) => sum + row.solAmount, 0);
     const sellFlow5s = sells5.reduce((sum, row) => sum + row.solAmount, 0);
+    const buyFlow2s = buys2.reduce((sum, row) => sum + row.solAmount, 0);
+    const sellFlow2s = sells2.reduce((sum, row) => sum + row.solAmount, 0);
+    const previousBuyFlow2s = previousBuys2.reduce((sum, row) => sum + row.solAmount, 0);
+    const previousSellFlow2s = previousSells2.reduce((sum, row) => sum + row.solAmount, 0);
     const max15 = Math.max(0, ...rows15.map((row) => row.price));
     const first15 = rows15[0]?.price;
     return {
       ageMs: finite(latest?.ageMs, createdAt == null ? null : timestampMs - createdAt),
       curvePct: finite(latest?.curvePct),
-      buyers2s: new Set(rows2.filter((row) => row.side === 'BUY').map((row) => row.wallet).filter(Boolean)).size,
+      buyers2s: new Set(buys2.map((row) => row.wallet).filter(Boolean)).size,
+      previousBuyers2s: new Set(previousBuys2.map((row) => row.wallet).filter(Boolean)).size,
       buyers5s: new Set(buys5.map((row) => row.wallet).filter(Boolean)).size,
       buyTx5s: buys5.length,
       sellTx5s: sells5.length,
       buyFlow5s,
       sellFlow5s,
       netFlow5s: buyFlow5s - sellFlow5s,
+      buyFlow2s,
+      sellFlow2s,
+      netFlow2s: buyFlow2s - sellFlow2s,
+      previousNetFlow2s: previousBuyFlow2s - previousSellFlow2s,
+      buyTxShare2sPct: rows2.length ? buys2.length / rows2.length * 100 : 0,
       buyTxSharePct: rows5.length ? buys5.length / rows5.length * 100 : 0,
       return2sPct: this._windowReturn(rows2),
       return5sPct: this._windowReturn(rows5),
@@ -601,7 +674,18 @@ class CyaOrganicBurstShadowSuite {
       if (position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt) continue;
       this._mark(position, trade, marketPrice);
       const exit = this.exitProfiles.get(position.exitProfileId);
+      if (!exit) continue;
       const heldMs = trade.timestampMs - position.entryAt;
+      if (position.coreExitTargetAt > 0 && !position.coreExitAt) {
+        if (trade.timestampMs >= position.coreExitTargetAt
+          && trade.timestampMs <= position.coreExitDeadlineAt) {
+          this._fillCore(position, trade, marketPrice, exit);
+        } else if (trade.timestampMs > position.coreExitDeadlineAt) {
+          position.coreExitTargetAt = 0;
+          position.coreExitDeadlineAt = 0;
+          this._patch(position.id, { coreExitTargetAt: 0, coreExitDeadlineAt: 0 });
+        }
+      }
       if (exit.structureInvalidationEnabled && heldMs >= exit.minInvalidationHoldMs
         && heldMs <= exit.invalidationWindowMs) {
         const recent = this._features(position.mint, trade.timestampMs).return2sPct;
@@ -614,8 +698,120 @@ class CyaOrganicBurstShadowSuite {
           continue;
         }
       }
+      if (this._evaluateDynamicExit(position, trade, marketPrice, exit, heldMs)) continue;
       if (heldMs >= exit.maxHoldMs) this._requestExit(position, position.entryAt + exit.maxHoldMs, 'MAX_HOLD');
     }
+  }
+
+  _evaluateDynamicExit(position, trade, marketPrice, exit, heldMs) {
+    const gross = returnPct(marketPrice, position.averageEntryPrice) || 0;
+    const peak = returnPct(position.highestPrice, position.averageEntryPrice) || 0;
+    const drawdown = position.highestPrice > 0
+      ? (1 - marketPrice / position.highestPrice) * 100
+      : 0;
+    if (exit.hardStopPct > 0 && gross <= -exit.hardStopPct) {
+      this._requestExit(position, trade.timestampMs, 'HARD_STOP');
+      return true;
+    }
+    if (exit.mode === 'FLOW_FADE' && heldMs >= (exit.minHoldMs || 0)) {
+      const features = this._features(position.mint, trade.timestampMs);
+      const netFlowFlip = features.previousNetFlow2s > 0 && features.netFlow2s < 0;
+      const sellPressure = features.sellFlow2s > 0
+        && features.sellFlow2s / Math.max(0.001, features.buyFlow2s)
+          >= (exit.minSellBuyFlowRatio || 0.8);
+      const buyerRetention = features.previousBuyers2s > 0
+        ? features.buyers2s / features.previousBuyers2s
+        : 1;
+      const buyerStall = features.previousBuyers2s >= 2
+        && buyerRetention <= (exit.maxBuyerRetentionRatio || 0.5);
+      const votes = Number(netFlowFlip) + Number(sellPressure) + Number(buyerStall);
+      if (votes >= (exit.minFadeVotes || 2)) {
+        this.metrics.flowFadeExits += 1;
+        this._requestExit(position, trade.timestampMs, `FLOW_FADE_${votes}OF3`);
+        return true;
+      }
+    }
+    if (exit.mode === 'TRAILING'
+      && heldMs >= (exit.minHoldMs || 0)
+      && peak >= exit.trailingActivationPct
+      && drawdown >= exit.trailingStopPct) {
+      this.metrics.trailingExits += 1;
+      this._requestExit(position, trade.timestampMs,
+        `TRAILING_T${exit.trailingActivationPct}_D${exit.trailingStopPct}`);
+      return true;
+    }
+    if (exit.mode === 'CORE_RUNNER') {
+      if (!position.coreExitAt && !(position.coreExitTargetAt > 0)
+        && gross >= exit.coreActivationPct) {
+        position.coreExitTargetAt = trade.timestampMs + this.config.exitDelayMs;
+        position.coreExitDeadlineAt = position.coreExitTargetAt + this.config.exitTimeoutMs;
+        position.coreWeightPct = exit.coreWeightPct;
+        this._patch(position.id, {
+          coreExitTargetAt: position.coreExitTargetAt,
+          coreExitDeadlineAt: position.coreExitDeadlineAt,
+          coreWeightPct: position.coreWeightPct,
+        });
+      }
+      if (position.coreExitAt) {
+        const tier = this._runnerTier(exit, peak);
+        position.runnerTier = tier?.label || null;
+        position.runnerStopPrice = tier
+          ? position.highestPrice * (1 - tier.drawdownPct / 100)
+          : null;
+        this._patch(position.id, {
+          runnerTier: position.runnerTier,
+          runnerStopPrice: position.runnerStopPrice,
+        });
+        if (tier && marketPrice <= position.runnerStopPrice) {
+          this.metrics.runnerExits += 1;
+          this._requestExit(position, trade.timestampMs, `RUNNER_${tier.label}`);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  _runnerTier(exit, peakReturnPct) {
+    let active = null;
+    for (const tier of exit.trailingTiers || []) {
+      if (peakReturnPct >= tier.activationPct) {
+        active = {
+          ...tier,
+          label: `T${tier.activationPct}_D${tier.drawdownPct}`,
+        };
+      }
+    }
+    return active;
+  }
+
+  _fillCore(position, trade, marketPrice, exit) {
+    const weight = Math.max(0, Math.min(1, (exit.coreWeightPct || 0) / 100));
+    const coreUnits = position.tokenUnits * weight;
+    const markReturnPct = returnPct(marketPrice, position.averageEntryPrice);
+    const execution = executableSell(trade, coreUnits, marketPrice, {
+      rugMarkReturnPct: markReturnPct,
+    });
+    if (!(execution.price > 0)) return;
+    position.coreExitAt = trade.timestampMs;
+    position.coreExitPrice = execution.price;
+    position.coreExitMarketPrice = marketPrice;
+    position.coreExitImpactPct = execution.impactPct;
+    position.coreProceedsSol = execution.proceedsSol ?? coreUnits * execution.price;
+    position.coreWeightPct = exit.coreWeightPct;
+    position.coreExitTargetAt = 0;
+    position.coreExitDeadlineAt = 0;
+    this._patch(position.id, {
+      coreExitTargetAt: 0,
+      coreExitDeadlineAt: 0,
+      coreExitAt: position.coreExitAt,
+      coreExitPrice: position.coreExitPrice,
+      coreExitMarketPrice: position.coreExitMarketPrice,
+      coreExitImpactPct: position.coreExitImpactPct,
+      coreProceedsSol: position.coreProceedsSol,
+      coreWeightPct: position.coreWeightPct,
+    });
+    this.metrics.coreExits += 1;
   }
 
   _comparable(position, trade, price) {
@@ -741,14 +937,23 @@ class CyaOrganicBurstShadowSuite {
 
   _estimatedCostSol(position) {
     const variablePct = this.costs.platformFeePct + this.costs.buySlippagePct + this.costs.sellSlippagePct;
-    return position.totalInvestedSol * variablePct / 100 + this.costs.totalFixedCostSol * 2;
+    const executions = position.coreExitAt ? 3 : 2;
+    return position.totalInvestedSol * variablePct / 100
+      + this.costs.totalFixedCostSol * executions;
   }
 
   _close(position, trade, marketPrice) {
     const markReturnPct = returnPct(marketPrice, position.averageEntryPrice);
-    const execution = executableSell(trade, position.tokenUnits, marketPrice, { rugMarkReturnPct: markReturnPct });
+    const coreWeight = position.coreExitAt
+      ? Math.max(0, Math.min(1, position.coreWeightPct / 100))
+      : 0;
+    const remainingUnits = position.tokenUnits * (1 - coreWeight);
+    const execution = executableSell(trade, remainingUnits, marketPrice, {
+      rugMarkReturnPct: markReturnPct,
+    });
     if (execution.price == null) return;
-    const proceedsSol = execution.proceedsSol ?? position.tokenUnits * execution.price;
+    const runnerProceedsSol = execution.proceedsSol ?? remainingUnits * execution.price;
+    const proceedsSol = (position.coreProceedsSol || 0) + runnerProceedsSol;
     const grossReturnPct = (proceedsSol / position.totalInvestedSol - 1) * 100;
     const estimatedCostSol = this._estimatedCostSol(position);
     const netReturnPct = (proceedsSol - estimatedCostSol) / position.totalInvestedSol * 100 - 100;
@@ -778,6 +983,9 @@ class CyaOrganicBurstShadowSuite {
       'totalInvestedSol', 'tokenUnits', 'highestPrice', 'lowestPrice',
       'lastObservedAt', 'lastMarket', 'lastPrice', 'recentReturn2sPct',
       'maxFavorableReturnPct', 'maxAdverseReturnPct', 'exitTriggerAt',
+      'coreExitTargetAt', 'coreExitDeadlineAt', 'coreExitAt', 'coreExitPrice',
+      'coreExitMarketPrice', 'coreExitImpactPct', 'coreProceedsSol',
+      'coreWeightPct', 'runnerStopPrice', 'runnerTier',
       'exitTargetAt', 'exitDeadlineAt', 'exitAt', 'exitMarket', 'exitPrice',
       'exitMarketPrice', 'exitImpactPct', 'exitReason', 'grossReturnPct',
       'netReturnPct', 'estimatedCostSol', 'holdMs',

@@ -71,6 +71,9 @@ function testPreviousLiveSchemaUpgrade() {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE UNIQUE INDEX idx_live_positions_one_active_mint
+    ON live_positions(mint)
+    WHERE status IN ('OPENING','OPEN','EXITING','EXIT_FAILED');
     INSERT INTO live_positions (
       source_type, mint, mode, status, position_sol, token_amount_raw,
       entry_market, entry_price, exit_market, exit_price, exit_reason,
@@ -105,6 +108,15 @@ function testPreviousLiveSchemaUpgrade() {
     .some((column) => column.name === 'realized_pnl_sol'));
   assert.ok(upgraded.db.prepare('PRAGMA table_info(live_orders)').all()
     .some((column) => column.name === 'wallet_sol_delta'));
+  const activeMintIndexes = upgraded.db.prepare("PRAGMA index_list('live_positions')").all();
+  assert.strictEqual(
+    activeMintIndexes.some((index) => index.name === 'idx_live_positions_one_active_mint'),
+    false,
+  );
+  assert.strictEqual(
+    activeMintIndexes.find((index) => index.name === 'idx_live_positions_active_mint')?.unique,
+    0,
+  );
   upgraded.close();
   fs.rmSync(directory, { recursive: true, force: true });
 }
@@ -209,6 +221,20 @@ assert.strictEqual(
   'UNKNOWN',
   'an indexed signature plus an unindexed Token-2022 ATA must not close the position',
 );
+assert.deepStrictEqual(
+  classifyBuyReconciliation({ err: null, confirmationStatus: 'confirmed' }, 999_999n, {
+    transactionTokenDeltaRaw: 123n,
+    transactionObserved: true,
+    balanceObserved: true,
+  }),
+  {
+    state: 'CONFIRMED',
+    tokenAmountRaw: '123',
+    confirmationStatus: 'confirmed',
+    recoveredFrom: 'TRANSACTION_META',
+  },
+  'a same-Mint buy must attribute only the current transaction receipt to its position lot',
+);
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-post-live-'));
 const store = new ResearchStore({
@@ -282,6 +308,64 @@ store.recordComplete({
 const manager = new LiveTradingManager({ config, store, now: () => now });
 manager.start();
 manager.onGraduated(store.getToken('MintLive111111111111111111111111111111111'));
+
+const sharedMint = 'MintSharedSlots111111111111111111111111111111';
+const sharedMintManager = new LiveTradingManager({
+  config: {
+    ...config,
+    maxConcurrentPositions: 10,
+    maxConcurrentPositionsPerMint: 2,
+  },
+  store,
+  now: () => now,
+});
+sharedMintManager._addPosition({ id: 9001, mint: sharedMint, strategyId: 'first' });
+assert.strictEqual(sharedMintManager._riskReason({
+  strategyId: 'post_gd25_35_xleg', mint: sharedMint,
+}), null);
+sharedMintManager._addPosition({ id: 9002, mint: sharedMint, strategyId: 'second' });
+assert.strictEqual(sharedMintManager._riskReason({
+  strategyId: 'post_gd25_35_xleg', mint: sharedMint,
+}), 'MAX_POSITIONS_PER_MINT');
+
+// COB-D's live trailing mode takes the full position at +10% only during the
+// first two seconds. Outside that window the existing +30% trailing rule
+// remains in control.
+const cobFastStrategy = {
+  exitMode: 'TRAILING',
+  minHoldMs: 0,
+  fastTakeProfitPct: 10,
+  fastTakeProfitWindowMs: 2_000,
+  trailingActivationPct: 30,
+  trailingStopPct: 10,
+  hardStopPct: 20,
+  maxHoldMs: 60_000,
+};
+const cobFastManager = new LiveTradingManager({ config, store, now: () => now });
+let cobExitReason = null;
+cobFastManager._requestExit = (_position, reason) => { cobExitReason = reason; };
+cobFastManager._evaluatePositionExit({
+  id: 9010,
+  mint: 'MintCobFast11111111111111111111111111111111',
+  status: 'OPEN',
+  strategy: cobFastStrategy,
+  entryPrice: 100,
+  highestPrice: 111,
+  openedAt: now,
+}, now + 1_500, 111);
+assert.strictEqual(cobExitReason, 'FAST_TAKE_PROFIT');
+
+cobExitReason = null;
+cobFastManager._evaluatePositionExit({
+  id: 9011,
+  mint: 'MintCobLate11111111111111111111111111111111',
+  status: 'OPEN',
+  strategy: cobFastStrategy,
+  entryPrice: 100,
+  highestPrice: 111,
+  openedAt: now,
+}, now + 2_001, 111);
+assert.strictEqual(cobExitReason, null);
 
 // A rejected/failed buy is not a successful entry and must not consume one of
 // the two durable per-Mint slots.
@@ -590,6 +674,7 @@ setImmediate(() => {
     signature: 'legacy-empty-signature',
   });
   let recoveredSellCalls = 0;
+  let recoveredSellRequest = null;
   const recoveryManager = new LiveTradingManager({
     config: { ...config, dryRun: false },
     store,
@@ -598,8 +683,9 @@ setImmediate(() => {
       async reconcileBuy() {
         return { state: 'CONFIRMED', tokenAmountRaw: '134585106701' };
       },
-      async sell() {
+      async sell(request) {
         recoveredSellCalls += 1;
+        recoveredSellRequest = request;
         return {
           signature: 'legacy-recovery-sell', venue: 'PUMP_AMM',
           tokenAmountRaw: '134585106701', remainingTokenAmountRaw: '0',
@@ -618,6 +704,10 @@ setImmediate(() => {
   assert.strictEqual(recoveredPosition.exit_reason, 'ENTRY_RECONCILED_MAX_HOLD');
   assert.strictEqual(recoveredPosition.closed_at > 0, true);
   assert.strictEqual(recoveredSellCalls, 1);
+  assert.deepStrictEqual(recoveredSellRequest, {
+    mint: legacyMint,
+    tokenAmountRaw: '134585106701',
+  });
   assert.strictEqual(store.db.prepare('SELECT requested_token_raw FROM live_orders WHERE id = ?')
     .get(legacyOrderId).requested_token_raw, '134585106701');
   await recoveryManager.stop();
@@ -699,7 +789,7 @@ setImmediate(() => {
   assert.strictEqual(releasedPosition.exit_reason, 'ENTRY_EXPIRED_UNOBSERVED');
   assert.strictEqual(store.db.prepare('SELECT status FROM live_orders WHERE id = ?')
     .get(expiredOrderId).status, 'FAILED');
-  assert.strictEqual(expiredManager.positions.has(expiredMint), false);
+  assert.strictEqual(expiredManager.positions.has(expiredPosition.id), false);
   await expiredManager.stop();
 
   await manager.stop();

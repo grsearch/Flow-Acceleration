@@ -367,7 +367,7 @@
               <b><span class="strategy-code">CSF-E510-Q</span>CYA Slot Flow</b><small>严格5–10秒公共流前向组；旧宽松组停止新开仓</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-organic-burst" data-strategy-code="COB-D/F">
-              <b><span class="strategy-code">COB-D/F</span>CYA Organic Burst</b><small>严格公共流 + 健康回撤；同Mint互斥；仅FIX30</small>
+              <b><span class="strategy-code">COB-D/F</span>CYA Organic Burst</b><small>严格公共流 + 健康回撤；FIX30 / FlowFade / Trailing / Runner</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
               <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun（已停）</b><small>0胜率且样本稀疏；历史数据保留，不再新增</small>
@@ -883,9 +883,9 @@
                 <h2>CYA Organic Burst Shadow COB-D / F（A/B/C 历史保留）</h2>
                 <p>只使用非监控钱包的公开成交形成严格有机资金爆发信号；同一 Mint 只进入一个新组，CYA 首次 OPEN 仅作未来标签。</p>
               </div>
-              <div class="strategy-expression" id="cya-organic-burst-expression">COB-D/F 严格公共流 + 健康回撤入场 × FIX30</div>
+              <div class="strategy-expression" id="cya-organic-burst-expression">COB-D/F 严格公共流 + 健康回撤入场 × 四种独立退出</div>
               <div class="strategy-metric-groups" id="cya-organic-burst-metrics"></div>
-              <div class="section-title"><h2>有机爆发入场 × 右尾退出</h2><p>200ms 后按 1 SOL 储备容量模拟成交；新 D/F 组仅固定30秒，旧 A/B/C 继续显示历史结果。</p></div>
+              <div class="section-title"><h2>有机爆发入场 × 右尾退出</h2><p>200ms 后按 1 SOL 储备容量模拟成交；D/F 同时测试 FIX30、FlowFade、T30-D10 与 25/75 Runner，旧 A/B/C 继续显示历史结果。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / 100</th><th>CYA 5s标签</th><th>Flow / 容量</th><th>MFE / MAE</th></tr></thead>
                 <tbody id="cya-organic-burst-cohort-rows"></tbody>
@@ -1454,15 +1454,15 @@
         ['买入条件', liveEntryRows],
         ['卖出策略', liveExitRows],
         ['仓位与风控', [
-          ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`], ['最大并发', `${number(runtime.maxConcurrentPositions || 3)} 仓`],
+          ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`], ['最大并发', `${number(runtime.maxConcurrentPositions || 10)} 仓`],
           ['每日开仓额度', '不设上限'], ['钱包最低保留', `${number(runtime.minWalletReserveSol,4)} SOL`],
-          ['同 Mint', `单仓 / ${mintOpportunityCopy}`], ['重入冷却', age(strategy.reentryCooldownMs || 0)],
+          ['同 Mint 上限', `${number(runtime.maxConcurrentPositionsPerMint || 3)} 仓 / ${mintOpportunityCopy}`], ['重入冷却', age(strategy.reentryCooldownMs || 0)],
           ['当前活动仓位', number(runtime.activePositions)],
           ['紧急开关', runtime.killSwitchActive ? '已禁止开仓' : '正常'], ['当前模式', mode],
         ]],
         ['链上执行', [
           ['买入模式', isBondingCurveLive ? 'Bonding Curve 固定SOL硬上限' : 'PumpSwap 固定SOL硬上限'], ['真实签名', mode === 'LIVE' ? '开启' : '关闭'], ['完整数据采集', '始终开启'],
-          ['卖出数量', (isGraduationAccelLive || isPbrLive) ? 'Core 50% + Runner余额100%' : '链上当前余额 100%'], ['卖后余额核对', '残余自动重试'],
+          ['卖出数量', (isGraduationAccelLive || isPbrLive) ? '当前批次 Core 50% + Runner' : '当前仓位批次 100%'], ['卖后余额核对', '当前批次残余自动重试'],
           ['买/卖优先费', `${number(runtime.priorityFeeSol,6)} SOL / 笔`],
         ]],
       ];
@@ -1640,7 +1640,7 @@
         ['合格信号 / CYA标签', `${number(runtime.qualifiedSignals)} / ${number(runtime.targetOpenLabels)}`, '只标记未来首次 OPEN，ADD 不参与'],
         ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
         ['旧组 / 互斥抑制', `${number(runtime.retiredEntrySignalsSuppressed)} / ${number(runtime.exclusiveSignalsSuppressed)}`, 'A/B/C停止新增；D/F同Mint只计一次'],
-        ['结构失效退出', number(runtime.structureInvalidations), '仅历史 INV10 组；D/F 均使用 FIX30'],
+        ['动态退出', `${number(runtime.flowFadeExits)} / ${number(runtime.trailingExits)}`, `FlowFade / Trailing · Core ${number(runtime.coreExits)} · Runner ${number(runtime.runnerExits)}`],
         ['RUG / 跳价 / 无成交', `${number(runtime.rugGuardRejected)} / ${number(runtime.priceJump)} / ${number(runtime.noEntry)}`, `每 Mint 队列≤${number(strategy.boundedPerMintTradeQueue || 256)}`],
       ], []);
       const cohorts = data.cohorts || [];
@@ -2568,7 +2568,7 @@
         ['Launch Quality E', [['模式', launchQuality.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动Launch', number(launchQuality.activeLaunches)], ['本次Launch', number(launchQuality.launchesObserved)], ['本次快照', number(launchQuality.snapshotsWritten)], ['旧7.5%参考', number(launchQuality.referencePullbacks)], ['FD深回踩参考 / 过深拒绝', `${number(launchQuality.deepReferences)} / ${number(launchQuality.deepRejected)}`], ['完整标签', number(launchQuality.labelsCompleted)], ['数据表', '独立观察表'], ['链上交易', '无执行路径']]],
         ['M2F-OBS', [['模式', migrationSecondLeg.enabled ? 'OBSERVER ONLY' : '关闭'], ['活动迁移', number(migrationSecondLeg.activeMigrations)], ['本次迁移', number(migrationSecondLeg.migrationsObserved)], ['本次快照', number(migrationSecondLeg.snapshotsWritten)], ['额外RPC', '无'], ['模拟仓位', '不创建'], ['已补字段', 'Quote Reserve / 容量冲击 / Canonical'], ['临时字段', 'Gross-NFI10 / Boost与Cashback提示'], ['仍不可用', 'Mayhem / 精确BOOST / 实体聚类'], ['链上交易', '无执行路径']]],
         ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N · 15秒控制 + NQ质量组' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 留存 + Curve + 峰后资金流'], ['数据表', '历史全保留，新 cohort 独立'], ['链上交易', '永不发送']]],
-        ['Scope Guard', [['实盘入场', `${number(liveStrategies.filter(strategy => strategy.entryEnabled !== false).length)} 个独立策略启用`], ['启用策略', liveStrategies.filter(strategy => strategy.entryEnabled !== false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['已停新开仓', liveStrategies.filter(strategy => strategy.entryEnabled === false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['存量退出', '继续按各自原规则执行'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', '单仓'], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
+        ['Scope Guard', [['实盘入场', `${number(liveStrategies.filter(strategy => strategy.entryEnabled !== false).length)} 个独立策略启用`], ['启用策略', liveStrategies.filter(strategy => strategy.entryEnabled !== false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['已停新开仓', liveStrategies.filter(strategy => strategy.entryEnabled === false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['存量退出', '继续按各自原规则执行'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', `最多 ${number(trading.maxConcurrentPositionsPerMint || 3)} 仓`], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const rugStrategies = rugRisk.strategyStats || [];

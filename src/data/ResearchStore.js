@@ -747,8 +747,8 @@ class ResearchStore {
       );
       CREATE INDEX IF NOT EXISTS idx_live_positions_status
         ON live_positions(status, updated_at);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_live_positions_one_active_mint
-        ON live_positions(mint)
+      CREATE INDEX IF NOT EXISTS idx_live_positions_active_mint
+        ON live_positions(mint, status, updated_at)
         WHERE status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED');
 
       CREATE TABLE IF NOT EXISTS live_orders (
@@ -2421,6 +2421,7 @@ class ResearchStore {
           ON live_orders(strategy_id, created_at DESC);
       `);
       this._ensureLiveSettlementColumns();
+      this._ensureLivePositionIndexes();
       return;
     }
 
@@ -2513,8 +2514,8 @@ class ResearchStore {
           DROP TABLE live_positions_legacy_primary_migration;
           CREATE INDEX idx_live_positions_status
             ON live_positions(status, updated_at);
-          CREATE UNIQUE INDEX idx_live_positions_one_active_mint
-            ON live_positions(mint)
+          CREATE INDEX idx_live_positions_active_mint
+            ON live_positions(mint, status, updated_at)
             WHERE status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED');
           CREATE INDEX idx_live_orders_position ON live_orders(position_id, id);
           CREATE INDEX idx_live_orders_created_id
@@ -2535,6 +2536,19 @@ class ResearchStore {
       throw new Error(`Live trading schema migration has ${violations.length} FK violation(s)`);
     }
     this._ensureLiveSettlementColumns();
+    this._ensureLivePositionIndexes();
+  }
+
+  _ensureLivePositionIndexes() {
+    // Older releases enforced one active row per Mint in SQLite. Live position
+    // lots are now isolated by position id, while the configurable per-Mint
+    // limit is enforced atomically by LiveTradingManager's entry queue.
+    this.db.exec(`
+      DROP INDEX IF EXISTS idx_live_positions_one_active_mint;
+      CREATE INDEX IF NOT EXISTS idx_live_positions_active_mint
+        ON live_positions(mint, status, updated_at)
+        WHERE status IN ('OPENING', 'OPEN', 'EXITING', 'EXIT_FAILED');
+    `);
   }
 
   _ensureLiveSettlementColumns() {

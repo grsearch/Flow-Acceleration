@@ -463,7 +463,12 @@ const config = {
     contextFallbackRpcUrl: process.env.FLOW_LIVE_CONTEXT_FALLBACK_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
-    maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 3, { min: 1, max: 20 }),
+    maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 10, { min: 1, max: 20 }),
+    maxConcurrentPositionsPerMint: integerEnv(
+      'FLOW_LIVE_MAX_CONCURRENT_POSITIONS_PER_MINT',
+      3,
+      { min: 1, max: 10 },
+    ),
     minWalletReserveSol: numberEnv('FLOW_LIVE_MIN_WALLET_RESERVE_SOL', 0.05, { min: 0 }),
     mintCooldownMs: integerEnv('FLOW_LIVE_MINT_COOLDOWN_MS', 10 * 60_000, { min: 0 }),
     maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_MAX_ENTRY_PRICE_JUMP_PCT', 10, {
@@ -530,9 +535,9 @@ const config = {
     strategies: [
       {
         id: 'cya_organic_burst_cob_d_fix30_live',
-        code: 'COB-D-X30',
-        label: 'CYA Organic Burst · COB-D Strict 5 SOL',
-        ruleVersion: 'cya_organic_burst_cob_d_fix30_live_v1',
+        code: 'COB-D-T30-D10-X60',
+        label: 'CYA Organic Burst · COB-D Strict 5 SOL · Fast TP + Trailing',
+        ruleVersion: 'cya_organic_burst_cob_d_fast_tp_trailing_live_v3',
         signalSource: 'CYA_ORGANIC_BURST_COB_D',
         enabled: booleanEnv('FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_ENABLED', true),
         entryEnabled: booleanEnv(
@@ -561,11 +566,23 @@ const config = {
           10,
           { min: 0, max: 100 },
         ),
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 30_000,
-        hardStopPct: 0,
-        maxHoldMs: 30_000,
-        sourceShadowCohortId: 'COB_D_FIX30',
+        exitMode: 'TRAILING',
+        minHoldMs: 0,
+        fastTakeProfitPct: numberEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_FAST_TP_PCT',
+          10,
+          { min: 0 },
+        ),
+        fastTakeProfitWindowMs: integerEnv(
+          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_FAST_TP_WINDOW_MS',
+          2_000,
+          { min: 0 },
+        ),
+        trailingActivationPct: 30,
+        trailingStopPct: 10,
+        hardStopPct: 20,
+        maxHoldMs: 60_000,
+        sourceShadowCohortId: 'COB_D_T30_10_X60',
       },
       {
         id: 'big_winner_pbr_a_x50_15_live',
@@ -3496,14 +3513,14 @@ const config = {
       },
       // Strict forward-only replacements. They are mutually exclusive per
       // Mint: >=7 SOL is assigned to F first; 5-7 SOL is assigned to D.
-      // Both use only the 30-second fixed hold so the weak INV10/FIX20 exits
-      // cannot multiply signals or contaminate the new forward sample.
+      // FIX30 remains the historical control. New exits are independent rows;
+      // COB-D live is promoted only from T30_10_X60.
       {
         id: 'COB_F',
         label: 'COB-F · strict 7 SOL organic pullback',
         newEntriesEnabled: true,
         exclusiveGroup: 'COB_STRICT',
-        exitProfileIds: ['FIX30'],
+        exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
         minBuyers5s: 10, minNetFlow5sSol: 7,
         minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
@@ -3517,7 +3534,7 @@ const config = {
         newEntriesEnabled: true,
         liveStrategyId: 'cya_organic_burst_cob_d_fix30_live',
         exclusiveGroup: 'COB_STRICT',
-        exitProfileIds: ['FIX30'],
+        exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
         minBuyers5s: 10, minNetFlow5sSol: 5,
         minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
@@ -3550,12 +3567,49 @@ const config = {
       {
         id: 'FIX30',
         label: 'fixed 30s right-tail control',
+        mode: 'FIXED_HOLD',
         maxHoldMs: 30_000,
         structureInvalidationEnabled: false,
         minInvalidationHoldMs: 0,
         invalidationWindowMs: 0,
         invalidationDrawdownPct: 0,
         maxInvalidationReturn2sPct: 0,
+      },
+      {
+        id: 'FLOWFADE_X60',
+        label: '5s protection / 2-of-3 flow fade / max 60s',
+        mode: 'FLOW_FADE',
+        minHoldMs: 5_000,
+        maxHoldMs: 60_000,
+        minFadeVotes: 2,
+        minSellBuyFlowRatio: 0.8,
+        maxBuyerRetentionRatio: 0.5,
+        structureInvalidationEnabled: false,
+      },
+      {
+        id: 'T30_10_X60',
+        label: '-20% stop / +30% activation / 10% drawdown / max 60s',
+        mode: 'TRAILING',
+        hardStopPct: 20,
+        minHoldMs: 0,
+        trailingActivationPct: 30,
+        trailingStopPct: 10,
+        maxHoldMs: 60_000,
+        structureInvalidationEnabled: false,
+      },
+      {
+        id: 'CORE25_R75_X120',
+        label: '+20% sell 25% / 75% stair runner / max 120s',
+        mode: 'CORE_RUNNER',
+        coreActivationPct: 20,
+        coreWeightPct: 25,
+        maxHoldMs: 120_000,
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 15 },
+          { activationPct: 50, drawdownPct: 20 },
+          { activationPct: 100, drawdownPct: 25 },
+        ],
+        structureInvalidationEnabled: false,
       },
     ],
     costModel: normalizeCostModel({
