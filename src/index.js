@@ -166,6 +166,7 @@ function createRuntime(runtimeConfig = config) {
       smartWallets: [...smartWallets],
     },
     store,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   cyaOrganicBurstShadow.start();
   const sameSlotDumpBackrunShadow = new SameSlotDumpBackrunShadowSuite({
