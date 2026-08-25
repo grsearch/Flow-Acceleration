@@ -367,18 +367,19 @@ Bonding Curve 成交，并按1 SOL与同笔虚拟储备计算可执行均价和�
 
 ## CYA Organic Burst Shadow COB
 
-`COB-A/B/C` 是由目标钱包 `CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o`
+`COB` 是由目标钱包 `CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o`
 的历史首次 OPEN 反推后重新前向验证的独立公共流实验。入场不读取该钱包或任何监控
-Smart Wallet 的成交；目标钱包之后的首次 OPEN 只保存为未来5秒标签。三档分别测试
-宽松有机爆发、推荐平衡组和更早的2秒正动量组：共同要求发射早期、Curve 尚未透支、
-至少4个独立买家和较高买单占比，并限制5秒涨幅；平衡组额外要求5秒净流入至少1 SOL
-且15秒涨幅低于80%，避免已经过热的末端拉升。
+Smart Wallet 的成交；目标钱包之后的首次 OPEN 只保存为未来5秒标签。原 `COB-A/B/C`
+宽松组保留历史数据和活动仓位恢复，但停止新增。新的 `COB-D/F` 只接受发射后2–10秒、
+最近5秒至少10名独立买家、净流入至少5/7 SOL、买单占比70%–95%、最近2秒涨幅0%–40%，
+且相对15秒峰值已健康回撤至少2%的公共流。两组对同一 Mint 互斥：净流入达到7 SOL时
+优先计入F，否则5–7 SOL计入D，避免重复开仓和重复统计。
 
 每个信号等待200ms后的下一笔非监控钱包 Bonding Curve 成交，按1 SOL与同笔储备计算
-真实容量、成交均价和自身冲击。退出独立交叉测试：前10秒出现峰值回撤至少8%且最近
-2秒动量转负时退出，以及纯固定20秒、30秒两个右尾对照组。仓位写入独立表
+真实容量、成交均价和自身冲击。`COB-D/F` 仅使用固定30秒退出；INV10/FIX20及原来的
+多重交叉只用于旧 `COB-A/B/C` 历史与活动仓位管理。仓位写入独立表
 `cya_organic_burst_shadow_positions`，接口为 `GET /api/cya-organic-burst-shadow`，
-Dashboard 编号为 `COB-A/B/C`。该路径每个 Mint 最多保留256笔、15秒有界队列，复用
+Dashboard 编号为 `COB-D/F`。该路径每个 Mint 最多保留256笔、15秒有界队列，复用
 现有 Universal RUG Guard，不增加 RPC，不签名，也不发送交易。
 
 ## Flow -> Smart Confirmation Shadow L
