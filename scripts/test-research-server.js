@@ -590,7 +590,7 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 18);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 19);
     assert.deepStrictEqual(
       migratedRebound.runtime.entryProfiles
         .filter((profile) => profile.id.startsWith('GD25_35_RUG_GUARD'))
@@ -659,6 +659,7 @@ async function main() {
         ['GE30_R23_F1_NIGHT', 30_000, 1, 3],
         ['GE30_R23_F1_DAY', 30_000, 1, 3],
         ['GE30_D25_32_R24_F1', 30_000, 1, 4],
+        ['GE30_D25_32_R24_F1_EXEC1', 30_000, 1, 4],
         ['GE30_D25_32_R24_F1_04_24', 30_000, 1, 4],
         ['GE30_D25_32_R23_F1_FAST200', 30_000, 1, 3],
       ],
