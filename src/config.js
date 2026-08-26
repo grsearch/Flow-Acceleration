@@ -1015,10 +1015,10 @@ const config = {
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_ENABLED',
           true,
         ),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_ENTRY_ENABLED',
-          true,
-        ),
+        // Code-locked after the negative live sample. Keep the strategy loaded
+        // only for historical display and any outstanding position exit; a
+        // stale server .env must not reopen new entries.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_POSITION_SOL',
@@ -4045,6 +4045,13 @@ const config = {
     // covers their capacity suffixes (for example _0P1SOL and _1SOL).
     retiredCohortPrefixes: [
       'POST_GD25_35_RUG_GUARD_T20_24_',
+      'POST_GD25_35_X3',
+      'POST_GD25_35_X8',
+      'POST_GD25_35_XLEG',
+      'POST_GD25_35_XB25',
+      'POST_GD25_35_XB50',
+      'POST_GE30_R23_F1_',
+      'POST_GE30_R23_F3_',
       'POST_GE30_R23_F1_G1_B50_H60',
       'POST_GE30_R23_F1_G1_B75_H30',
       'POST_GE30_D25_32_R24_F1_04_24_V2_TIME_R2_H15',
@@ -4307,6 +4314,26 @@ const config = {
           3,
           { min: 0, max: 100 },
         ),
+      },
+      {
+        id: 'GE30_D25_32_R24_F1_EXEC1',
+        label: 'V2-EXEC1 · 首次可执行1 SOL对照 · H15固定退出',
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 32,
+        reboundMinPct: 2,
+        reboundMaxPct: 4,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 1,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_V2_MAX_ENTRY_JUMP_PCT',
+          3,
+          { min: 0, max: 100 },
+        ),
+        exitProfileIds: ['V2_R2_H15'],
+        capacityAware: true,
+        positionSols: [0.1, 1],
       },
       {
         id: 'GE30_D25_32_R24_F1_04_24',
@@ -4640,7 +4667,9 @@ const config = {
       ].map(([id, fallbackHardStopPct]) => ({
         id,
         label: `${id} | 2秒弱势检查 / 硬止损${fallbackHardStopPct}%`,
-        entryProfileIds: ['GE30_D25_32_R24_F1'],
+        entryProfileIds: id === 'V2_R2_H15'
+          ? ['GE30_D25_32_R24_F1', 'GE30_D25_32_R24_F1_EXEC1']
+          : ['GE30_D25_32_R24_F1'],
         exitMode: 'RISK_XLEG',
         trailingActivationPct: 8,
         trailingStopPct: 3,
@@ -5541,6 +5570,19 @@ const config = {
         requireNoCreatorSell: true,
         capacityAwareExit: true,
       },
+      ...[15, 20].map((hardStopPct) => ({
+        id: `O_C80_D5_B2_S0_NC_H${hardStopPct}`,
+        label: `O-C80-D5止损对照 · H${hardStopPct}% / 其余退出不变`,
+        mode: 'CURVE_MILESTONE',
+        thresholdPct: 80,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 2,
+        maxSellTx: 0,
+        requireNoCreatorSell: true,
+        capacityAwareExit: true,
+        hardStopPct,
+      })),
       ...[75, 78].map((thresholdPct) => ({
         id: `O_C${thresholdPct}_D5_B2_S0_NC_EARLY`,
         label: `O-C${thresholdPct}-EARLY · Curve${thresholdPct}提前触发 / ΔCurve5≥5 / Buyers≥2 / 0卖单`,
