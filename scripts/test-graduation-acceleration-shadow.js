@@ -720,3 +720,71 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
 }
 
 testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly();
+
+function testProfileSpecificHardStopsStayIndependent() {
+  const store = makeStore();
+  const settings = config();
+  settings.capacitySols = [1];
+  settings.entryProfiles = [15, 30].map((hardStopPct) => ({
+    id: `D5_H${hardStopPct}`,
+    label: `D5 H${hardStopPct}`,
+    mode: 'CURVE_MILESTONE',
+    thresholdPct: 80,
+    recentWindowMs: 5_000,
+    minCurveDeltaPct: 5,
+    minBuyers: 2,
+    maxSellTx: 0,
+    requireNoCreatorSell: true,
+    hardStopPct,
+  }));
+  const suite = new GraduationAccelerationShadowSuite({
+    config: settings,
+    store,
+    now: () => 8_000_000,
+  });
+  suite.start();
+  const mint = 'd5-profile-hard-stop';
+  suite.onCreate({ mint, creator: 'd5-creator', createdAt: 8_000_000 });
+  suite.observeTrade(trade({
+    mint, timestampMs: 8_000_100, price: 1e-7, curvePct: 70, wallet: 'd5-buyer-1',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: 8_001_000, price: 1e-7, curvePct: 80, wallet: 'd5-buyer-2',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: 8_001_200, price: 1e-7, curvePct: 81, wallet: 'd5-fill',
+  }));
+  const opened = store.db.prepare(`
+    SELECT entry_profile_id, entry_price, status
+    FROM graduation_acceleration_shadow_positions WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.equal(opened.length, 2);
+  assert.ok(opened.every((row) => row.status === STATUS.OPEN));
+
+  const drawdownPrice = Math.min(...opened.map((row) => row.entry_price)) * 0.84;
+  suite.observeTrade(trade({
+    mint, timestampMs: 8_001_400, price: drawdownPrice, curvePct: 79,
+    side: 'SELL', wallet: 'd5-seller',
+  }));
+  let rows = store.db.prepare(`
+    SELECT entry_profile_id, status, exit_reason
+    FROM graduation_acceleration_shadow_positions WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'D5_H15').status, STATUS.EXIT_PENDING);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'D5_H30').status, STATUS.OPEN);
+
+  suite.observeTrade(trade({
+    mint, timestampMs: 8_001_600, price: drawdownPrice, curvePct: 79,
+    side: 'SELL', wallet: 'd5-exit-fill',
+  }));
+  rows = store.db.prepare(`
+    SELECT entry_profile_id, status, exit_reason
+    FROM graduation_acceleration_shadow_positions WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'D5_H15').status, STATUS.CLOSED);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'D5_H15').exit_reason, 'HARD_STOP');
+  assert.equal(rows.find((row) => row.entry_profile_id === 'D5_H30').status, STATUS.OPEN);
+  store.close();
+}
+
+testProfileSpecificHardStopsStayIndependent();
