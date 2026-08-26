@@ -807,7 +807,9 @@ class GraduationAccelerationShadowSuite {
       if (position.status === STATUS.RUNNER && trade.market !== 'PUMP_AMM') continue;
       this._updateExtrema(position, trade.timestampMs, price);
       const gross = ((price / position.entryPrice) - 1) * 100;
-      if (gross <= -this.config.hardStopPct) {
+      const profile = this.entryProfiles.get(position.entryProfileId);
+      const hardStopPct = finite(profile?.hardStopPct, this.config.hardStopPct);
+      if (hardStopPct > 0 && gross <= -hardStopPct) {
         this._requestExit(position, trade.timestampMs, 'HARD_STOP', trade.market);
         continue;
       }
