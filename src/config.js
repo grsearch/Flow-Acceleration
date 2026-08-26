@@ -2297,17 +2297,13 @@ const config = {
     }),
   },
 
-  // Forward-only creator-affinity study. A creator's reputation is computed
-  // exclusively from monitored-wallet episodes that were completed before the
-  // current public-flow signal. The current Smart Wallet trade remains a future
-  // label and never triggers entry, so the study cannot gain speed by leaking
-  // the behavior it is trying to predict.
+  // Forward-only creator-affinity observer. Creator launch history from every
+  // token already present in flow_tokens is kept separate from the selected
+  // Smart-Wallet trade sample. Historical simulated positions remain readable,
+  // but the disproven CAF entry family no longer creates new positions.
   creatorAffinityShadow: {
     enabled: booleanEnv('FLOW_CREATOR_AFFINITY_SHADOW_ENABLED', true),
-    simulatePositions: booleanEnv(
-      'FLOW_CREATOR_AFFINITY_SIMULATED_ENTRIES_ENABLED',
-      true,
-    ),
+    simulatePositions: false,
     storageTable: 'creator_affinity_shadow_positions',
     strategyCode: 'CAF',
     strategyName: 'Creator Affinity + Public Flow',
@@ -2318,6 +2314,16 @@ const config = {
         'FLOW_CREATOR_AFFINITY_LOOKBACK_MS',
         7 * 24 * 60 * 60_000,
         { min: 24 * 60 * 60_000 },
+      ),
+      serialLowQualityMinPriorLaunches: integerEnv(
+        'FLOW_CREATOR_AFFINITY_SERIAL_LOW_QUALITY_MIN_PRIOR_LAUNCHES',
+        20,
+        { min: 1 },
+      ),
+      serialLowQualityMaxGraduationRatePct: numberEnv(
+        'FLOW_CREATOR_AFFINITY_SERIAL_LOW_QUALITY_MAX_GRADUATION_RATE_PCT',
+        2,
+        { min: 0, max: 100 },
       ),
     },
     positionSizeSol: shadowPositionEnv('FLOW_CREATOR_AFFINITY_POSITION_SOL'),
@@ -2350,38 +2356,58 @@ const config = {
     ),
     entryProfiles: [
       {
+        id: 'CAF_ALL_E15',
+        label: 'CAF-ALL-E15 · current-DB all-launch observer baseline',
+        minAgeMs: 3_000, maxAgeMs: 15_000,
+        minCurvePct: 10, maxCurvePct: 85,
+        minPublicBuyers1s: 1, minPublicBuyers5s: 3,
+        minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
+        maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
+      },
+      {
         id: 'CAF_W50_E10',
-        label: 'CAF-W50-E10 · prior completed>=3 / win>=50% / public flow <=10s',
+        label: 'CAF-W50-E10 · Smart sample win>=50% + all-launch quality',
         minAgeMs: 3_000, maxAgeMs: 10_000,
         minCurvePct: 10, maxCurvePct: 85,
         minPublicBuyers1s: 1, minPublicBuyers5s: 3,
         minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
         maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
         minCreatorPriorCompleted: 3, minCreatorPriorWinRatePct: 50,
+        minCreatorAllPriorLaunches: 3, minCreatorAllPriorGraduated: 1,
+        minCreatorAllPriorGraduationRatePct: 2,
+        rejectCreatorSerialLowQuality: true,
         requirePreRiskSampleReady: true,
         maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
       },
       {
         id: 'CAF_P0_E10',
-        label: 'CAF-P0-E10 · prior completed>=3 / capital return>=0 / public flow <=10s',
+        label: 'CAF-P0-E10 · Smart sample return>=0 + all-launch quality',
         minAgeMs: 3_000, maxAgeMs: 10_000,
         minCurvePct: 10, maxCurvePct: 85,
         minPublicBuyers1s: 1, minPublicBuyers5s: 3,
         minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
         maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
         minCreatorPriorCompleted: 3, minCreatorPriorCapitalReturnPct: 0,
+        minCreatorAllPriorLaunches: 3, minCreatorAllPriorGraduated: 1,
+        minCreatorAllPriorGraduationRatePct: 2,
+        rejectCreatorSerialLowQuality: true,
         requirePreRiskSampleReady: true,
         maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
       },
       {
         id: 'CAF_W50_B5_E15',
-        label: 'CAF-W50-B5-E15 · quality prior + broader 5-buyer flow <=15s',
+        label: 'CAF-W50-B5-E15 · Smart sample quality + broader public flow',
         minAgeMs: 3_000, maxAgeMs: 15_000,
         minCurvePct: 10, maxCurvePct: 85,
         minPublicBuyers1s: 1, minPublicBuyers5s: 5,
         minPublicBuyFlow5sSol: 1, minPublicNetFlow5sSol: 0.5,
         maxLargestBuyerSharePct: 45, maxReturn5sPct: 50,
         minCreatorPriorCompleted: 3, minCreatorPriorWinRatePct: 50,
+        minCreatorAllPriorLaunches: 3, minCreatorAllPriorGraduated: 1,
+        minCreatorAllPriorGraduationRatePct: 2,
+        rejectCreatorSerialLowQuality: true,
         requirePreRiskSampleReady: true,
         maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
       },

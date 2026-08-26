@@ -17,12 +17,17 @@ function main() {
   }, { configuredTradingCostPct: 0 });
   const config = {
     enabled: true,
-    simulatePositions: true,
+    simulatePositions: false,
     storageTable: 'creator_affinity_shadow_positions',
     strategyCode: 'CAF', strategyName: 'Creator Affinity + Public Flow', modeCode: 'CAF',
     positionSizeSol: 1,
     smartWallets: [smartA, smartB],
-    creatorAffinity: { enabled: true, lookbackMs: 7 * 24 * 60 * 60_000 },
+    creatorAffinity: {
+      enabled: true,
+      lookbackMs: 7 * 24 * 60 * 60_000,
+      serialLowQualityMinPriorLaunches: 20,
+      serialLowQualityMaxGraduationRatePct: 2,
+    },
     featureWindowMs: 5_000, stateRetentionMs: 60_000,
     episodeCooldownMs: 60_000, smartLabelWindowMs: 15_000,
     entryDelayMs: 200, entryTimeoutMs: 2_000,
@@ -36,6 +41,9 @@ function main() {
       minPublicNetFlow5sSol: 0.25, maxLargestBuyerSharePct: 50,
       maxReturn5sPct: 50,
       minCreatorPriorCompleted: 3, minCreatorPriorWinRatePct: 50,
+      minCreatorAllPriorLaunches: 3, minCreatorAllPriorGraduated: 1,
+      minCreatorAllPriorGraduationRatePct: 2,
+      rejectCreatorSerialLowQuality: true,
     }],
     exitProfiles: [{ id: 'H20_T60', hardStopPct: 20, maxHoldMs: 60_000 }],
     costModel: {
@@ -70,6 +78,8 @@ function main() {
       timestampMs: openedAt, sol: 1, balance: 100 });
     smartEvent({ mint, wallet: index === 2 ? smartB : smartA, side: 'SELL', phase: 'CLOSE',
       timestampMs: openedAt + 2_000, sol: 1.2, balance: 0 });
+    store.db.prepare('UPDATE flow_tokens SET graduated_at=? WHERE mint=?')
+      .run(openedAt + 3_000, mint);
   }
 
   // An unfinished prior launch is visible as a launch, but never fabricated into
@@ -94,6 +104,11 @@ function main() {
     'unfinished and future-closed episodes must be causally censored');
   assert.strictEqual(prior.creatorPriorWinRatePct, 100);
   assert.ok(Math.abs(prior.creatorPriorCapitalReturnPct - 20) < 0.000001);
+  const allPrior = suite._creatorAllLaunchSnapshot(currentMint, base, creator);
+  assert.strictEqual(allPrior.creatorAllPriorLaunches, 5);
+  assert.strictEqual(allPrior.creatorAllPriorGraduated, 3);
+  assert.strictEqual(allPrior.creatorAllPriorGraduationRatePct, 60);
+  assert.strictEqual(allPrior.creatorSerialLowQuality, false);
 
   const observe = (offset, wallet, sol, price) => {
     now = base + offset;
@@ -114,10 +129,17 @@ function main() {
     SELECT * FROM creator_affinity_shadow_positions
     WHERE mint=?
   `).get(currentMint);
-  assert.strictEqual(row.status, 'PENDING_ENTRY');
+  assert.strictEqual(row.status, 'OBSERVED');
+  assert.strictEqual(row.exit_profile_id, 'OBS');
+  assert.strictEqual(row.rejection_reason, 'OBSERVER_ONLY_NO_SIMULATED_ENTRY');
   assert.strictEqual(row.creator_prior_completed, 3);
   assert.strictEqual(row.creator_prior_win_rate_pct, 100);
   assert.ok(Math.abs(row.creator_prior_capital_return_pct - 20) < 0.000001);
+  const storedFeatures = JSON.parse(row.features_json);
+  assert.strictEqual(storedFeatures.creatorAllPriorLaunches, 5);
+  assert.strictEqual(storedFeatures.creatorAllPriorGraduated, 3);
+  assert.strictEqual(storedFeatures.creatorAllPriorGraduationRatePct, 60);
+  assert.strictEqual(storedFeatures.creatorSerialLowQuality, false);
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM sqlite_master
     WHERE type='table' AND name='public_flow_lead_shadow_positions'
@@ -146,9 +168,22 @@ function main() {
   ).get().n, 1);
 
   const dashboard = suite.dashboard({ positionLimit: 10 });
-  assert.strictEqual(dashboard.cohorts.length, 1);
+  assert.strictEqual(dashboard.cohorts.length, 0,
+    'observer labels must not be mixed into historical simulated cohorts');
   assert.strictEqual(dashboard.positions.length, 1);
-  assert.strictEqual(suite.health().strategy.research.creatorAffinityIsHistoricalPriorOnly, true);
+  assert.strictEqual(dashboard.observerStats.signals, 1);
+  assert.strictEqual(dashboard.observerStats.independent_mints, 1);
+  assert.strictEqual(dashboard.observerStats.independent_creators, 1);
+  assert.strictEqual(dashboard.observerStats.average_creator_all_prior_launches, 5);
+  assert.strictEqual(dashboard.observerStats.average_creator_all_prior_graduated, 3);
+  assert.strictEqual(dashboard.observerStats.average_creator_all_prior_graduation_rate_pct, 60);
+  const health = suite.health();
+  assert.strictEqual(health.observerOnly, true);
+  assert.strictEqual(health.simulatesPositions, false);
+  assert.strictEqual(health.strategy.research.creatorAffinityIsHistoricalPriorOnly, true);
+  assert.strictEqual(health.strategy.research.creatorAllHistorySource,
+    'flow_tokens_current_db_causal');
+  assert.strictEqual(health.strategy.research.creatorSmartWalletSampleIsSeparate, true);
   store.close();
   console.log('Creator Affinity Shadow tests: PASS');
 }

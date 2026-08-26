@@ -677,9 +677,9 @@ function createRuntime(runtimeConfig = config) {
       + 'Smart OPEN=future label, ADD=ignored, sends transactions=false.',
     );
     console.log(
-      `Creator Affinity Shadow CAF: ${runtimeConfig.creatorAffinityShadow.entryProfiles.length} `
-      + `historical-creator entries x ${runtimeConfig.creatorAffinityShadow.exitProfiles.length} exits; `
-      + 'current Smart OPEN=future label only, sends transactions=false.',
+      `Creator Affinity Observer CAF-OBS: ${runtimeConfig.creatorAffinityShadow.entryProfiles.length} `
+      + 'current-DB all-launch filters plus a separate Smart sample; '
+      + 'new simulated entries=false, current Smart OPEN=future label only.',
     );
     console.log(
       `CYA Slot Flow Shadow CSF: ${runtimeConfig.cyaSlotFlowShadow.entryProfiles.length} `

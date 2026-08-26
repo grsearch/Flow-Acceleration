@@ -77,6 +77,16 @@ class PublicFlowLeadShadowSuite {
     );
     this.lastCreatorHistoryPruneAt = 0;
     this.creatorLaunches = new Map();
+    this.creatorAllHistory = {
+      serialLowQualityMinPriorLaunches: Math.max(
+        1,
+        Math.trunc(finite(this.creatorAffinity.serialLowQualityMinPriorLaunches, 20)),
+      ),
+      serialLowQualityMaxGraduationRatePct: Math.max(
+        0,
+        finite(this.creatorAffinity.serialLowQualityMaxGraduationRatePct, 2),
+      ),
+    };
     this.simulatePositions = config.simulatePositions === true;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
@@ -104,9 +114,23 @@ class PublicFlowLeadShadowSuite {
       opened: 0,
       closed: 0,
       noExit: 0,
+      creatorAllHistorySnapshots: 0,
+      creatorSerialLowQuality: 0,
       lastActionAt: null,
     };
     this._initStorage();
+    this.creatorAllHistoryQuery = this.creatorAffinity.enabled
+      ? this.store.db.prepare(`
+        SELECT COUNT(*) prior_launches,
+          SUM(CASE WHEN graduated_at IS NOT NULL AND graduated_at<=@timestampMs
+            THEN 1 ELSE 0 END) prior_graduated,
+          MIN(created_at) first_created_at,
+          MAX(created_at) latest_created_at
+        FROM flow_tokens
+        WHERE creator=@creator AND mint<>@mint
+          AND created_at IS NOT NULL AND created_at<@timestampMs
+      `)
+      : null;
   }
 
   _initStorage() {
@@ -364,6 +388,13 @@ class PublicFlowLeadShadowSuite {
           sendsTransactions: false,
           noExitPricedAsTotalLoss: false,
           creatorAffinityIsHistoricalPriorOnly: Boolean(this.creatorAffinity.enabled),
+          creatorAllHistorySource: this.creatorAffinity.enabled
+            ? 'flow_tokens_current_db_causal' : null,
+          creatorSmartWalletSampleIsSeparate: Boolean(this.creatorAffinity.enabled),
+          serialLowQualityMinPriorLaunches:
+            this.creatorAllHistory.serialLowQualityMinPriorLaunches,
+          serialLowQualityMaxGraduationRatePct:
+            this.creatorAllHistory.serialLowQualityMaxGraduationRatePct,
         },
       },
       ...this.metrics,
@@ -542,6 +573,40 @@ class PublicFlowLeadShadowSuite {
     };
   }
 
+  _creatorAllLaunchSnapshot(mint, timestampMs = this.now(), creatorOverride = null) {
+    if (!this.creatorAffinity.enabled || !this.creatorAllHistoryQuery) return {};
+    const token = this.store.getToken(mint);
+    const creator = creatorOverride || token?.creator || token?.creator_wallet || null;
+    const empty = {
+      creatorAllPriorLaunches: 0,
+      creatorAllPriorGraduated: 0,
+      creatorAllPriorGraduationRatePct: null,
+      creatorAllHistoryFirstCreatedAt: null,
+      creatorAllHistoryLatestCreatedAt: null,
+      creatorSerialLowQuality: false,
+    };
+    if (!creator || !(timestampMs > 0)) return empty;
+    const row = this.creatorAllHistoryQuery.get({ creator, mint, timestampMs }) || {};
+    const priorLaunches = Math.max(0, finite(row.prior_launches, 0));
+    const priorGraduated = Math.max(0, finite(row.prior_graduated, 0));
+    const graduationRatePct = priorLaunches > 0
+      ? priorGraduated / priorLaunches * 100 : null;
+    const serialLowQuality = priorLaunches
+      >= this.creatorAllHistory.serialLowQualityMinPriorLaunches
+      && graduationRatePct != null
+      && graduationRatePct < this.creatorAllHistory.serialLowQualityMaxGraduationRatePct;
+    this.metrics.creatorAllHistorySnapshots += 1;
+    if (serialLowQuality) this.metrics.creatorSerialLowQuality += 1;
+    return {
+      creatorAllPriorLaunches: priorLaunches,
+      creatorAllPriorGraduated: priorGraduated,
+      creatorAllPriorGraduationRatePct: graduationRatePct,
+      creatorAllHistoryFirstCreatedAt: finite(row.first_created_at),
+      creatorAllHistoryLatestCreatedAt: finite(row.latest_created_at),
+      creatorSerialLowQuality: serialLowQuality,
+    };
+  }
+
   advanceTime(now = this.now()) {
     if (!this.config.enabled) return;
     this._pruneCreatorHistory(now);
@@ -682,7 +747,7 @@ class PublicFlowLeadShadowSuite {
       || profile.maxPreConsecutiveBuys != null);
   }
 
-  _entryReasons(profile, features, { includeRisk = true } = {}) {
+  _entryReasons(profile, features, { includeRisk = true, includeCreator = true } = {}) {
     const reasons = [];
     const below = (value, limit) => limit != null && !(value >= limit);
     const above = (value, limit) => limit != null && !(value <= limit);
@@ -712,27 +777,46 @@ class PublicFlowLeadShadowSuite {
         || features.flowAccelerationRatio > profile.maxFlowAccelerationRatio)) {
       reasons.push('FLOW_ACCEL_ABOVE_MAX');
     }
-    if (profile.minCreatorPriorLaunches != null
-      && features.creatorPriorLaunches < profile.minCreatorPriorLaunches) {
-      reasons.push('CREATOR_PRIOR_LAUNCHES_BELOW_MIN');
-    }
-    if (profile.minCreatorPriorSmartWallets != null
-      && features.creatorPriorSmartWallets < profile.minCreatorPriorSmartWallets) {
-      reasons.push('CREATOR_PRIOR_WALLETS_BELOW_MIN');
-    }
-    if (profile.minCreatorPriorCompleted != null
-      && features.creatorPriorCompleted < profile.minCreatorPriorCompleted) {
-      reasons.push('CREATOR_PRIOR_COMPLETED_BELOW_MIN');
-    }
-    if (profile.minCreatorPriorWinRatePct != null
-      && (features.creatorPriorWinRatePct == null
-        || features.creatorPriorWinRatePct < profile.minCreatorPriorWinRatePct)) {
-      reasons.push('CREATOR_PRIOR_WIN_RATE_BELOW_MIN');
-    }
-    if (profile.minCreatorPriorCapitalReturnPct != null
-      && (features.creatorPriorCapitalReturnPct == null
-        || features.creatorPriorCapitalReturnPct < profile.minCreatorPriorCapitalReturnPct)) {
-      reasons.push('CREATOR_PRIOR_RETURN_BELOW_MIN');
+    if (includeCreator) {
+      if (profile.minCreatorPriorLaunches != null
+        && features.creatorPriorLaunches < profile.minCreatorPriorLaunches) {
+        reasons.push('CREATOR_SMART_SAMPLE_LAUNCHES_BELOW_MIN');
+      }
+      if (profile.minCreatorPriorSmartWallets != null
+        && features.creatorPriorSmartWallets < profile.minCreatorPriorSmartWallets) {
+        reasons.push('CREATOR_SMART_SAMPLE_WALLETS_BELOW_MIN');
+      }
+      if (profile.minCreatorPriorCompleted != null
+        && features.creatorPriorCompleted < profile.minCreatorPriorCompleted) {
+        reasons.push('CREATOR_SMART_SAMPLE_COMPLETED_BELOW_MIN');
+      }
+      if (profile.minCreatorPriorWinRatePct != null
+        && (features.creatorPriorWinRatePct == null
+          || features.creatorPriorWinRatePct < profile.minCreatorPriorWinRatePct)) {
+        reasons.push('CREATOR_SMART_SAMPLE_WIN_RATE_BELOW_MIN');
+      }
+      if (profile.minCreatorPriorCapitalReturnPct != null
+        && (features.creatorPriorCapitalReturnPct == null
+          || features.creatorPriorCapitalReturnPct < profile.minCreatorPriorCapitalReturnPct)) {
+        reasons.push('CREATOR_SMART_SAMPLE_RETURN_BELOW_MIN');
+      }
+      if (profile.minCreatorAllPriorLaunches != null
+        && features.creatorAllPriorLaunches < profile.minCreatorAllPriorLaunches) {
+        reasons.push('CREATOR_ALL_PRIOR_LAUNCHES_BELOW_MIN');
+      }
+      if (profile.minCreatorAllPriorGraduated != null
+        && features.creatorAllPriorGraduated < profile.minCreatorAllPriorGraduated) {
+        reasons.push('CREATOR_ALL_PRIOR_GRADUATED_BELOW_MIN');
+      }
+      if (profile.minCreatorAllPriorGraduationRatePct != null
+        && (features.creatorAllPriorGraduationRatePct == null
+          || features.creatorAllPriorGraduationRatePct
+            < profile.minCreatorAllPriorGraduationRatePct)) {
+        reasons.push('CREATOR_ALL_GRADUATION_RATE_BELOW_MIN');
+      }
+      if (profile.rejectCreatorSerialLowQuality && features.creatorSerialLowQuality) {
+        reasons.push('CREATOR_SERIAL_LOW_QUALITY');
+      }
     }
     if (includeRisk) {
       if (profile.requirePreRiskSampleReady && !features.preRiskSampleReady) {
@@ -756,15 +840,26 @@ class PublicFlowLeadShadowSuite {
       const key = `${trade.mint}:${profile.id}`;
       const prior = this.lastEpisodes.get(key);
       if (prior != null && trade.timestampMs - prior < this.config.episodeCooldownMs) continue;
-      if (!this._entryReasons(profile, publicFeatures, { includeRisk: false }).length) {
+      if (!this._entryReasons(profile, publicFeatures, {
+        includeRisk: false,
+        includeCreator: false,
+      }).length) {
         candidates.push(profile);
       }
     }
     if (!candidates.length) return [];
     const needsPreRisk = candidates.some((profile) => this._profileNeedsPreRisk(profile));
-    const features = needsPreRisk
+    let features = needsPreRisk
       ? { ...publicFeatures, ...this._preRiskFeatures(trade.mint, trade.timestampMs) }
       : publicFeatures;
+    features = {
+      ...features,
+      ...this._creatorAllLaunchSnapshot(
+        trade.mint,
+        trade.timestampMs,
+        publicFeatures.creator,
+      ),
+    };
     const results = [];
     for (const profile of candidates) {
       const key = `${trade.mint}:${profile.id}`;
@@ -1102,7 +1197,16 @@ class PublicFlowLeadShadowSuite {
   dashboard({ positionLimit = 100 } = {}) {
     const limit = Math.min(300, Math.max(1, Math.trunc(Number(positionLimit) || 100)));
     const positions = this.store.db.prepare(`
-      SELECT *, CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+      SELECT *,
+        json_extract(features_json, '$.creatorAllPriorLaunches')
+          AS creator_all_prior_launches,
+        json_extract(features_json, '$.creatorAllPriorGraduated')
+          AS creator_all_prior_graduated,
+        json_extract(features_json, '$.creatorAllPriorGraduationRatePct')
+          AS creator_all_prior_graduation_rate_pct,
+        json_extract(features_json, '$.creatorSerialLowQuality')
+          AS creator_serial_low_quality,
+        CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
         THEN exit_at-entry_at ELSE NULL END AS hold_ms
       FROM ${this.storageTable}
       ORDER BY CASE WHEN status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING') THEN 0 ELSE 1 END,
@@ -1111,6 +1215,7 @@ class PublicFlowLeadShadowSuite {
     const groups = this.store.db.prepare(`
       SELECT cohort_id, entry_profile_id, exit_profile_id,
         COUNT(*) signals, COUNT(DISTINCT mint) independent_mints,
+        COUNT(DISTINCT creator) independent_creators,
         SUM(status='PRICE_JUMP') price_jump, SUM(status='NO_ENTRY') no_entry,
         SUM(status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING')) active,
         SUM(status='CLOSED') resolved, SUM(status='NO_EXIT') no_exit,
@@ -1128,6 +1233,15 @@ class PublicFlowLeadShadowSuite {
         AVG(creator_prior_completed) average_creator_prior_completed,
         AVG(creator_prior_win_rate_pct) average_creator_prior_win_rate_pct,
         AVG(creator_prior_capital_return_pct) average_creator_prior_capital_return_pct,
+        AVG(json_extract(features_json, '$.creatorAllPriorLaunches'))
+          average_creator_all_prior_launches,
+        AVG(json_extract(features_json, '$.creatorAllPriorGraduated'))
+          average_creator_all_prior_graduated,
+        AVG(json_extract(features_json, '$.creatorAllPriorGraduationRatePct'))
+          average_creator_all_prior_graduation_rate_pct,
+        AVG(CASE WHEN json_type(features_json, '$.creatorSerialLowQuality') IS NOT NULL
+          THEN CASE WHEN json_extract(features_json, '$.creatorSerialLowQuality')
+            THEN 100.0 ELSE 0 END END) creator_serial_low_quality_rate_pct,
         AVG(max_favorable_return_pct) average_mfe_pct,
         AVG(max_adverse_return_pct) average_mae_pct,
         AVG(net_return_pct) average_net_return_pct,
@@ -1170,6 +1284,7 @@ class PublicFlowLeadShadowSuite {
     });
     const observerStats = this.store.db.prepare(`
       SELECT COUNT(*) signals, COUNT(DISTINCT mint) independent_mints,
+        COUNT(DISTINCT creator) independent_creators,
         MAX(signal_at) latest_signal_at,
         SUM(smart_open_at IS NOT NULL) smart_open_labels,
         AVG(CASE WHEN smart_open_delay_ms<=5000 THEN 100.0 ELSE 0 END)
@@ -1182,7 +1297,16 @@ class PublicFlowLeadShadowSuite {
         AVG(creator_prior_smart_wallets) average_creator_prior_smart_wallets,
         AVG(creator_prior_completed) average_creator_prior_completed,
         AVG(creator_prior_win_rate_pct) average_creator_prior_win_rate_pct,
-        AVG(creator_prior_capital_return_pct) average_creator_prior_capital_return_pct
+        AVG(creator_prior_capital_return_pct) average_creator_prior_capital_return_pct,
+        AVG(json_extract(features_json, '$.creatorAllPriorLaunches'))
+          average_creator_all_prior_launches,
+        AVG(json_extract(features_json, '$.creatorAllPriorGraduated'))
+          average_creator_all_prior_graduated,
+        AVG(json_extract(features_json, '$.creatorAllPriorGraduationRatePct'))
+          average_creator_all_prior_graduation_rate_pct,
+        AVG(CASE WHEN json_type(features_json, '$.creatorSerialLowQuality') IS NOT NULL
+          THEN CASE WHEN json_extract(features_json, '$.creatorSerialLowQuality')
+            THEN 100.0 ELSE 0 END END) creator_serial_low_quality_rate_pct
       FROM ${this.storageTable} WHERE exit_profile_id='OBS'
     `).get();
     return { cohorts, positions, observerStats };

@@ -480,6 +480,8 @@ class ResearchStore {
       );
       CREATE INDEX IF NOT EXISTS idx_flow_tokens_last_trade ON flow_tokens(last_trade_at);
       CREATE INDEX IF NOT EXISTS idx_flow_tokens_pool ON flow_tokens(migration_pool);
+      CREATE INDEX IF NOT EXISTS idx_flow_tokens_creator_created
+        ON flow_tokens(creator, created_at);
 
       CREATE TABLE IF NOT EXISTS raw_trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -727,10 +727,10 @@ class ResearchServer {
         generatedAt: Date.now(),
         runtime: this.creatorAffinityShadow?.health() || {
           enabled: false,
-          mode: 'SHADOW_CAF',
+          mode: 'OBSERVER_CAF',
           sendsTransactions: false,
-          observerOnly: false,
-          simulatesPositions: true,
+          observerOnly: true,
+          simulatesPositions: false,
           entryProfiles: [],
           exitProfiles: [],
         },
