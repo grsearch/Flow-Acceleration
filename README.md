@@ -775,6 +775,7 @@ Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 07:00 运行，�
 - `O90_DAY0818_STAIR120` / `O_C80_DAY1218_STAIR240` / `O_C80_NIGHT0004_STAIR240` / `O_C80_EVENING2024_STAIR240`：不叠加强质量阈值，只把旧 O90/O-C80 入场规则限制在指定北京时段，用于检验时段效果能否向前复现；同样不接实盘。
 - `O_C75_D5_B2_S0_NC_EARLY` / `O_C78_D5_B2_S0_NC_EARLY`：保留 O-C80 的5秒资金流、买家、零卖单和 Creator 未卖条件，只把首次 Curve 阈值提前到75%/78%，用于检验能否减少“提交前已经毕业”而不显著增加 RUG；全新 cohort、1 SOL Shadow，不接实盘。
 - `O_C80_M5_HANDOFF_X60`：Curve80 信号只作为迁移观察起点，不在 Bonding Curve 模拟买入。毕业后观察首个 PumpSwap 5秒，要求独立买家 `>=5`、净流非负、Sell/Buy `<=0.7`、窗口回撤 `<=20%`，并在模拟成交时限制市场涨价 `<=15%` 与1 SOL自身冲击 `<=10%`，合格后固定持有60秒；该跨市场衔接仍是 Shadow-only。
+- `O_C80_LIVE_MIG_X20` / `O_C80_LIVE_MIG_X30`：仅在真实 O-C80 实盘订单因 `ENTRY_MIGRATED_BEFORE_SUBMIT` 被安全拒绝后建立独立 Shadow。不会强行追买已毕业币；先等待至少3笔真实 PumpSwap 成交、2笔买入、2个独立买家、净流入与卖压/大卖单约束，再按1 SOL池容量模拟成交，分别固定持有20秒和30秒。普通 `ENTRY_REJECTED` 不进入该组，既有实盘规则、价格跳变保护及成功订单路径均不改变。
 
 FC 的 Flow 证据使用“信号时间不晚于回踩参考时间”的因果约束，未来信号不能反向使历史参考点合格。O90→M5 的 PumpSwap 门槛只决定毕业后的 Runner，失败时不会把未成交或不可定价样本伪记为盈利。
 
