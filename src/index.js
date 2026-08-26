@@ -262,6 +262,9 @@ function createRuntime(runtimeConfig = config) {
     onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   graduationAccelerationShadow.start();
+  trader.addEntryFailureObserver((event) => {
+    graduationAccelerationShadow.onLiveEntryFailure(event);
+  });
   store.releaseStartupTradeReplay();
   console.log(`[Startup] all strategy state restored in ${Date.now() - runtimeStartedAt}ms`);
   const server = new ResearchServer({
