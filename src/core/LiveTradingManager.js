@@ -121,6 +121,7 @@ class LiveTradingManager {
     this.mintExitQueues = new Map();
     this.graduationGateTrades = new Map();
     this.entryQueue = Promise.resolve();
+    this.entryFailureObservers = new Set();
     this.stopping = false;
     this.metrics = {
       evaluated: 0,
@@ -140,6 +141,22 @@ class LiveTradingManager {
       candidates: 0,
       signals: 0,
     };
+  }
+
+  addEntryFailureObserver(observer) {
+    if (typeof observer !== 'function') return () => {};
+    this.entryFailureObservers.add(observer);
+    return () => this.entryFailureObservers.delete(observer);
+  }
+
+  _notifyEntryFailure(event) {
+    for (const observer of this.entryFailureObservers) {
+      try {
+        observer(event);
+      } catch (error) {
+        this._rememberError(error);
+      }
+    }
   }
 
   _addPosition(position) {
@@ -1079,6 +1096,22 @@ class LiveTradingManager {
       else this.metrics.entryPreSubmitRejected += 1;
       this.metrics.lastActionAt = failedAt;
       this._rememberError(error);
+      this._notifyEntryFailure({
+        strategyId: strategy.id,
+        episodeId: event.episodeId || null,
+        mint: event.mint,
+        symbol: event.symbol || null,
+        market: event.market || strategy.market,
+        rejectionReason,
+        errorCode: error.code || null,
+        failedAt,
+        signalAt: event.timestampMs || null,
+        signalPrice: event.price || null,
+        signalCurvePct: event.features?.signalCurvePct ?? null,
+        slot: event.slot || null,
+        receivedAtMs: event.receivedAtMs || null,
+        features: event.features || {},
+      });
     }
   }
 
