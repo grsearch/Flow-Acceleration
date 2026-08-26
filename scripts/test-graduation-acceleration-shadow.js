@@ -788,3 +788,135 @@ function testProfileSpecificHardStopsStayIndependent() {
 }
 
 testProfileSpecificHardStopsStayIndependent();
+
+function testLiveMigrationFailureHandoffWaitsForOrganicPumpSwapFlow() {
+  const store = makeStore();
+  const settings = config();
+  settings.capacitySols = [1];
+  settings.entryProfiles = [20_000, 30_000].map((runnerMaxHoldMs) => ({
+    id: `LIVE_MIG_X${runnerMaxHoldMs / 1_000}`,
+    label: `live migration x${runnerMaxHoldMs / 1_000}`,
+    mode: 'LIVE_MIGRATION_FAILURE',
+    sourceLiveStrategyId: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
+    migrationHandoff: true,
+    capacityAwareExit: true,
+    capacitySols: [1],
+    entryTimeoutMs: 2_500,
+    coreExitPct: 0,
+    postMigrationEntryGate: {
+      entryDelayMs: 500,
+      captureWindowMs: 3_000,
+      evaluateAtFill: true,
+      waitForQualification: true,
+      minTrades: 3,
+      minBuyTx: 2,
+      minBuyers: 2,
+      minNetFlowSol: 0.1,
+      maxSellBuyRatio: 0.5,
+      maxLargestSellSol: 1,
+      maxDrawdownPct: 12,
+      maxMarketMovePct: 15,
+      maxSelfImpactPct: 10,
+    },
+    runnerExitMode: 'FIXED_HOLD',
+    runnerMaxHoldMs,
+  }));
+  const suite = new GraduationAccelerationShadowSuite({
+    config: settings,
+    store,
+    now: () => 9_000_000,
+  });
+  suite.start();
+  suite.onLiveEntryFailure({
+    strategyId: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
+    episodeId: 'live-migration:ignored',
+    mint: 'live-migration-ignored',
+    rejectionReason: 'ENTRY_REJECTED',
+    failedAt: 9_000_000,
+    signalAt: 8_999_900,
+    signalPrice: 1e-7,
+  });
+  assert.equal(suite.health().pendingEntries, 0,
+    'ordinary live rejections do not seed migration handoff cohorts');
+
+  const mint = 'live-migration-handoff';
+  suite.onLiveEntryFailure({
+    strategyId: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
+    episodeId: 'live-migration:1',
+    mint,
+    symbol: 'LMH',
+    rejectionReason: 'ENTRY_MIGRATED_BEFORE_SUBMIT',
+    errorCode: 'MIGRATED_BEFORE_SUBMIT',
+    failedAt: 9_000_000,
+    signalAt: 8_999_900,
+    signalPrice: 1e-7,
+    signalCurvePct: 82,
+    slot: 123,
+    features: { buyers: 4, netFlowSol: 8 },
+  });
+  assert.equal(suite.health().pendingEntries, 2);
+  assert.equal(suite.health().liveMigrationFailuresObserved, 1);
+
+  suite.observeTrade(trade({
+    mint, timestampMs: 9_000_600, price: 1e-7, market: 'PUMP_AMM',
+    side: 'BUY', wallet: 'amm-buyer-1', solAmount: 0.2,
+  }));
+  assert.equal(suite.health().pendingEntries, 2,
+    'the first sparse PumpSwap trade waits instead of rejecting the handoff');
+  suite.observeTrade(trade({
+    mint, timestampMs: 9_000_750, price: 1.01e-7, market: 'PUMP_AMM',
+    side: 'SELL', wallet: 'amm-seller-1', solAmount: 0.05,
+  }));
+  assert.equal(suite.health().pendingEntries, 2);
+  suite.observeTrade(trade({
+    mint, timestampMs: 9_000_900, price: 1.02e-7, market: 'PUMP_AMM',
+    side: 'BUY', wallet: 'amm-buyer-2', solAmount: 0.2,
+  }));
+
+  let rows = store.db.prepare(`
+    SELECT entry_profile_id, status, position_sol, features_json
+    FROM graduation_acceleration_shadow_positions WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((row) => row.status === STATUS.RUNNER));
+  assert.ok(rows.every((row) => row.position_sol === 1));
+  assert.ok(rows.every((row) => (
+    JSON.parse(row.features_json).sourceLiveRejectionReason === 'ENTRY_MIGRATED_BEFORE_SUBMIT'
+  )));
+
+  suite.observeTrade(trade({
+    mint, timestampMs: 9_020_901, price: 1.05e-7, market: 'PUMP_AMM',
+    side: 'BUY', wallet: 'later-buyer-1', solAmount: 0.1,
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: 9_021_101, price: 1.05e-7, market: 'PUMP_AMM',
+    side: 'BUY', wallet: 'later-buyer-2', solAmount: 0.1,
+  }));
+  rows = store.db.prepare(`
+    SELECT entry_profile_id, status FROM graduation_acceleration_shadow_positions
+    WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'LIVE_MIG_X20').status, STATUS.CLOSED);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'LIVE_MIG_X30').status, STATUS.RUNNER);
+
+  suite.observeTrade(trade({
+    mint, timestampMs: 9_030_901, price: 1.08e-7, market: 'PUMP_AMM',
+    side: 'BUY', wallet: 'later-buyer-3', solAmount: 0.1,
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: 9_031_101, price: 1.08e-7, market: 'PUMP_AMM',
+    side: 'BUY', wallet: 'later-buyer-4', solAmount: 0.1,
+  }));
+  rows = store.db.prepare(`
+    SELECT entry_profile_id, status, entry_at, exit_at
+    FROM graduation_acceleration_shadow_positions WHERE mint=?
+  `).all(mint);
+  assert.ok(rows.every((row) => row.status === STATUS.CLOSED));
+  assert.ok(rows.find((row) => row.entry_profile_id === 'LIVE_MIG_X20').exit_at
+    - rows.find((row) => row.entry_profile_id === 'LIVE_MIG_X20').entry_at >= 20_000);
+  assert.ok(rows.find((row) => row.entry_profile_id === 'LIVE_MIG_X30').exit_at
+    - rows.find((row) => row.entry_profile_id === 'LIVE_MIG_X30').entry_at >= 30_000);
+  store.close();
+}
+
+testLiveMigrationFailureHandoffWaitsForOrganicPumpSwapFlow();
