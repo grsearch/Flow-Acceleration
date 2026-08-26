@@ -61,6 +61,22 @@ class PublicFlowLeadShadowSuite {
     this.store = store;
     this.rugRiskTracker = rugRiskTracker;
     this.now = now;
+    this.storageTable = /^[a-z][a-z0-9_]*$/i.test(config.storageTable || '')
+      ? config.storageTable : 'public_flow_lead_shadow_positions';
+    this.strategyCode = config.strategyCode || 'PFL';
+    this.strategyName = config.strategyName || 'Public Flow Lead';
+    this.modeCode = config.modeCode || 'PFL';
+    this.creatorAffinity = config.creatorAffinity || { enabled: false };
+    this.creatorHistoryLookbackMs = Math.max(
+      60_000,
+      finite(this.creatorAffinity.lookbackMs, 7 * 24 * 60 * 60_000),
+    );
+    this.creatorHistoryPruneIntervalMs = Math.max(
+      10_000,
+      finite(this.creatorAffinity.pruneIntervalMs, 60_000),
+    );
+    this.lastCreatorHistoryPruneAt = 0;
+    this.creatorLaunches = new Map();
     this.simulatePositions = config.simulatePositions === true;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
@@ -94,8 +110,10 @@ class PublicFlowLeadShadowSuite {
   }
 
   _initStorage() {
+    const table = this.storageTable;
+    const indexPrefix = table.replace(/_positions$/, '');
     this.store.db.exec(`
-      CREATE TABLE IF NOT EXISTS public_flow_lead_shadow_positions (
+      CREATE TABLE IF NOT EXISTS ${table} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cohort_id TEXT NOT NULL,
         entry_profile_id TEXT NOT NULL,
@@ -134,6 +152,12 @@ class PublicFlowLeadShadowSuite {
         pre_side_alternation_pct REAL,
         pre_repeated_buy_size_pct REAL,
         pre_largest_wallet_share_pct REAL,
+        creator TEXT,
+        creator_prior_launches INTEGER,
+        creator_prior_smart_wallets INTEGER,
+        creator_prior_completed INTEGER,
+        creator_prior_win_rate_pct REAL,
+        creator_prior_capital_return_pct REAL,
         features_json TEXT NOT NULL,
         smart_open_at INTEGER,
         smart_open_delay_ms INTEGER,
@@ -165,16 +189,16 @@ class PublicFlowLeadShadowSuite {
         updated_at INTEGER NOT NULL,
         UNIQUE(cohort_id, episode_id)
       );
-      CREATE INDEX IF NOT EXISTS idx_public_flow_lead_status
-        ON public_flow_lead_shadow_positions(status, updated_at);
-      CREATE INDEX IF NOT EXISTS idx_public_flow_lead_mint
-        ON public_flow_lead_shadow_positions(mint, signal_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_public_flow_lead_profiles
-        ON public_flow_lead_shadow_positions(entry_profile_id, exit_profile_id);
+      CREATE INDEX IF NOT EXISTS idx_${indexPrefix}_status
+        ON ${table}(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_${indexPrefix}_mint
+        ON ${table}(mint, signal_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_${indexPrefix}_profiles
+        ON ${table}(entry_profile_id, exit_profile_id);
     `);
     this._ensureFeatureColumns();
     this.insert = this.store.db.prepare(`
-      INSERT OR IGNORE INTO public_flow_lead_shadow_positions (
+      INSERT OR IGNORE INTO ${table} (
         cohort_id, entry_profile_id, exit_profile_id, episode_id, mint, symbol,
         status, rejection_reason, position_sol, configured_cost_pct,
         signal_at, signal_market, signal_price, age_ms, curve_pct,
@@ -185,7 +209,10 @@ class PublicFlowLeadShadowSuite {
         flow_acceleration_ratio, pre_risk_sample_ready, pre_risk_flagged,
         pre_return_pct, pre_max_consecutive_buys, pre_buy_share_pct,
         pre_side_alternation_pct, pre_repeated_buy_size_pct,
-        pre_largest_wallet_share_pct, features_json, entry_target_at,
+        pre_largest_wallet_share_pct, creator, creator_prior_launches,
+        creator_prior_smart_wallets, creator_prior_completed,
+        creator_prior_win_rate_pct, creator_prior_capital_return_pct,
+        features_json, entry_target_at,
         entry_deadline_at, created_at, updated_at
       ) VALUES (
         @cohortId, @entryProfileId, @exitProfileId, @episodeId, @mint, @symbol,
@@ -198,16 +225,19 @@ class PublicFlowLeadShadowSuite {
         @flowAccelerationRatio, @preRiskSampleReady, @preRiskFlagged,
         @preReturnPct, @preMaxConsecutiveBuys, @preBuySharePct,
         @preSideAlternationPct, @preRepeatedBuySizePct,
-        @preLargestWalletSharePct, @featuresJson, @entryTargetAt,
+        @preLargestWalletSharePct, @creator, @creatorPriorLaunches,
+        @creatorPriorSmartWallets, @creatorPriorCompleted,
+        @creatorPriorWinRatePct, @creatorPriorCapitalReturnPct,
+        @featuresJson, @entryTargetAt,
         @entryDeadlineAt, @createdAt, @updatedAt
       )
     `);
     this.active = this.store.db.prepare(`
-      SELECT * FROM public_flow_lead_shadow_positions
+      SELECT * FROM ${table}
       WHERE status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING') ORDER BY signal_at, id
     `);
     this.update = this.store.db.prepare(`
-      UPDATE public_flow_lead_shadow_positions SET
+      UPDATE ${table} SET
         status=COALESCE(@status,status),
         rejection_reason=COALESCE(@rejectionReason,rejection_reason),
         entry_at=COALESCE(@entryAt,entry_at),
@@ -235,13 +265,13 @@ class PublicFlowLeadShadowSuite {
       WHERE id=@id
     `);
     this.markNoExit = this.store.db.prepare(`
-      UPDATE public_flow_lead_shadow_positions
+      UPDATE ${table}
       SET status='NO_EXIT', exit_reason=@exitReason,
         estimated_cost_sol=@estimatedCostSol, updated_at=@updatedAt
       WHERE id=@id
     `);
     this.labelSmartOpen = this.store.db.prepare(`
-      UPDATE public_flow_lead_shadow_positions
+      UPDATE ${table}
       SET smart_open_at=@smartOpenAt,
         smart_open_delay_ms=@smartOpenAt-signal_at,
         smart_open_wallet=@smartOpenWallet,
@@ -254,7 +284,7 @@ class PublicFlowLeadShadowSuite {
 
   _ensureFeatureColumns() {
     const columns = new Set(this.store.db.prepare(
-      'PRAGMA table_info(public_flow_lead_shadow_positions)',
+      `PRAGMA table_info(${this.storageTable})`,
     ).all().map((row) => row.name));
     const additions = [
       ['pre_risk_sample_ready', 'INTEGER'],
@@ -265,11 +295,17 @@ class PublicFlowLeadShadowSuite {
       ['pre_side_alternation_pct', 'REAL'],
       ['pre_repeated_buy_size_pct', 'REAL'],
       ['pre_largest_wallet_share_pct', 'REAL'],
+      ['creator', 'TEXT'],
+      ['creator_prior_launches', 'INTEGER'],
+      ['creator_prior_smart_wallets', 'INTEGER'],
+      ['creator_prior_completed', 'INTEGER'],
+      ['creator_prior_win_rate_pct', 'REAL'],
+      ['creator_prior_capital_return_pct', 'REAL'],
     ];
     for (const [name, type] of additions) {
       if (!columns.has(name)) {
         this.store.db.exec(
-          `ALTER TABLE public_flow_lead_shadow_positions ADD COLUMN ${name} ${type}`,
+          `ALTER TABLE ${this.storageTable} ADD COLUMN ${name} ${type}`,
         );
       }
     }
@@ -277,6 +313,7 @@ class PublicFlowLeadShadowSuite {
 
   start() {
     if (!this.config.enabled) return;
+    if (this.creatorAffinity.enabled) this._restoreCreatorHistory();
     for (const row of this.active.all()) {
       const position = camelRow(row);
       if (position.status === STATUS.PENDING_ENTRY) this.pendingEntries.set(position.id, position);
@@ -285,7 +322,7 @@ class PublicFlowLeadShadowSuite {
     }
     const recent = this.store.db.prepare(`
       SELECT mint, entry_profile_id, MAX(signal_at) signal_at
-      FROM public_flow_lead_shadow_positions
+      FROM ${this.storageTable}
       WHERE signal_at>=? GROUP BY mint, entry_profile_id
     `).all(this.now() - this.config.stateRetentionMs);
     for (const row of recent) {
@@ -301,7 +338,7 @@ class PublicFlowLeadShadowSuite {
   health() {
     return {
       enabled: this.config.enabled,
-      mode: this.simulatePositions ? 'SHADOW_PFL' : 'OBSERVER_PFL',
+      mode: this.simulatePositions ? `SHADOW_${this.modeCode}` : `OBSERVER_${this.modeCode}`,
       sendsTransactions: false,
       observerOnly: !this.simulatePositions,
       simulatesPositions: this.simulatePositions,
@@ -310,14 +347,15 @@ class PublicFlowLeadShadowSuite {
       entryProfiles: [...this.entryProfiles.values()],
       exitProfiles: [...this.exitProfiles.values()],
       strategy: {
-        name: 'Public Flow Lead',
+        code: this.strategyCode,
+        name: this.strategyName,
         positionSizeSol: this.config.positionSizeSol,
         featureWindowMs: this.config.featureWindowMs,
         entryDelayMs: this.config.entryDelayMs,
         smartLabelWindowMs: this.config.smartLabelWindowMs,
         smartWalletCount: this.smartWallets.size,
         research: {
-          isolatedPositionTable: 'public_flow_lead_shadow_positions',
+          isolatedPositionTable: this.storageTable,
           entryUsesSmartWallet: false,
           smartOpenIsFutureLabelOnly: true,
           smartAddsIgnored: true,
@@ -325,6 +363,7 @@ class PublicFlowLeadShadowSuite {
           historicalSimulatedPositionsRetained: true,
           sendsTransactions: false,
           noExitPricedAsTotalLoss: false,
+          creatorAffinityIsHistoricalPriorOnly: Boolean(this.creatorAffinity.enabled),
         },
       },
       ...this.metrics,
@@ -354,8 +393,9 @@ class PublicFlowLeadShadowSuite {
 
   onSmartWalletEvent(event) {
     if (!this.config.enabled || !event?.mint || !event?.wallet
-      || !this.smartWallets.has(event.wallet)
-      || String(event.side || '').toUpperCase() !== 'BUY') return 0;
+      || !this.smartWallets.has(event.wallet)) return 0;
+    if (this.creatorAffinity.enabled) this._recordCreatorEvent(event);
+    if (String(event.side || '').toUpperCase() !== 'BUY') return 0;
     const phase = String(event.positionPhase || '').toUpperCase();
     if (phase !== 'OPEN') {
       if (phase === 'ADD') this.metrics.ignoredSmartAdds += 1;
@@ -374,8 +414,137 @@ class PublicFlowLeadShadowSuite {
     return result.changes;
   }
 
+  _restoreCreatorHistory() {
+    if (!this.store.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='smart_wallet_events'",
+    ).get()) return;
+    const events = this.store.db.prepare(`
+      SELECT e.timestamp_ms, e.wallet, e.mint, e.side, e.position_phase,
+        e.sol_amount, e.token_balance_after, t.creator
+      FROM smart_wallet_events e
+      LEFT JOIN flow_tokens t ON t.mint=e.mint
+      WHERE e.timestamp_ms>=? AND t.creator IS NOT NULL AND t.creator<>''
+      ORDER BY e.timestamp_ms, e.id
+    `).all(this.now() - this.creatorHistoryLookbackMs);
+    for (const event of events) this._recordCreatorEvent(event, event.creator);
+  }
+
+  _recordCreatorEvent(event, creatorOverride = null) {
+    const creator = creatorOverride
+      || this.store.getToken(event.mint)?.creator
+      || this.store.getToken(event.mint)?.creator_wallet
+      || null;
+    if (!creator || !event.mint) return;
+    if (!this.creatorLaunches.has(creator)) this.creatorLaunches.set(creator, new Map());
+    const launches = this.creatorLaunches.get(creator);
+    if (!launches.has(event.mint)) {
+      launches.set(event.mint, {
+        mint: event.mint,
+        firstOpenAt: null,
+        wallets: new Set(),
+        activeEpisodes: new Map(),
+        completedEpisodes: [],
+      });
+    }
+    const launch = launches.get(event.mint);
+    const side = String(event.side || '').toUpperCase();
+    const phase = String(event.position_phase ?? event.positionPhase ?? '').toUpperCase();
+    const timestampMs = finite(event.timestamp_ms ?? event.timestampMs);
+    const solAmount = Math.max(0, finite(event.sol_amount ?? event.solAmount, 0));
+    const tokenBalanceAfterRaw = event.token_balance_after ?? event.tokenBalanceAfter;
+    const tokenBalanceAfter = tokenBalanceAfterRaw == null
+      ? null : finite(tokenBalanceAfterRaw, null);
+    if (side === 'BUY') {
+      if (phase === 'OPEN') {
+        launch.wallets.add(event.wallet);
+        launch.firstOpenAt = launch.firstOpenAt == null
+          ? timestampMs : Math.min(launch.firstOpenAt, timestampMs);
+        // A new OPEN always starts a new causal episode. Any stale unfinished
+        // episode is deliberately discarded instead of being counted as a loss.
+        launch.activeEpisodes.set(event.wallet, {
+          wallet: event.wallet,
+          openedAt: timestampMs,
+          buySol: solAmount,
+          sellSol: 0,
+        });
+      } else {
+        const episode = launch.activeEpisodes.get(event.wallet);
+        if (episode) episode.buySol += solAmount;
+      }
+    } else if (side === 'SELL') {
+      const episode = launch.activeEpisodes.get(event.wallet);
+      if (episode) {
+        episode.sellSol += solAmount;
+        const isClosed = phase === 'CLOSE'
+          || (tokenBalanceAfter != null && tokenBalanceAfter <= 0);
+        if (isClosed) {
+          launch.completedEpisodes.push({ ...episode, closedAt: timestampMs });
+          launch.activeEpisodes.delete(event.wallet);
+        }
+      }
+    }
+    // A SELL observed before a causal OPEN must not leave an empty creator/Mint
+    // shell in memory or become a historical launch sample.
+    if (launch.firstOpenAt == null && !launch.activeEpisodes.size
+      && !launch.completedEpisodes.length) launches.delete(event.mint);
+    this._pruneCreatorHistory(timestampMs);
+  }
+
+  _pruneCreatorHistory(timestampMs = this.now(), { force = false } = {}) {
+    if (!this.creatorAffinity.enabled || !(timestampMs > 0)) return;
+    if (!force && timestampMs - this.lastCreatorHistoryPruneAt
+      < this.creatorHistoryPruneIntervalMs) return;
+    this.lastCreatorHistoryPruneAt = timestampMs;
+    const cutoff = timestampMs - this.creatorHistoryLookbackMs;
+    for (const [creator, launches] of this.creatorLaunches) {
+      for (const [mint, candidate] of launches) {
+        if (candidate.firstOpenAt == null || candidate.firstOpenAt < cutoff) {
+          launches.delete(mint);
+        }
+      }
+      if (!launches.size) this.creatorLaunches.delete(creator);
+    }
+  }
+
+  _creatorSnapshot(mint, timestampMs = this.now()) {
+    if (!this.creatorAffinity.enabled) return {};
+    const token = this.store.getToken(mint);
+    const creator = token?.creator || token?.creator_wallet || null;
+    if (!creator) {
+      return {
+        creator: null,
+        creatorPriorLaunches: 0,
+        creatorPriorSmartWallets: 0,
+        creatorPriorCompleted: 0,
+        creatorPriorWinRatePct: null,
+        creatorPriorCapitalReturnPct: null,
+      };
+    }
+    const prior = [...(this.creatorLaunches.get(creator)?.values() || [])]
+      .filter((launch) => launch.mint !== mint
+        && launch.firstOpenAt != null
+        && launch.firstOpenAt < timestampMs
+        && launch.firstOpenAt >= timestampMs - this.creatorHistoryLookbackMs);
+    const completed = prior.flatMap((launch) => launch.completedEpisodes || [])
+      .filter((episode) => episode.closedAt != null
+        && episode.closedAt <= timestampMs && episode.buySol > 0);
+    const wallets = new Set(prior.flatMap((launch) => [...launch.wallets]));
+    const buySol = completed.reduce((sum, episode) => sum + episode.buySol, 0);
+    const sellSol = completed.reduce((sum, episode) => sum + episode.sellSol, 0);
+    const wins = completed.filter((episode) => episode.sellSol > episode.buySol).length;
+    return {
+      creator,
+      creatorPriorLaunches: prior.length,
+      creatorPriorSmartWallets: wallets.size,
+      creatorPriorCompleted: completed.length,
+      creatorPriorWinRatePct: completed.length ? wins / completed.length * 100 : null,
+      creatorPriorCapitalReturnPct: buySol > 0 ? (sellSol / buySol - 1) * 100 : null,
+    };
+  }
+
   advanceTime(now = this.now()) {
     if (!this.config.enabled) return;
+    this._pruneCreatorHistory(now);
     for (const pending of [...this.pendingEntries.values()]) {
       if (now <= pending.entryDeadlineAt) continue;
       this._patch(pending.id, {
@@ -488,6 +657,7 @@ class PublicFlowLeadShadowSuite {
         ? (latest.price / first.price - 1) * 100 : 0,
       flowAccelerationRatio: previousBuyFlow1s > 0
         ? buyFlow1s / previousBuyFlow1s : (buyFlow1s > 0 ? null : 0),
+      ...this._creatorSnapshot(mint, timestampMs),
     };
   }
 
@@ -541,6 +711,28 @@ class PublicFlowLeadShadowSuite {
       && (features.flowAccelerationRatio == null
         || features.flowAccelerationRatio > profile.maxFlowAccelerationRatio)) {
       reasons.push('FLOW_ACCEL_ABOVE_MAX');
+    }
+    if (profile.minCreatorPriorLaunches != null
+      && features.creatorPriorLaunches < profile.minCreatorPriorLaunches) {
+      reasons.push('CREATOR_PRIOR_LAUNCHES_BELOW_MIN');
+    }
+    if (profile.minCreatorPriorSmartWallets != null
+      && features.creatorPriorSmartWallets < profile.minCreatorPriorSmartWallets) {
+      reasons.push('CREATOR_PRIOR_WALLETS_BELOW_MIN');
+    }
+    if (profile.minCreatorPriorCompleted != null
+      && features.creatorPriorCompleted < profile.minCreatorPriorCompleted) {
+      reasons.push('CREATOR_PRIOR_COMPLETED_BELOW_MIN');
+    }
+    if (profile.minCreatorPriorWinRatePct != null
+      && (features.creatorPriorWinRatePct == null
+        || features.creatorPriorWinRatePct < profile.minCreatorPriorWinRatePct)) {
+      reasons.push('CREATOR_PRIOR_WIN_RATE_BELOW_MIN');
+    }
+    if (profile.minCreatorPriorCapitalReturnPct != null
+      && (features.creatorPriorCapitalReturnPct == null
+        || features.creatorPriorCapitalReturnPct < profile.minCreatorPriorCapitalReturnPct)) {
+      reasons.push('CREATOR_PRIOR_RETURN_BELOW_MIN');
     }
     if (includeRisk) {
       if (profile.requirePreRiskSampleReady && !features.preRiskSampleReady) {
@@ -632,6 +824,12 @@ class PublicFlowLeadShadowSuite {
         preSideAlternationPct: features.preSideAlternationPct,
         preRepeatedBuySizePct: features.preRepeatedBuySizePct,
         preLargestWalletSharePct: features.preLargestWalletSharePct,
+        creator: features.creator,
+        creatorPriorLaunches: features.creatorPriorLaunches,
+        creatorPriorSmartWallets: features.creatorPriorSmartWallets,
+        creatorPriorCompleted: features.creatorPriorCompleted,
+        creatorPriorWinRatePct: features.creatorPriorWinRatePct,
+        creatorPriorCapitalReturnPct: features.creatorPriorCapitalReturnPct,
         featuresJson: JSON.stringify(features),
         entryTargetAt: trade.timestampMs,
         entryDeadlineAt: trade.timestampMs,
@@ -640,7 +838,7 @@ class PublicFlowLeadShadowSuite {
       });
       if (result.changes) {
         const row = this.store.db.prepare(
-          'SELECT * FROM public_flow_lead_shadow_positions WHERE id=?',
+          `SELECT * FROM ${this.storageTable} WHERE id=?`,
         ).get(Number(result.lastInsertRowid));
         this.metrics.observerSignals += 1;
         this.metrics.lastActionAt = now;
@@ -691,6 +889,12 @@ class PublicFlowLeadShadowSuite {
         preSideAlternationPct: features.preSideAlternationPct,
         preRepeatedBuySizePct: features.preRepeatedBuySizePct,
         preLargestWalletSharePct: features.preLargestWalletSharePct,
+        creator: features.creator,
+        creatorPriorLaunches: features.creatorPriorLaunches,
+        creatorPriorSmartWallets: features.creatorPriorSmartWallets,
+        creatorPriorCompleted: features.creatorPriorCompleted,
+        creatorPriorWinRatePct: features.creatorPriorWinRatePct,
+        creatorPriorCapitalReturnPct: features.creatorPriorCapitalReturnPct,
         featuresJson: JSON.stringify(features),
         entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
         entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs,
@@ -699,7 +903,7 @@ class PublicFlowLeadShadowSuite {
       });
       if (!result.changes) continue;
       const row = this.store.db.prepare(
-        'SELECT * FROM public_flow_lead_shadow_positions WHERE id=?',
+        `SELECT * FROM ${this.storageTable} WHERE id=?`,
       ).get(Number(result.lastInsertRowid));
       const position = camelRow(row);
       this.pendingEntries.set(position.id, position);
@@ -900,7 +1104,7 @@ class PublicFlowLeadShadowSuite {
     const positions = this.store.db.prepare(`
       SELECT *, CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
         THEN exit_at-entry_at ELSE NULL END AS hold_ms
-      FROM public_flow_lead_shadow_positions
+      FROM ${this.storageTable}
       ORDER BY CASE WHEN status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING') THEN 0 ELSE 1 END,
         updated_at DESC, id DESC LIMIT ?
     `).all(limit);
@@ -919,6 +1123,11 @@ class PublicFlowLeadShadowSuite {
         AVG(pre_risk_flagged*100.0) pre_risk_flagged_rate_pct,
         AVG(pre_return_pct) average_pre_return_pct,
         AVG(pre_max_consecutive_buys) average_pre_max_consecutive_buys,
+        AVG(creator_prior_launches) average_creator_prior_launches,
+        AVG(creator_prior_smart_wallets) average_creator_prior_smart_wallets,
+        AVG(creator_prior_completed) average_creator_prior_completed,
+        AVG(creator_prior_win_rate_pct) average_creator_prior_win_rate_pct,
+        AVG(creator_prior_capital_return_pct) average_creator_prior_capital_return_pct,
         AVG(max_favorable_return_pct) average_mfe_pct,
         AVG(max_adverse_return_pct) average_mae_pct,
         AVG(net_return_pct) average_net_return_pct,
@@ -931,13 +1140,13 @@ class PublicFlowLeadShadowSuite {
         AVG(CASE WHEN status='CLOSED'
           THEN CASE WHEN net_return_pct>=100 THEN 100.0 ELSE 0 END END) big100_rate_pct,
         MAX(net_return_pct) max_winner_pct
-      FROM public_flow_lead_shadow_positions
+      FROM ${this.storageTable}
       WHERE exit_profile_id<>'OBS'
       GROUP BY cohort_id, entry_profile_id, exit_profile_id
       ORDER BY entry_profile_id, exit_profile_id
     `).all();
     const returns = this.store.db.prepare(`
-      SELECT net_return_pct FROM public_flow_lead_shadow_positions
+      SELECT net_return_pct FROM ${this.storageTable}
       WHERE cohort_id=? AND status='CLOSED' AND net_return_pct IS NOT NULL
       ORDER BY net_return_pct
     `);
@@ -968,8 +1177,13 @@ class PublicFlowLeadShadowSuite {
         AVG(CASE WHEN smart_open_delay_ms<=15000 THEN 100.0 ELSE 0 END)
           smart_open_15s_rate_pct,
         AVG(public_buyers_5s) average_public_buyers_5s,
-        AVG(public_net_flow_5s) average_public_net_flow_5s
-      FROM public_flow_lead_shadow_positions WHERE exit_profile_id='OBS'
+        AVG(public_net_flow_5s) average_public_net_flow_5s,
+        AVG(creator_prior_launches) average_creator_prior_launches,
+        AVG(creator_prior_smart_wallets) average_creator_prior_smart_wallets,
+        AVG(creator_prior_completed) average_creator_prior_completed,
+        AVG(creator_prior_win_rate_pct) average_creator_prior_win_rate_pct,
+        AVG(creator_prior_capital_return_pct) average_creator_prior_capital_return_pct
+      FROM ${this.storageTable} WHERE exit_profile_id='OBS'
     `).get();
     return { cohorts, positions, observerStats };
   }

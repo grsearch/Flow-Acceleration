@@ -62,6 +62,7 @@ class ResearchServer {
     smartWalletRugEscapeShadow = null,
     smartWalletFirstOpenRightTailShadow = null,
     publicFlowLeadShadow = null,
+    creatorAffinityShadow = null,
     cyaSlotFlowShadow = null,
     cyaOrganicBurstShadow = null,
     sameSlotDumpBackrunShadow = null,
@@ -96,6 +97,7 @@ class ResearchServer {
     this.smartWalletRugEscapeShadow = smartWalletRugEscapeShadow;
     this.smartWalletFirstOpenRightTailShadow = smartWalletFirstOpenRightTailShadow;
     this.publicFlowLeadShadow = publicFlowLeadShadow;
+    this.creatorAffinityShadow = creatorAffinityShadow;
     this.cyaSlotFlowShadow = cyaSlotFlowShadow;
     this.cyaOrganicBurstShadow = cyaOrganicBurstShadow;
     this.sameSlotDumpBackrunShadow = sameSlotDumpBackrunShadow;
@@ -165,6 +167,7 @@ class ResearchServer {
           'smart-wallet-rug-escape': enabled('smartWalletRugEscapeShadow'),
           'smart-first-open-right-tail': enabled('smartWalletFirstOpenRightTailShadow'),
           'public-flow-lead': enabled('publicFlowLeadShadow'),
+          'creator-affinity': enabled('creatorAffinityShadow'),
           'launch-pullback': enabled('launchPullbackShadow'),
           'migrated-rebound': enabled('migratedDropReboundShadow'),
           'migration-continuity': enabled('migrationContinuityShadow'),
@@ -719,6 +722,27 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/creator-affinity-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.creatorAffinityShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_CAF',
+          sendsTransactions: false,
+          observerOnly: false,
+          simulatesPositions: true,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        timeSessions: this.creatorAffinityShadow
+          ? this.store.shadowTimeSessionDashboard('creator-affinity')
+          : { sessions: [] },
+        ...(this.creatorAffinityShadow?.dashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+        }) || { cohorts: [], positions: [] }),
+      });
+    });
+
     this.app.get('/api/cya-organic-burst-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -832,6 +856,7 @@ class ResearchServer {
         smartWalletFirstOpenRightTailShadow:
           this.smartWalletFirstOpenRightTailShadow?.health() || null,
         publicFlowLeadShadow: this.publicFlowLeadShadow?.health() || null,
+        creatorAffinityShadow: this.creatorAffinityShadow?.health() || null,
         cyaSlotFlowShadow: this.cyaSlotFlowShadow?.health() || null,
         cyaOrganicBurstShadow: this.cyaOrganicBurstShadow?.health() || null,
         sameSlotDumpBackrunShadow: this.sameSlotDumpBackrunShadow?.health() || null,

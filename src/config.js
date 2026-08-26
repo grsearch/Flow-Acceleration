@@ -2297,6 +2297,107 @@ const config = {
     }),
   },
 
+  // Forward-only creator-affinity study. A creator's reputation is computed
+  // exclusively from monitored-wallet episodes that were completed before the
+  // current public-flow signal. The current Smart Wallet trade remains a future
+  // label and never triggers entry, so the study cannot gain speed by leaking
+  // the behavior it is trying to predict.
+  creatorAffinityShadow: {
+    enabled: booleanEnv('FLOW_CREATOR_AFFINITY_SHADOW_ENABLED', true),
+    simulatePositions: booleanEnv(
+      'FLOW_CREATOR_AFFINITY_SIMULATED_ENTRIES_ENABLED',
+      true,
+    ),
+    storageTable: 'creator_affinity_shadow_positions',
+    strategyCode: 'CAF',
+    strategyName: 'Creator Affinity + Public Flow',
+    modeCode: 'CAF',
+    creatorAffinity: {
+      enabled: true,
+      lookbackMs: integerEnv(
+        'FLOW_CREATOR_AFFINITY_LOOKBACK_MS',
+        7 * 24 * 60 * 60_000,
+        { min: 24 * 60 * 60_000 },
+      ),
+    },
+    positionSizeSol: shadowPositionEnv('FLOW_CREATOR_AFFINITY_POSITION_SOL'),
+    featureWindowMs: integerEnv('FLOW_CREATOR_AFFINITY_FEATURE_WINDOW_MS', 5_000, {
+      min: 2_000,
+    }),
+    stateRetentionMs: integerEnv('FLOW_CREATOR_AFFINITY_STATE_RETENTION_MS', 10 * 60_000, {
+      min: 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_CREATOR_AFFINITY_EPISODE_COOLDOWN_MS', 30_000, {
+      min: 1_000,
+    }),
+    smartLabelWindowMs: integerEnv('FLOW_CREATOR_AFFINITY_SMART_LABEL_WINDOW_MS', 15_000, {
+      min: 5_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_CREATOR_AFFINITY_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_CREATOR_AFFINITY_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_CREATOR_AFFINITY_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_CREATOR_AFFINITY_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_CREATOR_AFFINITY_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_CREATOR_AFFINITY_MAX_ENTRY_DROP_PCT', 30, {
+      min: 0, max: 100,
+    }),
+    maxCrossMarketPriceJumpPct: numberEnv(
+      'FLOW_CREATOR_AFFINITY_MAX_CROSS_MARKET_JUMP_PCT',
+      50,
+      { min: 0, max: 1_000 },
+    ),
+    entryProfiles: [
+      {
+        id: 'CAF_W50_E10',
+        label: 'CAF-W50-E10 · prior completed>=3 / win>=50% / public flow <=10s',
+        minAgeMs: 3_000, maxAgeMs: 10_000,
+        minCurvePct: 10, maxCurvePct: 85,
+        minPublicBuyers1s: 1, minPublicBuyers5s: 3,
+        minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
+        maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
+        minCreatorPriorCompleted: 3, minCreatorPriorWinRatePct: 50,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
+      },
+      {
+        id: 'CAF_P0_E10',
+        label: 'CAF-P0-E10 · prior completed>=3 / capital return>=0 / public flow <=10s',
+        minAgeMs: 3_000, maxAgeMs: 10_000,
+        minCurvePct: 10, maxCurvePct: 85,
+        minPublicBuyers1s: 1, minPublicBuyers5s: 3,
+        minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
+        maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
+        minCreatorPriorCompleted: 3, minCreatorPriorCapitalReturnPct: 0,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
+      },
+      {
+        id: 'CAF_W50_B5_E15',
+        label: 'CAF-W50-B5-E15 · quality prior + broader 5-buyer flow <=15s',
+        minAgeMs: 3_000, maxAgeMs: 15_000,
+        minCurvePct: 10, maxCurvePct: 85,
+        minPublicBuyers1s: 1, minPublicBuyers5s: 5,
+        minPublicBuyFlow5sSol: 1, minPublicNetFlow5sSol: 0.5,
+        maxLargestBuyerSharePct: 45, maxReturn5sPct: 50,
+        minCreatorPriorCompleted: 3, minCreatorPriorWinRatePct: 50,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
+      },
+    ],
+    exitProfiles: [60, 120, 240].map((holdSeconds) => ({
+      id: `H20_T${holdSeconds}`,
+      label: `Hard stop 20% / fixed ${holdSeconds}s`,
+      hardStopPct: 20,
+      maxHoldMs: holdSeconds * 1_000,
+    })),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_CREATOR_AFFINITY_POSITION_SOL'),
+    }),
+  },
+
   // Independent right-tail study. It consumes the existing PumpSwap trade stream,
   // opens no real positions, and never treats an unobservable exit as a total loss.
   bigWinnerShadow: {

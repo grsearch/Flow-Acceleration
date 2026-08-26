@@ -310,6 +310,11 @@ class ResearchStore {
         table: 'public_flow_lead_shadow_positions',
         anchor: 'signal_at',
       },
+      'creator-affinity': {
+        label: 'Creator Affinity + Public Flow · CAF',
+        table: 'creator_affinity_shadow_positions',
+        anchor: 'signal_at',
+      },
       'cya-slot-flow': {
         label: 'CYA Slot Flow · CSF',
         table: 'cya_slot_flow_shadow_positions',

@@ -376,6 +376,30 @@ Dashboard 显示观察信号数、未来 Smart OPEN 5秒/15秒覆盖率及历史
 `FLOW_PUBLIC_FLOW_LEAD_B2_ENABLED`；旧四组还需额外开启
 `FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED`。
 
+## Creator Affinity + Public Flow Shadow CAF
+
+`creator_affinity_shadow_positions` 用来检验“部分 Smart Wallet 是否偏好同一批发行方”
+这个假设，但不会把 Smart Wallet 当前买入当作入场信号。CAF 的入场仍然只读取当前币
+已经公开发生的 Bonding Curve 订单流；发行方画像只包含最近7天内、在当前信号之前
+已经完整平仓的 `Smart Wallet × Mint` 交易周期。当前 Mint、尚未平仓的历史买入以及
+信号之后才发生的卖出都不会进入画像，因此不会发生未来数据泄漏。
+
+默认前向组为：
+
+- `CAF-W50-E10`：历史已闭合周期至少3个、胜率至少50%，配合发射后3–10秒公共流；
+- `CAF-P0-E10`：历史已闭合周期至少3个、历史资金回报不低于0%，配合相同公共流；
+- `CAF-W50-B5-E15`：历史胜率至少50%，并要求5秒至少5名公共买家和更强净流入。
+
+每组独立记录固定60/120/240秒退出，按1 SOL容量和200ms延迟模拟，Smart OPEN 仍只作为
+未来5秒/15秒标签。Dashboard 会显示发行方历史发射数、独立 Smart Wallet 数、已闭合
+周期数、历史胜率和历史资金回报。接口为 `GET /api/creator-affinity-shadow`，策略代码
+为 `CAF-W/P`。
+
+已有离线数据只能说明“被 Smart Wallet 选中过的样本中，具备历史记录的发行方略好”，
+不能证明公开订单流可以在 Smart Wallet 之前稳定捕捉它们：现有六个历史导出库中的
+PFL 表均没有可用于交叉验证的前向行。因此 CAF 必须保持 Shadow，积累独立前向样本后
+才能判断这是真实发行方质量，还是 Smart Wallet 样本选择偏差；不得直接晋升实盘。
+
 ## CYA Completed-Slot Public Flow Shadow CSF
 
 CSF 是独立于已停用 CYA Early Pyramid K 的前向实验。历史样本显示目标钱包的早期
