@@ -38,6 +38,7 @@ function camelRow(row) {
     mint: row.mint,
     status: row.status,
     positionSol: finite(row.position_sol, 1),
+    configuredCostPct: finite(row.configured_cost_pct, 0),
     signalAt: finite(row.signal_at),
     signalMarket: row.signal_market,
     signalPrice: finite(row.signal_price),
@@ -76,8 +77,16 @@ class CyaOrganicBurstShadowSuite {
     this.config = config;
     this.store = store;
     this.now = now;
-    this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
+    this.costModel = config.costModel || { positionSizeSol: config.positionSizeSol };
+    this.costs = costBreakdown(this.costModel);
     this.entryProfiles = new Map((config.entryProfiles || []).map((profile) => [profile.id, profile]));
+    this.profileCosts = new Map([...this.entryProfiles.values()].map((profile) => [
+      profile.id,
+      costBreakdown({
+        ...this.costModel,
+        positionSizeSol: profile.positionSizeSol ?? config.positionSizeSol,
+      }),
+    ]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
     this.smartWallets = new Set(config.smartWallets || []);
     this.targetWallet = String(config.targetWallet || '');
@@ -352,6 +361,16 @@ class CyaOrganicBurstShadowSuite {
         sameMintExclusiveGroups: [...new Set(
           [...this.entryProfiles.values()].map((profile) => profile.exclusiveGroup).filter(Boolean),
         )],
+        liveReplayProfiles: [...this.entryProfiles.values()]
+          .filter((profile) => profile.liveReplay === true)
+          .map((profile) => ({
+            id: profile.id,
+            positionSizeSol: profile.positionSizeSol,
+            entryDelayMs: profile.entryDelayMs,
+            entryTimeoutMs: profile.entryTimeoutMs,
+            maxEntryPriceJumpPct: profile.maxEntryPriceJumpPct,
+            maxEntryImpactPct: profile.maxEntryImpactPct,
+          })),
       },
       ...this.metrics,
     };
@@ -602,6 +621,10 @@ class CyaOrganicBurstShadowSuite {
     const permittedExitIds = profile.exitProfileIds?.length
       ? new Set(profile.exitProfileIds)
       : null;
+    const positionSol = profile.positionSizeSol ?? this.config.positionSizeSol;
+    const profileCosts = this.profileCosts.get(profile.id) || this.costs;
+    const entryDelayMs = profile.entryDelayMs ?? this.config.entryDelayMs;
+    const entryTimeoutMs = profile.entryTimeoutMs ?? this.config.entryTimeoutMs;
     for (const exit of this.exitProfiles.values()) {
       if (permittedExitIds && !permittedExitIds.has(exit.id)) continue;
       const now = this.now();
@@ -615,8 +638,8 @@ class CyaOrganicBurstShadowSuite {
         symbol: trade.symbol || this.store.getToken(trade.mint)?.symbol || null,
         status: STATUS.PENDING_ENTRY,
         rejectionReason: null,
-        positionSol: this.config.positionSizeSol,
-        configuredCostPct: this.costs.deterministicCostPct,
+        positionSol,
+        configuredCostPct: profileCosts.deterministicCostPct,
         signalAt: trade.timestampMs,
         signalMarket: trade.market,
         signalPrice: price,
@@ -635,9 +658,16 @@ class CyaOrganicBurstShadowSuite {
         return15sPct: features.return15sPct,
         runup15sPct: features.runup15sPct,
         drawdown15sPct: features.drawdown15sPct,
-        featuresJson: JSON.stringify(features),
-        entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
-        entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs,
+        featuresJson: JSON.stringify({
+          ...features,
+          liveReplay: profile.liveReplay === true,
+          simulatedPositionSol: positionSol,
+          maxEntryPriceJumpPct: profile.maxEntryPriceJumpPct
+            ?? this.config.maxEntryPriceJumpPct,
+          maxEntryImpactPct: profile.maxEntryImpactPct ?? this.config.maxEntryImpactPct,
+        }),
+        entryTargetAt: trade.timestampMs + entryDelayMs,
+        entryDeadlineAt: trade.timestampMs + entryDelayMs + entryTimeoutMs,
         createdAt: now,
         updatedAt: now,
       });
@@ -846,11 +876,18 @@ class CyaOrganicBurstShadowSuite {
       return;
     }
     const jumpPct = returnPct(execution.price, position.signalPrice);
-    if (jumpPct > this.config.maxEntryPriceJumpPct || jumpPct < -this.config.maxEntryPriceDropPct
-      || execution.impactPct > this.config.maxEntryImpactPct) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    const maxEntryPriceJumpPct = profile?.maxEntryPriceJumpPct
+      ?? this.config.maxEntryPriceJumpPct;
+    const maxEntryPriceDropPct = profile?.maxEntryPriceDropPct
+      ?? this.config.maxEntryPriceDropPct;
+    const maxEntryImpactPct = profile?.maxEntryImpactPct
+      ?? this.config.maxEntryImpactPct;
+    if (jumpPct > maxEntryPriceJumpPct || jumpPct < -maxEntryPriceDropPct
+      || execution.impactPct > maxEntryImpactPct) {
       this._patch(position.id, {
         status: STATUS.PRICE_JUMP,
-        rejectionReason: execution.impactPct > this.config.maxEntryImpactPct
+        rejectionReason: execution.impactPct > maxEntryImpactPct
           ? `ENTRY_IMPACT_${execution.impactPct.toFixed(2)}PCT`
           : `ENTRY_PRICE_MOVE_${jumpPct.toFixed(2)}PCT`,
         entryJumpPct: jumpPct,
@@ -938,10 +975,11 @@ class CyaOrganicBurstShadowSuite {
   }
 
   _estimatedCostSol(position) {
-    const variablePct = this.costs.platformFeePct + this.costs.buySlippagePct + this.costs.sellSlippagePct;
+    const costs = this.profileCosts.get(position.entryProfileId) || this.costs;
+    const variablePct = costs.platformFeePct + costs.buySlippagePct + costs.sellSlippagePct;
     const executions = position.coreExitAt ? 3 : 2;
     return position.totalInvestedSol * variablePct / 100
-      + this.costs.totalFixedCostSol * executions;
+      + costs.totalFixedCostSol * executions;
   }
 
   _close(position, trade, marketPrice) {
@@ -1073,23 +1111,39 @@ class CyaOrganicBurstShadowSuite {
       );
       const middle = Math.floor(values.length / 2);
       const top5Profit = [...wins].sort((a, b) => b - a).slice(0, 5).reduce((sum, value) => sum + value, 0);
+      const exitPriceCoveragePct = completedEntered > 0
+        ? pricedExits / completedEntered * 100
+        : null;
+      const noExitRatePct = completedEntered > 0
+        ? unpricedExits / completedEntered * 100
+        : null;
+      const stress30 = stressAverage(-30);
+      const profitFactor = loss > 0 ? profit / loss : (profit > 0 ? null : 0);
+      const promotionBlockers = [];
+      if (pricedExits < 200) promotionBlockers.push('PRICED<200');
+      if (!(exitPriceCoveragePct >= 90)) promotionBlockers.push('EXIT_COVERAGE<90%');
+      if (!(noExitRatePct <= 5)) promotionBlockers.push('NO_EXIT>5%');
+      if (!(stress30 > 0)) promotionBlockers.push('S30<=0');
+      if (!(profitFactor > 1.2)) promotionBlockers.push('PF<=1.2');
       return {
         ...group,
         entered,
         completed_entered: completedEntered,
         unpriced_exits: unpricedExits,
         entry_coverage_pct: Number(group.signals) > 0 ? entered / Number(group.signals) * 100 : null,
-        exit_price_coverage_pct: completedEntered > 0 ? pricedExits / completedEntered * 100 : null,
+        exit_price_coverage_pct: exitPriceCoveragePct,
         priced_signal_coverage_pct: Number(group.signals) > 0
           ? pricedExits / Number(group.signals) * 100 : null,
-        no_exit_rate_pct: completedEntered > 0 ? unpricedExits / completedEntered * 100 : null,
-        stress_average_net_return_30_pct: stressAverage(-30),
+        no_exit_rate_pct: noExitRatePct,
+        stress_average_net_return_30_pct: stress30,
         stress_average_net_return_50_pct: stressAverage(-50),
         stress_average_net_return_80_pct: stressAverage(-80),
         median_net_return_pct: values.length
           ? (values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2) : null,
-        profit_factor: loss > 0 ? profit / loss : (profit > 0 ? null : 0),
+        profit_factor: profitFactor,
         top_5_winner_contribution_pct: profit > 0 ? top5Profit / profit * 100 : null,
+        promotion_ready: promotionBlockers.length === 0,
+        promotion_blockers: promotionBlockers,
       };
     });
     return { cohorts, positions };
