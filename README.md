@@ -613,8 +613,9 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 ## 多策略实盘框架
 
-当前仅 `O-C80-D5-B2-S0-NC` 与 `O-C80-HO500-X60-R` 允许产生新实盘仓位，
-单笔都为 `0.1 SOL`；对应 Shadow 仍保持 `1 SOL`，且实盘入场统一经过内存态跨 Mint RUG Guard。
+当前仅 `O-C80-D5-B2-S0-NC` 允许产生新实盘仓位，单笔为 `0.1 SOL`；对应
+Shadow 仍保持 `1 SOL`，且实盘入场统一经过内存态跨 Mint RUG Guard。
+`O-C80-HO500-X60-R` 已停止新开仓，但 HO0 / HO200 / HO500 Shadow 恢复组继续采样。
 `COB-F-C25-R75-X120` 与 `COB-D-T30-D10-X60` 已停止新开仓，但保留历史展示、
 存量仓位退出和各自1 SOL Shadow研究。
 `PBR-A-X50-15` 与 `GFR-300-HS20-H30` 已于 2026-08-22 在代码层
@@ -658,6 +659,8 @@ GD25-35-F1-XLEG / post_gd25_35_f1_xleg_live_v1（停止新开仓）
 O-C80-D5-B2-S0-NC / graduation_accel_o_c80_d5_b2_s0_nc_live（开启）
 Curve≥80%、最近5秒ΔCurve≥5、Buyers5≥2、0卖单、Creator未卖
 → Bonding Curve买入0.1 SOL；对应 Graduation Acceleration Shadow O 继续按1 SOL独立观察
+→ 实盘暂保留30%硬止损；新增 H15 / H20 独立 Shadow 对照。历史回放显示完全取消止损
+会把快速 RUG 尾部重新放大到 -80%~-100%，因此不直接修改实盘退出。
 
 M-C5-T12.5 / migration_continuity_mc_c5_t12_5_live（停止新开仓）
 Migration Continuity MC_C5 历史定义 → PumpSwap买入0.5 SOL
