@@ -186,7 +186,7 @@ assert.strictEqual(config.cyaOrganicBurstShadow.enabled, true);
 assert.ok(config.cyaOrganicBurstShadow.entryProfiles
   .filter((profile) => ['COB_D', 'COB_F'].includes(profile.id))
   .every((profile) => profile.newEntriesEnabled === true));
-assert.strictEqual(liveGraduationRecovery.entryEnabled, true);
+assert.strictEqual(liveGraduationRecovery.entryEnabled, false);
 assert.strictEqual(liveGraduationRecovery.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');
 assert.strictEqual(liveGraduationRecovery.exitMode, 'FIXED_HOLD');
@@ -242,7 +242,6 @@ assert.deepStrictEqual(
     .map((strategy) => strategy.code),
   [
     'O-C80-D5-B2-S0-NC',
-    'O-C80-HO500-X60-R',
   ],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
@@ -520,6 +519,7 @@ assert.deepStrictEqual(
     ['GE30_R23_F1_NIGHT', 30_000, 1],
     ['GE30_R23_F1_DAY', 30_000, 1],
     ['GE30_D25_32_R24_F1', 30_000, 1],
+    ['GE30_D25_32_R24_F1_EXEC1', 30_000, 1],
     ['GE30_D25_32_R24_F1_04_24', 30_000, 1],
     ['GE30_D25_32_R23_F1_FAST200', 30_000, 1],
     ['GFR_300', 30_000, 1],
@@ -532,6 +532,10 @@ assert.deepStrictEqual(
     .find((profile) => profile.id === 'GE30_R23_F1_EXEC').positionSols,
   [0.05, 0.1, 0.25, 0.5, 1],
 );
+const v2ExecutableProfile = config.migratedDropReboundShadow.entryProfiles
+  .find((profile) => profile.id === 'GE30_D25_32_R24_F1_EXEC1');
+assert.deepStrictEqual(v2ExecutableProfile.positionSols, [0.1, 1]);
+assert.deepStrictEqual(v2ExecutableProfile.exitProfileIds, ['V2_R2_H15']);
 assert.deepStrictEqual(
   config.migratedDropReboundShadow.entryProfiles
     .find((profile) => profile.id === 'GE30_R23_F1_NIGHT').beijingHourRanges,
@@ -556,9 +560,14 @@ assert.ok(config.migratedDropReboundShadow.exitProfiles
   .filter((profile) => profile.id.startsWith('XB') || profile.id.startsWith('XR'))
   .every((profile) => profile.entryProfileIds.join(',') === 'GD25_35'));
 assert.ok(config.migratedDropReboundShadow.exitProfiles
-  .filter((profile) => ['V2_R2_H10', 'V2_R2_H15', 'V2_B75_H20', 'V2_B75_H60']
+  .filter((profile) => ['V2_R2_H10', 'V2_B75_H20', 'V2_B75_H60']
     .includes(profile.id))
   .every((profile) => profile.entryProfileIds.join(',') === 'GE30_D25_32_R24_F1'));
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.exitProfiles
+    .find((profile) => profile.id === 'V2_R2_H15').entryProfileIds,
+  ['GE30_D25_32_R24_F1', 'GE30_D25_32_R24_F1_EXEC1'],
+);
 const v2TimeProfile = config.migratedDropReboundShadow.entryProfiles
   .find((profile) => profile.id === 'GE30_D25_32_R24_F1_04_24');
 assert.deepStrictEqual(v2TimeProfile.beijingHourRanges, [[4, 24]]);
@@ -584,6 +593,13 @@ assert.strictEqual(config.migratedDropReboundShadow.fastFlowMaxTradesPerMint, 51
 assert.strictEqual(config.migratedDropReboundShadow.fastFlowSweepMs, 5_000);
 assert.ok([
   'POST_GD25_35_RUG_GUARD_T20_24_',
+  'POST_GD25_35_X3',
+  'POST_GD25_35_X8',
+  'POST_GD25_35_XLEG',
+  'POST_GD25_35_XB25',
+  'POST_GD25_35_XB50',
+  'POST_GE30_R23_F1_',
+  'POST_GE30_R23_F3_',
   'POST_GE30_R23_F1_G1_B50_H60',
   'POST_GE30_R23_F1_G1_B75_H30',
   'POST_GE30_D25_32_R24_F1_04_24_V2_TIME_R2_H15',
@@ -743,6 +759,7 @@ assert.deepStrictEqual(
   config.graduationAccelerationShadow.entryProfiles.map((profile) => profile.id),
   [
     'O_FAST10_C80_B20_R07', 'O_C80_D5_B2_S0_NC',
+    'O_C80_D5_B2_S0_NC_H15', 'O_C80_D5_B2_S0_NC_H20',
     'O_C75_D5_B2_S0_NC_EARLY', 'O_C78_D5_B2_S0_NC_EARLY',
     'O_C80_M5_HANDOFF_X60',
     'O_C80_P500_STAIR240', 'O_C80_P1000_X60',
@@ -760,6 +777,10 @@ assert.deepStrictEqual(
     'O_C80_J60_70_X60', 'O_C80_J60_70_X120',
   ],
 );
+const d5StopProfiles = config.graduationAccelerationShadow.entryProfiles
+  .filter((profile) => profile.id.startsWith('O_C80_D5_B2_S0_NC_H'));
+assert.deepStrictEqual(d5StopProfiles.map((profile) => profile.hardStopPct), [15, 20]);
+assert.ok(d5StopProfiles.every((profile) => !profile.liveStrategyId));
 const relaxedGraduationProfiles = config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.studyGroup?.startsWith('O_C80_'));
 assert.strictEqual(relaxedGraduationProfiles.length, 14);
