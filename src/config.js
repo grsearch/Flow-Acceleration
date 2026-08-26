@@ -3672,6 +3672,46 @@ const config = {
         minReturn5sPct: null, maxReturn5sPct: null,
         maxReturn15sPct: null, minDrawdown15sPct: 2,
       },
+      // Forward-only execution comparator for COB-F. It deliberately keeps
+      // the same public-flow signal but reproduces the retired live route's
+      // 0.1 SOL size, 1.5s freshness window and stricter jump/impact limits.
+      // It never emits a live signal and does not alter the original 1 SOL
+      // COB-F cohort or any historical row.
+      {
+        id: 'COB_F_LR01',
+        label: 'COB-F-LR01 · 0.1 SOL live-execution replay',
+        newEntriesEnabled: booleanEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENABLED', true),
+        liveReplay: true,
+        exclusiveGroup: 'COB_F_LIVE_REPLAY',
+        exitProfileIds: ['CORE25_R75_X120'],
+        positionSizeSol: numberEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_POSITION_SOL', 0.1, {
+          min: 0.001, max: 100,
+        }),
+        entryDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_DELAY_MS', 200, {
+          min: 0, max: 10_000,
+        }),
+        entryTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_TIMEOUT_MS', 1_500, {
+          min: 1, max: 30_000,
+        }),
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_JUMP_PCT', 15,
+          { min: 0, max: 1_000 },
+        ),
+        maxEntryPriceDropPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_DROP_PCT', 35,
+          { min: 0, max: 100 },
+        ),
+        maxEntryImpactPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_IMPACT_PCT', 10,
+          { min: 0, max: 1_000 },
+        ),
+        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
+        minBuyers5s: 10, minNetFlow5sSol: 7,
+        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
+        minReturn2sPct: 0, maxReturn2sPct: 40,
+        minReturn5sPct: null, maxReturn5sPct: null,
+        maxReturn15sPct: null, minDrawdown15sPct: 2,
+      },
       {
         id: 'COB_D',
         label: 'COB-D · strict 5 SOL organic pullback',
