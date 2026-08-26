@@ -684,8 +684,10 @@ class ResearchServer {
         generatedAt: Date.now(),
         runtime: this.publicFlowLeadShadow?.health() || {
           enabled: false,
-          mode: 'SHADOW_PFL',
+          mode: 'OBSERVER_PFL',
           sendsTransactions: false,
+          observerOnly: true,
+          simulatesPositions: false,
           entryProfiles: [],
           exitProfiles: [],
         },

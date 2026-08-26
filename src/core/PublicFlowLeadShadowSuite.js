@@ -11,6 +11,7 @@ const STATUS = Object.freeze({
   EXIT_PENDING: 'EXIT_PENDING',
   CLOSED: 'CLOSED',
   NO_EXIT: 'NO_EXIT',
+  OBSERVED: 'OBSERVED',
 });
 
 function finite(value, fallback = null) {
@@ -60,6 +61,7 @@ class PublicFlowLeadShadowSuite {
     this.store = store;
     this.rugRiskTracker = rugRiskTracker;
     this.now = now;
+    this.simulatePositions = config.simulatePositions === true;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
@@ -77,6 +79,7 @@ class PublicFlowLeadShadowSuite {
       riskSnapshots: 0,
       riskRejected: 0,
       qualifiedSignals: 0,
+      observerSignals: 0,
       replaySignalsSuppressed: 0,
       smartOpenLabels: 0,
       ignoredSmartAdds: 0,
@@ -298,8 +301,10 @@ class PublicFlowLeadShadowSuite {
   health() {
     return {
       enabled: this.config.enabled,
-      mode: 'SHADOW_PFL',
+      mode: this.simulatePositions ? 'SHADOW_PFL' : 'OBSERVER_PFL',
       sendsTransactions: false,
+      observerOnly: !this.simulatePositions,
+      simulatesPositions: this.simulatePositions,
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
       entryProfiles: [...this.entryProfiles.values()],
@@ -316,6 +321,8 @@ class PublicFlowLeadShadowSuite {
           entryUsesSmartWallet: false,
           smartOpenIsFutureLabelOnly: true,
           smartAddsIgnored: true,
+          newSimulatedEntriesEnabled: this.simulatePositions,
+          historicalSimulatedPositionsRetained: true,
           sendsTransactions: false,
           noExitPricedAsTotalLoss: false,
         },
@@ -583,6 +590,64 @@ class PublicFlowLeadShadowSuite {
     const episodeId = `${trade.mint}:${profile.id}:${trade.timestampMs}`;
     const results = [];
     this.metrics.qualifiedSignals += 1;
+    if (!this.simulatePositions) {
+      const now = this.now();
+      const result = this.insert.run({
+        cohortId: `${profile.id}_OBS`,
+        entryProfileId: profile.id,
+        exitProfileId: 'OBS',
+        episodeId,
+        mint: trade.mint,
+        symbol: trade.symbol || this.store.getToken(trade.mint)?.symbol || null,
+        status: STATUS.OBSERVED,
+        rejectionReason: 'OBSERVER_ONLY_NO_SIMULATED_ENTRY',
+        positionSol: this.config.positionSizeSol,
+        configuredCostPct: this.costs.deterministicCostPct,
+        signalAt: trade.timestampMs,
+        signalMarket: trade.market,
+        signalPrice: price,
+        ageMs: features.ageMs,
+        curvePct: features.curvePct,
+        publicBuyers1s: features.publicBuyers1s,
+        publicBuyers5s: features.publicBuyers5s,
+        publicBuyTx1s: features.publicBuyTx1s,
+        publicBuyTx5s: features.publicBuyTx5s,
+        publicSellTx5s: features.publicSellTx5s,
+        publicBuyFlow1s: features.publicBuyFlow1s,
+        previousBuyFlow1s: features.previousBuyFlow1s,
+        publicBuyFlow5s: features.publicBuyFlow5s,
+        publicSellFlow5s: features.publicSellFlow5s,
+        publicNetFlow5s: features.publicNetFlow5s,
+        largestBuyerSharePct: features.largestBuyerSharePct,
+        sellBuyRatio: features.sellBuyRatio,
+        return5sPct: features.return5sPct,
+        flowAccelerationRatio: features.flowAccelerationRatio,
+        preRiskSampleReady: features.preRiskSampleReady == null
+          ? null : Number(features.preRiskSampleReady),
+        preRiskFlagged: features.preRiskFlagged == null
+          ? null : Number(features.preRiskFlagged),
+        preReturnPct: features.preReturnPct,
+        preMaxConsecutiveBuys: features.preMaxConsecutiveBuys,
+        preBuySharePct: features.preBuySharePct,
+        preSideAlternationPct: features.preSideAlternationPct,
+        preRepeatedBuySizePct: features.preRepeatedBuySizePct,
+        preLargestWalletSharePct: features.preLargestWalletSharePct,
+        featuresJson: JSON.stringify(features),
+        entryTargetAt: trade.timestampMs,
+        entryDeadlineAt: trade.timestampMs,
+        createdAt: now,
+        updatedAt: now,
+      });
+      if (result.changes) {
+        const row = this.store.db.prepare(
+          'SELECT * FROM public_flow_lead_shadow_positions WHERE id=?',
+        ).get(Number(result.lastInsertRowid));
+        this.metrics.observerSignals += 1;
+        this.metrics.lastActionAt = now;
+        results.push(row);
+      }
+      return results;
+    }
     for (const exit of this.exitProfiles.values()) {
       const now = this.now();
       const cohortId = `${profile.id}_${exit.id}`;
@@ -867,6 +932,7 @@ class PublicFlowLeadShadowSuite {
           THEN CASE WHEN net_return_pct>=100 THEN 100.0 ELSE 0 END END) big100_rate_pct,
         MAX(net_return_pct) max_winner_pct
       FROM public_flow_lead_shadow_positions
+      WHERE exit_profile_id<>'OBS'
       GROUP BY cohort_id, entry_profile_id, exit_profile_id
       ORDER BY entry_profile_id, exit_profile_id
     `).all();
@@ -893,7 +959,19 @@ class PublicFlowLeadShadowSuite {
         top_5_winner_contribution_pct: profit > 0 ? top5Profit / profit * 100 : null,
       };
     });
-    return { cohorts, positions };
+    const observerStats = this.store.db.prepare(`
+      SELECT COUNT(*) signals, COUNT(DISTINCT mint) independent_mints,
+        MAX(signal_at) latest_signal_at,
+        SUM(smart_open_at IS NOT NULL) smart_open_labels,
+        AVG(CASE WHEN smart_open_delay_ms<=5000 THEN 100.0 ELSE 0 END)
+          smart_open_5s_rate_pct,
+        AVG(CASE WHEN smart_open_delay_ms<=15000 THEN 100.0 ELSE 0 END)
+          smart_open_15s_rate_pct,
+        AVG(public_buyers_5s) average_public_buyers_5s,
+        AVG(public_net_flow_5s) average_public_net_flow_5s
+      FROM public_flow_lead_shadow_positions WHERE exit_profile_id='OBS'
+    `).get();
+    return { cohorts, positions, observerStats };
   }
 }
 

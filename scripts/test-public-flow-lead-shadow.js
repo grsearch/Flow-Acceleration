@@ -31,6 +31,7 @@ function main() {
   }, { configuredTradingCostPct: 0 });
   const config = {
     enabled: true,
+    simulatePositions: true,
     positionSizeSol: 1,
     smartWallets: [smartWallet],
     featureWindowMs: 5_000,
@@ -243,6 +244,61 @@ function main() {
   assert.ok(columns.includes('pre_risk_sample_ready'));
   assert.ok(columns.includes('pre_return_pct'));
   assert.ok(columns.includes('pre_max_consecutive_buys'));
+
+  const observerMint = 'PublicFlowObserver1111111111111111111111111';
+  store.recordCreate({
+    mint: observerMint, symbol: 'PFLO', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 10_000, initialRealTokenReservesRaw: null,
+    tokenTotalSupplyRaw: null,
+  });
+  const observerSuite = new PublicFlowLeadShadowSuite({
+    config: {
+      ...config,
+      simulatePositions: false,
+      entryProfiles: [config.entryProfiles[0]],
+    },
+    store,
+    now: () => now,
+    rugRiskTracker,
+  });
+  observerSuite.start();
+  const observerTrade = (offset, wallet) => {
+    now += offset;
+    return observerSuite.observeTrade({
+      mint: observerMint, symbol: 'PFLO', timestampMs: now,
+      market: 'PUMP_BONDING_CURVE', side: 'BUY', solAmount: 0.8,
+      tokenAmount: 0.8, wallet, price: 1, reservePrice: 1,
+      curvePct: 70, ageMs: 10_000, signature: `observer-${wallet}-${now}`,
+      eventIndex: 0,
+    });
+  };
+  observerTrade(100, 'observer-public-1');
+  observerTrade(100, 'observer-public-2');
+  observerTrade(100, 'observer-public-3');
+  observerTrade(100, 'observer-public-4');
+  const observerSignals = [
+    ...observerTrade(100, 'observer-public-5'),
+    ...observerTrade(100, 'observer-public-6'),
+  ];
+  assert.strictEqual(observerSignals.length, 1);
+  assert.strictEqual(observerSuite.health().mode, 'OBSERVER_PFL');
+  assert.strictEqual(observerSuite.health().observerOnly, true);
+  assert.strictEqual(observerSuite.health().pendingEntries, 0);
+  assert.strictEqual(observerSuite.health().activePositions, 0);
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM public_flow_lead_shadow_positions
+    WHERE mint=? AND status='OBSERVED' AND exit_profile_id='OBS'
+      AND entry_at IS NULL
+  `).get(observerMint).n, 1);
+  now += 500;
+  assert.strictEqual(observerSuite.onSmartWalletEvent({
+    mint: observerMint, wallet: smartWallet, side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: now,
+  }), 1);
+  const observerDashboard = observerSuite.dashboard({ positionLimit: 20 });
+  assert.strictEqual(observerDashboard.observerStats.signals, 1);
+  assert.strictEqual(observerDashboard.observerStats.smart_open_labels, 1);
+  assert.strictEqual(observerDashboard.observerStats.smart_open_5s_rate_pct, 100);
   store.close();
   console.log('Public Flow Lead Shadow tests: PASS');
 }

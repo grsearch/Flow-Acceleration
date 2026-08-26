@@ -135,7 +135,8 @@ async function main() {
   assert.ok(dashboard.includes('data-live-strategy-pane="public-flow-lead"'));
   assert.ok(dashboard.includes('id="public-flow-lead-cohort-rows"'));
   assert.ok(dashboard.includes('id="public-flow-lead-position-rows"'));
-  assert.ok(dashboard.includes('data-strategy-code="PFL-S50-R8/B70-R10"'));
+  assert.ok(dashboard.includes('data-strategy-code="PFL-OBS"'));
+  assert.ok(dashboard.includes('停止新增模拟仓位'));
   assert.ok(dashboard.includes("loadDashboard('/api/public-flow-lead-shadow?positionLimit=50'"));
   assert.ok(dashboard.includes('data-strategy-code="SWFO-S/B-RT"'));
   assert.ok(dashboard.includes("loadDashboard('/api/smart-first-open-right-tail-shadow?positionLimit=50'"));
@@ -518,8 +519,10 @@ async function main() {
     const publicFlowLead = await (await fetch(
       `http://127.0.0.1:${port}/api/public-flow-lead-shadow`,
     )).json();
-    assert.strictEqual(publicFlowLead.runtime.mode, 'SHADOW_PFL');
+    assert.strictEqual(publicFlowLead.runtime.mode, 'OBSERVER_PFL');
     assert.strictEqual(publicFlowLead.runtime.sendsTransactions, false);
+    assert.strictEqual(publicFlowLead.runtime.observerOnly, true);
+    assert.strictEqual(publicFlowLead.runtime.simulatesPositions, false);
     assert.strictEqual(publicFlowLead.runtime.strategy.research.entryUsesSmartWallet, false);
     assert.strictEqual(publicFlowLead.runtime.strategy.research.smartAddsIgnored, true);
     assert.deepStrictEqual(

@@ -2167,6 +2167,13 @@ const config = {
   // promotional rather than incremental conviction.
   publicFlowLeadShadow: {
     enabled: booleanEnv('FLOW_PUBLIC_FLOW_LEAD_V2_ENABLED', true),
+    // Forward public-flow signals remain useful as labels, but the first live
+    // sample invalidated the simulated-entry edge. Keep observation on while
+    // stopping new paper positions by default; historical rows stay queryable.
+    simulatePositions: booleanEnv(
+      'FLOW_PUBLIC_FLOW_LEAD_SIMULATED_ENTRIES_ENABLED',
+      false,
+    ),
     positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
     featureWindowMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_FEATURE_WINDOW_MS', 5_000, {
       min: 2_000,

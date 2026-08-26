@@ -349,14 +349,14 @@ Graduation Acceleration O 的所有新仓都启用1 SOL容量报价；即使是�
 旧行未必保存当时完整池储备，不能可靠重算真实可卖回的 SOL；研究时应把新增 GUARD
 组及升级后的前向样本作为可执行口径，不要与旧的 mark-price 历史均值直接合并。
 
-## Public Flow Lead Shadow PFL
+## Public Flow Lead Observer PFL
 
 `public_flow_lead_shadow_positions` 把 Smart Wallet 改为纯离线监督标签：入场只读取
 非监控钱包的公开 Bonding Curve 成交，不等待任何 Smart Wallet 交易，也不使用
 Smart Wallet 的成交金额或价格。后续首次 `OPEN` 只记录为5秒/15秒命中标签；所有
 `ADD` 明确忽略，既不触发入场，也不构成确认。
 
-V2 默认启用两个公共流前置组：
+V2 默认保留两个公共流前置观察组：
 
 - `PFL-S50-R8`：AGE 3–45秒、Curve 20%–85%、1秒/5秒公共买家至少2/6、
   1秒/5秒买入至少0.5/2 SOL、5秒净流入至少1 SOL、Top1不超过35%；同时要求
@@ -366,11 +366,12 @@ V2 默认启用两个公共流前置组：
   涨幅不超过70%、最大连续买单不超过10笔，以保留较多右尾候选。
 
 两组都先用公开订单流完成基础筛选，只有候选通过后才读取一次现有内存 RUG 快照；
-不会为普通成交增加 RPC、数据库扫描或网络等待。每次信号统一等待200ms后的下一笔
-同市场成交；同 Mint/同组30秒内只模拟一次。退出交叉测试20%/30%硬止损与
-120/180/240秒固定持有，不设固定止盈或移动止盈，以观察 Big50/Big100 右尾。
-Dashboard 同时显示未来 Smart OPEN 5秒/15秒覆盖率、PF、Top5利润贡献和
-MFE/MAE，以及信号前涨幅和连续买单。接口为 `GET /api/public-flow-lead-shadow`，
+不会为普通成交增加 RPC、数据库扫描或网络等待。前向样本表明这些组的实际胜率和
+收益显著低于早期离线估计，因此默认只写一条 `OBSERVED` 信号并继续标注未来 Smart
+OPEN，不再建立模拟仓位。历史模拟仓位和退出组仍保留查询，不与新增观察样本混合统计。
+如需复现实验，必须显式设置 `FLOW_PUBLIC_FLOW_LEAD_SIMULATED_ENTRIES_ENABLED=true`。
+Dashboard 显示观察信号数、未来 Smart OPEN 5秒/15秒覆盖率及历史模拟表现。
+接口为 `GET /api/public-flow-lead-shadow`，
 新策略代码为 `PFL-S50-R8/B70-R10`。旧 `PFL-B2` 需显式开启
 `FLOW_PUBLIC_FLOW_LEAD_B2_ENABLED`；旧四组还需额外开启
 `FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED`。

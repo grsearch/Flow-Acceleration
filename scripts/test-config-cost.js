@@ -362,6 +362,7 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(config.smartWalletFirstOpenRightTailShadow.enabled, false);
 assert.strictEqual(config.publicFlowLeadShadow.enabled, true);
+assert.strictEqual(config.publicFlowLeadShadow.simulatePositions, false);
 assert.strictEqual(config.publicFlowLeadShadow.positionSizeSol, 1);
 assert.strictEqual(config.publicFlowLeadShadow.smartLabelWindowMs, 15_000);
 assert.deepStrictEqual(
