@@ -762,6 +762,7 @@ assert.deepStrictEqual(
     'O_C80_D5_B2_S0_NC_H15', 'O_C80_D5_B2_S0_NC_H20',
     'O_C75_D5_B2_S0_NC_EARLY', 'O_C78_D5_B2_S0_NC_EARLY',
     'O_C80_M5_HANDOFF_X60',
+    'O_C80_LIVE_MIG_X20', 'O_C80_LIVE_MIG_X30',
     'O_C80_P500_STAIR240', 'O_C80_P1000_X60',
     'O_C80_P1000_X120', 'O_C80_P1000_STAIR240',
     'O90_M5_X60', 'O90_M5_X120', 'O90_M5_STAIR120',
@@ -817,6 +818,18 @@ const migrationHandoffProfile = config.graduationAccelerationShadow.entryProfile
 assert.strictEqual(migrationHandoffProfile.migrationHandoff, true);
 assert.strictEqual(migrationHandoffProfile.postMigrationEntryGate.minBuyers, 5);
 assert.strictEqual(migrationHandoffProfile.liveStrategyId, undefined);
+const liveMigrationHandoffProfiles = config.graduationAccelerationShadow.entryProfiles
+  .filter((profile) => profile.mode === 'LIVE_MIGRATION_FAILURE');
+assert.deepStrictEqual(
+  liveMigrationHandoffProfiles.map((profile) => profile.id),
+  ['O_C80_LIVE_MIG_X20', 'O_C80_LIVE_MIG_X30'],
+);
+assert.ok(liveMigrationHandoffProfiles.every((profile) => (
+  profile.sourceLiveStrategyId === 'graduation_accel_o_c80_d5_b2_s0_nc_live'
+  && profile.capacitySols[0] === 1
+  && profile.postMigrationEntryGate.waitForQualification === true
+  && !profile.liveStrategyId
+)));
 assert.strictEqual(config.migrationSecondLegShadow.enabled, false);
 assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, true);
 assert.strictEqual(config.migrationSecondLegShadow.maxObservedPriceRatio, 100);
