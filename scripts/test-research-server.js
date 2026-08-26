@@ -135,8 +135,10 @@ async function main() {
   assert.ok(dashboard.includes('data-live-strategy-pane="public-flow-lead"'));
   assert.ok(dashboard.includes('id="public-flow-lead-cohort-rows"'));
   assert.ok(dashboard.includes('id="public-flow-lead-position-rows"'));
-  assert.ok(dashboard.includes('data-strategy-code="PFL-B0/B1/A1/R1"'));
+  assert.ok(dashboard.includes('data-strategy-code="PFL-S50-R8/B70-R10"'));
   assert.ok(dashboard.includes("loadDashboard('/api/public-flow-lead-shadow?positionLimit=50'"));
+  assert.ok(dashboard.includes('data-strategy-code="SWFO-S/B-RT"'));
+  assert.ok(dashboard.includes("loadDashboard('/api/smart-first-open-right-tail-shadow?positionLimit=50'"));
   assert.ok(dashboard.includes('Smart OPEN 只作未来'));
   assert.ok(dashboard.includes('data-live-strategy="cya-slot-flow"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="cya-slot-flow"'));
@@ -522,7 +524,7 @@ async function main() {
     assert.strictEqual(publicFlowLead.runtime.strategy.research.smartAddsIgnored, true);
     assert.deepStrictEqual(
       publicFlowLead.runtime.entryProfiles.map((profile) => profile.id),
-      ['PFL_B2'],
+      ['PFL_S50_R8', 'PFL_B70_R10'],
     );
     assert.strictEqual(publicFlowLead.runtime.exitProfiles.length, 6);
     assert.ok(Array.isArray(publicFlowLead.cohorts));

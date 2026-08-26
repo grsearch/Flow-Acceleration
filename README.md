@@ -283,6 +283,30 @@ Smart Wallet 或 Shadow 结果。只有第二个或第三个**不同**监控钱�
 期间缺少可用储备时按无法回收处理，不再拿图表最后价冒充成交价。接口为
 `GET /api/smart-resonance-shadow`，策略代码为 `SR-R0/R1/R2/R3/R3-GUARD`。
 
+## Smart Wallet 首次 OPEN 右尾 Shadow SWFO-S/B-RT
+
+该组已停止新增样本，仅保留历史对照。实测确认等待 Smart Wallet 首次 OPEN 才触发会
+系统性晚于公共订单流，不能作为当前前向买入优势。旧表
+`smart_wallet_first_open_right_tail_shadow_positions` 曾把监控钱包降级为一次性触发器：
+每个 Smart Wallet Episode 只接受首次 `OPEN`，后续 `ADD` 永久忽略。入场判断只读取
+OPEN 到达前已经形成的内存 RUG 快照，不等待未来成交、不访问数据库或 RPC，也不进入
+任何实盘路径。风险快照缺失关键字段时记录 `INCOMPLETE_PRE_ENTRY_RISK`，不会误放行。
+
+两组入场独立计数：
+
+- `S50_R8`：入场前涨幅不超过50%，最大连续买单不超过8笔；优先验证快速RUG过滤
+  与样本纯度。
+- `B70_R10`：入场前涨幅不超过70%，最大连续买单不超过10笔；保留更多右尾候选，
+  用于验证较宽条件是否仍能稳定捕获 Big50/Big100。
+
+每组同时交叉固定20/60/120秒、15秒保护后的3秒公共资金衰减退出，以及
+`25% Core + 75% Runner`。所有仓位按1 SOL池储备冲击、200ms入场/退出延迟与完整成本
+建模；`NO_EXIT` 收益保持空值，不按 -100% 污染统计。Dashboard 显示 PF、Big50、
+Big100、Top5贡献和去Top5收益；接口为
+`GET /api/smart-first-open-right-tail-shadow`，策略代码为 `SWFO-S/B-RT`。只有同时显式开启
+`FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_TRIGGER_V2_ENABLED` 与
+`FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_SHADOW_ENABLED` 才会恢复新样本，默认均关闭。
+
 ## Shadow 可执行价格与 Pre-entry RUG Guard
 
 关键 Shadow 新样本同时区分“图表价格路径”和“仓位可执行路径”。QL、Migration
@@ -332,17 +356,24 @@ Graduation Acceleration O 的所有新仓都启用1 SOL容量报价；即使是�
 Smart Wallet 的成交金额或价格。后续首次 `OPEN` 只记录为5秒/15秒命中标签；所有
 `ADD` 明确忽略，既不触发入场，也不构成确认。
 
-PFL 已默认停止产生新样本，历史行仍完整保留。最后的前向组 `PFL-B2` 使用：
-AGE 8–12秒、Curve 60%–75%、最近1秒买家9–12、最近5秒买家至少45、
-5秒公共买入26–35 SOL、最大单一买家不超过15%、5秒涨幅10%–25%，且资金加速
-比处于1–2.5。每次信号统一等待200ms后的下一笔
+V2 默认启用两个公共流前置组：
+
+- `PFL-S50-R8`：AGE 3–45秒、Curve 20%–85%、1秒/5秒公共买家至少2/6、
+  1秒/5秒买入至少0.5/2 SOL、5秒净流入至少1 SOL、Top1不超过35%；同时要求
+  入场前 RUG 样本完整、涨幅不超过50%、最大连续买单不超过8笔。
+- `PFL-B70-R10`：AGE 3–60秒、Curve 20%–90%、1秒/5秒公共买家至少1/4、
+  1秒/5秒买入至少0.25/1 SOL、5秒净流入至少0.5 SOL、Top1不超过45%；入场前
+  涨幅不超过70%、最大连续买单不超过10笔，以保留较多右尾候选。
+
+两组都先用公开订单流完成基础筛选，只有候选通过后才读取一次现有内存 RUG 快照；
+不会为普通成交增加 RPC、数据库扫描或网络等待。每次信号统一等待200ms后的下一笔
 同市场成交；同 Mint/同组30秒内只模拟一次。退出交叉测试20%/30%硬止损与
 120/180/240秒固定持有，不设固定止盈或移动止盈，以观察 Big50/Big100 右尾。
 Dashboard 同时显示未来 Smart OPEN 5秒/15秒覆盖率、PF、Top5利润贡献和
-MFE/MAE。接口为 `GET /api/public-flow-lead-shadow`，新策略代码为 `PFL-B2`。
-只有同时设置 `FLOW_PROVEN_NEGATIVE_SHADOWS_ENABLED=true` 与
-`FLOW_PUBLIC_FLOW_LEAD_SHADOW_ENABLED=true` 才会有意恢复；旧四组还需额外设置
-`FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED=true`。
+MFE/MAE，以及信号前涨幅和连续买单。接口为 `GET /api/public-flow-lead-shadow`，
+新策略代码为 `PFL-S50-R8/B70-R10`。旧 `PFL-B2` 需显式开启
+`FLOW_PUBLIC_FLOW_LEAD_B2_ENABLED`；旧四组还需额外开启
+`FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED`。
 
 ## CYA Completed-Slot Public Flow Shadow CSF
 

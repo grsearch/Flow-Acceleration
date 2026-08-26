@@ -18,6 +18,9 @@ const {
 const {
   SmartWalletRugEscapeShadowSuite,
 } = require('./core/SmartWalletRugEscapeShadowSuite');
+const {
+  SmartWalletFirstOpenRightTailShadowSuite,
+} = require('./core/SmartWalletFirstOpenRightTailShadowSuite');
 const { PublicFlowLeadShadowSuite } = require('./core/PublicFlowLeadShadowSuite');
 const { CyaSlotFlowShadowSuite } = require('./core/CyaSlotFlowShadowSuite');
 const { CyaOrganicBurstShadowSuite } = require('./core/CyaOrganicBurstShadowSuite');
@@ -144,12 +147,19 @@ function createRuntime(runtimeConfig = config) {
     rugRiskTracker: preEntryRugRisk,
   });
   smartWalletRugEscapeShadow.start();
+  const smartWalletFirstOpenRightTailShadow = new SmartWalletFirstOpenRightTailShadowSuite({
+    config: runtimeConfig.smartWalletFirstOpenRightTailShadow,
+    store,
+    rugRiskTracker: preEntryRugRisk,
+  });
+  smartWalletFirstOpenRightTailShadow.start();
   const publicFlowLeadShadow = new PublicFlowLeadShadowSuite({
     config: {
       ...runtimeConfig.publicFlowLeadShadow,
       smartWallets: [...smartWallets],
     },
     store,
+    rugRiskTracker: preEntryRugRisk,
   });
   publicFlowLeadShadow.start();
   const cyaSlotFlowShadow = new CyaSlotFlowShadowSuite({
@@ -283,6 +293,7 @@ function createRuntime(runtimeConfig = config) {
     preEntryRugRisk,
     smartResonanceShadow,
     smartWalletRugEscapeShadow,
+    smartWalletFirstOpenRightTailShadow,
     publicFlowLeadShadow,
     cyaSlotFlowShadow,
     cyaOrganicBurstShadow,
@@ -349,6 +360,7 @@ function createRuntime(runtimeConfig = config) {
       ...smartLikeEarlyShadow.trackedMints(),
       ...smartResonanceShadow.trackedMints(),
       ...smartWalletRugEscapeShadow.trackedMints(),
+      ...smartWalletFirstOpenRightTailShadow.trackedMints(),
       ...publicFlowLeadShadow.trackedMints(),
       ...cyaSlotFlowShadow.trackedMints(),
       ...cyaOrganicBurstShadow.trackedMints(),
@@ -518,6 +530,9 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('smartWalletRugEscape', () => (
           smartWalletRugEscapeShadow.observeTrade(trade)
         ));
+        observeShadow('smartWalletFirstOpenRightTail', () => (
+          smartWalletFirstOpenRightTailShadow.observeTrade(trade)
+        ));
         observeShadow('publicFlowLead', () => publicFlowLeadShadow.observeTrade(trade));
         observeShadow('cyaSlotFlow', () => cyaSlotFlowShadow.observeTrade(trade));
         observeShadow('cyaOrganicBurst', () => cyaOrganicBurstShadow.observeTrade(trade));
@@ -560,6 +575,9 @@ function createRuntime(runtimeConfig = config) {
             ));
             observeShadow('smartWalletRugEscapeEvent', () => (
               smartWalletRugEscapeShadow.onSmartWalletEvent(normalizedSmartEvent)
+            ));
+            observeShadow('smartWalletFirstOpenRightTailEvent', () => (
+              smartWalletFirstOpenRightTailShadow.onSmartWalletEvent(normalizedSmartEvent)
             ));
             observeShadow('publicFlowLeadLabel', () => (
               publicFlowLeadShadow.onSmartWalletEvent(normalizedSmartEvent)
@@ -745,6 +763,7 @@ function createRuntime(runtimeConfig = config) {
         ['preEntryRugRiskAdvance', preEntryRugRisk],
         ['smartResonanceAdvance', smartResonanceShadow],
         ['smartWalletRugEscapeAdvance', smartWalletRugEscapeShadow],
+        ['smartWalletFirstOpenRightTailAdvance', smartWalletFirstOpenRightTailShadow],
         ['publicFlowLeadAdvance', publicFlowLeadShadow],
         ['cyaSlotFlowAdvance', cyaSlotFlowShadow],
         ['cyaOrganicBurstAdvance', cyaOrganicBurstShadow],
@@ -814,6 +833,7 @@ function createRuntime(runtimeConfig = config) {
     preEntryRugRisk.stop();
     smartResonanceShadow.stop();
     smartWalletRugEscapeShadow.stop();
+    smartWalletFirstOpenRightTailShadow.stop();
     publicFlowLeadShadow.stop();
     cyaSlotFlowShadow.stop();
     cyaOrganicBurstShadow.stop();
@@ -853,6 +873,7 @@ function createRuntime(runtimeConfig = config) {
       preEntryRugRisk: preEntryRugRisk.health(),
       smartResonanceShadow: smartResonanceShadow.health(),
       smartWalletRugEscapeShadow: smartWalletRugEscapeShadow.health(),
+      smartWalletFirstOpenRightTailShadow: smartWalletFirstOpenRightTailShadow.health(),
       publicFlowLeadShadow: publicFlowLeadShadow.health(),
       cyaSlotFlowShadow: cyaSlotFlowShadow.health(),
       cyaOrganicBurstShadow: cyaOrganicBurstShadow.health(),
@@ -878,7 +899,8 @@ function createRuntime(runtimeConfig = config) {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow,
-    smartWalletRugEscapeShadow, publicFlowLeadShadow,
+    smartWalletRugEscapeShadow, smartWalletFirstOpenRightTailShadow,
+    publicFlowLeadShadow,
     cyaSlotFlowShadow, cyaOrganicBurstShadow,
     sameSlotDumpBackrunShadow,
     launchPullbackShadow,

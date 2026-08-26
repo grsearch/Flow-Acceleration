@@ -2096,14 +2096,77 @@ const config = {
     }),
   },
 
+  // Historical Smart-first trigger experiment. Waiting for the monitored OPEN
+  // proved causally late, so a second explicit gate defaults to false even when
+  // an older server .env still contains the original ENABLED=true setting.
+  // Rows remain queryable; new causal entries live in Public Flow Lead V2 below.
+  smartWalletFirstOpenRightTailShadow: {
+    enabled: booleanEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_TRIGGER_V2_ENABLED', false)
+      && booleanEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_SHADOW_ENABLED', false),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_POSITION_SOL'),
+    entryDelayMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_EXIT_TIMEOUT_MS', 2_000, { min: 1 }),
+    flowFadeWindowMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_FLOW_FADE_WINDOW_MS', 3_000, {
+      min: 500,
+    }),
+    maxEpisodeMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_MAX_EPISODE_MS', 130_000, {
+      min: 20_000,
+    }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_MAX_ENTRY_JUMP_PCT', 20, {
+      min: 0, max: 1_000,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_MAX_ENTRY_DROP_PCT', 30, {
+      min: 0, max: 100,
+    }),
+    entryProfiles: [
+      {
+        id: 'S50_R8', label: 'Strict · pre-return <=50% · consecutive buys <=8',
+        maxPreReturnPct: 50, maxConsecutiveBuys: 8,
+      },
+      {
+        id: 'B70_R10', label: 'Balanced · pre-return <=70% · consecutive buys <=10',
+        maxPreReturnPct: 70, maxConsecutiveBuys: 10,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'X20', label: 'Fixed 20s control', mode: 'FIXED_HOLD',
+        maxHoldMs: 20_000, hardStopPct: 0, coreWeightPct: 0,
+      },
+      {
+        id: 'X60', label: 'Fixed 60s control', mode: 'FIXED_HOLD',
+        maxHoldMs: 60_000, hardStopPct: 0, coreWeightPct: 0,
+      },
+      {
+        id: 'X120', label: 'Fixed 120s control', mode: 'FIXED_HOLD',
+        maxHoldMs: 120_000, hardStopPct: 0, coreWeightPct: 0,
+      },
+      {
+        id: 'FF15_X120', label: '15s protection + 3s flow-fade / max 120s', mode: 'FLOW_FADE',
+        protectionMs: 15_000, flowFadeNetSol: -0.5, maxHoldMs: 120_000,
+        hardStopPct: 20, coreWeightPct: 0,
+      },
+      {
+        id: 'C25_R75_X120', label: '25% core + 75% protected runner / max 120s', mode: 'CORE_RUNNER',
+        coreWeightPct: 25, coreActivationPct: 50, trailingDrawdownPct: 20,
+        hardStopPct: 20, maxHoldMs: 120_000,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_POSITION_SOL'),
+    }),
+  },
+
   // Public-order-flow lead study derived from the pre-buy structure observed
   // around profitable Smart Wallet entries. Entry never waits for or consumes a
   // Smart Wallet event. A later Smart OPEN is stored only as a future label;
   // ADD events are intentionally ignored because repeated small adds can be
   // promotional rather than incremental conviction.
   publicFlowLeadShadow: {
-    enabled: provenNegativeShadowsEnabled
-      && booleanEnv('FLOW_PUBLIC_FLOW_LEAD_SHADOW_ENABLED', false),
+    enabled: booleanEnv('FLOW_PUBLIC_FLOW_LEAD_V2_ENABLED', true),
     positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
     featureWindowMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_FEATURE_WINDOW_MS', 5_000, {
       min: 2_000,
@@ -2133,6 +2196,32 @@ const config = {
       { min: 0, max: 1_000 },
     ),
     entryProfiles: [
+      {
+        id: 'PFL_S50_R8',
+        label: 'PFL-S50-R8 · strict public-flow lead / future Smart label',
+        minAgeMs: 3_000, maxAgeMs: 45_000,
+        minCurvePct: 20, maxCurvePct: 85,
+        minPublicBuyers1s: 2, minPublicBuyers5s: 6,
+        minPublicBuyFlow1sSol: 0.5, minPublicBuyFlow5sSol: 2,
+        minPublicNetFlow5sSol: 1, maxLargestBuyerSharePct: 35,
+        maxReturn5sPct: 30,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 50,
+        maxPreConsecutiveBuys: 8,
+      },
+      {
+        id: 'PFL_B70_R10',
+        label: 'PFL-B70-R10 · balanced public-flow lead / future Smart label',
+        minAgeMs: 3_000, maxAgeMs: 60_000,
+        minCurvePct: 20, maxCurvePct: 90,
+        minPublicBuyers1s: 1, minPublicBuyers5s: 4,
+        minPublicBuyFlow1sSol: 0.25, minPublicBuyFlow5sSol: 1,
+        minPublicNetFlow5sSol: 0.5, maxLargestBuyerSharePct: 45,
+        maxReturn5sPct: 40,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 70,
+        maxPreConsecutiveBuys: 10,
+      },
       ...(publicFlowLeadLegacyProfilesEnabled ? [
       {
         id: 'PFL_B0',
@@ -2173,7 +2262,7 @@ const config = {
         maxReturn5sPct: 30,
       },
       ] : []),
-      {
+      ...(booleanEnv('FLOW_PUBLIC_FLOW_LEAD_B2_ENABLED', false) ? [{
         id: 'PFL_B2',
         label: 'PFL-B2 · 8–12s diversified flow / future Smart OPEN study',
         minAgeMs: 8_000, maxAgeMs: 12_000,
@@ -2185,7 +2274,7 @@ const config = {
         maxLargestBuyerSharePct: 15,
         minReturn5sPct: 10, maxReturn5sPct: 25,
         minFlowAccelerationRatio: 1, maxFlowAccelerationRatio: 2.5,
-      },
+      }] : []),
     ],
     exitProfiles: [20, 30].flatMap((hardStopPct) => (
       [120, 180, 240].map((holdSeconds) => ({

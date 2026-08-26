@@ -60,6 +60,7 @@ class ResearchServer {
     preEntryRugRisk = null,
     smartResonanceShadow = null,
     smartWalletRugEscapeShadow = null,
+    smartWalletFirstOpenRightTailShadow = null,
     publicFlowLeadShadow = null,
     cyaSlotFlowShadow = null,
     cyaOrganicBurstShadow = null,
@@ -93,6 +94,7 @@ class ResearchServer {
     this.preEntryRugRisk = preEntryRugRisk;
     this.smartResonanceShadow = smartResonanceShadow;
     this.smartWalletRugEscapeShadow = smartWalletRugEscapeShadow;
+    this.smartWalletFirstOpenRightTailShadow = smartWalletFirstOpenRightTailShadow;
     this.publicFlowLeadShadow = publicFlowLeadShadow;
     this.cyaSlotFlowShadow = cyaSlotFlowShadow;
     this.cyaOrganicBurstShadow = cyaOrganicBurstShadow;
@@ -161,6 +163,7 @@ class ResearchServer {
           'same-slot-dump-backrun': enabled('sameSlotDumpBackrunShadow'),
           'smart-resonance': enabled('smartResonanceShadow'),
           'smart-wallet-rug-escape': enabled('smartWalletRugEscapeShadow'),
+          'smart-first-open-right-tail': enabled('smartWalletFirstOpenRightTailShadow'),
           'public-flow-lead': enabled('publicFlowLeadShadow'),
           'launch-pullback': enabled('launchPullbackShadow'),
           'migrated-rebound': enabled('migratedDropReboundShadow'),
@@ -659,6 +662,23 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/smart-first-open-right-tail-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        ...(this.smartWalletFirstOpenRightTailShadow?.dashboard(
+          numeric(request.query.positionLimit, 100),
+        ) || {
+          enabled: false,
+          mode: 'SHADOW_SWFO_RT',
+          sendsTransactions: false,
+          strategy: {},
+          groups: [],
+          positions: [],
+          health: { enabled: false },
+        }),
+      });
+    });
+
     this.app.get('/api/public-flow-lead-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -807,6 +827,8 @@ class ResearchServer {
         preEntryRugRisk: this.preEntryRugRisk?.health() || null,
         smartResonanceShadow: this.smartResonanceShadow?.health() || null,
         smartWalletRugEscapeShadow: this.smartWalletRugEscapeShadow?.health() || null,
+        smartWalletFirstOpenRightTailShadow:
+          this.smartWalletFirstOpenRightTailShadow?.health() || null,
         publicFlowLeadShadow: this.publicFlowLeadShadow?.health() || null,
         cyaSlotFlowShadow: this.cyaSlotFlowShadow?.health() || null,
         cyaOrganicBurstShadow: this.cyaOrganicBurstShadow?.health() || null,

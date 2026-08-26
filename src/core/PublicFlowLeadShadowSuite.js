@@ -55,9 +55,10 @@ function camelRow(row) {
 }
 
 class PublicFlowLeadShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, rugRiskTracker = null, now = () => Date.now() }) {
     this.config = config;
     this.store = store;
+    this.rugRiskTracker = rugRiskTracker;
     this.now = now;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
@@ -73,6 +74,8 @@ class PublicFlowLeadShadowSuite {
       observedPublicTrades: 0,
       excludedSmartTrades: 0,
       evaluatedStates: 0,
+      riskSnapshots: 0,
+      riskRejected: 0,
       qualifiedSignals: 0,
       replaySignalsSuppressed: 0,
       smartOpenLabels: 0,
@@ -120,6 +123,14 @@ class PublicFlowLeadShadowSuite {
         sell_buy_ratio REAL,
         return_5s_pct REAL,
         flow_acceleration_ratio REAL,
+        pre_risk_sample_ready INTEGER,
+        pre_risk_flagged INTEGER,
+        pre_return_pct REAL,
+        pre_max_consecutive_buys INTEGER,
+        pre_buy_share_pct REAL,
+        pre_side_alternation_pct REAL,
+        pre_repeated_buy_size_pct REAL,
+        pre_largest_wallet_share_pct REAL,
         features_json TEXT NOT NULL,
         smart_open_at INTEGER,
         smart_open_delay_ms INTEGER,
@@ -158,6 +169,7 @@ class PublicFlowLeadShadowSuite {
       CREATE INDEX IF NOT EXISTS idx_public_flow_lead_profiles
         ON public_flow_lead_shadow_positions(entry_profile_id, exit_profile_id);
     `);
+    this._ensureFeatureColumns();
     this.insert = this.store.db.prepare(`
       INSERT OR IGNORE INTO public_flow_lead_shadow_positions (
         cohort_id, entry_profile_id, exit_profile_id, episode_id, mint, symbol,
@@ -167,7 +179,10 @@ class PublicFlowLeadShadowSuite {
         public_sell_tx_5s, public_buy_flow_1s, previous_buy_flow_1s,
         public_buy_flow_5s, public_sell_flow_5s, public_net_flow_5s,
         largest_buyer_share_pct, sell_buy_ratio, return_5s_pct,
-        flow_acceleration_ratio, features_json, entry_target_at,
+        flow_acceleration_ratio, pre_risk_sample_ready, pre_risk_flagged,
+        pre_return_pct, pre_max_consecutive_buys, pre_buy_share_pct,
+        pre_side_alternation_pct, pre_repeated_buy_size_pct,
+        pre_largest_wallet_share_pct, features_json, entry_target_at,
         entry_deadline_at, created_at, updated_at
       ) VALUES (
         @cohortId, @entryProfileId, @exitProfileId, @episodeId, @mint, @symbol,
@@ -177,7 +192,10 @@ class PublicFlowLeadShadowSuite {
         @publicSellTx5s, @publicBuyFlow1s, @previousBuyFlow1s,
         @publicBuyFlow5s, @publicSellFlow5s, @publicNetFlow5s,
         @largestBuyerSharePct, @sellBuyRatio, @return5sPct,
-        @flowAccelerationRatio, @featuresJson, @entryTargetAt,
+        @flowAccelerationRatio, @preRiskSampleReady, @preRiskFlagged,
+        @preReturnPct, @preMaxConsecutiveBuys, @preBuySharePct,
+        @preSideAlternationPct, @preRepeatedBuySizePct,
+        @preLargestWalletSharePct, @featuresJson, @entryTargetAt,
         @entryDeadlineAt, @createdAt, @updatedAt
       )
     `);
@@ -229,6 +247,29 @@ class PublicFlowLeadShadowSuite {
         AND signal_at>=@smartOpenAt-@labelWindowMs
         AND smart_open_at IS NULL
     `);
+  }
+
+  _ensureFeatureColumns() {
+    const columns = new Set(this.store.db.prepare(
+      'PRAGMA table_info(public_flow_lead_shadow_positions)',
+    ).all().map((row) => row.name));
+    const additions = [
+      ['pre_risk_sample_ready', 'INTEGER'],
+      ['pre_risk_flagged', 'INTEGER'],
+      ['pre_return_pct', 'REAL'],
+      ['pre_max_consecutive_buys', 'INTEGER'],
+      ['pre_buy_share_pct', 'REAL'],
+      ['pre_side_alternation_pct', 'REAL'],
+      ['pre_repeated_buy_size_pct', 'REAL'],
+      ['pre_largest_wallet_share_pct', 'REAL'],
+    ];
+    for (const [name, type] of additions) {
+      if (!columns.has(name)) {
+        this.store.db.exec(
+          `ALTER TABLE public_flow_lead_shadow_positions ADD COLUMN ${name} ${type}`,
+        );
+      }
+    }
   }
 
   start() {
@@ -443,7 +484,28 @@ class PublicFlowLeadShadowSuite {
     };
   }
 
-  _entryReasons(profile, features) {
+  _preRiskFeatures(mint, timestampMs) {
+    const risk = this.rugRiskTracker?.snapshot?.(mint, timestampMs) || null;
+    this.metrics.riskSnapshots += 1;
+    return {
+      preRiskSampleReady: Boolean(risk?.sampleReady),
+      preRiskFlagged: Boolean(risk?.flagged),
+      preReturnPct: finite(risk?.returnPct),
+      preMaxConsecutiveBuys: finite(risk?.maxConsecutiveBuys, 0),
+      preBuySharePct: finite(risk?.buySharePct),
+      preSideAlternationPct: finite(risk?.sideAlternationPct),
+      preRepeatedBuySizePct: finite(risk?.repeatedBuySizeSharePct),
+      preLargestWalletSharePct: finite(risk?.maxWalletBuyTxSharePct),
+    };
+  }
+
+  _profileNeedsPreRisk(profile) {
+    return Boolean(profile.requirePreRiskSampleReady
+      || profile.maxPreReturnPct != null
+      || profile.maxPreConsecutiveBuys != null);
+  }
+
+  _entryReasons(profile, features, { includeRisk = true } = {}) {
     const reasons = [];
     const below = (value, limit) => limit != null && !(value >= limit);
     const above = (value, limit) => limit != null && !(value <= limit);
@@ -473,18 +535,44 @@ class PublicFlowLeadShadowSuite {
         || features.flowAccelerationRatio > profile.maxFlowAccelerationRatio)) {
       reasons.push('FLOW_ACCEL_ABOVE_MAX');
     }
+    if (includeRisk) {
+      if (profile.requirePreRiskSampleReady && !features.preRiskSampleReady) {
+        reasons.push('PRE_RISK_SAMPLE_INCOMPLETE');
+      }
+      if (above(features.preReturnPct, profile.maxPreReturnPct)) {
+        reasons.push('PRE_RETURN_ABOVE_MAX');
+      }
+      if (above(features.preMaxConsecutiveBuys, profile.maxPreConsecutiveBuys)) {
+        reasons.push('PRE_CONSECUTIVE_BUYS_ABOVE_MAX');
+      }
+    }
     return reasons;
   }
 
   _evaluatePublicFlow(trade, price) {
-    const features = this._features(trade.mint, trade.timestampMs);
+    const publicFeatures = this._features(trade.mint, trade.timestampMs);
     this.metrics.evaluatedStates += 1;
-    const results = [];
+    const candidates = [];
     for (const profile of this.entryProfiles.values()) {
       const key = `${trade.mint}:${profile.id}`;
       const prior = this.lastEpisodes.get(key);
       if (prior != null && trade.timestampMs - prior < this.config.episodeCooldownMs) continue;
-      if (this._entryReasons(profile, features).length) continue;
+      if (!this._entryReasons(profile, publicFeatures, { includeRisk: false }).length) {
+        candidates.push(profile);
+      }
+    }
+    if (!candidates.length) return [];
+    const needsPreRisk = candidates.some((profile) => this._profileNeedsPreRisk(profile));
+    const features = needsPreRisk
+      ? { ...publicFeatures, ...this._preRiskFeatures(trade.mint, trade.timestampMs) }
+      : publicFeatures;
+    const results = [];
+    for (const profile of candidates) {
+      const key = `${trade.mint}:${profile.id}`;
+      if (this._entryReasons(profile, features).length) {
+        this.metrics.riskRejected += 1;
+        continue;
+      }
       this.lastEpisodes.set(key, trade.timestampMs);
       results.push(...this._recordSignal(profile, trade, price, features));
     }
@@ -528,6 +616,16 @@ class PublicFlowLeadShadowSuite {
         sellBuyRatio: features.sellBuyRatio,
         return5sPct: features.return5sPct,
         flowAccelerationRatio: features.flowAccelerationRatio,
+        preRiskSampleReady: features.preRiskSampleReady == null
+          ? null : Number(features.preRiskSampleReady),
+        preRiskFlagged: features.preRiskFlagged == null
+          ? null : Number(features.preRiskFlagged),
+        preReturnPct: features.preReturnPct,
+        preMaxConsecutiveBuys: features.preMaxConsecutiveBuys,
+        preBuySharePct: features.preBuySharePct,
+        preSideAlternationPct: features.preSideAlternationPct,
+        preRepeatedBuySizePct: features.preRepeatedBuySizePct,
+        preLargestWalletSharePct: features.preLargestWalletSharePct,
         featuresJson: JSON.stringify(features),
         entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
         entryDeadlineAt: trade.timestampMs + this.config.entryDelayMs + this.config.entryTimeoutMs,
@@ -752,6 +850,10 @@ class PublicFlowLeadShadowSuite {
         AVG(public_net_flow_5s) average_public_net_flow_5s,
         AVG(largest_buyer_share_pct) average_largest_buyer_share_pct,
         AVG(flow_acceleration_ratio) average_flow_acceleration_ratio,
+        AVG(pre_risk_sample_ready*100.0) pre_risk_ready_rate_pct,
+        AVG(pre_risk_flagged*100.0) pre_risk_flagged_rate_pct,
+        AVG(pre_return_pct) average_pre_return_pct,
+        AVG(pre_max_consecutive_buys) average_pre_max_consecutive_buys,
         AVG(max_favorable_return_pct) average_mfe_pct,
         AVG(max_adverse_return_pct) average_mae_pct,
         AVG(net_return_pct) average_net_return_pct,

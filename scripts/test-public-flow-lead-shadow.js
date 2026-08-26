@@ -9,6 +9,22 @@ function main() {
   let now = base;
   let sequence = 0;
   const smartWallet = 'smart-a';
+  let riskSnapshotCalls = 0;
+  const rugRiskTracker = {
+    snapshot() {
+      riskSnapshotCalls += 1;
+      return {
+        sampleReady: true,
+        flagged: false,
+        returnPct: 18,
+        maxConsecutiveBuys: 6,
+        buySharePct: 72,
+        sideAlternationPct: 41,
+        repeatedBuySizePct: 8,
+        largestWalletSharePct: 21,
+      };
+    },
+  };
   const store = new ResearchStore({
     dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
     flushMs: 60_000, flushMax: 1_000,
@@ -35,6 +51,9 @@ function main() {
         minPublicBuyers5s: 5, minPublicBuyFlow5sSol: 4,
         minPublicNetFlow5sSol: 3, maxLargestBuyerSharePct: 30,
         maxReturn5sPct: 50,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 50,
+        maxPreConsecutiveBuys: 8,
       },
       {
         id: 'PFL_A', minAgeMs: 5_000, maxAgeMs: 20_000,
@@ -43,6 +62,9 @@ function main() {
         minPublicBuyFlow1sSol: 3, minPublicBuyFlow5sSol: 4,
         minPublicNetFlow5sSol: 3, maxLargestBuyerSharePct: 30,
         minFlowAccelerationRatio: 1.5, maxReturn5sPct: 50,
+        requirePreRiskSampleReady: true,
+        maxPreReturnPct: 50,
+        maxPreConsecutiveBuys: 8,
       },
     ],
     exitProfiles: [
@@ -55,7 +77,9 @@ function main() {
       positionSizeSol: 1, entryFailureRatePct: 0, entryFailureCostPct: 0,
     },
   };
-  const suite = new PublicFlowLeadShadowSuite({ config, store, now: () => now });
+  const suite = new PublicFlowLeadShadowSuite({
+    config, store, now: () => now, rugRiskTracker,
+  });
   suite.start();
   const boundedProfile = {
     minAgeMs: 8_000, maxAgeMs: 12_000,
@@ -87,6 +111,26 @@ function main() {
   assert.ok(suite._entryReasons(boundedProfile, {
     ...boundedFeatures, flowAccelerationRatio: 3,
   }).includes('FLOW_ACCEL_ABOVE_MAX'));
+  const riskProfile = {
+    requirePreRiskSampleReady: true,
+    maxPreReturnPct: 50,
+    maxPreConsecutiveBuys: 8,
+  };
+  const riskFeatures = {
+    preRiskSampleReady: true,
+    preReturnPct: 40,
+    preMaxConsecutiveBuys: 7,
+  };
+  assert.deepStrictEqual(suite._entryReasons(riskProfile, riskFeatures), []);
+  assert.ok(suite._entryReasons(riskProfile, {
+    ...riskFeatures, preRiskSampleReady: false,
+  }).includes('PRE_RISK_SAMPLE_INCOMPLETE'));
+  assert.ok(suite._entryReasons(riskProfile, {
+    ...riskFeatures, preReturnPct: 51,
+  }).includes('PRE_RETURN_ABOVE_MAX'));
+  assert.ok(suite._entryReasons(riskProfile, {
+    ...riskFeatures, preMaxConsecutiveBuys: 9,
+  }).includes('PRE_CONSECUTIVE_BUYS_ABOVE_MAX'));
   const mint = 'PublicFlowLead111111111111111111111111111';
   store.recordCreate({
     mint, symbol: 'PFL', name: null, uri: null, bondingCurve: null, creator: null,
@@ -117,10 +161,14 @@ function main() {
   assert.strictEqual(store.db.prepare(
     'SELECT COUNT(*) n FROM public_flow_lead_shadow_positions',
   ).get().n, 0);
+  assert.strictEqual(riskSnapshotCalls, 0,
+    'public flow must pass before the RUG snapshot is read');
 
   // Public order flow independently creates both entry profiles before any Smart OPEN label.
   const signal = trade(0, 'BUY', 0.8, 'public-4', 1.05);
   assert.strictEqual(signal.signals.length, 4);
+  assert.strictEqual(riskSnapshotCalls, 1,
+    'all qualifying profiles for one trade must share one local RUG snapshot');
   assert.strictEqual(store.db.prepare(
     'SELECT COUNT(*) n FROM public_flow_lead_shadow_positions',
   ).get().n, 4);
@@ -128,6 +176,8 @@ function main() {
     SELECT COUNT(*) n FROM public_flow_lead_shadow_positions
     WHERE public_buyers_5s=6 AND ABS(public_buy_flow_5s-4.2)<0.000001
       AND ABS(previous_buy_flow_1s-1)<0.000001
+      AND pre_risk_sample_ready=1 AND pre_risk_flagged=0
+      AND ABS(pre_return_pct-18)<0.000001 AND pre_max_consecutive_buys=6
       AND smart_open_at IS NULL
   `).get().n, 4, 'Smart trades must not contaminate public-flow features');
 
@@ -184,10 +234,15 @@ function main() {
   assert.strictEqual(dashboard.cohorts.length, 4);
   assert.strictEqual(dashboard.positions.length, 4);
   assert.ok(dashboard.cohorts.every((row) => row.smart_open_15s_rate_pct === 100));
+  assert.strictEqual(riskSnapshotCalls, 1);
+  assert.strictEqual(suite.health().riskSnapshots, 1);
   const columns = store.db.prepare(
     'PRAGMA table_info(public_flow_lead_shadow_positions)',
   ).all().map((row) => row.name);
   assert.ok(!columns.includes('source_wallet'), 'entry table must not depend on a Smart wallet');
+  assert.ok(columns.includes('pre_risk_sample_ready'));
+  assert.ok(columns.includes('pre_return_pct'));
+  assert.ok(columns.includes('pre_max_consecutive_buys'));
   store.close();
   console.log('Public Flow Lead Shadow tests: PASS');
 }

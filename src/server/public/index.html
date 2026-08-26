@@ -378,8 +378,11 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-wallet-rug-escape" data-strategy-code="SWRE-B/E/G">
               <b><span class="strategy-code">SWRE-B/E/G</span>Smart 首仓快速 RUG 逃生</b><small>只研究首次 OPEN；30秒基准 / 10秒紧急退出 / 合成拉盘过滤</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="public-flow-lead" data-strategy-code="PFL-B0/B1/A1/R1">
-              <b><span class="strategy-code">PFL-B0/B1/A1/R1</span>Public Flow Lead（已停）</b><small>长期负收益，历史数据保留</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-first-open-right-tail" data-strategy-code="SWFO-S/B-RT">
+              <b><span class="strategy-code">SWFO-S/B-RT</span>Smart 首仓结构筛选右尾（已停）</b><small>等待 Smart OPEN 触发过晚；历史数据保留</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="public-flow-lead" data-strategy-code="PFL-S50-R8/B70-R10">
+              <b><span class="strategy-code">PFL-S50-R8/B70-R10</span>Public Flow Lead V2</b><small>公共流先入场；Smart OPEN 仅作未来标签</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="launch-pullback" data-strategy-code="F/FT/FD/FO/FC/FA/FR">
               <b><span class="strategy-code">F/FT/FD/FO/FC/FA/FR</span>Launch 回踩</b><small>旧组保留；新增前置 Flow 共振与多退出对照</small>
@@ -833,13 +836,34 @@
             </article>
           </div>
 
+          <div class="strategy-pane" data-live-strategy-pane="smart-first-open-right-tail" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Smart First OPEN Right-Tail Shadow SWFO-S/B-RT</h2>
+                <p>历史对照组，已停止新增样本：等待监控钱包首次 OPEN 才触发会系统性晚于公共订单流。</p>
+              </div>
+              <div class="strategy-expression" id="smart-first-open-right-tail-expression">S50_R8 / B70_R10 × X20 / X60 / X120 / FF15_X120 / C25_R75_X120</div>
+              <div class="strategy-metric-groups" id="smart-first-open-right-tail-metrics"></div>
+              <div class="section-title"><h2>入场结构 × 退出组合</h2><p>Strict/ Balanced 独立计数；Big50、Big100、去 Top5 和 Core+Runner 用于检验右尾，而不是只追求胜率。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>入场 / 完成</th><th>胜率 / 平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / Big100</th><th>去Top5 / Top5贡献</th><th>入场结构</th><th>MFE / MAE</th></tr></thead>
+                <tbody id="smart-first-open-right-tail-group-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>风险快照不完整会明确拒绝；NO_EXIT 单独删失，绝不伪造 -100% 收益。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Smart OPEN</th><th>组别 / 状态</th><th>Mint / 钱包</th><th>信号前结构</th><th>信号 / 入场 / 最高 / 出场</th><th>Core / Runner</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="smart-first-open-right-tail-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
           <div class="strategy-pane" data-live-strategy-pane="public-flow-lead" hidden>
             <article class="card record-section">
               <div class="section-title">
-                <h2>Public Flow Lead Shadow PFL</h2>
-                <p>完全由非监控钱包公共订单流触发；不等待 Smart Wallet。后续首次 OPEN 只作5/15秒标签，ADD 永久忽略。</p>
+                <h2>Public Flow Lead V2 Shadow PFL</h2>
+                <p>完全由非监控钱包公共订单流提前触发；Smart 首次 OPEN 只作未来5/15秒标签。基础流条件通过后才读取内存结构质量，不拖慢普通成交。</p>
               </div>
-              <div class="strategy-expression" id="public-flow-lead-expression">PFL-B0/B1/A1/R1 入场 × H20/H30 × 120/180/240秒固定持有</div>
+              <div class="strategy-expression" id="public-flow-lead-expression">PFL-S50-R8 / PFL-B70-R10 × H20/H30 × 120/180/240秒固定持有</div>
               <div class="strategy-metric-groups" id="public-flow-lead-metrics"></div>
               <div class="strategy-metric-groups" id="public-flow-lead-time-sessions"></div>
               <div class="section-title"><h2>公共流入场 × 右尾退出</h2><p>同时观察未来 Smart OPEN 覆盖、Big50/Big100、PF 和 Top5 盈利贡献。</p></div>
@@ -1598,6 +1622,32 @@
       }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart RUG Escape 前向样本。</td></tr>';
     }
 
+    function renderSmartFirstOpenRightTailShadow(data) {
+      const runtime = data.health || {};
+      const strategy = data.strategy || {};
+      const entryLabels = Object.fromEntries((strategy.entryProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((strategy.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#smart-first-open-right-tail-expression').textContent = runtime.enabled
+        ? `${(strategy.entryProfiles || []).map(row => row.id).join(' / ')} × ${(strategy.exitProfiles || []).map(row => row.id).join(' / ')}：首次 Smart OPEN 触发，因果结构过滤后按 1 SOL 储备冲击模拟；ADD 永久忽略。`
+        : '已停止新增样本：Smart OPEN 作为入场触发过晚；历史数据仅用于与 Public Flow Lead V2 对照。';
+      renderMetricGroups('#smart-first-open-right-tail-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW SWFO-RT' : '关闭', '独立表 · 不影响旧组 · 永不发链'],
+        ['首次OPEN / 忽略ADD', `${number(runtime.firstOpens)} / ${number(runtime.ignoredAdds)}`, `Smart事件 ${number(runtime.smartEvents)}`],
+        ['合格 / 拒绝入场组', `${number(runtime.qualifiedProfiles)} / ${number(runtime.rejectedProfiles)}`, `累计评估 ${number(runtime.evaluatedProfiles)}`],
+        ['活动 Episode / Mint', `${number(runtime.activeEpisodes)} / ${number(runtime.trackedMints)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
+        ['数据与延迟', '内存快照', '额外RPC 无 · 只追踪候选Mint'],
+      ], []);
+      const groups = data.groups || [];
+      document.querySelector('#smart-first-open-right-tail-group-rows').innerHTML = groups.length ? groups.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.mints)}<br><span class="table-note">规则拒绝 ${number(row.rule_rejected)} · NO_EXIT ${number(row.no_exit)}</span></td><td>${number(row.entries)} / ${number(row.closed)}</td><td class="${tone(row.average_net_return_pct)}">${rate(row.win_rate_pct)} / ${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}</td><td>${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td class="${tone(row.average_net_return_ex_top5_pct)}">${pct(row.average_net_return_ex_top5_pct)} / ${rate(row.top_5_total_pnl_contribution_pct)}</td><td>涨幅 ${pct(row.average_pre_return_pct)}<br><span class="table-note">连续买 ${number(row.average_pre_max_consecutive_buys,1)}</span></td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+      )).join('') : '<tr><td colspan="9" class="empty">等待首次 Smart OPEN 的 Strict / Balanced 前向样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#smart-first-open-right-tail-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+          return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.smart_wallet || '')}</span></td><td>涨幅 ${pct(row.pre_return_pct)} · 连买 ${number(row.pre_max_consecutive_buys)}<br><span class="table-note">Buy ${rate(row.pre_buy_share_pct)} · 交替 ${rate(row.pre_side_alternation_pct)} · Top1 ${rate(row.pre_largest_wallet_share_pct)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td>${pct(row.core_realized_return_pct)} / ${pct(row.runner_realized_return_pct)}<br><span class="table-note">Core ${number(row.core_weight_pct)}%</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">暂无 Smart First OPEN Right-Tail 模拟仓位。</td></tr>';
+    }
+
     function renderPublicFlowLeadShadow(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -1605,21 +1655,22 @@
       const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
       document.querySelector('#public-flow-lead-expression').textContent = `${(runtime.entryProfiles || []).map(row => row.id).join(' / ')}：只用公开订单流；窗口 ${age(strategy.featureWindowMs)}，延迟 ${age(strategy.entryDelayMs)} 后成交；Smart OPEN 只作未来 ${age(strategy.smartLabelWindowMs)} 标签，ADD 忽略。`;
       renderMetricGroups('#public-flow-lead-metrics', [
-        ['运行模式', runtime.enabled ? 'SHADOW PFL' : '关闭', '独立表；永不签名或发送交易'],
+        ['运行模式', runtime.enabled ? 'SHADOW PFL V2' : '关闭', '公开流先触发；永不签名或发送交易'],
         ['公开交易 / 排除Smart', `${number(runtime.observedPublicTrades)} / ${number(runtime.excludedSmartTrades)}`, `评估状态 ${number(runtime.evaluatedStates)}`],
         ['合格信号 / Smart标签', `${number(runtime.qualifiedSignals)} / ${number(runtime.smartOpenLabels)}`, `忽略ADD ${number(runtime.ignoredSmartAdds)} · 跳价 ${number(runtime.priceJump)}`],
+        ['结构快照 / 拒绝', `${number(runtime.riskSnapshots)} / ${number(runtime.riskRejected)}`, '仅基础公共流条件通过后读取内存'],
         ['待入场 / 活动仓位', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)} · NO_EXIT ${number(runtime.noExit)}`],
       ], []);
       renderTimeSessions('#public-flow-lead-time-sessions', data.timeSessions);
       const cohorts = data.cohorts || [];
       document.querySelector('#public-flow-lead-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
-        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 跳价 ${number(row.price_jump)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td><td>${rate(row.smart_open_5s_rate_pct)} / ${rate(row.smart_open_15s_rate_pct)}</td><td>Buyers ${number(row.average_public_buyers_5s,1)} · Buy ${number(row.average_public_buy_flow_5s,2)} SOL<br><span class="table-note">Net ${number(row.average_public_net_flow_5s,2)} · Top1 ${rate(row.average_largest_buyer_share_pct)} · Accel ${number(row.average_flow_acceleration_ratio,2)}x</span></td><td>${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 跳价 ${number(row.price_jump)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Top5贡献 ${rate(row.top_5_winner_contribution_pct)}</span></td><td>${rate(row.smart_open_5s_rate_pct)} / ${rate(row.smart_open_15s_rate_pct)}</td><td>Buyers ${number(row.average_public_buyers_5s,1)} · Buy ${number(row.average_public_buy_flow_5s,2)} SOL<br><span class="table-note">Net ${number(row.average_public_net_flow_5s,2)} · Top1 ${rate(row.average_largest_buyer_share_pct)} · Accel ${number(row.average_flow_acceleration_ratio,2)}x</span><br><span class="table-note">前涨幅 ${pct(row.average_pre_return_pct)} · 连买 ${number(row.average_pre_max_consecutive_buys,1)} · 样本完整 ${rate(row.pre_risk_ready_rate_pct)}</span></td><td>${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}</td></tr>`
       )).join('') : '<tr><td colspan="9" class="empty">等待公共订单流提前信号样本。</td></tr>';
       const rows = data.positions || [];
       document.querySelector('#public-flow-lead-position-rows').innerHTML = rows.length ? rows.map(row => {
         const reason = row.exit_reason || row.rejection_reason || '—';
         const smartLabel = row.smart_open_at ? `${age(row.smart_open_delay_ms)}<br><span class="table-note">${escapeHtml(row.smart_open_wallet || '')}</span>` : '—';
-        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_1s)} / ${number(row.public_buyers_5s)}</td><td>${number(row.public_buy_flow_1s,2)} / ${number(row.public_buy_flow_5s,2)} SOL / ${number(row.flow_acceleration_ratio,2)}x<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL</span></td><td>${rate(row.largest_buyer_share_pct)} / ${number(row.sell_buy_ratio,2)}</td><td>${smartLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_1s)} / ${number(row.public_buyers_5s)}</td><td>${number(row.public_buy_flow_1s,2)} / ${number(row.public_buy_flow_5s,2)} SOL / ${number(row.flow_acceleration_ratio,2)}x<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL</span></td><td>${rate(row.largest_buyer_share_pct)} / ${number(row.sell_buy_ratio,2)}<br><span class="table-note">前涨幅 ${pct(row.pre_return_pct)} · 连买 ${number(row.pre_max_consecutive_buys)}</span></td><td>${smartLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="11" class="empty">暂无 Public Flow Lead 模拟仓位。</td></tr>';
     }
 
@@ -2685,6 +2736,9 @@
         ],
         'smart-wallet-rug-escape': requestContext => [
           loadDashboard('/api/smart-wallet-rug-escape-shadow?positionLimit=50', renderSmartWalletRugEscapeShadow, requestContext),
+        ],
+        'smart-first-open-right-tail': requestContext => [
+          loadDashboard('/api/smart-first-open-right-tail-shadow?positionLimit=50', renderSmartFirstOpenRightTailShadow, requestContext),
         ],
         'public-flow-lead': requestContext => [
           loadDashboard('/api/public-flow-lead-shadow?positionLimit=50', renderPublicFlowLeadShadow, requestContext),

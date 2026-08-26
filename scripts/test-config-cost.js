@@ -360,12 +360,13 @@ assert.deepStrictEqual(
     ['H30_T180', 30, 180_000], ['H30_T240', 30, 240_000],
   ],
 );
-assert.strictEqual(config.publicFlowLeadShadow.enabled, false);
+assert.strictEqual(config.smartWalletFirstOpenRightTailShadow.enabled, false);
+assert.strictEqual(config.publicFlowLeadShadow.enabled, true);
 assert.strictEqual(config.publicFlowLeadShadow.positionSizeSol, 1);
 assert.strictEqual(config.publicFlowLeadShadow.smartLabelWindowMs, 15_000);
 assert.deepStrictEqual(
   config.publicFlowLeadShadow.entryProfiles.map((profile) => profile.id),
-  ['PFL_B2'],
+  ['PFL_S50_R8', 'PFL_B70_R10'],
 );
 assert.deepStrictEqual(
   config.publicFlowLeadShadow.exitProfiles.map((profile) => [
@@ -377,14 +378,23 @@ assert.deepStrictEqual(
     ['H30_T180', 30, 180_000], ['H30_T240', 30, 240_000],
   ],
 );
-const pflB2 = config.publicFlowLeadShadow.entryProfiles[0];
+const [pflStrict, pflBalanced] = config.publicFlowLeadShadow.entryProfiles;
 assert.deepStrictEqual([
-  pflB2.minAgeMs, pflB2.maxAgeMs, pflB2.minPublicBuyers1s,
-  pflB2.maxPublicBuyers1s, pflB2.minPublicBuyers5s,
-  pflB2.minPublicBuyFlow5sSol, pflB2.maxPublicBuyFlow5sSol,
-  pflB2.minReturn5sPct, pflB2.maxReturn5sPct,
-  pflB2.minFlowAccelerationRatio, pflB2.maxFlowAccelerationRatio,
-], [8_000, 12_000, 9, 12, 45, 26, 35, 10, 25, 1, 2.5]);
+  pflStrict.minAgeMs, pflStrict.maxAgeMs,
+  pflStrict.minPublicBuyers1s, pflStrict.minPublicBuyers5s,
+  pflStrict.minPublicBuyFlow1sSol, pflStrict.minPublicBuyFlow5sSol,
+  pflStrict.minPublicNetFlow5sSol, pflStrict.maxLargestBuyerSharePct,
+  pflStrict.maxReturn5sPct, pflStrict.maxPreReturnPct,
+  pflStrict.maxPreConsecutiveBuys, pflStrict.requirePreRiskSampleReady,
+], [3_000, 45_000, 2, 6, 0.5, 2, 1, 35, 30, 50, 8, true]);
+assert.deepStrictEqual([
+  pflBalanced.minAgeMs, pflBalanced.maxAgeMs,
+  pflBalanced.minPublicBuyers1s, pflBalanced.minPublicBuyers5s,
+  pflBalanced.minPublicBuyFlow1sSol, pflBalanced.minPublicBuyFlow5sSol,
+  pflBalanced.minPublicNetFlow5sSol, pflBalanced.maxLargestBuyerSharePct,
+  pflBalanced.maxReturn5sPct, pflBalanced.maxPreReturnPct,
+  pflBalanced.maxPreConsecutiveBuys, pflBalanced.requirePreRiskSampleReady,
+], [3_000, 60_000, 1, 4, 0.25, 1, 0.5, 45, 40, 70, 10, true]);
 assert.strictEqual(config.launchPullbackShadow.enabled, true);
 assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 1);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
