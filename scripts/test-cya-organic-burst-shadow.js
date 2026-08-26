@@ -76,6 +76,16 @@ function main() {
         minNetFlow5sSol: 5, minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
         minReturn2sPct: 0, maxReturn2sPct: 40, minDrawdown15sPct: 2,
       },
+      {
+        id: 'COB_F_LR01', label: '0.1 SOL live replay', newEntriesEnabled: true,
+        liveReplay: true, exclusiveGroup: 'COB_F_LIVE_REPLAY',
+        exitProfileIds: ['CORE25_R75_X120'], positionSizeSol: 0.1,
+        entryDelayMs: 200, entryTimeoutMs: 1_500,
+        maxEntryPriceJumpPct: 15, maxEntryPriceDropPct: 35, maxEntryImpactPct: 10,
+        minAgeMs: 2_000, maxAgeMs: 10_000, minBuyers5s: 10,
+        minNetFlow5sSol: 7, minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
+        minReturn2sPct: 0, maxReturn2sPct: 40, minDrawdown15sPct: 2,
+      },
     ],
     exitProfiles: [
       {
@@ -234,11 +244,15 @@ function main() {
   assert.strictEqual(fixed30Cohort.unpriced_exits, 0);
   assert.strictEqual(fixed30Cohort.entry_coverage_pct, 100);
   assert.strictEqual(fixed30Cohort.exit_price_coverage_pct, 100);
+  assert.strictEqual(fixed30Cohort.promotion_ready, false);
+  assert.ok(fixed30Cohort.promotion_blockers.includes('PRICED<200'));
   assert.strictEqual(
     fixed30Cohort.stress_average_net_return_80_pct,
     fixed30Cohort.average_net_return_pct,
   );
-  assert.deepStrictEqual(suite.health().activeEntryProfiles.map((row) => row.id), ['COB_F', 'COB_D']);
+  assert.deepStrictEqual(suite.health().activeEntryProfiles.map((row) => row.id), [
+    'COB_F', 'COB_D', 'COB_F_LR01',
+  ]);
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
 
   // COB-F keeps all four Shadow exits but promotes only its 25/75 runner cohort.
@@ -258,6 +272,29 @@ function main() {
   assert.strictEqual(liveSignals[1].strategyId, 'cya_organic_burst_cob_f_core25_runner_live');
   assert.strictEqual(liveSignals[1].features.shadowEntryProfileId, 'COB_F');
   assert.strictEqual(liveSignals[1].features.shadowExitProfileId, 'CORE25_R75_X120');
+
+  // The live-execution replay is a separate 0.1 SOL cohort, uses the shorter
+  // 1.5s fill window and never emits a real live signal.
+  suite._recordSignal(
+    suite.entryProfiles.get('COB_F_LR01'),
+    {
+      mint: 'cob-f-live-replay', symbol: 'COBLR', timestampMs: now,
+      receivedAtMs: now, slot: 301, market: 'PUMP_BONDING_CURVE',
+      virtualSolReservesRaw: '1000000000000',
+      virtualTokenReservesRaw: '1000000000000000',
+    },
+    0.0000002,
+    { buyers5s: 12, netFlow5s: 8, buyTxSharePct: 80, return2sPct: 10, drawdown15sPct: 3 },
+  );
+  const replayRow = store.db.prepare(`
+    SELECT * FROM cya_organic_burst_shadow_positions
+    WHERE entry_profile_id='COB_F_LR01'
+  `).get();
+  assert.strictEqual(replayRow.position_sol, 0.1);
+  assert.strictEqual(replayRow.exit_profile_id, 'CORE25_R75_X120');
+  assert.strictEqual(replayRow.entry_target_at - replayRow.signal_at, 200);
+  assert.strictEqual(replayRow.entry_deadline_at - replayRow.entry_target_at, 1_500);
+  assert.strictEqual(liveSignals.length, 2, 'live replay must never emit a live signal');
   store.close();
   console.log('CYA Organic Burst Shadow tests: PASS');
 }
