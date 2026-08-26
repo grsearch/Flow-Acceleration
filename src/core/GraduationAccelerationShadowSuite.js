@@ -169,6 +169,8 @@ class GraduationAccelerationShadowSuite {
       postMigrationGateFailed: 0,
       migrationHandoffPassed: 0,
       migrationHandoffRejected: 0,
+      liveMigrationFailuresObserved: 0,
+      liveMigrationHandoffRows: 0,
       relaxedJumpBandPassed: 0,
       relaxedJumpBandRejected: 0,
       runnerExits: 0,
@@ -484,6 +486,9 @@ class GraduationAccelerationShadowSuite {
     if (ageMs < 0) return;
     for (const profile of this.entryProfiles.values()) {
       if (state.triggered.has(profile.id)) continue;
+      // These cohorts are seeded only by a real live pre-submit migration
+      // rejection. They must not create ordinary Curve-triggered entries.
+      if (profile.mode === 'LIVE_MIGRATION_FAILURE') continue;
       if (profile.mode === 'CURVE_MILESTONE_PERSISTENCE') {
         this._evaluatePersistenceEntry(state, profile, trade, price);
         continue;
@@ -939,6 +944,9 @@ class GraduationAccelerationShadowSuite {
       || trade.timestampMs > pending.entryDeadlineAt) return;
     const gate = this._postMigrationEntryGateDecision(pending, profile, trade.timestampMs);
     if (!gate) return;
+    if (profile.postMigrationEntryGate?.waitForQualification
+      && gate.retryable
+      && trade.timestampMs < pending.entryDeadlineAt) return;
     if (!gate.passed) {
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
         status: STATUS.NO_ENTRY,
@@ -1069,6 +1077,76 @@ class GraduationAccelerationShadowSuite {
     }
   }
 
+  onLiveEntryFailure(event) {
+    if (!this.config.enabled || !event?.mint
+      || event.rejectionReason !== 'ENTRY_MIGRATED_BEFORE_SUBMIT') return;
+    const profiles = [...this.entryProfiles.values()].filter((profile) => (
+      profile.mode === 'LIVE_MIGRATION_FAILURE'
+      && (!profile.sourceLiveStrategyId || profile.sourceLiveStrategyId === event.strategyId)
+    ));
+    if (!profiles.length) return;
+    const failedAt = finite(event.failedAt, this.now());
+    const signalAt = finite(event.signalAt, failedAt);
+    const signalPrice = finite(event.signalPrice);
+    if (!(signalPrice > 0)) return;
+    const token = this.store.getToken(event.mint);
+    this.graduatedMints.add(event.mint);
+    this.metrics.liveMigrationFailuresObserved += 1;
+    for (const profile of profiles) {
+      const capacities = [...new Set((profile.capacitySols || [1])
+        .map(Number).filter((value) => Number.isFinite(value) && value > 0))];
+      const gate = profile.postMigrationEntryGate || {};
+      const entryDelayMs = finite(gate.entryDelayMs, 500);
+      const entryTimeoutMs = finite(profile.entryTimeoutMs, 2_500);
+      const baseEpisodeId = event.episodeId
+        || `${event.strategyId || 'LIVE'}:${event.mint}:${signalAt}`;
+      for (const positionSol of capacities) {
+        const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: positionSol });
+        const cohortId = `${profile.id}:${capacityId(positionSol)}`;
+        const episodeId = `${baseEpisodeId}:MIGRATED_HANDOFF`;
+        const saved = this.store.createGraduationAccelerationShadowPosition({
+          cohortId,
+          episodeId,
+          entryProfileId: profile.id,
+          mint: event.mint,
+          symbol: event.symbol || token?.symbol || null,
+          creator: event.features?.creator || token?.creator || null,
+          status: STATUS.PENDING_ENTRY,
+          positionSol,
+          configuredCostPct: costs.deterministicCostPct,
+          signalAt,
+          signalPrice,
+          signalCurvePct: finite(event.signalCurvePct),
+          features: {
+            ...(event.features || {}),
+            sourceLiveStrategyId: event.strategyId || null,
+            sourceLiveRejectionReason: event.rejectionReason,
+            sourceLiveErrorCode: event.errorCode || null,
+            sourceLiveFailedAt: failedAt,
+            sourceLiveSlot: event.slot || null,
+          },
+          entryTargetAt: failedAt + entryDelayMs,
+          entryDeadlineAt: failedAt + entryDelayMs + entryTimeoutMs,
+          coreWeightPct: 0,
+        });
+        if (!saved?.inserted) {
+          this.metrics.deduplicated += 1;
+          continue;
+        }
+        const position = rowPosition(saved);
+        position.graduatedAt = failedAt;
+        this.store.updateGraduationAccelerationShadowPosition(position.id, {
+          graduatedAt: failedAt,
+        });
+        this.pendingEntries.set(position.id, position);
+        this._index(position);
+        this.metrics.liveMigrationHandoffRows += 1;
+      }
+      this.metrics.signals += 1;
+    }
+    this.metrics.lastActionAt = failedAt;
+  }
+
   _postMigrationEntryGateDecision(position, profile, now) {
     const gate = profile?.postMigrationEntryGate;
     if (!gate || !(position.graduatedAt > 0)) return null;
@@ -1085,6 +1163,7 @@ class GraduationAccelerationShadowSuite {
     const sellSol = sells.reduce((sum, row) => sum + row.solAmount, 0);
     const netFlowSol = buySol - sellSol;
     const sellBuyRatio = buySol > 0 ? sellSol / buySol : Infinity;
+    const largestSellSol = sells.reduce((max, row) => Math.max(max, row.solAmount), 0);
     const prices = rows.map((row) => row.price).filter((value) => value > 0);
     const firstPrice = prices[0] || null;
     const lastPrice = prices.at(-1) || null;
@@ -1093,22 +1172,30 @@ class GraduationAccelerationShadowSuite {
       ? ((peakPrice - lastPrice) / peakPrice) * 100 : Infinity;
     const checks = [
       ['NO_PRICE', firstPrice > 0 && lastPrice > 0],
-      ['BUYERS', buyers >= gate.minBuyers],
-      ['NET_FLOW', netFlowSol >= gate.minNetFlowSol],
-      ['SELL_BUY', sellBuyRatio <= gate.maxSellBuyRatio],
-      ['DRAWDOWN', drawdownPct <= gate.maxDrawdownPct],
+      ['TRADES', rows.length >= finite(gate.minTrades, 0)],
+      ['BUY_TX', buys.length >= finite(gate.minBuyTx, 0)],
+      ['BUYERS', buyers >= finite(gate.minBuyers, 0)],
+      ['NET_FLOW', netFlowSol >= finite(gate.minNetFlowSol, -Infinity)],
+      ['SELL_BUY', sellBuyRatio <= finite(gate.maxSellBuyRatio, Infinity)],
+      ['LARGEST_SELL', largestSellSol <= finite(gate.maxLargestSellSol, Infinity)],
+      ['DRAWDOWN', drawdownPct <= finite(gate.maxDrawdownPct, Infinity)],
     ];
     const failed = checks.find(([, passed]) => !passed);
+    const reason = failed?.[0] || 'PASSED';
     return {
       evaluatedAt,
+      trades: rows.length,
+      buyTx: buys.length,
       buyers,
       netFlowSol,
       sellBuyRatio,
+      largestSellSol,
       drawdownPct,
       firstPrice,
       lastPrice,
       passed: !failed,
-      reason: failed?.[0] || 'PASSED',
+      reason,
+      retryable: ['NO_PRICE', 'TRADES', 'BUY_TX', 'BUYERS', 'NET_FLOW'].includes(reason),
     };
   }
 
