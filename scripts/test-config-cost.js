@@ -118,7 +118,7 @@ assert.strictEqual(livePbrA.entryEnabled, false);
 assert.strictEqual(livePbrA.positionSizeSol, 0.1);
 assert.strictEqual(livePbrA.ruleVersion, 'big_winner_pbr_a_x50_15_live_v2');
 assert.strictEqual(livePbrA.exitMode, 'PBR_CORE_RUNNER');
-assert.strictEqual(liveGfr300.entryEnabled, true);
+assert.strictEqual(liveGfr300.entryEnabled, false);
 assert.strictEqual(liveGfr300.positionSizeSol, 0.1);
 assert.strictEqual(liveGfr300.exitMode, 'TAIL');
 assert.strictEqual(liveGfr300.hardStopPct, 20);
@@ -267,7 +267,6 @@ assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
   [
-    'GFR-300-HS20-H30',
     'POST-GE30-R23-F2-G2-XLEG',
     'POST-GD25-35-X8',
     'O90-M5-STAIR120',
@@ -887,9 +886,21 @@ assert.ok(liveMigrationHandoffProfiles.every((profile) => (
   && profile.postMigrationEntryGate.waitForQualification === true
   && !profile.liveStrategyId
 )));
-assert.strictEqual(config.migrationSecondLegShadow.enabled, false);
+assert.strictEqual(config.migrationSecondLegShadow.enabled, true);
 assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, true);
 assert.strictEqual(config.migrationSecondLegShadow.maxObservedPriceRatio, 100);
+assert.deepStrictEqual(
+  config.migrationSecondLegShadow.cohorts
+    .filter((cohort) => cohort.enabled !== false)
+    .map((cohort) => cohort.id),
+  [
+    'LPS-D150-X30', 'LPS-D150-X60', 'LPS-D150-X120',
+    'LPS-D180-X30', 'LPS-D240-X30', 'LPS-D300-X30',
+  ],
+);
+assert.ok(config.migrationSecondLegShadow.cohorts
+  .filter((cohort) => cohort.enabled !== false)
+  .every((cohort) => cohort.positionSizeSol === 1 && !cohort.liveStrategyId));
 assert.deepStrictEqual(
   config.migrationSecondLegShadow.cohorts
     .filter((cohort) => cohort.id.startsWith('M2F-SSR-'))

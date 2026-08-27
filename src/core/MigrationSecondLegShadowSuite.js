@@ -243,7 +243,7 @@ class MigrationSecondLegShadowSuite {
     }));
     return {
       enabled: this.config.enabled,
-      mode: 'SHADOW_M2F_RESEARCH_MATRIX',
+      mode: 'SHADOW_LPS_RESEARCH_MATRIX',
       code: this.cohorts.map((cohort) => cohort.id).join(' / '),
       sendsTransactions: false,
       liveDecisionIntegration: 'DISABLED',
@@ -252,7 +252,8 @@ class MigrationSecondLegShadowSuite {
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
       strategy: {
-        name: 'M2F Entry Control / Hold Extension / Confirmation Filter',
+        name: this.config.strategyName
+          || 'Late Post-Migration Stabilization LPS',
         positionSizeSol: this.config.positionSizeSol,
         entryDelayMs: this.config.entryDelayMs,
         maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
@@ -317,6 +318,7 @@ class MigrationSecondLegShadowSuite {
       holderDiffusionIndex: snapshot.observedHolderDiffusionIndex,
       quoteReserveSol: snapshot.quoteReserveSol,
       estimatedImpact1SolPct: snapshot.estimatedImpact1SolPct,
+      observationLagMs: snapshot.observationLagMs,
       marketRegime: regime,
       marketRegimeRequired: cohort.requireGreenRegime === true,
       liveEligible: false,
@@ -441,8 +443,10 @@ class MigrationSecondLegShadowSuite {
     const peakImpulsePct = snapshot.baselinePrice > 0
       ? ((snapshot.peakPrice / snapshot.baselinePrice) - 1) * 100 : null;
     const impact1Sol = finite(snapshot.estimatedImpact1SolPct);
+    const observationLagMs = finite(snapshot.observationLagMs, Infinity);
     if (cohort.requireGreenRegime && regime?.state !== 'GREEN') return false;
     return snapshot.ageMs >= t.minAgeMs && snapshot.ageMs <= t.maxAgeMs
+      && observationLagMs <= finite(t.maxObservationLagMs, Infinity)
       && snapshot.openingImpulsePct >= t.minCurrentImpulsePct
       && snapshot.openingImpulsePct <= t.maxCurrentImpulsePct
       && peakImpulsePct >= t.minPeakImpulsePct

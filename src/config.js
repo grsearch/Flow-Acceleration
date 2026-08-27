@@ -279,6 +279,85 @@ const m2fNearHighThresholds = Object.freeze({
   maxEstimatedImpact1SolPct: 1,
 });
 
+// Late post-migration stabilization (LPS) is intentionally isolated from the
+// retired M2F entry matrix. M2F-OBS already keeps eight minutes of causal
+// PumpSwap snapshots, so these delayed controls add no RPC calls. The 150s
+// cohort is the primary forward test; 180/240/300s are sparse controls.
+const lpsTargetToleranceMs = integerEnv('FLOW_LPS_TARGET_TOLERANCE_MS', 3_000, {
+  min: 500,
+  max: 15_000,
+});
+const lpsPositionSizeSol = numberEnv('FLOW_LPS_POSITION_SOL', 1, {
+  min: 0.01,
+  max: 100,
+});
+const lpsThresholds = (targetAgeMs) => ({
+  minAgeMs: targetAgeMs - lpsTargetToleranceMs,
+  maxAgeMs: targetAgeMs + lpsTargetToleranceMs,
+  maxObservationLagMs: integerEnv('FLOW_LPS_MAX_OBSERVATION_LAG_MS', 3_000, {
+    min: 250,
+    max: 30_000,
+  }),
+  minCurrentImpulsePct: -100,
+  maxCurrentImpulsePct: 10_000,
+  minPeakImpulsePct: -100,
+  minPullbackPct: -100,
+  maxPullbackPct: 100,
+  minReboundPct: -100,
+  maxReboundPct: 10_000,
+  minNetFlow10sSol: numberEnv('FLOW_LPS_MIN_NET_FLOW_10S_SOL', 8, {
+    min: -10_000,
+    max: 10_000,
+  }),
+  minNetFlow3sSol: -10_000,
+  minBuyers10s: integerEnv('FLOW_LPS_MIN_BUYERS_10S', 7, {
+    min: 0,
+    max: 10_000,
+  }),
+  minBuyers3s: 0,
+  maxLargestBuyerSharePct: numberEnv('FLOW_LPS_MAX_TOP1_SHARE_PCT', 50, {
+    min: 0,
+    max: 100,
+  }),
+  minBuySpeedRatio: -1_000,
+  minNetFlowAcceleration: numberEnv('FLOW_LPS_MIN_NET_FLOW_ACCELERATION', 0.001, {
+    min: -10_000,
+    max: 10_000,
+  }),
+  maxSellDecelerationRatio: 1_000_000_000,
+  minHolderDiffusionIndex: -10_000,
+  minQuoteReserveSol: 0,
+  maxEstimatedImpact1SolPct: numberEnv('FLOW_LPS_MAX_IMPACT_1SOL_PCT', 15, {
+    min: 0,
+    max: 100,
+  }),
+});
+const lpsEntryTargets = [
+  ['LPS-D150', 150_000, 'FLOW_LPS_150_ENABLED', [30_000, 60_000, 120_000]],
+  ['LPS-D180', 180_000, 'FLOW_LPS_180_ENABLED', [30_000]],
+  ['LPS-D240', 240_000, 'FLOW_LPS_240_ENABLED', [30_000]],
+  ['LPS-D300', 300_000, 'FLOW_LPS_300_ENABLED', [30_000]],
+];
+const lpsCohorts = lpsEntryTargets.flatMap(([
+  prefix, targetAgeMs, enabledEnv, holds,
+]) => holds.map((maxHoldMs) => ({
+  id: `${prefix}-X${maxHoldMs / 1_000}`,
+  label: `Late stabilization ${targetAgeMs / 1_000}s / fixed ${maxHoldMs / 1_000}s`,
+  enabled: booleanEnv(enabledEnv, true),
+  studyMode: 'LATE_POST_MIGRATION_STABILIZATION',
+  confirmationMode: 'IMMEDIATE',
+  positionSizeSol: lpsPositionSizeSol,
+  entryDelayMs: 200,
+  entryTimeoutMs: 2_000,
+  exitDelayMs: 200,
+  exitTimeoutMs: 2_000,
+  maxEntryPriceJumpPct: 15,
+  maxNegativeEntryJumpPct: 30,
+  hardStopPct: 100,
+  maxHoldMs,
+  thresholds: lpsThresholds(targetAgeMs),
+})));
+
 // The existing O-C80 live bridge deliberately keeps its 15% entry-move guard.
 // These new forward-only cohorts measure two different counterfactuals without
 // changing, signing or submitting any live order:
@@ -682,7 +761,9 @@ const config = {
         ruleVersion: 'migrated_gfr_300_hs20_h30_live_v1',
         signalSource: 'MIGRATED_GFR_300_CONFIRMED',
         enabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_ENABLED', true),
-        entryEnabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_ENTRY_ENABLED', true),
+        // Historical rows and already-open exits remain available, but new
+        // entries are hard-locked off after the negative live/RUG sample.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL', 0.1),
         maxSignalAgeMs: integerEnv(
@@ -6321,11 +6402,12 @@ const config = {
     }),
   },
 
-  // Retire M2F position cohorts after the negative forward sample. The
-  // independent M2F-OBS snapshot observer above remains enabled and continues
-  // collecting causal migration evidence without opening simulated positions.
+  // Retire the old M2F position cohorts after the negative forward sample.
+  // Reuse the independent eight-minute M2F-OBS tape for a separately named
+  // late-stabilization matrix; old M2F rows remain untouched and queryable.
   migrationSecondLegShadow: {
-    enabled: false,
+    enabled: booleanEnv('FLOW_LPS_SHADOW_ENABLED', true),
+    strategyName: 'Late Post-Migration Stabilization LPS',
     // Labels the broad post-migration tape for Shadow research only. This
     // object is not consumed by LiveTradingManager or any live strategy.
     marketRegime: {
@@ -6401,6 +6483,7 @@ const config = {
       {
         id: 'M2F-NH10-GUARD-B',
         label: 'Near-high 10s entry control',
+        enabled: false,
         studyMode: 'ENTRY_CONTROL',
         confirmationMode: 'IMMEDIATE',
         hardStopPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_HARD_STOP_PCT', 15, {
@@ -6415,7 +6498,7 @@ const config = {
       {
         id: 'M2F-HOLD-120',
         label: 'Same-entry fixed 120s hold extension',
-        enabled: booleanEnv('FLOW_M2F_HOLD_120_ENABLED', true),
+        enabled: false,
         studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
         confirmationMode: 'IMMEDIATE',
         hardStopPct: 100,
@@ -6427,7 +6510,7 @@ const config = {
       {
         id: 'M2F-HOLD-240',
         label: 'Same-entry fixed 240s right-tail extension',
-        enabled: booleanEnv('FLOW_M2F_HOLD_240_ENABLED', true),
+        enabled: false,
         studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
         confirmationMode: 'IMMEDIATE',
         hardStopPct: 100,
@@ -6439,7 +6522,7 @@ const config = {
       {
         id: 'M2F-HOLD-240-H20',
         label: 'Same-entry 240s extension with 20% mark stop',
-        enabled: booleanEnv('FLOW_M2F_HOLD_240_H20_ENABLED', true),
+        enabled: false,
         studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
         confirmationMode: 'IMMEDIATE',
         hardStopPct: 20,
@@ -6451,7 +6534,7 @@ const config = {
       {
         id: 'M2F-CF2-H10',
         label: 'Two-snapshot persistence filter / original 10s exit',
-        enabled: booleanEnv('FLOW_M2F_CONFIRM_FILTER_ENABLED', true),
+        enabled: false,
         studyMode: 'CONFIRM_FILTER',
         confirmationMode: 'TWO_SNAPSHOT_PERSISTENCE',
         confirmationMinGapMs: integerEnv('FLOW_M2F_CONFIRM_MIN_GAP_MS', 500, {
@@ -6477,7 +6560,7 @@ const config = {
       ].map(([id, label, requireGreenRegime, hardStopPct, maxHoldMs]) => ({
         id,
         label,
-        enabled: booleanEnv('FLOW_M2F_SELL_STRESS_RECOVERY_ENABLED', true),
+        enabled: false,
         studyMode: requireGreenRegime
           ? 'SELL_STRESS_RECOVERY_MARKET_REGIME'
           : 'SELL_STRESS_RECOVERY_CONTROL',
@@ -6511,6 +6594,7 @@ const config = {
           maxEstimatedImpact1SolPct: 5,
         },
       })),
+      ...lpsCohorts,
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
