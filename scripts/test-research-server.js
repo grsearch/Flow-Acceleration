@@ -642,6 +642,9 @@ async function main() {
         reboundMinPct: 2,
         reboundMaxPct: 5,
         reboundTimeoutMs: 1_000,
+        liveExitStrategies: {
+          X8: 'migrated_gd25_35_x8_live',
+        },
       },
     );
     assert.deepStrictEqual(

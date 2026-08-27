@@ -681,12 +681,10 @@ const config = {
         label: 'Lifecycle Drop/Rebound G · GFR_300 30秒尾仓',
         ruleVersion: 'migrated_gfr_300_hs20_h30_live_v1',
         signalSource: 'MIGRATED_GFR_300_CONFIRMED',
-        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_ENABLED', true),
-        // Keep historical rows and existing-position exits available while locking
-        // all new GFR-300 live entries off regardless of an older .env value.
-        entryEnabled: false,
+        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_ENABLED', true),
+        entryEnabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_ENTRY_ENABLED', true),
         market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GFR_300_POSITION_SOL', 0.1),
+        positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL', 0.1),
         maxSignalAgeMs: integerEnv(
           'FLOW_LIVE_MIGRATED_GFR_300_MAX_SIGNAL_AGE_MS',
           1_500,
@@ -708,6 +706,80 @@ const config = {
         hardStopPct: 20,
         maxHoldMs: 30_000,
         sourceShadowCohortId: 'POST_GFR_300_GFR_HS20_H30_C10',
+      },
+      {
+        id: 'migrated_ge30_r23_f2_only_g2_xleg_live',
+        code: 'POST-GE30-R23-F2-G2-XLEG',
+        label: 'Lifecycle Drop/Rebound G · 第二次机会 XLEG',
+        ruleVersion: 'migrated_ge30_r23_f2_only_g2_xleg_live_v1',
+        signalSource: 'MIGRATED_GE30_R23_F2_ONLY_G2_XLEG',
+        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'LEGACY',
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: 6_000,
+        maxHoldMs: 15_000,
+        sourceShadowCohortId: 'POST_GE30_R23_F2_ONLY_G2_XLEG',
+      },
+      {
+        id: 'migrated_gd25_35_x8_live',
+        code: 'POST-GD25-35-X8',
+        label: 'Lifecycle Drop/Rebound G · GD25-35 固定8秒',
+        ruleVersion: 'migrated_gd25_35_x8_live_v1',
+        signalSource: 'MIGRATED_GD25_35_X8',
+        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GD25_35_X8_ENABLED', true),
+        entryEnabled: booleanEnv('FLOW_LIVE_MIGRATED_GD25_35_X8_ENTRY_ENABLED', true),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GD25_35_X8_POSITION_SOL', 0.1),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GD25_35_X8_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GD25_35_X8_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GD25_35_X8_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 8_000,
+        maxHoldMs: 8_000,
+        sourceShadowCohortId: 'POST_GD25_35_X8',
       },
       {
         id: 'migration_continuity_mc_c5_t12_5_live',
@@ -755,14 +827,17 @@ const config = {
         label: 'Graduation Acceleration O · O90 M5 STAIR120',
         ruleVersion: 'graduation_accel_o90_m5_stair120_live_v1',
         signalSource: 'GRADUATION_ACCEL_O90_M5_STAIR120',
-        enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_ENABLED', true),
-        // Retired after repeated executable-loss failures. Keep the strategy
-        // loaded for history and already-open exits, but stale server env values
-        // must never reopen it.
-        entryEnabled: false,
+        enabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_ENABLED',
+          true,
+        ),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_ENTRY_ENABLED',
+          true,
+        ),
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V3_POSITION_SOL',
+          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_POSITION_SOL',
           0.1,
         ),
         maxSignalAgeMs: integerEnv(
@@ -911,6 +986,89 @@ const config = {
           maxSellBuyRatio: 0.55,
           minVirtualSolReserves: 30,
         },
+      },
+      {
+        id: 'quality_leader_ql_strict_guard_protected_live',
+        code: 'QL-STRICT-GUARD',
+        label: 'Quality Leader QL Strict Guard · Protected Runner',
+        ruleVersion: 'quality_leader_ql_strict_guard_protected_live_v1',
+        signalSource: 'QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED',
+        enabled: booleanEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_ENABLED',
+          true,
+        ),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_BONDING_CURVE',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_ENTRY_JUMP_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        maxShadowEntryImpactPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_SHADOW_IMPACT_PCT',
+          12,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'QUALITY_PROTECTED_RUNNER',
+        hardStopPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_HARD_STOP_PCT',
+          20,
+          { min: 0.1, max: 100 },
+        ),
+        strengthActivationPct: numberEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_STRENGTH_PCT',
+          20,
+          { min: 0.1, max: 1_000 },
+        ),
+        noStrengthMs: integerEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_NO_STRENGTH_MS',
+          30_000,
+          { min: 1_000, max: 5 * 60_000 },
+        ),
+        maxHoldMs: integerEnv(
+          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_HOLD_MS',
+          5 * 60_000,
+          { min: 10_000, max: 30 * 60_000 },
+        ),
+        protectedFloors: [
+          { activationPct: 20, minFloorPct: 0, peakGivebackPct: 15 },
+          { activationPct: 50, minFloorPct: 15, peakGivebackPct: 25 },
+          { activationPct: 100, minFloorPct: 40, peakGivebackPct: 40 },
+          { activationPct: 200, minFloorPct: 100, peakGivebackPct: 80 },
+        ],
+        qualityCriteria: {
+          minReturn10Pct: 140,
+          maxDrawdown20Pct: 12,
+          minBuyerDelta: 8,
+          minNetFlowDeltaSol: 3,
+          minRetentionPct: 80,
+          maxCreatorSharePct: 3,
+          minCurvePct: 55,
+          maxCurvePct: 90,
+          maxSellBuyRatio: 0.55,
+          minVirtualSolReserves: 30,
+          requireHealthyRugRisk: true,
+        },
+        sourceShadowCohortId: 'QL_STRICT_GUARD:QL_PROTECTED',
       },
       {
         id: 'launch_pullback_fo_rb10_30s_live',
@@ -4309,7 +4467,6 @@ const config = {
     retiredCohortPrefixes: [
       'POST_GD25_35_RUG_GUARD_T20_24_',
       'POST_GD25_35_X3',
-      'POST_GD25_35_X8',
       'POST_GD25_35_XLEG',
       'POST_GD25_35_XB25',
       'POST_GD25_35_XB50',
@@ -4391,6 +4548,9 @@ const config = {
         reboundMinPct: 2,
         reboundMaxPct: 5,
         reboundTimeoutMs: 1_000,
+        liveExitStrategies: {
+          X8: 'migrated_gd25_35_x8_live',
+        },
       },
       {
         id: 'GD25_35_RUG_GUARD_ALL',
@@ -4495,6 +4655,9 @@ const config = {
         minSignalOrdinal: 2,
         maxSignalsPerMint: 2,
         exitProfileIds: ['G2_XLEG'],
+        liveExitStrategies: {
+          G2_XLEG: 'migrated_ge30_r23_f2_only_g2_xleg_live',
+        },
       },
       {
         id: 'GE30_R23_F3_EXEC',
@@ -5676,7 +5839,6 @@ const config = {
     entryProfiles: [
       {
         id: 'QL_STRICT',
-        liveStrategyId: 'quality_leader_ql_strict_protected_live',
         label: 'QL-A/B Strict · Retention≥80%',
         minReturn10Pct: 140,
         maxDrawdown20Pct: 12,
@@ -5707,6 +5869,7 @@ const config = {
       },
       {
         id: 'QL_STRICT_GUARD',
+        liveStrategyId: 'quality_leader_ql_strict_guard_protected_live',
         label: 'QL-GUARD · Strict + 公共订单流RUG过滤',
         minReturn10Pct: 140,
         maxDrawdown20Pct: 12,
@@ -6559,7 +6722,12 @@ function validateConfig() {
     if (!config.liveTrading.privateKey) {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
-    if (!process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_POSITION_SOL
+    if (!process.env.FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL
+      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_POSITION_SOL
+      && !process.env.FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_POSITION_SOL
+      && !process.env.FLOW_LIVE_MIGRATED_GD25_35_X8_POSITION_SOL
+      && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_POSITION_SOL
+      && !process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_POSITION_SOL
       && !process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V3_POSITION_SOL

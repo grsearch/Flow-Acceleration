@@ -209,6 +209,7 @@ class MigratedDropReboundShadowSuite {
       candidates: 0,
       signals: 0,
       replaySignalsSuppressed: 0,
+      replayLiveSignalsSuppressed: 0,
       reboundTimeouts: 0,
       dropExceededMax: 0,
       reboundExceededMax: 0,
@@ -322,7 +323,7 @@ class MigratedDropReboundShadowSuite {
     if (lifecycleStage === 'POST_MIGRATION' && this._needsFastFlowTrade(trade.mint)) {
       this._recordFastFlowTrade(trade);
     }
-    this._observeRowsForMint(trade, price);
+    this._observeRowsForMint(trade, price, { replay });
     // A disabled lifecycle stage has no detector. Ignore it here so one
     // research suite cannot abort the shared runtime trade pipeline.
     if (!lifecycleStage || !this.lifecycleStageIds.has(lifecycleStage)) return;
@@ -795,7 +796,7 @@ class MigratedDropReboundShadowSuite {
     this.metrics.lastActionAt = this.now();
   }
 
-  _observeRowsForMint(trade, price) {
+  _observeRowsForMint(trade, price, { replay = false } = {}) {
     const ids = [...(this.rowsByMint.get(trade.mint) || [])];
     const fastCache = {
       features: new Map(),
@@ -853,7 +854,14 @@ class MigratedDropReboundShadowSuite {
           if (!decision.pass) continue;
           fill = decision.fill;
           this.metrics.fastConfirmationPassed += 1;
-          this._emitFastConfirmedLiveSignal(position, entryProfile, trade, price, decision);
+          this._emitFastConfirmedLiveSignal(
+            position,
+            entryProfile,
+            trade,
+            price,
+            decision,
+            { replay },
+          );
         } else {
           fill = entryProfile?.capacityAware && position.lifecycleStage === 'POST_MIGRATION'
             ? ammBuyAveragePrice(trade, position.positionSol, price)
@@ -904,6 +912,9 @@ class MigratedDropReboundShadowSuite {
         this.pendingEntries.delete(position.id);
         this.positions.set(position.id, position);
         this.metrics.opened += 1;
+        if (!entryProfile?.fastConfirmation) {
+          this._emitOpenedLiveSignal(position, entryProfile, trade, price, { replay });
+        }
         continue;
       }
       if (position.status === STATUS.EXIT_PENDING) {
@@ -985,8 +996,61 @@ class MigratedDropReboundShadowSuite {
     };
   }
 
-  _emitFastConfirmedLiveSignal(position, profile, trade, price, decision) {
+  _emitOpenedLiveSignal(position, profile, trade, price, { replay = false } = {}) {
+    const strategyId = profile?.liveExitStrategies?.[position.exitProfileId]
+      || profile?.liveStrategyId;
+    if (!this.onLiveSignal || !strategyId) return;
+    if (replay) {
+      this.metrics.replayLiveSignalsSuppressed += 1;
+      return;
+    }
+    const key = `${position.episodeId}:${profile.id}:${position.exitProfileId}:${strategyId}`;
+    if (this.liveSignalsEmitted.has(key)) return;
+    this.liveSignalsEmitted.add(key);
+    try {
+      this.onLiveSignal({
+        strategyId,
+        episodeId: `${position.episodeId}:${profile.id}:${position.exitProfileId}:OPEN`,
+        mint: position.mint,
+        symbol: position.symbol,
+        price: position.entryPrice || price,
+        slot: trade.slot,
+        timestampMs: trade.timestampMs,
+        receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+        market: 'PUMP_AMM',
+        poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+        poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+        virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+        features: {
+          entryProfileId: profile.id,
+          exitProfileId: position.exitProfileId,
+          sourceShadowCohortId: position.cohortId,
+          migrationAgeMs: position.migrationAgeMs,
+          dropPct: position.dropPct,
+          reboundPct: position.reboundPct,
+          shadowEntryJumpPct: position.entryJumpPct,
+          shadowEntryImpactPct: position.entryImpactPct,
+          shadowEntryPrice: position.entryPrice,
+        },
+      });
+    } catch (error) {
+      this.metrics.lastError = String(error?.message || error).slice(0, 1_000);
+    }
+  }
+
+  _emitFastConfirmedLiveSignal(
+    position,
+    profile,
+    trade,
+    price,
+    decision,
+    { replay = false } = {},
+  ) {
     if (!this.onLiveSignal || !profile?.liveStrategyId) return;
+    if (replay) {
+      this.metrics.replayLiveSignalsSuppressed += 1;
+      return;
+    }
     const key = `${position.episodeId}:${profile.id}`;
     if (this.liveSignalsEmitted.has(key)) return;
     this.liveSignalsEmitted.add(key);

@@ -32,11 +32,19 @@ function makeConfig() {
     entryProfiles: [
       {
         id: 'QL_STRICT', minReturn10Pct: 140, maxDrawdown20Pct: 12,
-        liveStrategyId: 'quality_leader_ql_strict_protected_live',
         minBuyerDelta: 8, minNetFlowDeltaSol: 3, minRetentionPct: 80,
         maxCreatorSharePct: 3, minCurvePct: 55, maxCurvePct: 90,
         maxSellBuyRatio: 0.55, minVirtualSolReserves: 30,
         exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
+      },
+      {
+        id: 'QL_STRICT_GUARD', minReturn10Pct: 140, maxDrawdown20Pct: 12,
+        liveStrategyId: 'quality_leader_ql_strict_guard_protected_live',
+        minBuyerDelta: 8, minNetFlowDeltaSol: 3, minRetentionPct: 80,
+        maxCreatorSharePct: 3, minCurvePct: 55, maxCurvePct: 90,
+        maxSellBuyRatio: 0.55, minVirtualSolReserves: 30,
+        requireHealthyRugRisk: true,
+        exitProfileIds: ['QL_PROTECTED'],
       },
       {
         id: 'QL_BROAD', minReturn10Pct: 140, maxDrawdown20Pct: 12,
@@ -81,6 +89,7 @@ function snapshot(mint, horizonMs, observedAt, overrides = {}) {
     netFlowSol: horizonMs === 10_000 ? 5 : 9,
     retentionPct: 85, creatorSharePct: 2, curvePct: 70,
     virtualSolReserves: 40,
+    rugRisk: { sampleReady: true, flagged: false },
     ...overrides,
   };
 }
@@ -106,19 +115,19 @@ function run() {
   recordToken(store, mint, base);
   suite.onSnapshot(snapshot(mint, 10_000, base + 10_000));
   suite.onSnapshot(snapshot(mint, 20_000, base + 20_000));
-  assert.strictEqual(suite.health().pendingEntries, 3,
-    'strict barbell, strict protected and broad barbell must remain independent');
+  assert.strictEqual(suite.health().pendingEntries, 4,
+    'strict, guarded strict and broad Shadow rows must remain independent');
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) AS n FROM live_positions').get().n, 0,
     'Quality Leader must never create live positions');
 
   now = base + 20_250;
   suite.observeTrade(trade(mint, now, 1));
-  assert.strictEqual(suite.health().activePositions, 3);
+  assert.strictEqual(suite.health().activePositions, 4);
   assert.strictEqual(liveSignals.length, 1,
     'strict protected must emit exactly one live signal, not one per A/B exit row');
-  assert.strictEqual(liveSignals[0].strategyId, 'quality_leader_ql_strict_protected_live');
+  assert.strictEqual(liveSignals[0].strategyId, 'quality_leader_ql_strict_guard_protected_live');
   assert.strictEqual(liveSignals[0].features.retention20Pct, 85);
-  assert.strictEqual(liveSignals[0].features.shadowCohortId, 'QL_STRICT:QL_PROTECTED');
+  assert.strictEqual(liveSignals[0].features.shadowCohortId, 'QL_STRICT_GUARD:QL_PROTECTED');
   now += 100;
   suite.observeTrade(trade(mint, now, 1.21));
   now += 250;
@@ -137,7 +146,7 @@ function run() {
   const rows = store.db.prepare(`
     SELECT * FROM quality_leader_shadow_positions WHERE mint = ? ORDER BY cohort_id
   `).all(mint);
-  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows.length, 4);
   assert.ok(rows.every((row) => row.status === 'CLOSED'));
   assert.ok(rows.filter((row) => row.exit_profile_id === 'QL_BARBELL')
     .every((row) => row.partial_stage === 2));
@@ -176,7 +185,7 @@ function run() {
     'cross-market scale must not create a fake huge winner');
 
   const dashboard = store.qualityLeaderShadowDashboard();
-  assert.strictEqual(dashboard.cohorts.length, 3);
+  assert.strictEqual(dashboard.cohorts.length, 4);
   assert.strictEqual(store.shadowTimeSessionDashboard('quality-leader').sessions.length, 4);
   store.close();
   console.log('quality leader shadow tests passed');
