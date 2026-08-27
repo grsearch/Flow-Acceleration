@@ -6022,6 +6022,155 @@ const config = {
     }),
   },
 
+  // Feature Effectiveness Audit Observer. This forward-only audit measures
+  // whether each existing signal family adds predictive value after a real
+  // 1 SOL reserve-impact model. It never opens a simulated or live position.
+  featureEdgeAudit: {
+    enabled: booleanEnv('FLOW_FEATURE_EDGE_AUDIT_ENABLED', true),
+    positionSol: numberEnv('FLOW_FEATURE_EDGE_AUDIT_POSITION_SOL', 1, { min: 0.01, max: 100 }),
+    sampleCooldownMs: integerEnv(
+      'FLOW_FEATURE_EDGE_AUDIT_SAMPLE_COOLDOWN_MS',
+      30_000,
+      { min: 1_000, max: 30 * 60_000 },
+    ),
+    maxPending: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_PENDING', 3_000, {
+      min: 100, max: 20_000,
+    }),
+    maxObservationLagMs: integerEnv(
+      'FLOW_FEATURE_EDGE_AUDIT_MAX_OBSERVATION_LAG_MS',
+      3_000,
+      { min: 250, max: 30_000 },
+    ),
+    stateRetentionMs: integerEnv(
+      'FLOW_FEATURE_EDGE_AUDIT_STATE_RETENTION_MS',
+      360_000,
+      { min: 310_000, max: 30 * 60_000 },
+    ),
+    minNetFlowSol: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_NETFLOW_SOL', 10, {
+      min: 0, max: 10_000,
+    }),
+    minBuyers: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_BUYERS', 7, { min: 1, max: 10_000 }),
+    minBuySharePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_BUY_SHARE_PCT', 70, {
+      min: 0, max: 100,
+    }),
+    maxEntryImpactPct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_ENTRY_IMPACT_PCT', 15, {
+      min: 0, max: 1_000,
+    }),
+    minCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_CURVE_PCT', 60, {
+      min: 0, max: 100,
+    }),
+    maxCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_CURVE_PCT', 95, {
+      min: 0, max: 100,
+    }),
+    minAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_AGE_MS', 5_000, {
+      min: 0, max: 60 * 60_000,
+    }),
+    maxAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_AGE_MS', 300_000, {
+      min: 1_000, max: 24 * 60 * 60_000,
+    }),
+  },
+
+  // Post-migration Survivor Observer (PM-SURV). Every migrated mint receives
+  // a bounded five-minute baseline. Only liquid, active survivors continue to
+  // 30/60 minutes; a deterministic holdout estimates big-winner false negatives.
+  // This observer never opens a position, calls extra RPC endpoints, or signs.
+  postMigrationSurvivorObserver: {
+    enabled: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_ENABLED', true),
+    positionSol: numberEnv('FLOW_POST_MIGRATION_SURVIVOR_POSITION_SOL', 1, {
+      min: 0.01, max: 100,
+    }),
+    baselineStageMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_BASELINE_MS', 5 * 60_000, {
+      min: 60_000, max: 30 * 60_000,
+    }),
+    extendedStageMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_EXTENDED_MS', 30 * 60_000, {
+      min: 5 * 60_000, max: 60 * 60_000,
+    }),
+    maxAgeMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_MAX_AGE_MS', 60 * 60_000, {
+      min: 30 * 60_000, max: 2 * 60 * 60_000,
+    }),
+    inactivityMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_INACTIVITY_MS', 180_000, {
+      min: 30_000, max: 30 * 60_000,
+    }),
+    maxActive: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_MAX_ACTIVE', 3_000, {
+      min: 100, max: 20_000,
+    }),
+    maxThirtyMinuteSurvivors: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_MAX_30M', 500, { min: 10, max: 10_000 },
+    ),
+    maxSixtyMinuteSurvivors: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_MAX_60M', 100, { min: 5, max: 5_000 },
+    ),
+    holdoutPct: numberEnv('FLOW_POST_MIGRATION_SURVIVOR_HOLDOUT_PCT', 10, {
+      min: 0, max: 100,
+    }),
+    softFailConfirmations: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_SOFT_FAIL_CONFIRMATIONS', 2, { min: 1, max: 10 },
+    ),
+    softFailConfirmationMs: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_SOFT_FAIL_CONFIRMATION_MS', 30_000,
+      { min: 1_000, max: 10 * 60_000 },
+    ),
+    riskCheckIntervalMs: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_RISK_CHECK_INTERVAL_MS', 2_000,
+      { min: 500, max: 60_000 },
+    ),
+    hardPriceRetentionPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_HARD_PRICE_RETENTION_PCT', 15, { min: 0, max: 100 },
+    ),
+    hardExecutableRecoveryPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_HARD_RECOVERY_PCT', 15, { min: 0, max: 100 },
+    ),
+    stage5MinPeakRetentionPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_PEAK_RETENTION_PCT', 30,
+      { min: 0, max: 100 },
+    ),
+    stage5MinTrades60s: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_TRADES_60S', 8, { min: 0, max: 100_000 },
+    ),
+    stage5MinBuyers60s: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_BUYERS_60S', 3, { min: 0, max: 100_000 },
+    ),
+    stage5MinBuyTx60s: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_BUYS_60S', 2, { min: 0, max: 100_000 },
+    ),
+    stage5MinSellTx60s: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_SELLS_60S', 1, { min: 0, max: 100_000 },
+    ),
+    stage5MinExecutableRecoveryPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_RECOVERY_PCT', 25, { min: 0, max: 100 },
+    ),
+    stage30MinBaselineReturnPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_RETURN_PCT', -10, { min: -100, max: 10_000 },
+    ),
+    stage30MinPeakRetentionPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_PEAK_RETENTION_PCT', 45,
+      { min: 0, max: 100 },
+    ),
+    stage30MinTrades300s: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_TRADES_300S', 12,
+      { min: 0, max: 100_000 },
+    ),
+    stage30MinBuyers300s: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_BUYERS_300S', 5,
+      { min: 0, max: 100_000 },
+    ),
+    stage30MinNetFlowSol: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_NETFLOW_SOL', 0,
+      { min: -100_000, max: 100_000 },
+    ),
+    stage30MinExecutableRecoveryPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_RECOVERY_PCT', 50, { min: 0, max: 100 },
+    ),
+    maxEventsPerMint: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_MAX_EVENTS_PER_MINT', 512,
+      { min: 64, max: 10_000 },
+    ),
+    dashboardLimit: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_DASHBOARD_LIMIT', 2_000,
+      { min: 100, max: 10_000 },
+    ),
+  },
+
   // Graduation Acceleration Shadow O. This is an independent forward-only
   // experiment derived from the non-overlapping historical graduation study.
   // It never signs or submits a transaction and does not reuse old I cohorts.

@@ -47,6 +47,10 @@ const { BigWinnerShadowSuite } = require('./core/BigWinnerShadowSuite');
 const {
   GraduationAccelerationShadowSuite,
 } = require('./core/GraduationAccelerationShadowSuite');
+const { FeatureEdgeAuditObserver } = require('./core/FeatureEdgeAuditObserver');
+const {
+  PostMigrationSurvivorObserver,
+} = require('./core/PostMigrationSurvivorObserver');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { PreEntryRugRiskTracker } = require('./core/PreEntryRugRiskTracker');
 const { ResearchStore } = require('./data/ResearchStore');
@@ -281,6 +285,17 @@ function createRuntime(runtimeConfig = config) {
     onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   graduationAccelerationShadow.start();
+  const featureEdgeAudit = new FeatureEdgeAuditObserver({
+    config: runtimeConfig.featureEdgeAudit,
+    store,
+  });
+  featureEdgeAudit.start();
+  const postMigrationSurvivor = new PostMigrationSurvivorObserver({
+    config: runtimeConfig.postMigrationSurvivorObserver,
+    store,
+    rugRiskTracker: preEntryRugRisk,
+  });
+  postMigrationSurvivor.start();
   trader.addEntryFailureObserver((event) => {
     graduationAccelerationShadow.onLiveEntryFailure(event);
   });
@@ -322,6 +337,8 @@ function createRuntime(runtimeConfig = config) {
     qualityLeaderShadow,
     bigWinnerShadow,
     graduationAccelerationShadow,
+    featureEdgeAudit,
+    postMigrationSurvivor,
   });
   const runtimeMetrics = {
     parsedEvents: 0,
@@ -382,6 +399,8 @@ function createRuntime(runtimeConfig = config) {
       ...qualityLeaderShadow.trackedMints(),
       ...bigWinnerShadow.trackedMints(),
       ...graduationAccelerationShadow.trackedMints(),
+      ...featureEdgeAudit.trackedMints(now),
+      ...postMigrationSurvivor.trackedMints(now),
       ...migrationSecondLegObserver.trackedMints(now),
       ...migrationSecondLegShadow.trackedMints(),
     ])]);
@@ -399,6 +418,7 @@ function createRuntime(runtimeConfig = config) {
     try {
       const saved = store.recordSignal(signal);
       labeler.addSignal(saved);
+      observeShadow('featureEdgeAuditSignal', () => featureEdgeAudit.onSignal(saved));
       observeShadow('launchPullbackSignal', () => launchPullbackShadow.onSignal(saved));
       observeShadow('smartLikeEarlySignal', () => smartLikeEarlyShadow.onSignal(saved));
       console.log(
@@ -473,6 +493,9 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('migrationSecondLegGraduate', () => (
             migrationSecondLegObserver.onGraduated(token || event)
           ));
+          observeShadow('postMigrationSurvivorGraduate', () => (
+            postMigrationSurvivor.onGraduated(token || event)
+          ));
           observeShadow('sameSlotDumpBackrunGraduate', () => (
             sameSlotDumpBackrunShadow.onGraduated(token || event)
           ));
@@ -499,6 +522,9 @@ function createRuntime(runtimeConfig = config) {
           ));
           observeShadow('migrationSecondLegGraduate', () => (
             migrationSecondLegObserver.onGraduated(token || event)
+          ));
+          observeShadow('postMigrationSurvivorGraduate', () => (
+            postMigrationSurvivor.onGraduated(token || event)
           ));
           observeShadow('sameSlotDumpBackrunGraduate', () => (
             sameSlotDumpBackrunShadow.onGraduated(token || event)
@@ -563,6 +589,8 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('graduationAcceleration', () => (
           graduationAccelerationShadow.observeTrade(trade)
         ));
+        observeShadow('featureEdgeAudit', () => featureEdgeAudit.observeTrade(trade));
+        observeShadow('postMigrationSurvivor', () => postMigrationSurvivor.observeTrade(trade));
         observeShadow('launchPullback', () => launchPullbackShadow.observeTrade(trade));
         observeShadow('primarySignal', () => signalShadow.observeTrade(trade));
         engine.handleTrade(trade, store.getToken(trade.mint));
@@ -807,6 +835,8 @@ function createRuntime(runtimeConfig = config) {
         ['bondingCurveMomentumAdvance', bondingCurveMomentumShadow],
         ['graduationHoldAdvance', graduationHoldShadow],
         ['graduationAccelerationAdvance', graduationAccelerationShadow],
+        ['featureEdgeAuditAdvance', featureEdgeAudit],
+        ['postMigrationSurvivorAdvance', postMigrationSurvivor],
       ],
     ];
     let maintenanceTick = 0;
@@ -874,6 +904,8 @@ function createRuntime(runtimeConfig = config) {
     bondingCurveMomentumShadow.stop();
     graduationHoldShadow.stop();
     graduationAccelerationShadow.stop();
+    featureEdgeAudit.stop();
+    postMigrationSurvivor.stop();
     await server.stop();
     store.close();
   }
@@ -915,6 +947,8 @@ function createRuntime(runtimeConfig = config) {
       bondingCurveMomentumShadow: bondingCurveMomentumShadow.health(),
       graduationHoldShadow: graduationHoldShadow.health(),
       graduationAccelerationShadow: graduationAccelerationShadow.health(),
+      featureEdgeAudit: featureEdgeAudit.health(),
+      postMigrationSurvivor: postMigrationSurvivor.health(),
     };
   }
 
@@ -932,7 +966,8 @@ function createRuntime(runtimeConfig = config) {
     migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
     migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
-    graduationAccelerationShadow,
+    graduationAccelerationShadow, featureEdgeAudit,
+    postMigrationSurvivor,
   };
 }
 

@@ -387,6 +387,12 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="creator-affinity" data-strategy-code="CAF-OBS">
               <b><span class="strategy-code">CAF-OBS</span>Creator 全量历史 × 公共流观察</b><small>当前DB全部发行历史与 Smart 抽样分开；停止新增模拟仓位</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="feature-edge-audit" data-strategy-code="FEA-OBS">
+              <b><span class="strategy-code">FEA-OBS</span>Feature Edge Audit</b><small>1 SOL可执行收益 · 5/30/120/300秒特征增量审计</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="post-migration-survivor" data-strategy-code="PM-SURV">
+              <b><span class="strategy-code">PM-SURV</span>迁移后分层存活观察</b><small>全量5分钟 → 存活30分钟 → 强者60分钟；10%退订审计</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="launch-pullback" data-strategy-code="F/FT/FD/FO/FC/FA/FR">
               <b><span class="strategy-code">F/FT/FD/FO/FC/FA/FR</span>Launch 回踩</b><small>旧组保留；新增前置 Flow 共振与多退出对照</small>
             </button>
@@ -900,6 +906,58 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint / Creator</th><th>Creator 当前DB全历史</th><th>Smart 抽样历史</th><th>AGE / Curve</th><th>Buyers / Flow</th><th>集中度</th><th>未来Smart</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="creator-affinity-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="feature-edge-audit" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Feature Effectiveness Audit FEA-OBS</h2>
+                <p>独立前向标签观察器；不建仓、不签名、不发链、不增加 RPC 请求</p>
+              </div>
+              <div class="strategy-expression" id="feature-edge-audit-expression">订单流 / 参与度 / 买卖平衡 / 生命周期结构 / 1 SOL可执行容量 × 5/30/120/300秒</div>
+              <div class="strategy-metric-groups" id="feature-edge-audit-metrics"></div>
+              <div class="section-title"><h2>时间窗口真实收益</h2><p>市场价与1 SOL可执行价并列，避免仅用标记价格高估策略效果</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>窗口</th><th>市场价样本 / 胜率</th><th>市场平均 / 中位</th><th>1 SOL样本 / 胜率</th><th>1 SOL平均 / 中位</th><th>PF</th><th>Big50 / 快速崩盘</th></tr></thead>
+                <tbody id="feature-edge-audit-horizon-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>单类特征增量</h2><p>与同一批基线比较平均收益和胜率提升；不是策略盈亏表</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>特征族</th><th>样本 / 胜率</th><th>平均 / 中位</th><th>平均收益增量</th><th>胜率增量</th><th>PF</th><th>Big50 / 快速崩盘</th></tr></thead>
+                <tbody id="feature-edge-audit-family-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>特征分数分层</h2><p>检查更多指标同时满足，是否真的带来单调改善</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>分数</th><th>样本 / 胜率</th><th>平均 / 中位</th><th>PF</th><th>Big50 / 快速崩盘</th></tr></thead>
+                <tbody id="feature-edge-audit-score-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近前向样本</h2><p>只展示信号当时可见特征与未来结果，防止未来数据泄漏</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>Mint / 变体</th><th>特征分数</th><th>1 SOL入场冲击</th><th>300秒市场 / 可执行</th><th>MFE / 可执行MFE</th><th>标签状态</th></tr></thead>
+                <tbody id="feature-edge-audit-recent-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="post-migration-survivor" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Post-Migration Survivor Observer PM-SURV</h2>
+                <p>迁移后自适应分层观察；不建仓、不签名、不发链、不调用额外 RPC</p>
+              </div>
+              <div class="strategy-expression" id="post-migration-survivor-expression">全量观察5分钟 → 存活者30分钟 → 最强者60分钟；死亡币动态退订并保留审计对照</div>
+              <div class="strategy-metric-groups" id="post-migration-survivor-metrics"></div>
+              <div class="section-title"><h2>订阅阶段与退订原因</h2><p>显示本观察器请求保留的 Mint；实际 gRPC 订阅仍与其他策略取并集。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>阶段</th><th>Mint 数</th><th>退订原因</th><th>次数</th></tr></thead>
+                <tbody id="post-migration-survivor-stage-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近迁移观察</h2><p>只写5/15/30/60分钟里程碑；不保存长期逐笔流水，控制数据库与事件循环成本。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>迁移时间</th><th>Mint</th><th>阶段 / 状态</th><th>通过5m / 30m</th><th>审计保留</th><th>5m / 30m / 60m</th><th>MFE / MAE</th><th>1 SOL可回收</th><th>退订 / 审计结果</th></tr></thead>
+                <tbody id="post-migration-survivor-recent-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1732,6 +1790,80 @@
         const smartHistory = `${number(row.creator_prior_completed)}完成 / ${rate(row.creator_prior_win_rate_pct)}胜率<br><span class="table-note">资金回报 ${pct(row.creator_prior_capital_return_pct)} · ${number(row.creator_prior_smart_wallets)}钱包</span>`;
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.creator || 'UNKNOWN')}</span></td><td>${allHistory}</td><td>${smartHistory}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_1s)} / ${number(row.public_buyers_5s)} · ${number(row.public_net_flow_5s,2)} SOL</td><td>Top1 ${rate(row.largest_buyer_share_pct)} · Sell÷Buy ${number(row.sell_buy_ratio,2)}<br><span class="table-note">前涨幅 ${pct(row.pre_return_pct)} · 连买 ${number(row.pre_max_consecutive_buys)}</span></td><td>${smartLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="12" class="empty">等待 CAF-OBS 前向观察信号。</td></tr>';
+    }
+
+    function renderFeatureEdgeAudit(data) {
+      const runtime = data.runtime || {};
+      const summary = data.summary || {};
+      const baseline = summary.baseline || {};
+      const featureLabels = {
+        flow: '订单流加速',
+        participation: '独立参与度增长',
+        balance: '真实买卖平衡',
+        structure: '生命周期结构',
+        execution: '1 SOL可执行容量',
+      };
+      document.querySelector('#feature-edge-audit-expression').textContent = `订单流 / 参与度 / 买卖平衡 / 生命周期结构 / ${number(runtime.positionSol,2)} SOL可执行容量 × ${(runtime.horizonsSeconds || [5,30,120,300]).join('/')}秒；严格前向标签。`;
+      renderMetricGroups('#feature-edge-audit-metrics', [
+        ['运行模式', runtime.enabled ? 'FEA-OBS' : '关闭', '只观察；不建仓、不签名、不发链'],
+        ['评估 / 新样本', `${number(runtime.signalsEvaluated)} / ${number(runtime.samplesCreated)}`, `冷却跳过 ${number(runtime.cooldownSkipped)} · 容量跳过 ${number(runtime.capacitySkipped)}`],
+        ['完成 / 删失 / 待观察', `${number(runtime.samplesCompleted)} / ${number(runtime.samplesCensored)} / ${number(runtime.pending)}`, `跟踪 Mint ${number(runtime.trackedMints)}`],
+        ['可执行报价 / 缺失', `${number(runtime.quoteAvailable)} / ${number(runtime.quoteMissing)}`, `${number(runtime.positionSol,2)} SOL固定输入，不用标记价格替代成交`],
+        ['审计样本 / 主窗口', `${number(summary.rowsLoaded)} / ${number(summary.targetHorizonSeconds)}s`, `最近完成 ${dateTime(runtime.lastCompletedAt)}`],
+        ['基线可执行平均 / 中位', `${pct(baseline.averagePct)} / ${pct(baseline.medianPct)}`, `胜率 ${rate(baseline.winRatePct)} · PF ${number(baseline.profitFactor,2)}`],
+      ], []);
+      const horizons = data.horizons || [];
+      document.querySelector('#feature-edge-audit-horizon-rows').innerHTML = horizons.length ? horizons.map(row => {
+        const mark = row.mark || {};
+        const executable = row.executable || {};
+        return `<tr><td><b>${number(row.horizonSeconds)}秒</b></td><td>${number(mark.count)} / ${rate(mark.winRatePct)}</td><td class="${tone(mark.averagePct)}">${pct(mark.averagePct)} / ${pct(mark.medianPct)}</td><td>${number(executable.count)} / ${rate(executable.winRatePct)}</td><td class="${tone(executable.averagePct)}">${pct(executable.averagePct)} / ${pct(executable.medianPct)}</td><td>${number(executable.profitFactor,2)}</td><td>${rate(executable.big50RatePct)} / ${rate(executable.rug50RatePct)}</td></tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">等待5/30/120/300秒前向标签。</td></tr>';
+      const families = data.families || [];
+      document.querySelector('#feature-edge-audit-family-rows').innerHTML = families.length ? families.map(row => (
+        `<tr><td><b>${escapeHtml(featureLabels[row.family] || row.family)}</b><br><span class="table-note">${number(row.horizonSeconds)}秒可执行收益</span></td><td>${number(row.count)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averagePct)}">${pct(row.averagePct)} / ${pct(row.medianPct)}</td><td class="${tone(row.averageLiftPct)}">${pct(row.averageLiftPct)}</td><td class="${tone(row.winRateLiftPct)}">${pct(row.winRateLiftPct)}</td><td>${number(row.profitFactor,2)}</td><td>${rate(row.big50RatePct)} / ${rate(row.rug50RatePct)}</td></tr>`
+      )).join('') : '<tr><td colspan="7" class="empty">等待足够样本计算特征增量。</td></tr>';
+      const scores = data.scores || [];
+      document.querySelector('#feature-edge-audit-score-rows').innerHTML = scores.length ? scores.map(row => (
+        `<tr><td><b>${number(row.score)} / 5</b></td><td>${number(row.count)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averagePct)}">${pct(row.averagePct)} / ${pct(row.medianPct)}</td><td>${number(row.profitFactor,2)}</td><td>${rate(row.big50RatePct)} / ${rate(row.rug50RatePct)}</td></tr>`
+      )).join('') : '<tr><td colspan="5" class="empty">等待特征分数分层样本。</td></tr>';
+      const recent = data.recent || [];
+      document.querySelector('#feature-edge-audit-recent-rows').innerHTML = recent.length ? recent.map(row => (
+        `<tr><td>${dateTime(row.signalAtMs)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.signalVariant || '—')}</span></td><td>${number(row.featureScore)} / 5</td><td>${row.quoteAvailable ? pct(row.entryImpactPct) : '报价缺失'}</td><td class="${tone(row.executableReturn300s)}">${pct(row.markReturn300s)} / ${pct(row.executableReturn300s)}</td><td>${pct(row.mfePct)} / ${pct(row.executableMfePct)}</td><td>${statusChip(row.labelStatus)}<br><span class="table-note">${escapeHtml(row.censorReason || '—')}</span></td></tr>`
+      )).join('') : '<tr><td colspan="7" class="empty">暂无前向审计样本。</td></tr>';
+    }
+
+    function renderPostMigrationSurvivor(data) {
+      const runtime = data.runtime || {};
+      const summary = data.summary || {};
+      const mfe = summary.mfe || {};
+      document.querySelector('#post-migration-survivor-expression').textContent = `所有迁移 Mint 先观察 ${age(runtime.baselineStageMs)}；5分钟存活者延长至 ${age(runtime.extendedStageMs)}；最强者最长 ${age(runtime.maxAgeMs)}。退订样本中 ${number(runtime.holdoutPct,1)}% 继续审计，估算错失大赢家比例。`;
+      renderMetricGroups('#post-migration-survivor-metrics', [
+        ['运行模式', runtime.enabled ? 'PM-SURV' : '关闭', 'Observer only · 不建仓、不签名、不发链'],
+        ['迁移 / 活跃请求', `${number(runtime.migrationsObserved)} / ${number(runtime.requestedAmmMints)}`, '实际订阅与其他模块取并集，不等同独占 credits'],
+        ['通过5m / 30m', `${number(runtime.passedFiveMinutes)} / ${number(runtime.passedThirtyMinutes)}`, `完成60m ${number(runtime.completed)} · 里程碑 ${number(runtime.milestonesWritten)}`],
+        ['退订 / 硬退订 / 容量退订', `${number(runtime.dropped)} / ${number(runtime.hardDropped)} / ${number(runtime.capDropped)}`, `审计保留 ${number(runtime.holdoutTracked)}`],
+        ['审计错失 Big50', `${number(summary.holdoutBig50FalseNegatives)} / ${number(summary.holdoutDrops)}`, `估算漏掉率 ${rate(summary.estimatedBig50MissRatePct)}`],
+        ['完成样本 MFE', `${pct(mfe.averagePct)} / ${pct(mfe.medianPct)}`, `Big50/100/200 ${rate(mfe.big50RatePct)} / ${rate(mfe.big100RatePct)} / ${rate(mfe.big200RatePct)}`],
+        ['5m / 30m存活 Big50率', `${rate(summary.passed5mBig50RatePct)} / ${rate(summary.passed30mBig50RatePct)}`, `载入样本 ${number(summary.rowsLoaded)}`],
+        ['额外 RPC / 链上交易', '无 / 无', '仅复用现有 PumpSwap 数据流；里程碑稀疏落库'],
+      ], []);
+      const stages = data.stages || [];
+      const reasons = data.dropReasons || [];
+      const rowCount = Math.max(stages.length, reasons.length, 1);
+      document.querySelector('#post-migration-survivor-stage-rows').innerHTML = Array.from({ length: rowCount }, (_, index) => {
+        const stage = stages[index] || {};
+        const reason = reasons[index] || {};
+        return `<tr><td><b>${escapeHtml(stage.stage || '—')}</b></td><td>${number(stage.count)}</td><td>${escapeHtml(reason.reason || '—')}</td><td>${number(reason.count)}</td></tr>`;
+      }).join('');
+      const rows = data.recent || [];
+      document.querySelector('#post-migration-survivor-recent-rows').innerHTML = rows.length ? rows.map(row => {
+        const audit = row.isHoldout ? `是${row.dropReason ? ' · 已触发退订' : ''}` : '否';
+        const hasPostDropMfe = row.postDropMfePct !== null
+          && row.postDropMfePct !== undefined
+          && Number.isFinite(Number(row.postDropMfePct));
+        const outcome = row.dropReason || (hasPostDropMfe ? `退订后MFE ${pct(row.postDropMfePct)}` : '—');
+        return `<tr><td>${dateTime(row.migrationAtMs)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td><b>${escapeHtml(row.stage || '—')}</b><br>${statusChip(row.status)}</td><td>${row.passed5m ? '✓' : '—'} / ${row.passed30m ? '✓' : '—'}</td><td>${audit}</td><td class="${tone(row.return60mPct ?? row.return30mPct ?? row.return5mPct)}">${pct(row.return5mPct)} / ${pct(row.return30mPct)} / ${pct(row.return60mPct)}</td><td>${pct(row.mfePct)} / ${pct(row.maePct)}</td><td>${rate(row.executableRecoveryPct)}</td><td>${escapeHtml(outcome)}</td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">等待迁移后分层存活样本。</td></tr>';
     }
 
     function renderCyaSlotFlowShadow(data) {
@@ -2807,6 +2939,12 @@
         ],
         'creator-affinity': requestContext => [
           loadDashboard('/api/creator-affinity-shadow?positionLimit=50', renderCreatorAffinityShadow, requestContext),
+        ],
+        'feature-edge-audit': requestContext => [
+          loadDashboard('/api/feature-edge-audit?limit=2000', renderFeatureEdgeAudit, requestContext),
+        ],
+        'post-migration-survivor': requestContext => [
+          loadDashboard('/api/post-migration-survivor?limit=2000', renderPostMigrationSurvivor, requestContext),
         ],
         'cya-slot-flow': requestContext => [
           loadDashboard('/api/cya-slot-flow-shadow?positionLimit=50', renderCyaSlotFlowShadow, requestContext),

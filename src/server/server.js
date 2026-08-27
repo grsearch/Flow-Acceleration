@@ -79,6 +79,8 @@ class ResearchServer {
     qualityLeaderShadow = null,
     bigWinnerShadow = null,
     graduationAccelerationShadow = null,
+    featureEdgeAudit = null,
+    postMigrationSurvivor = null,
   }) {
     this.config = config;
     this.store = store;
@@ -115,6 +117,8 @@ class ResearchServer {
     this.qualityLeaderShadow = qualityLeaderShadow;
     this.bigWinnerShadow = bigWinnerShadow;
     this.graduationAccelerationShadow = graduationAccelerationShadow;
+    this.featureEdgeAudit = featureEdgeAudit;
+    this.postMigrationSurvivor = postMigrationSurvivor;
     this.retentionMaintenance = loadRetentionMaintenance(this.store?.config?.dbPath);
     this.app = express();
     this.httpServer = null;
@@ -176,6 +180,8 @@ class ResearchServer {
           'bonding-momentum': enabled('bondingCurveMomentumShadow'),
           'graduation-hold': enabled('graduationHoldShadow'),
           'graduation-acceleration': enabled('graduationAccelerationShadow'),
+          'feature-edge-audit': enabled('featureEdgeAudit'),
+          'post-migration-survivor': enabled('postMigrationSurvivorObserver'),
           'launch-quality': enabled('launchQualityObserver'),
           'migration-second-leg': enabled('migrationSecondLegObserver')
             || enabled('migrationSecondLegShadow'),
@@ -743,6 +749,44 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/feature-edge-audit', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.featureEdgeAudit?.health() || {
+          enabled: false,
+          mode: 'FEA-OBS',
+          observerOnly: true,
+          sendsTransactions: false,
+          extraRpcCalls: false,
+        },
+        ...(this.featureEdgeAudit?.dashboard({
+          limit: numeric(request.query.limit, 2_000),
+        }) || { summary: {}, horizons: [], families: [], scores: [], recent: [] }),
+      });
+    });
+
+    this.app.get('/api/post-migration-survivor', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        ...(this.postMigrationSurvivor?.dashboard({
+          limit: numeric(request.query.limit, 2_000),
+        }) || {
+          runtime: {
+            enabled: false,
+            mode: 'PM_SURV_OBSERVER_ONLY',
+            observerOnly: true,
+            sendsTransactions: false,
+            extraRpcCalls: false,
+          },
+          summary: {},
+          stages: [],
+          dropReasons: [],
+          recent: [],
+          milestones: [],
+        }),
+      });
+    });
+
     this.app.get('/api/cya-organic-burst-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -874,6 +918,8 @@ class ResearchServer {
         bondingCurveMomentumShadow: this.bondingCurveMomentumShadow?.health() || null,
         graduationHoldShadow: this.graduationHoldShadow?.health() || null,
         graduationAccelerationShadow: this.graduationAccelerationShadow?.health() || null,
+        featureEdgeAudit: this.featureEdgeAudit?.health() || null,
+        postMigrationSurvivor: this.postMigrationSurvivor?.health() || null,
       });
     });
 
