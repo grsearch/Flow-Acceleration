@@ -954,9 +954,19 @@
                 <thead><tr><th>阶段</th><th>Mint 数</th><th>退订原因</th><th>次数</th></tr></thead>
                 <tbody id="post-migration-survivor-stage-rows"></tbody>
               </table></div>
+              <div class="section-title"><h2>5分钟存活门控 × 容量感知 Shadow</h2><p>通过5分钟门控后，按真实可买、真实可卖口径独立测试固定30/60/120秒；不发实盘交易。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>组别</th><th>信号 / 入场</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大</th><th>Big50 / 100</th><th>可执行MFE / MAE</th><th>无入场 / 无退出</th></tr></thead>
+                <tbody id="post-migration-survivor-shadow-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近容量感知模拟仓位</h2><p>仅记录最终结果，活动仓位保留在内存，避免高频写库拖慢采集。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>组别 / 状态</th><th>Mint</th><th>入场冲击</th><th>最高 / 最低</th><th>净收益</th><th>持有 / 原因</th></tr></thead>
+                <tbody id="post-migration-survivor-shadow-position-rows"></tbody>
+              </table></div>
               <div class="section-title"><h2>最近迁移观察</h2><p>只写5/15/30/60分钟里程碑；不保存长期逐笔流水，控制数据库与事件循环成本。</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>迁移时间</th><th>Mint</th><th>阶段 / 状态</th><th>通过5m / 30m</th><th>审计保留</th><th>5m / 30m / 60m</th><th>MFE / MAE</th><th>1 SOL可回收</th><th>退订 / 审计结果</th></tr></thead>
+                <thead><tr><th>迁移时间</th><th>Mint</th><th>阶段 / 状态</th><th>通过5m / 30m</th><th>审计保留</th><th>5m / 30m / 60m</th><th>标记 / 可执行 MFE·MAE</th><th>1 SOL可回收</th><th>退订 / 审计结果</th></tr></thead>
                 <tbody id="post-migration-survivor-recent-rows"></tbody>
               </table></div>
             </article>
@@ -1836,14 +1846,18 @@
       const runtime = data.runtime || {};
       const summary = data.summary || {};
       const mfe = summary.mfe || {};
-      document.querySelector('#post-migration-survivor-expression').textContent = `所有迁移 Mint 先观察 ${age(runtime.baselineStageMs)}；5分钟存活者延长至 ${age(runtime.extendedStageMs)}；最强者最长 ${age(runtime.maxAgeMs)}。退订样本中 ${number(runtime.holdoutPct,1)}% 继续审计，估算错失大赢家比例。`;
+      const executableMfe = summary.executableMfe || {};
+      document.querySelector('#post-migration-survivor-expression').textContent = `所有迁移 Mint 先观察 ${age(runtime.baselineStageMs)}；通过5分钟门控后独立测试 ${(runtime.shadowHoldMs || []).map(age).join(' / ')} 容量感知退出；存活观察最长 ${age(runtime.maxAgeMs)}。退订样本中 ${number(runtime.holdoutPct,1)}% 继续审计。`;
       renderMetricGroups('#post-migration-survivor-metrics', [
-        ['运行模式', runtime.enabled ? 'PM-SURV' : '关闭', 'Observer only · 不建仓、不签名、不发链'],
+        ['运行模式', runtime.enabled ? 'PM-SURV + SHADOW' : '关闭', '观察 + 独立容量感知模拟；不签名、不发链'],
         ['迁移 / 活跃请求', `${number(runtime.migrationsObserved)} / ${number(runtime.requestedAmmMints)}`, '实际订阅与其他模块取并集，不等同独占 credits'],
         ['通过5m / 30m', `${number(runtime.passedFiveMinutes)} / ${number(runtime.passedThirtyMinutes)}`, `完成60m ${number(runtime.completed)} · 里程碑 ${number(runtime.milestonesWritten)}`],
         ['退订 / 硬退订 / 容量退订', `${number(runtime.dropped)} / ${number(runtime.hardDropped)} / ${number(runtime.capDropped)}`, `审计保留 ${number(runtime.holdoutTracked)}`],
-        ['审计错失 Big50', `${number(summary.holdoutBig50FalseNegatives)} / ${number(summary.holdoutDrops)}`, `估算漏掉率 ${rate(summary.estimatedBig50MissRatePct)}`],
-        ['完成样本 MFE', `${pct(mfe.averagePct)} / ${pct(mfe.medianPct)}`, `Big50/100/200 ${rate(mfe.big50RatePct)} / ${rate(mfe.big100RatePct)} / ${rate(mfe.big200RatePct)}`],
+        ['Shadow 活动 / 已关 / 无退出', `${number(runtime.activeShadowPositions)} / ${number(runtime.shadowClosed)} / ${number(runtime.shadowNoExit)}`, `无入场 ${number(runtime.shadowNoEntry)} · 成本 ${pct(runtime.shadowRoundTripCostPct)}`],
+        ['审计错失可执行 Big50', `${number(summary.holdoutBig50FalseNegatives)} / ${number(summary.holdoutDrops)}`, `估算漏掉率 ${rate(summary.estimatedBig50MissRatePct)}`],
+        ['完成样本标记 MFE', `${pct(mfe.averagePct)} / ${pct(mfe.medianPct)}`, `Big50/100/200 ${rate(mfe.big50RatePct)} / ${rate(mfe.big100RatePct)} / ${rate(mfe.big200RatePct)}`],
+        ['完成样本可执行 MFE', `${pct(executableMfe.averagePct)} / ${pct(executableMfe.medianPct)}`, `Big50/100/200 ${rate(executableMfe.big50RatePct)} / ${rate(executableMfe.big100RatePct)} / ${rate(executableMfe.big200RatePct)}`],
+        ['异常高价隔离', `${number(runtime.transientPricesWithheld)} / ${number(runtime.transientPricesConfirmed)}`, `隔离 / 确认 · 样本异常 ${number(summary.priceAnomalies)}`],
         ['5m / 30m存活 Big50率', `${rate(summary.passed5mBig50RatePct)} / ${rate(summary.passed30mBig50RatePct)}`, `载入样本 ${number(summary.rowsLoaded)}`],
         ['额外 RPC / 链上交易', '无 / 无', '仅复用现有 PumpSwap 数据流；里程碑稀疏落库'],
       ], []);
@@ -1855,14 +1869,22 @@
         const reason = reasons[index] || {};
         return `<tr><td><b>${escapeHtml(stage.stage || '—')}</b></td><td>${number(stage.count)}</td><td>${escapeHtml(reason.reason || '—')}</td><td>${number(reason.count)}</td></tr>`;
       }).join('');
+      const shadowCohorts = data.shadowCohorts || [];
+      document.querySelector('#post-migration-survivor-shadow-cohort-rows').innerHTML = shadowCohorts.length ? shadowCohorts.map(row => (
+        `<tr><td><b>${escapeHtml(row.profileId || '—')}</b><br><span class="table-note">固定 ${age(row.holdMs)}</span></td><td>${number(row.signals)} / ${number(row.entered)}</td><td>${number(row.priced)} / ${rate(row.winRatePct)}</td><td class="${tone(row.returns?.averagePct)}">${pct(row.returns?.averagePct)} / ${pct(row.returns?.medianPct)}</td><td>${number(row.profitFactor,2)} / ${pct(row.maxWinnerPct)}</td><td>${rate(row.big50RatePct)} / ${rate(row.big100RatePct)}</td><td>${pct(row.averageMfePct)} / ${pct(row.averageMaePct)}</td><td>${number(row.noEntry)} / ${number(row.noExit)}<br><span class="table-note">截尾 ${number(row.rightCensored)}</span></td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待通过5分钟门控后的容量感知模拟样本。</td></tr>';
+      const shadowPositions = data.shadowPositions || [];
+      document.querySelector('#post-migration-survivor-shadow-position-rows').innerHTML = shadowPositions.length ? shadowPositions.map(row => (
+        `<tr><td>${dateTime(row.signalAtMs)}</td><td><b>${escapeHtml(row.profileId || '—')}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${pct(row.entryImpactPct)}</td><td>${pct(row.highestExecutableReturnPct)} / ${pct(row.lowestExecutableReturnPct)}</td><td class="${tone(row.netReturnPct)}">${pct(row.netReturnPct)}</td><td>${age(row.holdMs)}<br><span class="table-note">${escapeHtml(row.exitReason || row.missingExitReason || '—')}</span></td></tr>`
+      )).join('') : '<tr><td colspan="7" class="empty">暂无 PM-SURV 容量感知模拟仓位。</td></tr>';
       const rows = data.recent || [];
       document.querySelector('#post-migration-survivor-recent-rows').innerHTML = rows.length ? rows.map(row => {
         const audit = row.isHoldout ? `是${row.dropReason ? ' · 已触发退订' : ''}` : '否';
-        const hasPostDropMfe = row.postDropMfePct !== null
-          && row.postDropMfePct !== undefined
-          && Number.isFinite(Number(row.postDropMfePct));
-        const outcome = row.dropReason || (hasPostDropMfe ? `退订后MFE ${pct(row.postDropMfePct)}` : '—');
-        return `<tr><td>${dateTime(row.migrationAtMs)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td><b>${escapeHtml(row.stage || '—')}</b><br>${statusChip(row.status)}</td><td>${row.passed5m ? '✓' : '—'} / ${row.passed30m ? '✓' : '—'}</td><td>${audit}</td><td class="${tone(row.return60mPct ?? row.return30mPct ?? row.return5mPct)}">${pct(row.return5mPct)} / ${pct(row.return30mPct)} / ${pct(row.return60mPct)}</td><td>${pct(row.mfePct)} / ${pct(row.maePct)}</td><td>${rate(row.executableRecoveryPct)}</td><td>${escapeHtml(outcome)}</td></tr>`;
+        const hasPostDropMfe = row.postDropExecutableMfePct !== null
+          && row.postDropExecutableMfePct !== undefined
+          && Number.isFinite(Number(row.postDropExecutableMfePct));
+        const outcome = row.dropReason || (hasPostDropMfe ? `退订后可执行MFE ${pct(row.postDropExecutableMfePct)}` : '—');
+        return `<tr><td>${dateTime(row.migrationAtMs)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td><b>${escapeHtml(row.stage || '—')}</b><br>${statusChip(row.status)}</td><td>${row.passed5m ? '✓' : '—'} / ${row.passed30m ? '✓' : '—'}</td><td>${audit}</td><td class="${tone(row.return60mPct ?? row.return30mPct ?? row.return5mPct)}">${pct(row.return5mPct)} / ${pct(row.return30mPct)} / ${pct(row.return60mPct)}</td><td>${pct(row.mfePct)} / ${pct(row.maePct)}<br><span class="table-note">可执行 ${pct(row.executableMfePct)} / ${pct(row.executableMaePct)} · 异常 ${number(row.priceAnomalyCount)}</span></td><td>${rate(row.executableRecoveryPct)}</td><td>${escapeHtml(outcome)}</td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">等待迁移后分层存活样本。</td></tr>';
     }
 

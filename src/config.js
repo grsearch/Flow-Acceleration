@@ -6073,7 +6073,8 @@ const config = {
   // Post-migration Survivor Observer (PM-SURV). Every migrated mint receives
   // a bounded five-minute baseline. Only liquid, active survivors continue to
   // 30/60 minutes; a deterministic holdout estimates big-winner false negatives.
-  // This observer never opens a position, calls extra RPC endpoints, or signs.
+  // Passing 5m also opens isolated capacity-aware 30/60/120s Shadow rows. It
+  // never opens a live position, calls extra RPC endpoints, or signs.
   postMigrationSurvivorObserver: {
     enabled: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_ENABLED', true),
     positionSol: numberEnv('FLOW_POST_MIGRATION_SURVIVOR_POSITION_SOL', 1, {
@@ -6168,6 +6169,38 @@ const config = {
     dashboardLimit: integerEnv(
       'FLOW_POST_MIGRATION_SURVIVOR_DASHBOARD_LIMIT', 2_000,
       { min: 100, max: 10_000 },
+    ),
+    transientUpPriceRatio: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_TRANSIENT_UP_PRICE_RATIO', 20,
+      { min: 2, max: 1_000_000 },
+    ),
+    priceConfirmationWindowMs: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_WINDOW_MS', 500,
+      { min: 100, max: 60_000 },
+    ),
+    priceConfirmationMinPersistenceMs: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_MIN_PERSISTENCE_MS', 150,
+      { min: 0, max: 60_000 },
+    ),
+    priceConfirmationTolerancePct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_TOLERANCE_PCT', 25,
+      { min: 1, max: 100 },
+    ),
+    priceConfirmationMinWallets: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_MIN_WALLETS', 2,
+      { min: 1, max: 100 },
+    ),
+    shadowEnabled: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ENABLED', true),
+    shadowHoldMs: millisecondListEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_HOLDS_SECONDS', [30, 60, 120],
+    ),
+    shadowRoundTripCostPct: numberEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ROUND_TRIP_COST_PCT', 3.2,
+      { min: 0, max: 100 },
+    ),
+    shadowNoExitGraceMs: integerEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_NO_EXIT_GRACE_MS', 60_000,
+      { min: 1_000, max: 30 * 60_000 },
     ),
   },
 

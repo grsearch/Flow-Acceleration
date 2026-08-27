@@ -3,6 +3,7 @@
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 
 const MILESTONES = [300, 900, 1_800, 3_600];
+const DEFAULT_SHADOW_HOLDS_MS = [30_000, 60_000, 120_000];
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -15,6 +16,17 @@ function clamp(value, min, max) {
 
 function pctReturn(price, baseline) {
   return price > 0 && baseline > 0 ? ((price / baseline) - 1) * 100 : null;
+}
+
+function normalizeSide(value) {
+  const side = String(value || '').trim().toLowerCase();
+  return side === 'buy' || side === 'sell' ? side : 'unknown';
+}
+
+function normalizeHoldMs(values) {
+  const source = Array.isArray(values) && values.length ? values : DEFAULT_SHADOW_HOLDS_MS;
+  return [...new Set(source.map((value) => Math.trunc(finite(value, 0)))
+    .filter((value) => value >= 1_000 && value <= 30 * 60_000))].sort((a, b) => a - b);
 }
 
 function deterministicPercent(mint) {
@@ -81,6 +93,21 @@ class PostMigrationSurvivorObserver {
       ),
       maxEventsPerMint: Math.max(64, finite(config.maxEventsPerMint, 512)),
       dashboardLimit: Math.max(100, finite(config.dashboardLimit, 2_000)),
+      transientUpPriceRatio: Math.max(2, finite(config.transientUpPriceRatio, 20)),
+      priceConfirmationWindowMs: Math.max(100, finite(config.priceConfirmationWindowMs, 500)),
+      priceConfirmationMinPersistenceMs: Math.max(
+        0, finite(config.priceConfirmationMinPersistenceMs, 150),
+      ),
+      priceConfirmationTolerancePct: clamp(
+        finite(config.priceConfirmationTolerancePct, 25), 1, 100,
+      ),
+      priceConfirmationMinWallets: Math.max(
+        1, finite(config.priceConfirmationMinWallets, 2),
+      ),
+      shadowEnabled: config.shadowEnabled !== false,
+      shadowHoldMs: normalizeHoldMs(config.shadowHoldMs),
+      shadowRoundTripCostPct: Math.max(0, finite(config.shadowRoundTripCostPct, 3.2)),
+      shadowNoExitGraceMs: Math.max(1_000, finite(config.shadowNoExitGraceMs, 60_000)),
     };
     this.store = store;
     this.db = store?.db;
@@ -101,6 +128,13 @@ class PostMigrationSurvivorObserver {
       completed: 0,
       rightCensored: 0,
       milestonesWritten: 0,
+      invalidSides: 0,
+      transientPricesWithheld: 0,
+      transientPricesConfirmed: 0,
+      shadowOpened: 0,
+      shadowClosed: 0,
+      shadowNoEntry: 0,
+      shadowNoExit: 0,
       lastMigrationAt: null,
       lastCompletedAt: null,
     };
@@ -135,7 +169,11 @@ class PostMigrationSurvivorObserver {
         mfe_pct REAL NOT NULL DEFAULT 0,
         mae_pct REAL NOT NULL DEFAULT 0,
         executable_recovery_pct REAL,
+        executable_mfe_pct REAL NOT NULL DEFAULT 0,
+        executable_mae_pct REAL NOT NULL DEFAULT 0,
         post_drop_mfe_pct REAL,
+        post_drop_executable_mfe_pct REAL,
+        price_anomaly_count INTEGER NOT NULL DEFAULT 0,
         final_reason TEXT,
         decision_json TEXT,
         finalized_at_ms INTEGER,
@@ -167,7 +205,57 @@ class PostMigrationSurvivorObserver {
       );
       CREATE INDEX IF NOT EXISTS idx_pm_survivor_milestone_time
         ON post_migration_survivor_milestones(observed_at_ms DESC);
+      CREATE TABLE IF NOT EXISTS post_migration_survivor_shadow_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id INTEGER NOT NULL,
+        mint TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        hold_ms INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        signal_at_ms INTEGER NOT NULL,
+        entry_at_ms INTEGER,
+        entry_price REAL,
+        entry_market_price REAL,
+        entry_impact_pct REAL,
+        token_units REAL,
+        position_sol REAL NOT NULL,
+        highest_executable_return_pct REAL NOT NULL DEFAULT 0,
+        lowest_executable_return_pct REAL NOT NULL DEFAULT 0,
+        exit_at_ms INTEGER,
+        exit_price REAL,
+        exit_market_price REAL,
+        exit_impact_pct REAL,
+        gross_return_pct REAL,
+        net_return_pct REAL,
+        exit_reason TEXT,
+        missing_exit_reason TEXT,
+        entry_execution_json TEXT,
+        exit_execution_json TEXT,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        UNIQUE(observation_id, profile_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_pm_survivor_shadow_profile
+        ON post_migration_survivor_shadow_positions(profile_id, status, signal_at_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_pm_survivor_shadow_mint
+        ON post_migration_survivor_shadow_positions(mint, signal_at_ms DESC);
     `);
+    const observationColumns = new Set(this.db.prepare(
+      'PRAGMA table_info(post_migration_survivor_observations)',
+    ).all().map((row) => row.name));
+    const observationAdditions = [
+      ['executable_mfe_pct', 'REAL NOT NULL DEFAULT 0'],
+      ['executable_mae_pct', 'REAL NOT NULL DEFAULT 0'],
+      ['post_drop_executable_mfe_pct', 'REAL'],
+      ['price_anomaly_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+    for (const [name, definition] of observationAdditions) {
+      if (!observationColumns.has(name)) {
+        this.db.exec(
+          `ALTER TABLE post_migration_survivor_observations ADD COLUMN ${name} ${definition}`,
+        );
+      }
+    }
     const now = Date.now();
     const censored = this.db.prepare(`
       UPDATE post_migration_survivor_observations
@@ -176,6 +264,12 @@ class PostMigrationSurvivorObserver {
       WHERE status='OBSERVING'
     `).run(now).changes;
     this.metrics.rightCensored += censored;
+    this.db.prepare(`
+      UPDATE post_migration_survivor_shadow_positions
+      SET status='RIGHT_CENSORED', exit_reason='PROCESS_RESTART_NO_REPLAY',
+          updated_at_ms=?
+      WHERE status='OPEN'
+    `).run(now);
     this.statements.insert = this.db.prepare(`
       INSERT OR IGNORE INTO post_migration_survivor_observations (
         mint, symbol, creator, migration_at_ms, current_stage, status,
@@ -197,7 +291,10 @@ class PostMigrationSurvivorObserver {
         return_15m_pct=@return15mPct, return_30m_pct=@return30mPct,
         return_60m_pct=@return60mPct, mfe_pct=@mfePct, mae_pct=@maePct,
         executable_recovery_pct=@executableRecoveryPct,
-        post_drop_mfe_pct=@postDropMfePct, final_reason=@finalReason,
+        executable_mfe_pct=@executableMfePct, executable_mae_pct=@executableMaePct,
+        post_drop_mfe_pct=@postDropMfePct,
+        post_drop_executable_mfe_pct=@postDropExecutableMfePct,
+        price_anomaly_count=@priceAnomalyCount, final_reason=@finalReason,
         decision_json=@decisionJson, finalized_at_ms=@finalizedAtMs
       WHERE id=@id
     `);
@@ -219,6 +316,33 @@ class PostMigrationSurvivorObserver {
     this.statements.recentMilestones = this.db.prepare(`
       SELECT * FROM post_migration_survivor_milestones
       ORDER BY observed_at_ms DESC LIMIT ?
+    `);
+    this.statements.insertShadow = this.db.prepare(`
+      INSERT OR IGNORE INTO post_migration_survivor_shadow_positions (
+        observation_id, mint, profile_id, hold_ms, status, signal_at_ms,
+        entry_at_ms, entry_price, entry_market_price, entry_impact_pct,
+        token_units, position_sol, entry_execution_json, created_at_ms, updated_at_ms
+      ) VALUES (
+        @observationId, @mint, @profileId, @holdMs, @status, @signalAtMs,
+        @entryAtMs, @entryPrice, @entryMarketPrice, @entryImpactPct,
+        @tokenUnits, @positionSol, @entryExecutionJson, @createdAtMs, @updatedAtMs
+      )
+    `);
+    this.statements.updateShadow = this.db.prepare(`
+      UPDATE post_migration_survivor_shadow_positions SET
+        status=@status,
+        highest_executable_return_pct=@highestExecutableReturnPct,
+        lowest_executable_return_pct=@lowestExecutableReturnPct,
+        exit_at_ms=@exitAtMs, exit_price=@exitPrice,
+        exit_market_price=@exitMarketPrice, exit_impact_pct=@exitImpactPct,
+        gross_return_pct=@grossReturnPct, net_return_pct=@netReturnPct,
+        exit_reason=@exitReason, missing_exit_reason=@missingExitReason,
+        exit_execution_json=@exitExecutionJson, updated_at_ms=@updatedAtMs
+      WHERE id=@id
+    `);
+    this.statements.recentShadow = this.db.prepare(`
+      SELECT * FROM post_migration_survivor_shadow_positions
+      ORDER BY signal_at_ms DESC, hold_ms ASC LIMIT ?
     `);
   }
 
@@ -271,7 +395,11 @@ class PostMigrationSurvivorObserver {
       mfePct: 0,
       maePct: 0,
       executableRecoveryPct: null,
+      executableMfePct: 0,
+      executableMaePct: 0,
       postDropMfePct: null,
+      postDropExecutableMfePct: null,
+      priceAnomalyCount: 0,
       finalReason: null,
       finalizedAtMs: null,
       events: [],
@@ -280,6 +408,9 @@ class PostMigrationSurvivorObserver {
       latestDecision: null,
       lastRiskCheckAtMs: 0,
       lastRiskFlagged: false,
+      pendingUpwardPrice: null,
+      shadowEntryPendingAtMs: null,
+      shadowPositions: new Map(),
     };
     this.states.set(state.mint, state);
     this.metrics.migrationsObserved += 1;
@@ -291,11 +422,15 @@ class PostMigrationSurvivorObserver {
     if (!this.config.enabled || trade.market !== 'PUMP_AMM') return;
     const state = this.states.get(trade.mint);
     const timestampMs = finite(trade.timestampMs || trade.timestamp);
-    const price = finite(trade.price);
-    if (!state || !(timestampMs > 0) || !(price > 0)) return;
+    const rawPrice = finite(trade.price);
+    if (!state || !(timestampMs > 0) || !(rawPrice > 0)) return;
     if (timestampMs < state.migrationAtMs) return;
     this.metrics.tradesObserved += 1;
+    const side = normalizeSide(trade.side);
+    if (side === 'unknown') this.metrics.invalidSides += 1;
+    const price = this._acceptedMarkPrice(state, trade, timestampMs, rawPrice);
     if (!state.firstTradeAtMs) {
+      if (!(price > 0)) return;
       state.firstTradeAtMs = timestampMs;
       state.baselinePrice = price;
       state.peakPrice = price;
@@ -304,10 +439,12 @@ class PostMigrationSurvivorObserver {
       state.entryTokenUnits = buy.available ? finite(buy.tokenUnits) : null;
     }
     state.lastTradeAtMs = timestampMs;
-    state.lastPrice = price;
-    state.peakPrice = Math.max(state.peakPrice || price, price);
-    state.troughPrice = Math.min(state.troughPrice || price, price);
-    const markReturnPct = pctReturn(price, state.baselinePrice);
+    if (price > 0) {
+      state.lastPrice = price;
+      state.peakPrice = Math.max(state.peakPrice || price, price);
+      state.troughPrice = Math.min(state.troughPrice || price, price);
+    }
+    const markReturnPct = pctReturn(state.lastPrice, state.baselinePrice);
     if (Number.isFinite(markReturnPct)) {
       state.mfePct = Math.max(state.mfePct, markReturnPct);
       state.maePct = Math.min(state.maePct, markReturnPct);
@@ -315,20 +452,29 @@ class PostMigrationSurvivorObserver {
         state.postDropMfePct = Math.max(state.postDropMfePct ?? -Infinity, markReturnPct);
       }
     }
-    if (state.entryTokenUnits > 0) {
+    if (price > 0 && state.entryTokenUnits > 0) {
       const sell = executableSell(trade, state.entryTokenUnits, price, {
         rugMarkReturnPct: markReturnPct,
       });
       if (Number.isFinite(sell.proceedsSol)) {
         state.executableRecoveryPct = sell.proceedsSol / this.config.positionSol * 100;
+        const executableReturnPct = state.executableRecoveryPct - 100;
+        state.executableMfePct = Math.max(state.executableMfePct, executableReturnPct);
+        state.executableMaePct = Math.min(state.executableMaePct, executableReturnPct);
+        if (state.wouldDropAtMs && timestampMs >= state.wouldDropAtMs) {
+          state.postDropExecutableMfePct = Math.max(
+            state.postDropExecutableMfePct ?? -Infinity,
+            executableReturnPct,
+          );
+        }
       }
     }
     state.events.push({
       timestampMs,
       wallet: trade.wallet || null,
-      side: trade.side,
+      side,
       solAmount: finite(trade.solAmount, 0),
-      price,
+      price: rawPrice,
     });
     const pruneBefore = timestampMs - Math.max(5 * 60_000, this.config.inactivityMs);
     while (state.events.length > this.config.maxEventsPerMint
@@ -336,6 +482,11 @@ class PostMigrationSurvivorObserver {
       state.events.shift();
     }
     this._captureDueMilestones(state, timestampMs);
+    if (price > 0 && state.shadowEntryPendingAtMs
+      && timestampMs >= state.shadowEntryPendingAtMs) {
+      this._openShadowPositions(state, trade, timestampMs, price);
+    }
+    if (price > 0) this._advanceShadowPositions(state, trade, timestampMs, price);
     const hardReason = this._hardDropReason(state, timestampMs);
     if (hardReason) this._drop(state, hardReason, timestampMs, { hard: true });
   }
@@ -343,6 +494,7 @@ class PostMigrationSurvivorObserver {
   advanceTime(now = Date.now(), censorReason = null) {
     if (!this.config.enabled) return;
     for (const state of [...this.states.values()]) {
+      this._expireShadowPositions(state, now);
       if (censorReason) {
         this._finalize(state, 'RIGHT_CENSORED', censorReason, now);
         continue;
@@ -373,8 +525,11 @@ class PostMigrationSurvivorObserver {
   _stats(state, now, windowMs) {
     const from = now - windowMs;
     const rows = state.events.filter((event) => event.timestampMs >= from && event.timestampMs <= now);
-    const buys = rows.filter((event) => event.side === 'buy');
-    const sells = rows.filter((event) => event.side === 'sell');
+    // Persisted/replayed trades may use BUY/SELL while live events historically
+    // used lower-case values. Normalize at the boundary and again here so a
+    // casing mismatch can never silently turn a healthy flow window into zero.
+    const buys = rows.filter((event) => normalizeSide(event.side) === 'buy');
+    const sells = rows.filter((event) => normalizeSide(event.side) === 'sell');
     return {
       trades: rows.length,
       buyers: new Set(buys.map((event) => event.wallet).filter(Boolean)).size,
@@ -435,6 +590,7 @@ class PostMigrationSurvivorObserver {
     state.softFailure = null;
     state.passed5m = true;
     state.currentStage = 'TO_30M';
+    if (this.config.shadowEnabled) state.shadowEntryPendingAtMs = now;
     this.metrics.passedFiveMinutes += 1;
     this._recordMilestone(state, 'GATE_5M', now, 60_000, 'PASS', null, stats);
     this._persist(state);
@@ -550,8 +706,196 @@ class PostMigrationSurvivorObserver {
     if (result.changes) this.metrics.milestonesWritten += 1;
   }
 
+  _acceptedMarkPrice(state, trade, timestampMs, rawPrice) {
+    if (!(rawPrice > 0)) return null;
+    const reference = finite(state.lastPrice, finite(state.baselinePrice));
+    const pending = state.pendingUpwardPrice;
+    if (pending && timestampMs - pending.firstAtMs > this.config.priceConfirmationWindowMs) {
+      state.pendingUpwardPrice = null;
+    }
+    // Fast downward moves are always accepted immediately. The protection is
+    // deliberately one-sided so it cannot hide a rug or make stop losses look
+    // better than they would have been on chain.
+    if (!(reference > 0) || rawPrice <= reference
+      || rawPrice / reference < this.config.transientUpPriceRatio) {
+      if (rawPrice <= reference) state.pendingUpwardPrice = null;
+      return rawPrice;
+    }
+    const tolerance = this.config.priceConfirmationTolerancePct / 100;
+    let candidate = state.pendingUpwardPrice;
+    if (!candidate || Math.abs(rawPrice / candidate.price - 1) > tolerance) {
+      candidate = {
+        price: rawPrice,
+        firstAtMs: timestampMs,
+        lastAtMs: timestampMs,
+        wallets: new Set(),
+      };
+      state.pendingUpwardPrice = candidate;
+    }
+    candidate.lastAtMs = timestampMs;
+    if (trade.wallet) candidate.wallets.add(String(trade.wallet));
+    const persisted = timestampMs - candidate.firstAtMs
+      >= this.config.priceConfirmationMinPersistenceMs;
+    const distributed = candidate.wallets.size >= this.config.priceConfirmationMinWallets;
+    if (persisted || distributed) {
+      state.pendingUpwardPrice = null;
+      this.metrics.transientPricesConfirmed += 1;
+      return rawPrice;
+    }
+    state.priceAnomalyCount += 1;
+    this.metrics.transientPricesWithheld += 1;
+    return null;
+  }
+
+  _shadowProfileId(holdMs) {
+    return `PM5_X${Math.round(holdMs / 1_000)}`;
+  }
+
+  _openShadowPositions(state, trade, timestampMs, rawPrice) {
+    const signalAtMs = state.shadowEntryPendingAtMs;
+    state.shadowEntryPendingAtMs = null;
+    for (const holdMs of this.config.shadowHoldMs) {
+      const profileId = this._shadowProfileId(holdMs);
+      const entry = executableBuy(trade, this.config.positionSol, rawPrice);
+      const available = Boolean(entry.available && entry.price > 0 && entry.tokenUnits > 0);
+      const row = {
+        observationId: state.id,
+        mint: state.mint,
+        profileId,
+        holdMs,
+        status: available ? 'OPEN' : 'NO_ENTRY',
+        signalAtMs,
+        entryAtMs: available ? timestampMs : null,
+        entryPrice: available ? entry.price : null,
+        entryMarketPrice: finite(entry.marketPrice),
+        entryImpactPct: finite(entry.impactPct),
+        tokenUnits: available ? entry.tokenUnits : null,
+        positionSol: this.config.positionSol,
+        entryExecutionJson: JSON.stringify(entry),
+        createdAtMs: timestampMs,
+        updatedAtMs: timestampMs,
+      };
+      const inserted = this.statements.insertShadow.run(row);
+      if (!inserted.changes) continue;
+      if (!available) {
+        this.metrics.shadowNoEntry += 1;
+        continue;
+      }
+      const position = {
+        id: Number(inserted.lastInsertRowid),
+        ...row,
+        highestExecutableReturnPct: 0,
+        lowestExecutableReturnPct: 0,
+        exitAtMs: null,
+        exitPrice: null,
+        exitMarketPrice: null,
+        exitImpactPct: null,
+        grossReturnPct: null,
+        netReturnPct: null,
+        exitReason: null,
+        missingExitReason: null,
+        exitExecutionJson: null,
+      };
+      state.shadowPositions.set(profileId, position);
+      this.metrics.shadowOpened += 1;
+    }
+  }
+
+  _advanceShadowPositions(state, trade, timestampMs, rawPrice) {
+    for (const position of state.shadowPositions.values()) {
+      if (position.status !== 'OPEN') continue;
+      const exit = executableSell(trade, position.tokenUnits, rawPrice);
+      const available = Boolean(exit.available && Number.isFinite(exit.proceedsSol));
+      let grossReturnPct = null;
+      if (available) {
+        grossReturnPct = exit.proceedsSol / position.positionSol * 100 - 100;
+        position.highestExecutableReturnPct = Math.max(
+          position.highestExecutableReturnPct, grossReturnPct,
+        );
+        position.lowestExecutableReturnPct = Math.min(
+          position.lowestExecutableReturnPct, grossReturnPct,
+        );
+      }
+      const dueAtMs = position.entryAtMs + position.holdMs;
+      // MFE/MAE remains in memory until the position is resolved. Persisting
+      // every open position on every PumpSwap trade turns this observer into a
+      // synchronous hot-path writer and can stall the collector on busy mints.
+      if (timestampMs < dueAtMs) continue;
+      if (available) {
+        position.status = 'CLOSED';
+        position.exitAtMs = timestampMs;
+        position.exitPrice = finite(exit.price);
+        position.exitMarketPrice = finite(exit.marketPrice);
+        position.exitImpactPct = finite(exit.impactPct);
+        position.grossReturnPct = grossReturnPct;
+        position.netReturnPct = grossReturnPct - this.config.shadowRoundTripCostPct;
+        position.exitReason = `FIXED_HOLD_${Math.round(position.holdMs / 1_000)}S`;
+        position.exitExecutionJson = JSON.stringify(exit);
+        this.metrics.shadowClosed += 1;
+      } else if (timestampMs >= dueAtMs + this.config.shadowNoExitGraceMs) {
+        position.status = 'NO_EXIT';
+        position.exitAtMs = timestampMs;
+        position.exitReason = `NO_EXIT_AFTER_${Math.round(position.holdMs / 1_000)}S`;
+        position.missingExitReason = exit.reason || 'EXIT_CAPACITY_QUOTE_MISSING';
+        position.exitExecutionJson = JSON.stringify(exit);
+        this.metrics.shadowNoExit += 1;
+      }
+      this._persistShadowPosition(position, timestampMs);
+    }
+  }
+
+  _expireShadowPositions(state, now) {
+    for (const position of state.shadowPositions.values()) {
+      if (position.status !== 'OPEN') continue;
+      const expiresAtMs = position.entryAtMs + position.holdMs + this.config.shadowNoExitGraceMs;
+      if (now < expiresAtMs) continue;
+      position.status = 'NO_EXIT';
+      position.exitAtMs = now;
+      position.exitReason = `NO_EXIT_AFTER_${Math.round(position.holdMs / 1_000)}S`;
+      position.missingExitReason = 'NO_FUTURE_EXECUTABLE_QUOTE';
+      this.metrics.shadowNoExit += 1;
+      this._persistShadowPosition(position, now);
+    }
+  }
+
+  _finalizeShadowPositions(state, now, reason, status) {
+    state.shadowEntryPendingAtMs = null;
+    for (const position of state.shadowPositions.values()) {
+      if (position.status !== 'OPEN') continue;
+      const processBoundary = status === 'RIGHT_CENSORED';
+      position.status = processBoundary ? 'RIGHT_CENSORED' : 'NO_EXIT';
+      position.exitAtMs = now;
+      position.exitReason = reason;
+      position.missingExitReason = processBoundary
+        ? 'PROCESS_BOUNDARY_NO_REPLAY' : 'OBSERVER_ENDED_BEFORE_EXECUTABLE_EXIT';
+      if (!processBoundary) this.metrics.shadowNoExit += 1;
+      this._persistShadowPosition(position, now);
+    }
+  }
+
+  _persistShadowPosition(position, now) {
+    if (!this.statements.updateShadow || !position?.id) return;
+    this.statements.updateShadow.run({
+      id: position.id,
+      status: position.status,
+      highestExecutableReturnPct: position.highestExecutableReturnPct,
+      lowestExecutableReturnPct: position.lowestExecutableReturnPct,
+      exitAtMs: position.exitAtMs,
+      exitPrice: position.exitPrice,
+      exitMarketPrice: position.exitMarketPrice,
+      exitImpactPct: position.exitImpactPct,
+      grossReturnPct: position.grossReturnPct,
+      netReturnPct: position.netReturnPct,
+      exitReason: position.exitReason,
+      missingExitReason: position.missingExitReason,
+      exitExecutionJson: position.exitExecutionJson,
+      updatedAtMs: now,
+    });
+  }
+
   _finalize(state, status, reason, now) {
     if (!this.states.has(state.mint)) return;
+    this._finalizeShadowPositions(state, now, reason, status);
     state.status = status;
     state.currentStage = status;
     state.finalReason = reason;
@@ -588,7 +932,12 @@ class PostMigrationSurvivorObserver {
       mfePct: state.mfePct,
       maePct: state.maePct,
       executableRecoveryPct: state.executableRecoveryPct,
+      executableMfePct: state.executableMfePct,
+      executableMaePct: state.executableMaePct,
       postDropMfePct: Number.isFinite(state.postDropMfePct) ? state.postDropMfePct : null,
+      postDropExecutableMfePct: Number.isFinite(state.postDropExecutableMfePct)
+        ? state.postDropExecutableMfePct : null,
+      priceAnomalyCount: state.priceAnomalyCount,
       finalReason: state.finalReason,
       decisionJson: state.latestDecision ? JSON.stringify(state.latestDecision) : null,
       finalizedAtMs: state.finalizedAtMs,
@@ -622,13 +971,21 @@ class PostMigrationSurvivorObserver {
 
   dashboard({ limit = this.config.dashboardLimit } = {}) {
     if (!this.config.enabled || !this.statements.recent) {
-      return { runtime: this.health(), summary: {}, stages: [], dropReasons: [], recent: [], milestones: [] };
+      return {
+        runtime: this.health(), summary: {}, stages: [], dropReasons: [],
+        shadowCohorts: [], shadowPositions: [], recent: [], milestones: [],
+      };
     }
     const rows = this.statements.recent.all(Math.min(10_000, Math.max(100, Number(limit) || 2_000)));
+    const shadowRows = this.statements.recentShadow
+      ? this.statements.recentShadow.all(Math.min(20_000, Math.max(300, Number(limit) * 3 || 6_000)))
+      : [];
     const completed = rows.filter((row) => row.status === 'COMPLETE');
     const dropped = rows.filter((row) => row.status === 'DROPPED' || row.would_drop_at_ms);
     const holdouts = rows.filter((row) => row.is_holdout && row.would_drop_at_ms);
-    const falseNegatives = holdouts.filter((row) => finite(row.post_drop_mfe_pct, -Infinity) >= 50);
+    const falseNegatives = holdouts.filter(
+      (row) => finite(row.post_drop_executable_mfe_pct, -Infinity) >= 50,
+    );
     const byStage = new Map();
     for (const row of rows) byStage.set(row.current_stage, (byStage.get(row.current_stage) || 0) + 1);
     const byReason = new Map();
@@ -637,6 +994,50 @@ class PostMigrationSurvivorObserver {
       byReason.set(reason, (byReason.get(reason) || 0) + 1);
     }
     const mfe = aggregate(completed.map((row) => finite(row.mfe_pct)).filter(Number.isFinite));
+    const executableMfe = aggregate(
+      completed.map((row) => finite(row.executable_mfe_pct)).filter(Number.isFinite),
+    );
+    const shadowGroups = new Map();
+    for (const row of shadowRows) {
+      const group = shadowGroups.get(row.profile_id) || [];
+      group.push(row);
+      shadowGroups.set(row.profile_id, group);
+    }
+    const shadowCohorts = [...shadowGroups.entries()].map(([profileId, cohortRows]) => {
+      const entered = cohortRows.filter((row) => row.status !== 'NO_ENTRY');
+      const priced = cohortRows.filter(
+        (row) => row.status === 'CLOSED' && Number.isFinite(Number(row.net_return_pct)),
+      );
+      const returns = priced.map((row) => Number(row.net_return_pct));
+      const winners = returns.filter((value) => value > 0);
+      const losers = returns.filter((value) => value < 0);
+      const profit = winners.reduce((sum, value) => sum + value, 0);
+      const loss = Math.abs(losers.reduce((sum, value) => sum + value, 0));
+      return {
+        profileId,
+        holdMs: finite(cohortRows[0]?.hold_ms, 0),
+        signals: cohortRows.length,
+        entered: entered.length,
+        priced: priced.length,
+        winRatePct: priced.length ? winners.length / priced.length * 100 : null,
+        returns: aggregate(returns),
+        profitFactor: loss > 0 ? profit / loss : (profit > 0 ? null : 0),
+        maxWinnerPct: returns.length ? Math.max(...returns) : null,
+        big50RatePct: priced.length
+          ? returns.filter((value) => value >= 50).length / priced.length * 100 : null,
+        big100RatePct: priced.length
+          ? returns.filter((value) => value >= 100).length / priced.length * 100 : null,
+        noEntry: cohortRows.filter((row) => row.status === 'NO_ENTRY').length,
+        noExit: cohortRows.filter((row) => row.status === 'NO_EXIT').length,
+        rightCensored: cohortRows.filter((row) => row.status === 'RIGHT_CENSORED').length,
+        averageMfePct: aggregate(priced.map(
+          (row) => finite(row.highest_executable_return_pct),
+        )).averagePct,
+        averageMaePct: aggregate(priced.map(
+          (row) => finite(row.lowest_executable_return_pct),
+        )).averagePct,
+      };
+    }).sort((a, b) => a.holdMs - b.holdMs);
     return {
       runtime: this.health(),
       summary: {
@@ -647,17 +1048,46 @@ class PostMigrationSurvivorObserver {
         holdoutBig50FalseNegatives: falseNegatives.length,
         estimatedBig50MissRatePct: holdouts.length ? falseNegatives.length / holdouts.length * 100 : null,
         mfe,
+        executableMfe,
+        priceAnomalies: rows.reduce(
+          (sum, row) => sum + Math.max(0, finite(row.price_anomaly_count, 0)), 0,
+        ),
         passed5mBig50RatePct: completed.filter((row) => row.passed_5m).length
-          ? completed.filter((row) => row.passed_5m && finite(row.mfe_pct, -Infinity) >= 50).length
+          ? completed.filter(
+            (row) => row.passed_5m && finite(row.executable_mfe_pct, -Infinity) >= 50,
+          ).length
             / completed.filter((row) => row.passed_5m).length * 100 : null,
         passed30mBig50RatePct: completed.filter((row) => row.passed_30m).length
-          ? completed.filter((row) => row.passed_30m && finite(row.mfe_pct, -Infinity) >= 50).length
+          ? completed.filter(
+            (row) => row.passed_30m && finite(row.executable_mfe_pct, -Infinity) >= 50,
+          ).length
             / completed.filter((row) => row.passed_30m).length * 100 : null,
       },
       stages: [...byStage.entries()].map(([stage, count]) => ({ stage, count }))
         .sort((a, b) => b.count - a.count),
       dropReasons: [...byReason.entries()].map(([reason, count]) => ({ reason, count }))
         .sort((a, b) => b.count - a.count).slice(0, 20),
+      shadowCohorts,
+      shadowPositions: shadowRows.slice(0, 150).map((row) => ({
+        id: row.id,
+        mint: row.mint,
+        profileId: row.profile_id,
+        holdMs: row.hold_ms,
+        status: row.status,
+        signalAtMs: row.signal_at_ms,
+        entryAtMs: row.entry_at_ms,
+        entryPrice: row.entry_price,
+        entryMarketPrice: row.entry_market_price,
+        entryImpactPct: row.entry_impact_pct,
+        highestExecutableReturnPct: row.highest_executable_return_pct,
+        lowestExecutableReturnPct: row.lowest_executable_return_pct,
+        exitAtMs: row.exit_at_ms,
+        exitPrice: row.exit_price,
+        exitImpactPct: row.exit_impact_pct,
+        netReturnPct: row.net_return_pct,
+        exitReason: row.exit_reason,
+        missingExitReason: row.missing_exit_reason,
+      })),
       recent: rows.slice(0, 100).map((row) => ({
         id: row.id,
         mint: row.mint,
@@ -674,8 +1104,12 @@ class PostMigrationSurvivorObserver {
         return60mPct: row.return_60m_pct,
         mfePct: row.mfe_pct,
         maePct: row.mae_pct,
+        executableMfePct: row.executable_mfe_pct,
+        executableMaePct: row.executable_mae_pct,
         executableRecoveryPct: row.executable_recovery_pct,
         postDropMfePct: row.post_drop_mfe_pct,
+        postDropExecutableMfePct: row.post_drop_executable_mfe_pct,
+        priceAnomalyCount: row.price_anomaly_count,
       })),
       milestones: this.statements.recentMilestones.all(100),
     };
@@ -686,9 +1120,14 @@ class PostMigrationSurvivorObserver {
     for (const state of this.states.values()) {
       stageCounts[state.currentStage] = (stageCounts[state.currentStage] || 0) + 1;
     }
+    const activeShadowPositions = [...this.states.values()].reduce(
+      (sum, state) => sum + [...state.shadowPositions.values()]
+        .filter((position) => position.status === 'OPEN').length,
+      0,
+    );
     return {
       enabled: this.config.enabled,
-      mode: 'PM_SURV_OBSERVER_ONLY',
+      mode: 'PM_SURV_OBSERVER_SHADOW',
       observerOnly: true,
       sendsTransactions: false,
       extraRpcCalls: false,
@@ -702,6 +1141,14 @@ class PostMigrationSurvivorObserver {
       maxAgeMs: this.config.maxAgeMs,
       holdoutPct: this.config.holdoutPct,
       maxActive: this.config.maxActive,
+      shadowEnabled: this.config.shadowEnabled,
+      shadowHoldMs: this.config.shadowHoldMs,
+      shadowRoundTripCostPct: this.config.shadowRoundTripCostPct,
+      activeShadowPositions,
+      transientUpPriceRatio: this.config.transientUpPriceRatio,
+      priceConfirmationWindowMs: this.config.priceConfirmationWindowMs,
+      priceConfirmationMinPersistenceMs: this.config.priceConfirmationMinPersistenceMs,
+      priceConfirmationMinWallets: this.config.priceConfirmationMinWallets,
     };
   }
 }

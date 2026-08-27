@@ -8,7 +8,9 @@ const {
   deterministicPercent,
 } = require('../src/core/PostMigrationSurvivorObserver');
 
-function trade({ mint, timestampMs, price, side = 'buy', wallet = 'wallet-a', solAmount = 1 }) {
+function trade({ mint, timestampMs, price, side = 'BUY', wallet = 'wallet-a', solAmount = 1 }) {
+  const poolBaseReservesRaw = 1_000_000_000_000n;
+  const poolQuoteReservesRaw = BigInt(Math.max(1, Math.round(price * 1e15)));
   return {
     mint,
     timestampMs,
@@ -17,6 +19,9 @@ function trade({ mint, timestampMs, price, side = 'buy', wallet = 'wallet-a', so
     side,
     wallet,
     solAmount,
+    poolBaseReservesRaw: poolBaseReservesRaw.toString(),
+    poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
+    virtualQuoteReservesRaw: '0',
   };
 }
 
@@ -61,6 +66,15 @@ function main() {
       stage30MinExecutableRecoveryPct: 50,
       maxEventsPerMint: 64,
       dashboardLimit: 100,
+      transientUpPriceRatio: 20,
+      priceConfirmationWindowMs: 500,
+      priceConfirmationMinPersistenceMs: 150,
+      priceConfirmationTolerancePct: 25,
+      priceConfirmationMinWallets: 2,
+      shadowEnabled: true,
+      shadowHoldMs: [30_000, 60_000, 120_000],
+      shadowRoundTripCostPct: 3.2,
+      shadowNoExitGraceMs: 60_000,
     },
   });
   observer.start();
@@ -75,7 +89,7 @@ function main() {
       mint: survivorMint,
       timestampMs: migratedAt + 245_000 + index * 7_000,
       price: 1.1 + index * 0.01,
-      side: index === 3 ? 'sell' : 'buy',
+      side: index === 3 ? 'SELL' : 'BUY',
       wallet: `five-minute-${index % 4}`,
       solAmount: index === 3 ? 0.2 : 0.5,
     }));
@@ -84,12 +98,49 @@ function main() {
   assert.strictEqual(observer.health().passedFiveMinutes, 1,
     'a liquid two-way five-minute survivor should advance to the 30-minute layer');
 
+  observer.observeTrade(trade({
+    mint: survivorMint,
+    timestampMs: migratedAt + 301_000,
+    price: 1.2,
+    wallet: 'shadow-entry-wallet',
+  }));
+  observer.observeTrade(trade({
+    mint: survivorMint,
+    timestampMs: migratedAt + 332_000,
+    price: 1.25,
+    wallet: 'shadow-exit-30',
+  }));
+  observer.observeTrade(trade({
+    mint: survivorMint,
+    timestampMs: migratedAt + 362_000,
+    price: 1.3,
+    wallet: 'shadow-exit-60',
+  }));
+  observer.observeTrade(trade({
+    mint: survivorMint,
+    timestampMs: migratedAt + 422_000,
+    price: 1.4,
+    wallet: 'shadow-exit-120',
+  }));
+  observer.observeTrade(trade({
+    mint: survivorMint,
+    timestampMs: migratedAt + 500_000,
+    price: 100,
+    wallet: 'single-print-anomaly',
+  }));
+  observer.observeTrade(trade({
+    mint: survivorMint,
+    timestampMs: migratedAt + 501_000,
+    price: 1.3,
+    wallet: 'normal-price-after-anomaly',
+  }));
+
   for (let index = 0; index < 12; index += 1) {
     observer.observeTrade(trade({
       mint: survivorMint,
       timestampMs: migratedAt + 25 * 60_000 + index * 24_000,
       price: 1.25 + index * 0.01,
-      side: index % 5 === 4 ? 'sell' : 'buy',
+      side: index % 5 === 4 ? 'SELL' : 'BUY',
       wallet: `thirty-minute-${index % 6}`,
       solAmount: index % 5 === 4 ? 0.2 : 0.6,
     }));
@@ -112,7 +163,22 @@ function main() {
   assert.strictEqual(completed.passed_5m, 1);
   assert.strictEqual(completed.passed_30m, 1);
   assert(completed.mfe_pct >= 100, 'the observer should retain a 60-minute big winner');
+  assert(completed.mfe_pct < 1_000,
+    'a single transient upward price must not contaminate the MFE label');
+  assert(completed.executable_mfe_pct < 1_000,
+    'a withheld transient price must not contaminate executable MFE');
+  assert(completed.price_anomaly_count >= 1,
+    'withheld upward prices should be counted for auditability');
   assert(Number.isFinite(completed.return_60m_pct), 'the 60-minute return must be persisted');
+  const shadowRows = db.prepare(
+    'SELECT * FROM post_migration_survivor_shadow_positions WHERE mint=? ORDER BY hold_ms',
+  ).all(survivorMint);
+  assert.deepStrictEqual(shadowRows.map((row) => row.profile_id),
+    ['PM5_X30', 'PM5_X60', 'PM5_X120']);
+  assert(shadowRows.every((row) => row.status === 'CLOSED'),
+    'all three capacity-aware fixed-hold cohorts should resolve');
+  assert(shadowRows.every((row) => Number.isFinite(row.net_return_pct)),
+    'resolved shadow cohorts should persist executable net returns');
 
   const rugMint = 'PostMigrationRug1111111111111111111111111111';
   observer.onGraduated({ mint: rugMint, migratedAt: migratedAt + 4_000_000 });
@@ -138,6 +204,9 @@ function main() {
   assert.strictEqual(dashboard.summary.completed, 1);
   assert.strictEqual(dashboard.summary.dropped, 1);
   assert(dashboard.summary.mfe.big100RatePct >= 100);
+  assert.strictEqual(dashboard.shadowCohorts.length, 3);
+  assert.strictEqual(dashboard.runtime.mode, 'PM_SURV_OBSERVER_SHADOW');
+  assert(dashboard.summary.executableMfe.count >= 1);
   assert(dashboard.milestones.length >= 6);
 
   assert.strictEqual(deterministicPercent('same-mint'), deterministicPercent('same-mint'));
