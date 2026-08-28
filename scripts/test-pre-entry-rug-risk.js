@@ -30,6 +30,17 @@ const config = {
   beijingRiskStartHour: 16,
   beijingRiskEndHour: 20,
   beijingRiskMinFlags: 4,
+  cliffEnabled: true,
+  cliffWindowMs: 2_000,
+  cliffMaxSells: 3,
+  cliffMinDropPct: 50,
+  cliffPersistMaxRatioPct: 75,
+  cliffPairIgnoreMs: 100,
+  slowRugMinDurationMs: 10_000,
+  dumpabilityEnabled: true,
+  dumpabilityPositionSol: 1,
+  dumpTop1ReserveWarnPct: 25,
+  dumpTop3ReserveWarnPct: 50,
   crossMintEnabled: true,
   templateWindowMs: 5_000,
   templateLargeBuyMinSol: 1,
@@ -45,6 +56,80 @@ const config = {
   maxToxicWallets: 4_096,
   maxToxicTemplates: 1_024,
 };
+
+{
+  const tracker = new PreEntryRugRiskTracker({ config });
+  tracker.observeTrade({
+    mint: 'cliff-rug', side: 'BUY', market: 'PUMP_AMM', wallet: 'buyer',
+    timestampMs: 1_000, price: 1,
+  });
+  tracker.observeTrade({
+    mint: 'cliff-rug', side: 'SELL', market: 'PUMP_AMM', wallet: 'dumper',
+    timestampMs: 2_000, price: 0.12,
+  });
+  const confirmation = {
+    mint: 'cliff-rug', side: 'BUY', market: 'PUMP_AMM', wallet: 'independent',
+    timestampMs: 2_100, price: 0.18,
+  };
+  tracker.observeTrade(confirmation);
+  assert.equal(confirmation.rugPath.kind, 'CLIFF_DROP_50');
+  assert.equal(confirmation.rugPath.confirmed, true);
+  const outcome = tracker.classifyOutcome('cliff-rug', 1, 1_000, 2_100);
+  assert.equal(outcome.kind, 'CLIFF_RUG_80');
+  assert.equal(tracker.classifyOutcome('cliff-rug', 1)?.kind, 'CLIFF_RUG_80');
+  assert.equal(tracker.health().cliffConfirmed, 1);
+  assert.equal(tracker.health().cliffRug80, 1);
+}
+
+{
+  const tracker = new PreEntryRugRiskTracker({ config });
+  tracker.observeTrade({
+    mint: 'paired-artifact', side: 'BUY', market: 'PUMP_AMM', wallet: 'router',
+    timestampMs: 1_000, price: 1,
+  });
+  tracker.observeTrade({
+    mint: 'paired-artifact', side: 'SELL', market: 'PUMP_AMM', wallet: 'router',
+    timestampMs: 1_050, price: 0.1,
+  });
+  const snapshot = tracker.snapshot('paired-artifact', 1_100);
+  assert.equal(snapshot.rugPath, null);
+  assert.equal(tracker.health().cliffPairedArtifactsIgnored, 1);
+}
+
+{
+  const tracker = new PreEntryRugRiskTracker({ config });
+  const prices = [1, 0.96, 0.93, 0.89, 0.85, 0.81, 0.77, 0.73, 0.69, 0.65];
+  prices.forEach((price, index) => tracker.observeTrade({
+    mint: 'slow-rug', side: index % 2 === 0 ? 'BUY' : 'SELL', market: 'PUMP_AMM',
+    wallet: `wallet-${index}`, timestampMs: 1_000 + index * 1_500, price,
+  }));
+  const snapshot = tracker.snapshot('slow-rug', 14_600);
+  assert.equal(snapshot.rugPath.kind, 'SLOW_RUG_30');
+  assert.equal(tracker.classifyOutcome('slow-rug', 1, 1_000).kind, 'SLOW_RUG_30');
+}
+
+{
+  const tracker = new PreEntryRugRiskTracker({ config });
+  for (let index = 0; index < 10; index += 1) {
+    tracker.observeTrade({
+      mint: 'dumpability', side: 'BUY', market: 'PUMP_AMM',
+      wallet: index < 6 ? 'large-observed-wallet' : `wallet-${index}`,
+      tokenAmount: index < 6 ? 50_000 : 10_000,
+      solAmount: 1,
+      timestampMs: 1_000 + index * 500,
+      price: 0.0001,
+      poolBaseReservesRaw: '1000000000000',
+      poolQuoteReservesRaw: '100000000000',
+      virtualQuoteReservesRaw: '0',
+    });
+  }
+  const snapshot = tracker.snapshot('dumpability', 5_600);
+  assert.equal(snapshot.dumpability.sampleReady, true);
+  assert.ok(snapshot.dumpability.top1ReservePct >= 25);
+  assert.ok(snapshot.dumpability.top1RecoveryPct < 100);
+  assert.ok(snapshot.researchWarnings.includes('OBSERVED_TOP1_DUMPABLE_INVENTORY'));
+  assert.equal(tracker.health().dumpabilityWarnings, 1);
+}
 
 {
   const tracker = new PreEntryRugRiskTracker({ config });

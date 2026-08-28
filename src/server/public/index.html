@@ -2860,6 +2860,19 @@
         ['Holder Growth N', [['模式', holderGrowth.enabled ? 'SHADOW N · 15秒控制 + NQ质量组' : '关闭'], ['快照评估 / 命中', `${number(holderGrowth.evaluated)} / ${number(holderGrowth.matched)}`], ['待入场', number(holderGrowth.pendingEntries)], ['活动仓位', number(holderGrowth.activePositions)], ['开仓 / 关闭', `${number(holderGrowth.opened)} / ${number(holderGrowth.closed)}`], ['口径', '可观测独立买家 + 留存 + Curve + 峰后资金流'], ['数据表', '历史全保留，新 cohort 独立'], ['链上交易', '永不发送']]],
         ['Scope Guard', [['实盘入场', `${number(liveStrategies.filter(strategy => strategy.entryEnabled !== false).length)} 个独立策略启用`], ['启用策略', liveStrategies.filter(strategy => strategy.entryEnabled !== false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['已停新开仓', liveStrategies.filter(strategy => strategy.entryEnabled === false).map(strategy => escapeHtml(strategy.code || strategy.id)).join(' / ') || '无'], ['存量退出', '继续按各自原规则执行'], ['旧 Primary 实盘入口', '已移除'], ['原始数据', '全部保留'], ['同 Mint 实盘仓位', `最多 ${number(trading.maxConcurrentPositionsPerMint || 3)} 仓`], ['每日笔数 / 日亏损停机', '不限制'], ['安全锁 / 钱包保留额', '保留'], ['链上交易', escapeHtml(trading.mode || 'DISABLED')]]],
       ];
+      cards.splice(4, 0, ['RUG 路径与可砸库存', [
+        ['结果标签', escapeHtml(rugRisk.outcomeLabels || '等待前向样本')],
+        ['极速候选 / 已确认', `${number(rugRisk.cliffCandidates)} / ${number(rugRisk.cliffConfirmed)}`],
+        ['CLIFF_RUG_70 / 80', `${number(rugRisk.cliffRug70)} / ${number(rugRisk.cliffRug80)}`],
+        ['慢跌 SLOW_RUG_30', number(rugRisk.slowRug30)],
+        ['同钱包配对伪事件', number(rugRisk.cliffPairedArtifactsIgnored)],
+        ['确认前已恢复', number(rugRisk.cliffRecoveredBeforeConfirm)],
+        ['库存评估 / 样本完整', `${number(rugRisk.dumpabilityEvaluations)} / ${number(rugRisk.dumpabilitySampleReady)}`],
+        ['高可砸库存警告', number(rugRisk.dumpabilityWarnings)],
+        ['库存用途', '仅研究，不拦截实盘'],
+        ['极速RUG用途', '修正 Shadow 可执行退出容量'],
+        ['额外 RPC / DB', '无 / 无'],
+      ]]);
       document.querySelector('#health-cards').innerHTML = cards.map(([title,rows]) => `<article class="card"><div class="section-title"><h2>${title}</h2></div><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${value}</b></div>`).join('')}</div></article>`).join('');
       const rugStrategies = rugRisk.strategyStats || [];
       document.querySelector('#rug-guard-strategy-rows').innerHTML = rugStrategies.length

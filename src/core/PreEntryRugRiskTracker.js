@@ -2,6 +2,11 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  executableBuy,
+  reservesForTrade,
+  simulateSellSequence,
+} = require('./ShadowExecutionModel');
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -48,6 +53,8 @@ class PreEntryRugRiskTracker {
     this.toxicPersistPromise = null;
     this.guardStrategies = new Map();
     this.recentGuardDecisions = [];
+    this.recentCliffOutcomes = [];
+    this.recentDumpabilityWarnings = [];
     this.lastSweepAt = 0;
     this.metrics = {
       observedTrades: 0,
@@ -69,6 +76,16 @@ class PreEntryRugRiskTracker {
       toxicFuzzyMatches: 0,
       flaggedCrossMintWallets: 0,
       flaggedCrossMintTemplates: 0,
+      cliffCandidates: 0,
+      cliffConfirmed: 0,
+      cliffPairedArtifactsIgnored: 0,
+      cliffRecoveredBeforeConfirm: 0,
+      cliffRug70: 0,
+      cliffRug80: 0,
+      slowRug30: 0,
+      dumpabilityEvaluations: 0,
+      dumpabilitySampleReady: 0,
+      dumpabilityWarnings: 0,
       guardEvaluations: 0,
       guardPassed: 0,
       guardRejected: 0,
@@ -101,6 +118,8 @@ class PreEntryRugRiskTracker {
     this.toxicTemplateIndex.clear();
     this.guardStrategies.clear();
     this.recentGuardDecisions = [];
+    this.recentCliffOutcomes = [];
+    this.recentDumpabilityWarnings = [];
   }
 
   observeTrade(trade) {
@@ -111,10 +130,13 @@ class PreEntryRugRiskTracker {
     let state = this.states.get(trade.mint);
     if (!state) {
       state = {
+        mint: trade.mint,
         events: [], offset: 0, lastAt: timestampMs, version: 0,
         cachedVersion: -1, cachedToxicVersion: -1, cachedRisk: null,
         peakPrice: price, peakAt: timestampMs, template: null,
         templatePeakPrice: null, templateToxicLabeled: false,
+        cliffCandidate: null, confirmedCliffs: [], slowRugLabel: null,
+        lastTrade: null, lastDumpabilityVersion: -1,
       };
       this.states.set(trade.mint, state);
     }
@@ -124,7 +146,12 @@ class PreEntryRugRiskTracker {
       price,
       wallet: String(trade.wallet || ''),
       solAmount: finite(trade.solAmount, 0),
+      tokenAmount: finite(trade.tokenAmount, 0),
+      market: String(trade.market || ''),
+      signature: String(trade.signature || ''),
+      slot: finite(trade.slot),
     });
+    state.lastTrade = this._capacityTrade(trade);
     state.version += 1;
     state.lastAt = Math.max(state.lastAt, timestampMs);
     if (!(state.peakPrice > 0) || price > state.peakPrice) {
@@ -140,6 +167,9 @@ class PreEntryRugRiskTracker {
       this._refreshCrossMintTemplate(state, timestampMs, price);
       this._labelRapidCollapse(trade.mint, state, timestampMs, price);
     }
+    this._observeRugPath(trade.mint, state, state.events[state.events.length - 1]);
+    const activePath = this._activeRugPath(state, timestampMs, price);
+    if (activePath) trade.rugPath = activePath;
     this.metrics.observedTrades += 1;
     this.metrics.lastActionAt = this.now();
   }
@@ -210,6 +240,8 @@ class PreEntryRugRiskTracker {
     const buysPerBuyer = uniqueBuyers > 0 ? buys / uniqueBuyers : null;
     const maxWalletBuyTxSharePct = buys > 0 ? maxWalletBuyTrades / buys * 100 : null;
     const repeatedBuySizeSharePct = buys > 0 ? repeatedBuySizeTrades / buys * 100 : null;
+    const dumpability = this._dumpabilitySnapshot(state, rows, timestampMs);
+    const rugPath = this._activeRugPath(state, timestampMs, rows[rows.length - 1].price);
     const template = state.template
       && timestampMs - state.template.observedAt <= this._cfg('toxicCollapseWindowMs', 30_000)
       ? state.template : null;
@@ -295,6 +327,9 @@ class PreEntryRugRiskTracker {
       checks,
       signatures,
       flaggedReasons,
+      rugPath,
+      dumpability,
+      researchWarnings: dumpability?.warnings || [],
     };
     if (flagged) this._recordSignatureMetrics(risk);
     state.cachedRisk = risk;
@@ -368,6 +403,28 @@ class PreEntryRugRiskTracker {
     return decision;
   }
 
+  classifyOutcome(mint, entryPrice, entryAt, observedAt = this.now()) {
+    const state = this.states.get(mint);
+    const entry = finite(entryPrice);
+    const enteredAt = finite(entryAt, 0);
+    if (!state || !(entry > 0)) return null;
+    const cliff = state.confirmedCliffs.find((row) => row.confirmedAt >= enteredAt);
+    if (cliff) {
+      const returnPct = ((cliff.persistedPrice / entry) - 1) * 100;
+      const kind = returnPct <= -80
+        ? 'CLIFF_RUG_80' : (returnPct <= -70 ? 'CLIFF_RUG_70' : 'CLIFF_DROP_50');
+      return { ...cliff, kind, entryPrice: entry, entryAt: enteredAt, returnPct, observedAt };
+    }
+    const slow = state.slowRugLabel;
+    if (slow?.labeledAt >= enteredAt) {
+      const returnPct = ((slow.price / entry) - 1) * 100;
+      if (returnPct <= -30) return {
+        ...slow, kind: 'SLOW_RUG_30', entryPrice: entry, entryAt: enteredAt, returnPct, observedAt,
+      };
+    }
+    return null;
+  }
+
   advanceTime(now = this.now()) {
     if (!this.config.enabled || now - this.lastSweepAt < this.config.sweepIntervalMs) return;
     this.lastSweepAt = now;
@@ -385,6 +442,8 @@ class PreEntryRugRiskTracker {
       mode: 'UNIVERSAL_PRE_ENTRY_RUG_GUARD',
       scope: 'ALL_LIVE_AND_SHADOW_ENTRIES',
       enforcement: 'NATIVE_FLAGGED_BLOCK_OR_CROSS_MINT_TOXIC_BLOCK',
+      outcomeLabels: 'CLIFF_DROP_50/CLIFF_RUG_70/CLIFF_RUG_80/SLOW_RUG_30',
+      dumpabilityMode: 'RESEARCH_ONLY_NO_ENTRY_BLOCK',
       livePath: 'MEMORY_ONLY_BOUNDED_CACHE_REFRESH',
       sendsTransactions: false,
       trackedMints: this.states.size,
@@ -411,6 +470,17 @@ class PreEntryRugRiskTracker {
         beijingRiskStartHour: this.config.beijingRiskStartHour,
         beijingRiskEndHour: this.config.beijingRiskEndHour,
         beijingRiskMinFlags: this.config.beijingRiskMinFlags,
+        cliffEnabled: this._cfg('cliffEnabled', true),
+        cliffWindowMs: this._cfg('cliffWindowMs', 2_000),
+        cliffMaxSells: this._cfg('cliffMaxSells', 3),
+        cliffMinDropPct: this._cfg('cliffMinDropPct', 50),
+        cliffPersistMaxRatioPct: this._cfg('cliffPersistMaxRatioPct', 75),
+        cliffPairIgnoreMs: this._cfg('cliffPairIgnoreMs', 100),
+        slowRugMinDurationMs: this._cfg('slowRugMinDurationMs', 10_000),
+        dumpabilityEnabled: this._cfg('dumpabilityEnabled', true),
+        dumpabilityPositionSol: this._cfg('dumpabilityPositionSol', 1),
+        dumpTop1ReserveWarnPct: this._cfg('dumpTop1ReserveWarnPct', 25),
+        dumpTop3ReserveWarnPct: this._cfg('dumpTop3ReserveWarnPct', 50),
         crossMintEnabled: this.config.crossMintEnabled !== false,
         templateWindowMs: this._cfg('templateWindowMs', 5_000),
         templateMinLargeBuys: this._cfg('templateMinLargeBuys', 4),
@@ -426,6 +496,8 @@ class PreEntryRugRiskTracker {
       strategyStats: [...this.guardStrategies.values()]
         .sort((left, right) => right.evaluated - left.evaluated),
       recentFlagged: this.recentGuardDecisions.slice(0, 50),
+      recentCliffOutcomes: this.recentCliffOutcomes.slice(0, 50),
+      recentDumpabilityWarnings: this.recentDumpabilityWarnings.slice(0, 50),
       ...this.metrics,
     };
   }
@@ -462,6 +534,9 @@ class PreEntryRugRiskTracker {
       checks: {},
       signatures: {},
       flaggedReasons: [],
+      rugPath: null,
+      dumpability: null,
+      researchWarnings: [],
     };
   }
 
@@ -481,6 +556,208 @@ class PreEntryRugRiskTracker {
     if (risk.signatures?.crossMintToxicTemplate) this.metrics.flaggedCrossMintTemplates += 1;
     if (risk.beijingRiskWindow && risk.score >= this.config.beijingRiskMinFlags
       && risk.score < this.config.minFlags) this.metrics.flaggedBeijingRiskWindow += 1;
+  }
+
+  _capacityTrade(trade) {
+    return {
+      market: trade.market,
+      poolBaseReservesRaw: trade.poolBaseReservesRaw,
+      poolQuoteReservesRaw: trade.poolQuoteReservesRaw,
+      virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw,
+      virtualTokenReservesRaw: trade.virtualTokenReservesRaw,
+      virtualSolReservesRaw: trade.virtualSolReservesRaw,
+    };
+  }
+
+  _observeRugPath(mint, state, event) {
+    if (this._cfg('cliffEnabled', true) === false) return;
+    const pairIgnoreMs = this._cfg('cliffPairIgnoreMs', 100);
+    const persistRatio = this._cfg('cliffPersistMaxRatioPct', 75) / 100;
+    const candidate = state.cliffCandidate;
+    if (candidate) {
+      const pairedBuy = event.side === 'BUY' && event.wallet
+        && candidate.sellWallets.includes(event.wallet)
+        && event.timestampMs - candidate.lastSellAt >= 0
+        && event.timestampMs - candidate.lastSellAt <= pairIgnoreMs;
+      if (pairedBuy) {
+        state.cliffCandidate = null;
+        this.metrics.cliffPairedArtifactsIgnored += 1;
+      } else if (event.timestampMs > candidate.lastSellAt) {
+        const independent = event.side !== 'SELL'
+          || !candidate.sellWallets.includes(event.wallet);
+        if (independent && event.price <= candidate.preShockPrice * persistRatio) {
+          const confirmed = {
+            kind: 'CLIFF_DROP_50', confirmed: true, mint,
+            startedAt: candidate.startedAt, confirmedAt: event.timestampMs,
+            preShockPrice: candidate.preShockPrice,
+            persistedPrice: event.price,
+            dropPct: (1 - event.price / candidate.preShockPrice) * 100,
+            sellCount: candidate.sellCount,
+            sellWallets: [...candidate.sellWallets],
+          };
+          state.confirmedCliffs.unshift(confirmed);
+          if (state.confirmedCliffs.length > 8) state.confirmedCliffs.length = 8;
+          state.cliffCandidate = null;
+          this.metrics.cliffConfirmed += 1;
+          if (confirmed.persistedPrice / confirmed.preShockPrice <= 0.3) this.metrics.cliffRug70 += 1;
+          if (confirmed.persistedPrice / confirmed.preShockPrice <= 0.2) this.metrics.cliffRug80 += 1;
+          this.recentCliffOutcomes.unshift(confirmed);
+          if (this.recentCliffOutcomes.length > 100) this.recentCliffOutcomes.length = 100;
+          return;
+        }
+        if (event.price > candidate.preShockPrice * persistRatio) {
+          state.cliffCandidate = null;
+          this.metrics.cliffRecoveredBeforeConfirm += 1;
+        }
+      }
+      if (state.cliffCandidate
+        && event.timestampMs - state.cliffCandidate.startedAt
+          > this._cfg('cliffWindowMs', 2_000) + 2_000) state.cliffCandidate = null;
+    }
+
+    if (event.side !== 'SELL') return;
+    const sameMarket = (row) => !event.market || !row.market || row.market === event.market;
+    let pairedBefore = false;
+    for (let index = state.events.length - 2; index >= state.offset; index -= 1) {
+      const row = state.events[index];
+      const ageMs = event.timestampMs - row.timestampMs;
+      if (ageMs > pairIgnoreMs) break;
+      if (ageMs >= 0 && row.side === 'BUY' && row.wallet
+        && row.wallet === event.wallet && sameMarket(row)) {
+        pairedBefore = true;
+        break;
+      }
+    }
+    if (pairedBefore) {
+      this.metrics.cliffPairedArtifactsIgnored += 1;
+      return;
+    }
+    const windowMs = this._cfg('cliffWindowMs', 2_000);
+    const recentSells = [];
+    for (let index = state.events.length - 1; index >= state.offset; index -= 1) {
+      const row = state.events[index];
+      if (row.timestampMs < event.timestampMs - windowMs) break;
+      if (row.timestampMs <= event.timestampMs && row.side === 'SELL' && sameMarket(row)) {
+        recentSells.unshift(row);
+      }
+    }
+    const maxSells = this._cfg('cliffMaxSells', 3);
+    if (!recentSells.length || recentSells.length > maxSells) return;
+    const firstSell = recentSells[0];
+    let preShockPrice = 0;
+    for (let index = state.events.length - 1; index >= state.offset; index -= 1) {
+      const row = state.events[index];
+      if (row.timestampMs < firstSell.timestampMs - windowMs) break;
+      if (row.timestampMs < firstSell.timestampMs && sameMarket(row)) {
+        preShockPrice = Math.max(preShockPrice, row.price);
+      }
+    }
+    if (!(preShockPrice > 0)) return;
+    const minPrice = Math.min(...recentSells.map((row) => row.price));
+    const dropPct = (1 - minPrice / preShockPrice) * 100;
+    if (dropPct < this._cfg('cliffMinDropPct', 50)) return;
+    state.cliffCandidate = {
+      startedAt: firstSell.timestampMs,
+      lastSellAt: event.timestampMs,
+      preShockPrice,
+      minPrice,
+      dropPct,
+      sellCount: recentSells.length,
+      sellWallets: [...new Set(recentSells.map((row) => row.wallet).filter(Boolean))],
+    };
+    this.metrics.cliffCandidates += 1;
+  }
+
+  _activeRugPath(state, timestampMs, price) {
+    const cliff = state.confirmedCliffs.find((row) => (
+      timestampMs - row.confirmedAt <= this.config.stateRetentionMs
+    ));
+    if (cliff) return cliff;
+    if (state.cliffCandidate) return {
+      kind: 'CLIFF_CANDIDATE', confirmed: false,
+      ...state.cliffCandidate,
+    };
+    const slowMinDurationMs = this._cfg('slowRugMinDurationMs', 10_000);
+    if (!state.slowRugLabel && state.peakPrice > 0
+      && timestampMs - state.peakAt >= slowMinDurationMs
+      && price <= state.peakPrice * 0.7) {
+      state.slowRugLabel = {
+        kind: 'SLOW_RUG_30', confirmed: true,
+        labeledAt: timestampMs, peakAt: state.peakAt,
+        peakPrice: state.peakPrice, price,
+        durationMs: timestampMs - state.peakAt,
+      };
+      this.metrics.slowRug30 += 1;
+    }
+    return state.slowRugLabel;
+  }
+
+  _dumpabilitySnapshot(state, rows, timestampMs) {
+    if (this._cfg('dumpabilityEnabled', true) === false || !state.lastTrade) return null;
+    const inventory = new Map();
+    for (const row of rows) {
+      if (!row.wallet || !(row.tokenAmount > 0)) continue;
+      const prior = inventory.get(row.wallet) || 0;
+      inventory.set(row.wallet, Math.max(0, prior + (row.side === 'BUY' ? row.tokenAmount : -row.tokenAmount)));
+    }
+    const holders = [...inventory.entries()]
+      .filter(([, units]) => units > 0)
+      .sort((left, right) => right[1] - left[1]);
+    const totalObservedUnits = holders.reduce((sum, [, units]) => sum + units, 0);
+    const top1Units = holders[0]?.[1] || 0;
+    const top3Units = holders.slice(0, 3).reduce((sum, [, units]) => sum + units, 0);
+    const reserves = reservesForTrade(state.lastTrade);
+    const reserveTokenUnits = reserves ? Number(reserves.baseRaw) / 1e6 : null;
+    const positionSol = this._cfg('dumpabilityPositionSol', 1);
+    const markPrice = rows[rows.length - 1]?.price || null;
+    const buy = executableBuy(state.lastTrade, positionSol, markPrice);
+    const ourTokenUnits = buy.tokenUnits || (markPrice > 0 ? positionSol / markPrice : null);
+    const top1Sequence = ourTokenUnits > 0
+      ? simulateSellSequence(state.lastTrade, [top1Units, ourTokenUnits]) : null;
+    const top3Sequence = ourTokenUnits > 0
+      ? simulateSellSequence(state.lastTrade, [...holders.slice(0, 3).map(([, units]) => units), ourTokenUnits])
+      : null;
+    const top1RecoveryPct = top1Sequence?.available
+      ? top1Sequence.legs.at(-1).proceedsSol / positionSol * 100 : null;
+    const top3RecoveryPct = top3Sequence?.available
+      ? top3Sequence.legs.at(-1).proceedsSol / positionSol * 100 : null;
+    const sampleReady = rows.length >= this.config.minTrades
+      && holders.length > 0 && reserveTokenUnits > 0 && ourTokenUnits > 0;
+    const top1ReservePct = reserveTokenUnits > 0 ? top1Units / reserveTokenUnits * 100 : null;
+    const top3ReservePct = reserveTokenUnits > 0 ? top3Units / reserveTokenUnits * 100 : null;
+    const warnings = [];
+    if (sampleReady && top1ReservePct >= this._cfg('dumpTop1ReserveWarnPct', 25)) {
+      warnings.push('OBSERVED_TOP1_DUMPABLE_INVENTORY');
+    }
+    if (sampleReady && top3ReservePct >= this._cfg('dumpTop3ReserveWarnPct', 50)) {
+      warnings.push('OBSERVED_TOP3_DUMPABLE_INVENTORY');
+    }
+    if (sampleReady && top3RecoveryPct != null && top3RecoveryPct < 50) {
+      warnings.push('POST_TOP3_EXIT_RECOVERY_BELOW_50');
+    }
+    const result = {
+      mode: 'RESEARCH_ONLY_NO_ENTRY_BLOCK', observedAt: timestampMs,
+      sampleReady, sampleSize: rows.length, observedWallets: holders.length,
+      totalObservedUnits, top1ObservedUnits: top1Units, top3ObservedUnits: top3Units,
+      top1ObservedSharePct: totalObservedUnits > 0 ? top1Units / totalObservedUnits * 100 : null,
+      top3ObservedSharePct: totalObservedUnits > 0 ? top3Units / totalObservedUnits * 100 : null,
+      reserveTokenUnits, top1ReservePct, top3ReservePct,
+      positionSol, top1RecoveryPct, top3RecoveryPct,
+      warnings,
+    };
+    if (state.lastDumpabilityVersion !== state.version) {
+      state.lastDumpabilityVersion = state.version;
+      this.metrics.dumpabilityEvaluations += 1;
+      if (sampleReady) this.metrics.dumpabilitySampleReady += 1;
+      if (warnings.length) {
+        this.metrics.dumpabilityWarnings += 1;
+        this.recentDumpabilityWarnings.unshift({ mint: state.mint, ...result });
+        if (this.recentDumpabilityWarnings.length > 100) {
+          this.recentDumpabilityWarnings.length = 100;
+        }
+      }
+    }
+    return result;
   }
 
   _compact(state) {

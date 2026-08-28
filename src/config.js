@@ -1964,6 +1964,42 @@ const config = {
     beijingRiskMinFlags: integerEnv(
       'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_MIN_FLAGS', 4, { min: 1, max: 5 },
     ),
+    // Forward-only labels for the failure mode that a chart stop cannot
+    // protect against: one to three public sells collapse the pool before the
+    // next independent trade confirms that the lower price persisted. These
+    // labels correct Shadow capacity accounting; they are not entry blockers.
+    cliffEnabled: booleanEnv('FLOW_PRE_ENTRY_RUG_CLIFF_ENABLED', true),
+    cliffWindowMs: integerEnv('FLOW_PRE_ENTRY_RUG_CLIFF_WINDOW_MS', 2_000, {
+      min: 100, max: 10_000,
+    }),
+    cliffMaxSells: integerEnv('FLOW_PRE_ENTRY_RUG_CLIFF_MAX_SELLS', 3, {
+      min: 1, max: 10,
+    }),
+    cliffMinDropPct: numberEnv('FLOW_PRE_ENTRY_RUG_CLIFF_MIN_DROP_PCT', 50, {
+      min: 20, max: 99,
+    }),
+    cliffPersistMaxRatioPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_CLIFF_PERSIST_MAX_RATIO_PCT', 75, { min: 1, max: 100 },
+    ),
+    cliffPairIgnoreMs: integerEnv('FLOW_PRE_ENTRY_RUG_CLIFF_PAIR_IGNORE_MS', 100, {
+      min: 0, max: 1_000,
+    }),
+    slowRugMinDurationMs: integerEnv('FLOW_PRE_ENTRY_RUG_SLOW_MIN_DURATION_MS', 10_000, {
+      min: 1_000, max: 120_000,
+    }),
+    // Estimate how much of the visible token inventory the largest observed
+    // wallets could dump, then simulate our 1-SOL exit after them. This uses
+    // the existing bounded in-memory event ring and trade reserves only.
+    dumpabilityEnabled: booleanEnv('FLOW_PRE_ENTRY_RUG_DUMPABILITY_ENABLED', true),
+    dumpabilityPositionSol: numberEnv('FLOW_PRE_ENTRY_RUG_DUMPABILITY_POSITION_SOL', 1, {
+      min: 0.001, max: 100,
+    }),
+    dumpTop1ReserveWarnPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_DUMP_TOP1_RESERVE_WARN_PCT', 25, { min: 0, max: 1_000 },
+    ),
+    dumpTop3ReserveWarnPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_DUMP_TOP3_RESERVE_WARN_PCT', 50, { min: 0, max: 1_000 },
+    ),
     // Learn repeated launch/rug families from public trades only. Four large
     // buys in a sub-500ms burst form a template; after that template visibly
     // collapses, later Mints with the same amount/timing vector or at least two

@@ -5,6 +5,8 @@ const {
   executableBuy,
   executableSell,
   reservesForTrade,
+  rugClassification,
+  simulateSellSequence,
 } = require('../src/core/ShadowExecutionModel');
 
 function ammTrade(overrides = {}) {
@@ -59,6 +61,31 @@ function ammTrade(overrides = {}) {
   );
   assert.equal(ordinaryMissing.conservative, false);
   assert.equal(ordinaryMissing.price, 0.00001);
+}
+
+{
+  const cliffTrade = {
+    market: 'PUMP_AMM',
+    rugPath: { kind: 'CLIFF_DROP_50', confirmed: true },
+  };
+  const missing = executableSell(cliffTrade, 10_000, 0.00001, { rugMarkReturnPct: -10 });
+  assert.equal(missing.conservative, true);
+  assert.equal(missing.rugLike, true);
+  assert.equal(missing.price, 0);
+  assert.equal(missing.rugClassification, 'CLIFF_DROP_50');
+  assert.equal(rugClassification(cliffTrade, -82), 'CLIFF_RUG_80');
+}
+
+{
+  const trade = ammTrade();
+  const direct = simulateSellSequence(trade, [100_000]);
+  const afterLargeWallet = simulateSellSequence(trade, [400_000, 100_000]);
+  assert.equal(direct.available, true);
+  assert.equal(afterLargeWallet.available, true);
+  assert.ok(
+    afterLargeWallet.legs[1].proceedsSol < direct.legs[0].proceedsSol,
+    'our exit must recover less SOL after an observed large wallet dumps first',
+  );
 }
 
 console.log('shadow execution model tests passed');

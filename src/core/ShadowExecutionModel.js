@@ -43,6 +43,17 @@ function reservesForTrade(trade = {}) {
   return null;
 }
 
+function rugClassification(trade = {}, rugMarkReturnPct = null) {
+  const markReturnPct = finite(rugMarkReturnPct);
+  const path = trade?.rugPath || null;
+  const confirmedCliff = Boolean(path?.confirmed && String(path.kind || '').startsWith('CLIFF'));
+  if (confirmedCliff && markReturnPct != null && markReturnPct <= -80) return 'CLIFF_RUG_80';
+  if (confirmedCliff && markReturnPct != null && markReturnPct <= -70) return 'CLIFF_RUG_70';
+  if (confirmedCliff) return 'CLIFF_DROP_50';
+  if (path?.kind === 'SLOW_RUG_30') return 'SLOW_RUG_30';
+  return null;
+}
+
 function executableBuy(trade, positionSol, fallbackPrice = null) {
   const marketPrice = finite(fallbackPrice);
   const sol = finite(positionSol);
@@ -92,15 +103,18 @@ function executableSell(trade, tokenUnits, fallbackPrice = null, {
   const units = finite(tokenUnits);
   const reserves = reservesForTrade(trade);
   const rugLike = finite(rugMarkReturnPct, 0) <= -35;
+  const classification = rugClassification(trade, rugMarkReturnPct);
+  const confirmedCliff = String(classification || '').startsWith('CLIFF');
   if (!reserves || !(units > 0)) {
-    const conservative = rugLike;
+    const conservative = rugLike || confirmedCliff;
     return {
       available: false,
       price: conservative ? 0 : marketPrice,
       marketPrice,
       proceedsSol: conservative ? 0 : (marketPrice > 0 && units > 0 ? marketPrice * units : null),
       impactPct: conservative ? conservativeMissingQuotePct : null,
-      rugLike,
+      rugLike: rugLike || confirmedCliff,
+      rugClassification: classification,
       conservative,
       reason: 'EXIT_CAPACITY_QUOTE_MISSING',
       reserveSource: reserves?.source || null,
@@ -120,22 +134,71 @@ function executableSell(trade, tokenUnits, fallbackPrice = null, {
       proceedsSol,
       impactPct,
       rugLike: rugLike || impactPct <= -25,
+      rugClassification: classification,
       conservative: false,
       reason: null,
       reserveSource: reserves.source,
     };
   } catch (_) {
-    const conservative = rugLike;
+    const conservative = rugLike || confirmedCliff;
     return {
       available: false,
       price: conservative ? 0 : marketPrice,
       marketPrice,
       proceedsSol: conservative ? 0 : (marketPrice > 0 ? marketPrice * units : null),
       impactPct: conservative ? conservativeMissingQuotePct : null,
-      rugLike,
+      rugLike: rugLike || confirmedCliff,
+      rugClassification: classification,
       conservative,
       reason: 'EXIT_CAPACITY_QUOTE_INVALID',
       reserveSource: reserves.source,
+    };
+  }
+}
+
+// Bounded, deterministic reserve simulation used by the forward-only RUG
+// observer. It answers a different question from a mark-price stop: how much
+// SOL would remain for our exit after the largest publicly observed wallets
+// dump their currently observed inventory first? No RPC or database access is
+// performed here.
+function simulateSellSequence(trade, tokenUnitSequence = []) {
+  const reserves = reservesForTrade(trade);
+  if (!reserves) return { available: false, reason: 'EXIT_CAPACITY_QUOTE_MISSING', legs: [] };
+  let baseRaw = reserves.baseRaw;
+  let quoteRaw = reserves.quoteRaw;
+  const legs = [];
+  try {
+    for (const requestedUnits of tokenUnitSequence) {
+      const units = finite(requestedUnits, 0);
+      if (!(units > 0)) {
+        legs.push({ tokenUnits: 0, proceedsSol: 0, price: null });
+        continue;
+      }
+      const inputRaw = BigInt(Math.max(1, Math.round(units * 1e6)));
+      const quoteOutRaw = quoteRaw * inputRaw / (baseRaw + inputRaw);
+      const proceedsSol = Number(quoteOutRaw) / 1e9;
+      legs.push({
+        tokenUnits: units,
+        proceedsSol,
+        price: proceedsSol / units,
+      });
+      baseRaw += inputRaw;
+      quoteRaw -= quoteOutRaw;
+    }
+    return {
+      available: true,
+      reason: null,
+      reserveSource: reserves.source,
+      legs,
+      remainingBaseRaw: baseRaw,
+      remainingQuoteRaw: quoteRaw,
+    };
+  } catch (_) {
+    return {
+      available: false,
+      reason: 'EXIT_CAPACITY_QUOTE_INVALID',
+      reserveSource: reserves.source,
+      legs: [],
     };
   }
 }
@@ -157,4 +220,6 @@ module.exports = {
   executableBuy,
   executableSell,
   executableRoundTrip,
+  rugClassification,
+  simulateSellSequence,
 };
