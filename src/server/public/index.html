@@ -1124,6 +1124,27 @@
         </table></div>
       </article>
       <article class="card record-section" style="margin-top:18px">
+        <div class="section-title"><h2>首次极速 RUG · 现有策略旁路对照</h2><p>HC1/HC2 与每个现有策略同时记账；不阻止开仓、不增加 RPC/数据库查询，30 秒后比较抓中率与误伤</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>策略 / 类型</th><th>HC1 命中 / 结算</th><th>HC1 抓中 / 准确率</th><th>HC1 未崩 / 30秒收益</th><th>HC2 命中 / 结算</th><th>HC2 抓中 / 准确率</th><th>HC2 未崩 / 30秒收益</th></tr></thead>
+          <tbody id="rug-first-cliff-strategy-rows"></tbody>
+        </table></div>
+      </article>
+      <article class="card record-section" style="margin-top:18px">
+        <div class="section-title"><h2>首次极速 RUG · 生命周期分层标准</h2><p>同一机会按信号时的生命周期归类；发射、Curve 早/晚期、迁移临界以及 PumpSwap 早/成熟期分别统计，暂不改变实盘拦截</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>生命周期</th><th>HC1 命中 / 结算</th><th>HC1 抓中 / 准确率</th><th>HC1 未崩 / 30秒收益</th><th>HC2 命中 / 结算</th><th>HC2 抓中 / 准确率</th><th>HC2 未崩 / 30秒收益</th></tr></thead>
+          <tbody id="rug-first-cliff-lifecycle-rows"></tbody>
+        </table></div>
+      </article>
+      <article class="card record-section" style="margin-top:18px">
+        <div class="section-title"><h2>最近首次极速 RUG 旁路样本</h2><p>只有策略本来准备开仓、且原 RUG Guard 已放行的机会才会进入；用于直接观察加到现有策略后能否改善</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>时间</th><th>生命周期</th><th>策略 / 类型</th><th>Mint</th><th>命中</th><th>有效买家</th><th>Top1 / Top3 可砸库存</th><th>Top3后回收 / 单钱包买单</th><th>30秒结果</th><th>后续收益</th></tr></thead>
+          <tbody id="rug-first-cliff-recent-rows"></tbody>
+        </table></div>
+      </article>
+      <article class="card record-section" style="margin-top:18px">
         <div class="section-title"><h2>最近 RUG 高风险拦截</h2><p>仅显示新版本运行后实际阻止入场的记录；不会回填旧历史</p></div>
         <div class="table-wrap"><table>
           <thead><tr><th>时间</th><th>策略 / 类型</th><th>Mint</th><th>拦截签名</th><th>阶梯分数</th><th>买入占比</th><th>连续买入</th><th>买单/买家</th><th>同额买单</th><th>最大买入冲击</th><th>短时涨幅</th><th>结果</th></tr></thead>
@@ -2869,6 +2890,11 @@
         ['确认前已恢复', number(rugRisk.cliffRecoveredBeforeConfirm)],
         ['库存评估 / 样本完整', `${number(rugRisk.dumpabilityEvaluations)} / ${number(rugRisk.dumpabilitySampleReady)}`],
         ['高可砸库存警告', number(rugRisk.dumpabilityWarnings)],
+        ['首次极速旁路候选 / 待结算', `${number(rugRisk.firstCliffCandidates)} / ${number(rugRisk.firstCliffPending)}`],
+        ['HC1 / HC2 命中', `${number(rugRisk.firstCliffHc1Matched)} / ${number(rugRisk.firstCliffHc2Matched)}`],
+        ['抓中 / 30秒未崩', `${number(rugRisk.firstCliffCaught)} / ${number(rugRisk.firstCliffNoCliff30s)}`],
+        ['生命周期分层', '发射 / Curve早中晚 / 迁移 / PumpSwap早晚 · 配对Shadow'],
+        ['首次极速旁路用途', '与现有策略成对观察；暂不拦截'],
         ['库存用途', '仅研究，不拦截实盘'],
         ['极速RUG用途', '修正 Shadow 可执行退出容量'],
         ['额外 RPC / DB', '无 / 无'],
@@ -2887,6 +2913,49 @@
           return `<tr><td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b></td><td>${statusChip(row.source || 'SHADOW')}</td><td>${number(row.evaluated)}</td><td>${number(ready)}</td><td>${number(row.sampleInsufficient)}</td><td>${number(row.passed)}</td><td class="negative">${number(rejected)}</td><td>${rate(rejectionRate)}</td><td>${dateTime(row.lastRejectedAt)}</td></tr>`;
         }).join('')
         : '<tr><td colspan="9" class="empty">等待策略产生新的入场机会；旧历史不会回填</td></tr>';
+      const firstCliffStrategies = rugStrategies.filter(row => (
+        Number(row.firstCliffHc1Matched || 0) > 0 || Number(row.firstCliffHc2Matched || 0) > 0
+      ));
+      document.querySelector('#rug-first-cliff-strategy-rows').innerHTML = firstCliffStrategies.length
+        ? firstCliffStrategies.map(row => `<tr>
+          <td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.source || 'SHADOW')}</span></td>
+          <td>${number(row.firstCliffHc1Matched)} / ${number(row.firstCliffHc1Resolved)}</td>
+          <td>${number(row.firstCliffHc1Caught)} / ${rate(row.firstCliffHc1PrecisionPct)}</td>
+          <td>${number(row.firstCliffHc1NoCliff30s)} / <span class="${tone(row.firstCliffHc1AverageReturnPct)}">${pct(row.firstCliffHc1AverageReturnPct)}</span></td>
+          <td>${number(row.firstCliffHc2Matched)} / ${number(row.firstCliffHc2Resolved)}</td>
+          <td>${number(row.firstCliffHc2Caught)} / ${rate(row.firstCliffHc2PrecisionPct)}</td>
+          <td>${number(row.firstCliffHc2NoCliff30s)} / <span class="${tone(row.firstCliffHc2AverageReturnPct)}">${pct(row.firstCliffHc2AverageReturnPct)}</span></td>
+        </tr>`).join('')
+        : '<tr><td colspan="7" class="empty">等待现有策略产生同时命中 HC1/HC2 的新机会；旧历史不会回填</td></tr>';
+      const firstCliffLifecycle = (rugRisk.firstCliffLifecycleSummary || []).filter(row => (
+        Number(row.firstCliffHc1Matched || 0) > 0 || Number(row.firstCliffHc2Matched || 0) > 0
+      ));
+      document.querySelector('#rug-first-cliff-lifecycle-rows').innerHTML = firstCliffLifecycle.length
+        ? firstCliffLifecycle.map(row => `<tr>
+          <td><b>${escapeHtml(row.lifecycleLabel || row.lifecycleStage || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.lifecycleStage || '')}</span></td>
+          <td>${number(row.firstCliffHc1Matched)} / ${number(row.firstCliffHc1Resolved)}</td>
+          <td>${number(row.firstCliffHc1Caught)} / ${rate(row.firstCliffHc1PrecisionPct)}</td>
+          <td>${number(row.firstCliffHc1NoCliff30s)} / <span class="${tone(row.firstCliffHc1AverageReturnPct)}">${pct(row.firstCliffHc1AverageReturnPct)}</span></td>
+          <td>${number(row.firstCliffHc2Matched)} / ${number(row.firstCliffHc2Resolved)}</td>
+          <td>${number(row.firstCliffHc2Caught)} / ${rate(row.firstCliffHc2PrecisionPct)}</td>
+          <td>${number(row.firstCliffHc2NoCliff30s)} / <span class="${tone(row.firstCliffHc2AverageReturnPct)}">${pct(row.firstCliffHc2AverageReturnPct)}</span></td>
+        </tr>`).join('')
+        : '<tr><td colspan="7" class="empty">等待各生命周期积累新的配对样本；旧历史不会回填</td></tr>';
+      const firstCliffRecent = rugRisk.recentFirstCliffCounterfactuals || [];
+      document.querySelector('#rug-first-cliff-recent-rows').innerHTML = firstCliffRecent.length
+        ? firstCliffRecent.map(row => `<tr>
+          <td>${dateTime(row.entryAt)}</td>
+          <td><b>${escapeHtml(row.lifecycleLabel || row.lifecycleStage || 'UNKNOWN')}</b></td>
+          <td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.source || 'SHADOW')}</span></td>
+          <td>${mintLink(row.mint)}</td>
+          <td>${row.hc1Matched ? 'HC1' : ''}${row.hc1Matched && row.hc2Matched ? ' + ' : ''}${row.hc2Matched ? 'HC2' : ''}</td>
+          <td>${number(row.effectiveBuyers,2)}</td>
+          <td>${rate(row.top1InventoryPct ?? row.top1RealReservePct)} / ${rate(row.top3InventoryPct ?? row.top3RealReservePct)}</td>
+          <td>${rate(row.top3RecoveryPct)} / ${rate(row.maxWalletBuyTxSharePct)}</td>
+          <td>${statusChip(row.outcome === 'CLIFF_RUG_70' ? 'BLOCKED' : 'NO_CLIFF')}</td>
+          <td class="${tone(row.returnPct)}">${pct(row.returnPct)}</td>
+        </tr>`).join('')
+        : '<tr><td colspan="10" class="empty">尚无已结算的首次极速 RUG 旁路样本</td></tr>';
       const rugRecent = rugRisk.recentFlagged || [];
       document.querySelector('#rug-guard-recent-rows').innerHTML = rugRecent.length
         ? rugRecent.map(row => {

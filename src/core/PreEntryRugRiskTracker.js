@@ -33,6 +33,32 @@ function hourInWindow(hour, startHour, endHour) {
   return hour >= startHour || hour < endHour;
 }
 
+const FIRST_CLIFF_LIFECYCLE_STAGES = Object.freeze([
+  { id: 'LAUNCH', label: '发射 0–5 秒' },
+  { id: 'CURVE_EARLY', label: 'Curve 5–30 秒' },
+  { id: 'CURVE_LATE', label: 'Curve 30 秒后' },
+  { id: 'CURVE_MIGRATION', label: 'Curve 80%–迁移' },
+  { id: 'AMM_EARLY', label: 'PumpSwap 0–10 秒' },
+  { id: 'AMM_MATURE', label: 'PumpSwap 10 秒后' },
+]);
+
+function firstCliffCounterRow() {
+  return {
+    firstCliffHc1Matched: 0,
+    firstCliffHc2Matched: 0,
+    firstCliffHc1Resolved: 0,
+    firstCliffHc2Resolved: 0,
+    firstCliffHc1Caught: 0,
+    firstCliffHc2Caught: 0,
+    firstCliffHc1NoCliff30s: 0,
+    firstCliffHc2NoCliff30s: 0,
+    firstCliffHc1ReturnSumPct: 0,
+    firstCliffHc2ReturnSumPct: 0,
+    firstCliffHc1ReturnSamples: 0,
+    firstCliffHc2ReturnSamples: 0,
+  };
+}
+
 class PreEntryRugRiskTracker {
   constructor({ config, now = () => Date.now(), fileSystem = fs }) {
     this.config = config;
@@ -55,6 +81,14 @@ class PreEntryRugRiskTracker {
     this.recentGuardDecisions = [];
     this.recentCliffOutcomes = [];
     this.recentDumpabilityWarnings = [];
+    // Forward-only paired audit for the first-cliff heuristics. Candidates are
+    // registered only after the existing guard has passed, so these counters
+    // answer whether HC1/HC2 would improve every live/Shadow strategy without
+    // changing, delaying or blocking its current entry path.
+    this.firstCliffPendingByMint = new Map();
+    this.firstCliffCandidateKeys = new Map();
+    this.firstCliffPendingCount = 0;
+    this.recentFirstCliffCounterfactuals = [];
     this.lastSweepAt = 0;
     this.metrics = {
       observedTrades: 0,
@@ -86,6 +120,13 @@ class PreEntryRugRiskTracker {
       dumpabilityEvaluations: 0,
       dumpabilitySampleReady: 0,
       dumpabilityWarnings: 0,
+      firstCliffCandidates: 0,
+      firstCliffHc1Matched: 0,
+      firstCliffHc2Matched: 0,
+      firstCliffResolved: 0,
+      firstCliffCaught: 0,
+      firstCliffNoCliff30s: 0,
+      firstCliffCensored: 0,
       guardEvaluations: 0,
       guardPassed: 0,
       guardRejected: 0,
@@ -120,6 +161,10 @@ class PreEntryRugRiskTracker {
     this.recentGuardDecisions = [];
     this.recentCliffOutcomes = [];
     this.recentDumpabilityWarnings = [];
+    this.firstCliffPendingByMint.clear();
+    this.firstCliffCandidateKeys.clear();
+    this.firstCliffPendingCount = 0;
+    this.recentFirstCliffCounterfactuals = [];
   }
 
   observeTrade(trade) {
@@ -132,6 +177,8 @@ class PreEntryRugRiskTracker {
       state = {
         mint: trade.mint,
         events: [], offset: 0, lastAt: timestampMs, version: 0,
+        firstSeenAt: timestampMs, firstBondingAt: null, firstAmmAt: null,
+        lastCurvePct: null,
         cachedVersion: -1, cachedToxicVersion: -1, cachedRisk: null,
         peakPrice: price, peakAt: timestampMs, template: null,
         templatePeakPrice: null, templateToxicLabeled: false,
@@ -140,6 +187,13 @@ class PreEntryRugRiskTracker {
       };
       this.states.set(trade.mint, state);
     }
+    const market = String(trade.market || '');
+    if (market === 'PUMP_BONDING_CURVE' && !(state.firstBondingAt > 0)) {
+      state.firstBondingAt = timestampMs;
+    }
+    if (market === 'PUMP_AMM' && !(state.firstAmmAt > 0)) state.firstAmmAt = timestampMs;
+    const curvePct = finite(trade.curvePct);
+    if (curvePct != null) state.lastCurvePct = curvePct;
     state.events.push({
       timestampMs,
       side: trade.side,
@@ -147,9 +201,11 @@ class PreEntryRugRiskTracker {
       wallet: String(trade.wallet || ''),
       solAmount: finite(trade.solAmount, 0),
       tokenAmount: finite(trade.tokenAmount, 0),
-      market: String(trade.market || ''),
+      market,
       signature: String(trade.signature || ''),
       slot: finite(trade.slot),
+      ageMs: finite(trade.ageMs),
+      curvePct,
     });
     state.lastTrade = this._capacityTrade(trade);
     state.version += 1;
@@ -168,6 +224,9 @@ class PreEntryRugRiskTracker {
       this._labelRapidCollapse(trade.mint, state, timestampMs, price);
     }
     this._observeRugPath(trade.mint, state, state.events[state.events.length - 1]);
+    this._resolveFirstCliffCounterfactuals(
+      trade.mint, state, state.events[state.events.length - 1],
+    );
     const activePath = this._activeRugPath(state, timestampMs, price);
     if (activePath) trade.rugPath = activePath;
     this.metrics.observedTrades += 1;
@@ -241,6 +300,9 @@ class PreEntryRugRiskTracker {
     const maxWalletBuyTxSharePct = buys > 0 ? maxWalletBuyTrades / buys * 100 : null;
     const repeatedBuySizeSharePct = buys > 0 ? repeatedBuySizeTrades / buys * 100 : null;
     const dumpability = this._dumpabilitySnapshot(state, rows, timestampMs);
+    const firstCliffCounterfactual = this._firstCliffCounterfactualSnapshot(
+      state, rows, dumpability, timestampMs,
+    );
     const rugPath = this._activeRugPath(state, timestampMs, rows[rows.length - 1].price);
     const template = state.template
       && timestampMs - state.template.observedAt <= this._cfg('toxicCollapseWindowMs', 30_000)
@@ -317,6 +379,7 @@ class PreEntryRugRiskTracker {
       maxWalletBuyTxSharePct,
       repeatedBuySizeSharePct,
       maxBuyImpactPct,
+      lastPrice: rows[rows.length - 1]?.price || null,
       crossMintToxic,
       toxicWalletOverlap,
       toxicTemplateMatch: toxicTemplateMatch?.fingerprint || null,
@@ -329,6 +392,7 @@ class PreEntryRugRiskTracker {
       flaggedReasons,
       rugPath,
       dumpability,
+      firstCliffCounterfactual,
       researchWarnings: dumpability?.warnings || [],
     };
     if (flagged) this._recordSignatureMetrics(risk);
@@ -369,6 +433,7 @@ class PreEntryRugRiskTracker {
       lastEvaluatedAt: null,
       lastRejectedAt: null,
     };
+    this._initializeFirstCliffStrategyStats(stats);
     stats.evaluated += 1;
     stats.lastEvaluatedAt = timestampMs;
     if (risk.sampleReady) stats.sampleReady += 1;
@@ -400,6 +465,14 @@ class PreEntryRugRiskTracker {
       this.recentGuardDecisions.unshift(decision);
       if (this.recentGuardDecisions.length > 100) this.recentGuardDecisions.length = 100;
     }
+    if (!blocked) this._registerFirstCliffCounterfactual({
+      strategyId: normalizedStrategyId,
+      source: normalizedSource,
+      mint,
+      timestampMs,
+      risk,
+      stats,
+    });
     return decision;
   }
 
@@ -430,9 +503,11 @@ class PreEntryRugRiskTracker {
     this.lastSweepAt = now;
     const cutoff = now - this.config.stateRetentionMs;
     for (const [mint, state] of this.states) {
+      this._resolveFirstCliffCounterfactuals(mint, state, null, now);
       if (state.lastAt < cutoff) this.states.delete(mint);
       else this._prune(state, now);
     }
+    this._pruneFirstCliffCandidateKeys(now);
     this._expireToxicMemory(now);
   }
 
@@ -444,6 +519,8 @@ class PreEntryRugRiskTracker {
       enforcement: 'NATIVE_FLAGGED_BLOCK_OR_CROSS_MINT_TOXIC_BLOCK',
       outcomeLabels: 'CLIFF_DROP_50/CLIFF_RUG_70/CLIFF_RUG_80/SLOW_RUG_30',
       dumpabilityMode: 'RESEARCH_ONLY_NO_ENTRY_BLOCK',
+      firstCliffCounterfactualMode: 'PAIRED_SHADOW_NO_ENTRY_BLOCK',
+      firstCliffLifecycleMode: 'STAGE_SPECIFIC_PAIRED_SHADOW_NO_ENTRY_BLOCK',
       livePath: 'MEMORY_ONLY_BOUNDED_CACHE_REFRESH',
       sendsTransactions: false,
       trackedMints: this.states.size,
@@ -481,6 +558,26 @@ class PreEntryRugRiskTracker {
         dumpabilityPositionSol: this._cfg('dumpabilityPositionSol', 1),
         dumpTop1ReserveWarnPct: this._cfg('dumpTop1ReserveWarnPct', 25),
         dumpTop3ReserveWarnPct: this._cfg('dumpTop3ReserveWarnPct', 50),
+        firstCliffCounterfactualEnabled: this._cfg('firstCliffCounterfactualEnabled', true),
+        firstCliffHorizonMs: this._cfg('firstCliffHorizonMs', 30_000),
+        firstCliffEffectiveBuyersMax: this._cfg('firstCliffEffectiveBuyersMax', 3),
+        firstCliffHc1Top1Pct: this._cfg('firstCliffHc1Top1Pct', 15),
+        firstCliffHc1Top3Pct: this._cfg('firstCliffHc1Top3Pct', 35),
+        firstCliffHc2Top1Pct: this._cfg('firstCliffHc2Top1Pct', 20),
+        firstCliffHc2Top3Pct: this._cfg('firstCliffHc2Top3Pct', 35),
+        firstCliffLifecycleEnabled: this._cfg('firstCliffLifecycleEnabled', true),
+        firstCliffLaunchMaxAgeMs: this._cfg('firstCliffLaunchMaxAgeMs', 5_000),
+        firstCliffCurveEarlyMaxAgeMs: this._cfg('firstCliffCurveEarlyMaxAgeMs', 30_000),
+        firstCliffCurveMigrationMinPct: this._cfg('firstCliffCurveMigrationMinPct', 80),
+        firstCliffAmmEarlyMaxAgeMs: this._cfg('firstCliffAmmEarlyMaxAgeMs', 10_000),
+        firstCliffAmmHc1Top3RecoveryMaxPct:
+          this._cfg('firstCliffAmmHc1Top3RecoveryMaxPct', 50),
+        firstCliffAmmHc2Top3RecoveryMaxPct:
+          this._cfg('firstCliffAmmHc2Top3RecoveryMaxPct', 40),
+        firstCliffAmmHc1WalletBuyTxSharePct:
+          this._cfg('firstCliffAmmHc1WalletBuyTxSharePct', 50),
+        firstCliffAmmHc2WalletBuyTxSharePct:
+          this._cfg('firstCliffAmmHc2WalletBuyTxSharePct', 60),
         crossMintEnabled: this.config.crossMintEnabled !== false,
         templateWindowMs: this._cfg('templateWindowMs', 5_000),
         templateMinLargeBuys: this._cfg('templateMinLargeBuys', 4),
@@ -494,10 +591,14 @@ class PreEntryRugRiskTracker {
         toxicWalletOverlapMin: this._cfg('toxicWalletOverlapMin', 2),
       },
       strategyStats: [...this.guardStrategies.values()]
+        .map((row) => this._firstCliffStrategyHealth(row))
         .sort((left, right) => right.evaluated - left.evaluated),
       recentFlagged: this.recentGuardDecisions.slice(0, 50),
       recentCliffOutcomes: this.recentCliffOutcomes.slice(0, 50),
       recentDumpabilityWarnings: this.recentDumpabilityWarnings.slice(0, 50),
+      firstCliffPending: this.firstCliffPendingCount,
+      firstCliffLifecycleSummary: this._firstCliffLifecycleHealth(),
+      recentFirstCliffCounterfactuals: this.recentFirstCliffCounterfactuals.slice(0, 50),
       ...this.metrics,
     };
   }
@@ -524,6 +625,7 @@ class PreEntryRugRiskTracker {
       maxWalletBuyTxSharePct: null,
       repeatedBuySizeSharePct: null,
       maxBuyImpactPct: null,
+      lastPrice: null,
       crossMintToxic: false,
       toxicWalletOverlap: 0,
       toxicTemplateMatch: null,
@@ -536,6 +638,11 @@ class PreEntryRugRiskTracker {
       flaggedReasons: [],
       rugPath: null,
       dumpability: null,
+      firstCliffCounterfactual: {
+        mode: 'PAIRED_SHADOW_NO_ENTRY_BLOCK', eligible: false,
+        hc1Matched: false, hc2Matched: false,
+        lifecycleStage: null, lifecycleLabel: null,
+      },
       researchWarnings: [],
     };
   }
@@ -566,7 +673,369 @@ class PreEntryRugRiskTracker {
       virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw,
       virtualTokenReservesRaw: trade.virtualTokenReservesRaw,
       virtualSolReservesRaw: trade.virtualSolReservesRaw,
+      realTokenReservesRaw: trade.realTokenReservesRaw,
+      realSolReservesRaw: trade.realSolReservesRaw,
+      ageMs: trade.ageMs,
+      curvePct: trade.curvePct,
     };
+  }
+
+  _firstCliffCounterfactualSnapshot(state, rows, dumpability, timestampMs) {
+    const mode = 'PAIRED_SHADOW_NO_ENTRY_BLOCK';
+    const lifecycle = this._firstCliffLifecycle(state, rows, timestampMs);
+    const profile = this._firstCliffLifecycleProfile(lifecycle.stage);
+    if (this._cfg('firstCliffCounterfactualEnabled', true) === false) {
+      return {
+        mode, eligible: false, hc1Matched: false, hc2Matched: false,
+        lifecycleStage: lifecycle.stage, lifecycleLabel: lifecycle.label,
+      };
+    }
+    const walletBuySol = new Map();
+    const walletBuyTrades = new Map();
+    let buyTrades = 0;
+    for (const row of rows) {
+      if (row.side !== 'BUY' || !row.wallet || !(row.solAmount > 0)) continue;
+      walletBuySol.set(row.wallet, (walletBuySol.get(row.wallet) || 0) + row.solAmount);
+      walletBuyTrades.set(row.wallet, (walletBuyTrades.get(row.wallet) || 0) + 1);
+      buyTrades += 1;
+    }
+    const buySolValues = [...walletBuySol.values()];
+    const totalBuySol = buySolValues.reduce((sum, value) => sum + value, 0);
+    const squaredBuySol = buySolValues.reduce((sum, value) => sum + value * value, 0);
+    const effectiveBuyers = squaredBuySol > 0 ? totalBuySol * totalBuySol / squaredBuySol : null;
+    const maxWalletBuyTrades = walletBuyTrades.size
+      ? Math.max(...walletBuyTrades.values()) : 0;
+    const maxWalletBuyTxSharePct = buyTrades > 0
+      ? maxWalletBuyTrades / buyTrades * 100 : null;
+    const market = String(state.lastTrade?.market || rows.at(-1)?.market || '');
+    const isCurve = market === 'PUMP_BONDING_CURVE';
+    const isAmm = market === 'PUMP_AMM';
+    const realReserveRaw = finite(state.lastTrade?.realTokenReservesRaw);
+    const realReserveTokenUnits = realReserveRaw > 0 ? realReserveRaw / 1e6 : null;
+    const top1InventoryPct = isCurve && realReserveTokenUnits > 0
+      ? finite(dumpability?.top1ObservedUnits, 0) / realReserveTokenUnits * 100
+      : finite(dumpability?.top1ReservePct);
+    const top3InventoryPct = isCurve && realReserveTokenUnits > 0
+      ? finite(dumpability?.top3ObservedUnits, 0) / realReserveTokenUnits * 100
+      : finite(dumpability?.top3ReservePct);
+    const top3RecoveryPct = finite(dumpability?.top3RecoveryPct);
+    const capacityReady = isCurve
+      ? realReserveTokenUnits > 0 && finite(dumpability?.observedWallets, 0) > 0
+      : isAmm && Boolean(dumpability?.sampleReady);
+    const eligible = rows.length >= this.config.minTrades
+      && effectiveBuyers != null && effectiveBuyers < profile.effectiveBuyersMax
+      && capacityReady;
+    const inventoryHc1 = top1InventoryPct >= profile.hc1.top1Pct
+      || top3InventoryPct >= profile.hc1.top3Pct;
+    const inventoryHc2 = top1InventoryPct >= profile.hc2.top1Pct
+      || top3InventoryPct >= profile.hc2.top3Pct;
+    const ammFlowHc1 = isAmm && top3RecoveryPct != null
+      && top3RecoveryPct <= profile.hc1.top3RecoveryMaxPct
+      && maxWalletBuyTxSharePct >= profile.hc1.walletBuyTxShareMinPct;
+    const ammFlowHc2 = isAmm && top3RecoveryPct != null
+      && top3RecoveryPct <= profile.hc2.top3RecoveryMaxPct
+      && maxWalletBuyTxSharePct >= profile.hc2.walletBuyTxShareMinPct;
+    const hc1Matched = eligible && (inventoryHc1 || ammFlowHc1);
+    const hc2Matched = eligible && (inventoryHc2 || ammFlowHc2);
+    return {
+      mode,
+      observedAt: timestampMs,
+      market,
+      lifecycleStage: lifecycle.stage,
+      lifecycleLabel: lifecycle.label,
+      lifecycleAgeMs: lifecycle.ageMs,
+      lifecycleCurvePct: lifecycle.curvePct,
+      eligible,
+      effectiveBuyers,
+      effectiveBuyersMax: profile.effectiveBuyersMax,
+      totalBuySol,
+      maxWalletBuyTxSharePct,
+      realReserveTokenUnits,
+      top1InventoryPct,
+      top3InventoryPct,
+      top1RealReservePct: isCurve ? top1InventoryPct : null,
+      top3RealReservePct: isCurve ? top3InventoryPct : null,
+      top3RecoveryPct,
+      hc1Matched,
+      hc2Matched,
+      hc1: profile.hc1,
+      hc2: profile.hc2,
+    };
+  }
+
+  _firstCliffLifecycle(state, rows, timestampMs) {
+    const last = rows.at(-1) || {};
+    const market = String(state.lastTrade?.market || last.market || '');
+    const curvePct = finite(state.lastTrade?.curvePct,
+      finite(state.lastCurvePct, finite(last.curvePct)));
+    if (market === 'PUMP_AMM') {
+      const ageMs = Math.max(0, timestampMs - finite(state.firstAmmAt, timestampMs));
+      const stage = ageMs <= this._cfg('firstCliffAmmEarlyMaxAgeMs', 10_000)
+        ? 'AMM_EARLY' : 'AMM_MATURE';
+      return { stage, label: this._firstCliffLifecycleLabel(stage), ageMs, curvePct };
+    }
+    const reportedAgeMs = finite(state.lastTrade?.ageMs, finite(last.ageMs));
+    const ageMs = Math.max(0, reportedAgeMs != null
+      ? reportedAgeMs : timestampMs - finite(state.firstBondingAt, state.firstSeenAt));
+    let stage;
+    if (curvePct != null
+      && curvePct >= this._cfg('firstCliffCurveMigrationMinPct', 80)) {
+      stage = 'CURVE_MIGRATION';
+    } else if (ageMs <= this._cfg('firstCliffLaunchMaxAgeMs', 5_000)) {
+      stage = 'LAUNCH';
+    } else if (ageMs <= this._cfg('firstCliffCurveEarlyMaxAgeMs', 30_000)) {
+      stage = 'CURVE_EARLY';
+    } else stage = 'CURVE_LATE';
+    return { stage, label: this._firstCliffLifecycleLabel(stage), ageMs, curvePct };
+  }
+
+  _firstCliffLifecycleLabel(stage) {
+    return FIRST_CLIFF_LIFECYCLE_STAGES.find((row) => row.id === stage)?.label || stage;
+  }
+
+  _firstCliffLifecycleProfile(stage) {
+    const effectiveBuyers = this._cfg('firstCliffEffectiveBuyersMax', 3);
+    const base = {
+      effectiveBuyersMax: effectiveBuyers,
+      hc1: {
+        top1Pct: this._cfg('firstCliffHc1Top1Pct', 15),
+        top3Pct: this._cfg('firstCliffHc1Top3Pct', 35),
+        top3RecoveryMaxPct: null,
+        walletBuyTxShareMinPct: null,
+      },
+      hc2: {
+        top1Pct: this._cfg('firstCliffHc2Top1Pct', 20),
+        top3Pct: this._cfg('firstCliffHc2Top3Pct', 35),
+        top3RecoveryMaxPct: null,
+        walletBuyTxShareMinPct: null,
+      },
+    };
+    if (this._cfg('firstCliffLifecycleEnabled', true) === false) return base;
+    const adjusted = {
+      effectiveBuyersMax: base.effectiveBuyersMax,
+      hc1: { ...base.hc1 },
+      hc2: { ...base.hc2 },
+    };
+    if (stage === 'LAUNCH') {
+      adjusted.effectiveBuyersMax = Math.max(1, effectiveBuyers - 0.5);
+      adjusted.hc1.top1Pct = Math.max(0, base.hc1.top1Pct - 3);
+      adjusted.hc1.top3Pct = Math.max(0, base.hc1.top3Pct - 5);
+      adjusted.hc2.top1Pct = Math.max(0, base.hc2.top1Pct - 2);
+    } else if (stage === 'CURVE_LATE') {
+      adjusted.hc1.top1Pct += 5;
+      adjusted.hc1.top3Pct += 10;
+      adjusted.hc2.top1Pct += 5;
+      adjusted.hc2.top3Pct += 10;
+    } else if (stage === 'CURVE_MIGRATION') {
+      adjusted.effectiveBuyersMax += 1;
+      adjusted.hc1.top3Pct += 5;
+      adjusted.hc2.top3Pct += 10;
+    } else if (stage === 'AMM_EARLY' || stage === 'AMM_MATURE') {
+      const mature = stage === 'AMM_MATURE';
+      adjusted.effectiveBuyersMax += mature ? 1 : 0;
+      adjusted.hc1.top1Pct += mature ? 5 : 0;
+      adjusted.hc1.top3Pct += mature ? 15 : 5;
+      adjusted.hc2.top1Pct += mature ? 10 : 0;
+      adjusted.hc2.top3Pct += mature ? 20 : 10;
+      adjusted.hc1.top3RecoveryMaxPct = Math.max(0,
+        this._cfg('firstCliffAmmHc1Top3RecoveryMaxPct', 50) - (mature ? 10 : 0));
+      adjusted.hc2.top3RecoveryMaxPct = Math.max(0,
+        this._cfg('firstCliffAmmHc2Top3RecoveryMaxPct', 40) - (mature ? 10 : 0));
+      adjusted.hc1.walletBuyTxShareMinPct = Math.min(100,
+        this._cfg('firstCliffAmmHc1WalletBuyTxSharePct', 50) + (mature ? 10 : 0));
+      adjusted.hc2.walletBuyTxShareMinPct = Math.min(100,
+        this._cfg('firstCliffAmmHc2WalletBuyTxSharePct', 60) + (mature ? 10 : 0));
+    }
+    return adjusted;
+  }
+
+  _initializeFirstCliffStrategyStats(stats) {
+    for (const name of Object.keys(firstCliffCounterRow())) {
+      if (!Number.isFinite(stats[name])) stats[name] = 0;
+    }
+    if (!stats.firstCliffByStage || typeof stats.firstCliffByStage !== 'object') {
+      stats.firstCliffByStage = {};
+    }
+    for (const stage of FIRST_CLIFF_LIFECYCLE_STAGES) {
+      const row = stats.firstCliffByStage[stage.id] || {};
+      for (const [name, value] of Object.entries(firstCliffCounterRow())) {
+        if (!Number.isFinite(row[name])) row[name] = value;
+      }
+      row.stage = stage.id;
+      row.label = stage.label;
+      row.lifecycleStage = stage.id;
+      row.lifecycleLabel = stage.label;
+      stats.firstCliffByStage[stage.id] = row;
+    }
+  }
+
+  _registerFirstCliffCounterfactual({ strategyId, source, mint, timestampMs, risk, stats }) {
+    const feature = risk.firstCliffCounterfactual;
+    if (!feature?.eligible || (!feature.hc1Matched && !feature.hc2Matched)) return;
+    const key = `${source}|${strategyId}|${mint}|${feature.lifecycleStage || 'UNKNOWN'}`;
+    const existingExpiry = this.firstCliffCandidateKeys.get(key);
+    if (existingExpiry > timestampMs) return;
+    const maxPending = this._cfg('firstCliffMaxPending', 10_000);
+    if (this.firstCliffPendingCount >= maxPending) {
+      this.metrics.firstCliffCensored += 1;
+      return;
+    }
+    const horizonMs = this._cfg('firstCliffHorizonMs', 30_000);
+    const candidate = {
+      key,
+      strategyId,
+      source,
+      mint,
+      entryAt: timestampMs,
+      deadlineAt: timestampMs + horizonMs,
+      entryPrice: finite(risk.lastPrice),
+      hc1Matched: Boolean(feature.hc1Matched),
+      hc2Matched: Boolean(feature.hc2Matched),
+      lifecycleStage: feature.lifecycleStage,
+      lifecycleLabel: feature.lifecycleLabel,
+      effectiveBuyers: feature.effectiveBuyers,
+      top1InventoryPct: feature.top1InventoryPct,
+      top3InventoryPct: feature.top3InventoryPct,
+      top1RealReservePct: feature.top1RealReservePct,
+      top3RealReservePct: feature.top3RealReservePct,
+      top3RecoveryPct: feature.top3RecoveryPct,
+      maxWalletBuyTxSharePct: feature.maxWalletBuyTxSharePct,
+    };
+    const pending = this.firstCliffPendingByMint.get(mint) || [];
+    pending.push(candidate);
+    this.firstCliffPendingByMint.set(mint, pending);
+    this.firstCliffCandidateKeys.set(key, candidate.deadlineAt);
+    this.firstCliffPendingCount += 1;
+    this.metrics.firstCliffCandidates += 1;
+    if (candidate.hc1Matched) {
+      stats.firstCliffHc1Matched += 1;
+      stats.firstCliffByStage[candidate.lifecycleStage].firstCliffHc1Matched += 1;
+      this.metrics.firstCliffHc1Matched += 1;
+    }
+    if (candidate.hc2Matched) {
+      stats.firstCliffHc2Matched += 1;
+      stats.firstCliffByStage[candidate.lifecycleStage].firstCliffHc2Matched += 1;
+      this.metrics.firstCliffHc2Matched += 1;
+    }
+  }
+
+  _resolveFirstCliffCounterfactuals(mint, state, event = null, now = null) {
+    const pending = this.firstCliffPendingByMint.get(mint);
+    if (!pending?.length) return;
+    const observedAt = finite(event?.timestampMs, finite(now, this.now()));
+    const latestPrice = finite(event?.price, finite(state.events.at(-1)?.price));
+    const unresolved = [];
+    for (const candidate of pending) {
+      const cliff = state.confirmedCliffs.find((row) => (
+        row.confirmedAt >= candidate.entryAt
+        && row.confirmedAt <= candidate.deadlineAt
+        && row.dropPct >= 70
+      ));
+      if (cliff) {
+        const returnPct = candidate.entryPrice > 0
+          ? (cliff.persistedPrice / candidate.entryPrice - 1) * 100 : null;
+        this._finalizeFirstCliffCounterfactual(candidate, {
+          outcome: 'CLIFF_RUG_70', resolvedAt: cliff.confirmedAt,
+          returnPct, cliffDropPct: cliff.dropPct,
+        });
+      } else if (observedAt >= candidate.deadlineAt) {
+        const returnPct = candidate.entryPrice > 0 && latestPrice > 0
+          ? (latestPrice / candidate.entryPrice - 1) * 100 : null;
+        this._finalizeFirstCliffCounterfactual(candidate, {
+          outcome: 'NO_CLIFF_30S', resolvedAt: observedAt, returnPct,
+          markLagMs: Math.max(0, observedAt - finite(state.events.at(-1)?.timestampMs, observedAt)),
+        });
+      } else unresolved.push(candidate);
+    }
+    if (unresolved.length) this.firstCliffPendingByMint.set(mint, unresolved);
+    else this.firstCliffPendingByMint.delete(mint);
+  }
+
+  _finalizeFirstCliffCounterfactual(candidate, result) {
+    this.firstCliffPendingCount = Math.max(0, this.firstCliffPendingCount - 1);
+    this.firstCliffCandidateKeys.delete(candidate.key);
+    this.metrics.firstCliffResolved += 1;
+    if (result.outcome === 'CLIFF_RUG_70') this.metrics.firstCliffCaught += 1;
+    else this.metrics.firstCliffNoCliff30s += 1;
+    const stats = this.guardStrategies.get(candidate.strategyId);
+    if (stats) {
+      this._initializeFirstCliffStrategyStats(stats);
+      const stageStats = stats.firstCliffByStage[candidate.lifecycleStage];
+      for (const cohort of ['Hc1', 'Hc2']) {
+        if (!candidate[`${cohort.toLowerCase()}Matched`]) continue;
+        stats[`firstCliff${cohort}Resolved`] += 1;
+        stageStats[`firstCliff${cohort}Resolved`] += 1;
+        if (result.outcome === 'CLIFF_RUG_70') stats[`firstCliff${cohort}Caught`] += 1;
+        else stats[`firstCliff${cohort}NoCliff30s`] += 1;
+        if (result.outcome === 'CLIFF_RUG_70') stageStats[`firstCliff${cohort}Caught`] += 1;
+        else stageStats[`firstCliff${cohort}NoCliff30s`] += 1;
+        if (Number.isFinite(result.returnPct)) {
+          stats[`firstCliff${cohort}ReturnSumPct`] += result.returnPct;
+          stats[`firstCliff${cohort}ReturnSamples`] += 1;
+          stageStats[`firstCliff${cohort}ReturnSumPct`] += result.returnPct;
+          stageStats[`firstCliff${cohort}ReturnSamples`] += 1;
+        }
+      }
+    }
+    this.recentFirstCliffCounterfactuals.unshift({ ...candidate, ...result });
+    if (this.recentFirstCliffCounterfactuals.length > 100) {
+      this.recentFirstCliffCounterfactuals.length = 100;
+    }
+  }
+
+  _pruneFirstCliffCandidateKeys(now) {
+    for (const [key, expiresAt] of this.firstCliffCandidateKeys) {
+      if (expiresAt + this.config.stateRetentionMs < now) this.firstCliffCandidateKeys.delete(key);
+    }
+  }
+
+  _firstCliffStrategyHealth(row) {
+    this._initializeFirstCliffStrategyStats(row);
+    return {
+      ...row,
+      ...this._firstCliffCounterHealth(row),
+      firstCliffByStage: FIRST_CLIFF_LIFECYCLE_STAGES.map((stage) => ({
+        ...row.firstCliffByStage[stage.id],
+        ...this._firstCliffCounterHealth(row.firstCliffByStage[stage.id]),
+      })),
+    };
+  }
+
+  _firstCliffCounterHealth(row) {
+    return {
+      firstCliffHc1PrecisionPct: row.firstCliffHc1Resolved > 0
+        ? row.firstCliffHc1Caught / row.firstCliffHc1Resolved * 100 : null,
+      firstCliffHc2PrecisionPct: row.firstCliffHc2Resolved > 0
+        ? row.firstCliffHc2Caught / row.firstCliffHc2Resolved * 100 : null,
+      firstCliffHc1AverageReturnPct: row.firstCliffHc1ReturnSamples > 0
+        ? row.firstCliffHc1ReturnSumPct / row.firstCliffHc1ReturnSamples : null,
+      firstCliffHc2AverageReturnPct: row.firstCliffHc2ReturnSamples > 0
+        ? row.firstCliffHc2ReturnSumPct / row.firstCliffHc2ReturnSamples : null,
+    };
+  }
+
+  _firstCliffLifecycleHealth() {
+    const aggregates = Object.fromEntries(FIRST_CLIFF_LIFECYCLE_STAGES.map((stage) => [
+      stage.id, {
+        stage: stage.id,
+        label: stage.label,
+        lifecycleStage: stage.id,
+        lifecycleLabel: stage.label,
+        ...firstCliffCounterRow(),
+      },
+    ]));
+    for (const stats of this.guardStrategies.values()) {
+      this._initializeFirstCliffStrategyStats(stats);
+      for (const stage of FIRST_CLIFF_LIFECYCLE_STAGES) {
+        const source = stats.firstCliffByStage[stage.id];
+        const target = aggregates[stage.id];
+        for (const name of Object.keys(firstCliffCounterRow())) target[name] += source[name];
+      }
+    }
+    return FIRST_CLIFF_LIFECYCLE_STAGES.map((stage) => ({
+      ...aggregates[stage.id],
+      ...this._firstCliffCounterHealth(aggregates[stage.id]),
+    }));
   }
 
   _observeRugPath(mint, state, event) {

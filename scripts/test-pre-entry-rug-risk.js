@@ -41,6 +41,23 @@ const config = {
   dumpabilityPositionSol: 1,
   dumpTop1ReserveWarnPct: 25,
   dumpTop3ReserveWarnPct: 50,
+  firstCliffCounterfactualEnabled: true,
+  firstCliffHorizonMs: 30_000,
+  firstCliffMaxPending: 10_000,
+  firstCliffEffectiveBuyersMax: 3,
+  firstCliffHc1Top1Pct: 15,
+  firstCliffHc1Top3Pct: 35,
+  firstCliffHc2Top1Pct: 20,
+  firstCliffHc2Top3Pct: 35,
+  firstCliffLifecycleEnabled: true,
+  firstCliffLaunchMaxAgeMs: 5_000,
+  firstCliffCurveEarlyMaxAgeMs: 30_000,
+  firstCliffCurveMigrationMinPct: 80,
+  firstCliffAmmEarlyMaxAgeMs: 10_000,
+  firstCliffAmmHc1Top3RecoveryMaxPct: 50,
+  firstCliffAmmHc2Top3RecoveryMaxPct: 40,
+  firstCliffAmmHc1WalletBuyTxSharePct: 50,
+  firstCliffAmmHc2WalletBuyTxSharePct: 60,
   crossMintEnabled: true,
   templateWindowMs: 5_000,
   templateLargeBuyMinSol: 1,
@@ -129,6 +146,83 @@ const config = {
   assert.ok(snapshot.dumpability.top1RecoveryPct < 100);
   assert.ok(snapshot.researchWarnings.includes('OBSERVED_TOP1_DUMPABLE_INVENTORY'));
   assert.equal(tracker.health().dumpabilityWarnings, 1);
+}
+
+{
+  const tracker = new PreEntryRugRiskTracker({ config });
+  const seedFirstCliffCandidate = (mint, base) => {
+    const buySol = [8, 0.5, 0.5, 0.5, 0.5];
+    const buyToken = [22, 4, 4, 4, 4];
+    for (let index = 0; index < 10; index += 1) {
+      const buyIndex = Math.floor(index / 2);
+      tracker.observeTrade({
+        mint,
+        side: index % 2 === 0 ? 'BUY' : 'SELL',
+        market: 'PUMP_BONDING_CURVE',
+        wallet: index % 2 === 0 ? `holder-${mint}-${buyIndex}` : `seller-${mint}-${buyIndex}`,
+        solAmount: index % 2 === 0 ? buySol[buyIndex] : 0.01,
+        tokenAmount: index % 2 === 0 ? buyToken[buyIndex] : 0.1,
+        timestampMs: base + index * 500,
+        price: 1,
+        virtualTokenReservesRaw: '1000000000000',
+        virtualSolReservesRaw: '100000000000',
+        realTokenReservesRaw: '100000000',
+        realSolReservesRaw: '10000000000',
+      });
+    }
+  };
+
+  seedFirstCliffCandidate('hc-cliff', 1_000);
+  const feature = tracker.snapshot('hc-cliff', 5_600);
+  assert.equal(feature.flagged, false);
+  assert.equal(feature.firstCliffCounterfactual.eligible, true);
+  assert.equal(feature.firstCliffCounterfactual.hc1Matched, true);
+  assert.equal(feature.firstCliffCounterfactual.hc2Matched, true);
+  assert.ok(feature.firstCliffCounterfactual.effectiveBuyers < 3);
+  assert.equal(feature.firstCliffCounterfactual.lifecycleStage, 'LAUNCH');
+  assert.equal(feature.firstCliffCounterfactual.lifecycleLabel, '发射 0–5 秒');
+  const cliffEntry = tracker.evaluateGuard({
+    strategyId: 'HC-LIVE', mint: 'hc-cliff', timestampMs: 5_600, source: 'LIVE',
+  });
+  assert.equal(cliffEntry.blocked, false);
+  tracker.observeTrade({
+    mint: 'hc-cliff', side: 'SELL', market: 'PUMP_BONDING_CURVE', wallet: 'cliff-dumper',
+    timestampMs: 6_500, price: 0.2, tokenAmount: 50,
+  });
+  tracker.observeTrade({
+    mint: 'hc-cliff', side: 'BUY', market: 'PUMP_BONDING_CURVE', wallet: 'cliff-confirm',
+    timestampMs: 6_600, price: 0.2, tokenAmount: 0.1, solAmount: 0.01,
+  });
+
+  seedFirstCliffCandidate('hc-no-cliff', 101_000);
+  const noCliffEntry = tracker.evaluateGuard({
+    strategyId: 'HC-SHADOW', mint: 'hc-no-cliff', timestampMs: 105_600, source: 'SHADOW',
+  });
+  assert.equal(noCliffEntry.blocked, false);
+  tracker.observeTrade({
+    mint: 'hc-no-cliff', side: 'BUY', market: 'PUMP_BONDING_CURVE', wallet: 'late-buyer',
+    timestampMs: 136_000, price: 1.05, tokenAmount: 0.1, solAmount: 0.01,
+  });
+
+  const health = tracker.health();
+  assert.equal(health.firstCliffCandidates, 2);
+  assert.equal(health.firstCliffResolved, 2);
+  assert.equal(health.firstCliffCaught, 1);
+  assert.equal(health.firstCliffNoCliff30s, 1);
+  assert.equal(health.firstCliffPending, 0);
+  const liveStats = health.strategyStats.find((row) => row.strategyId === 'HC-LIVE');
+  assert.equal(liveStats.firstCliffHc1Caught, 1);
+  assert.equal(liveStats.firstCliffHc2Caught, 1);
+  assert.equal(liveStats.firstCliffHc1PrecisionPct, 100);
+  const liveLaunchStats = liveStats.firstCliffByStage.find((row) => row.lifecycleStage === 'LAUNCH');
+  assert.equal(liveLaunchStats.firstCliffHc1Caught, 1);
+  const shadowStats = health.strategyStats.find((row) => row.strategyId === 'HC-SHADOW');
+  assert.equal(shadowStats.firstCliffHc1NoCliff30s, 1);
+  assert.ok(shadowStats.firstCliffHc1AverageReturnPct > 4.9);
+  const launchLifecycle = health.firstCliffLifecycleSummary.find((row) => row.lifecycleStage === 'LAUNCH');
+  assert.equal(launchLifecycle.firstCliffHc1Caught, 1);
+  assert.equal(launchLifecycle.firstCliffHc1NoCliff30s, 1);
+  assert.ok(health.recentFirstCliffCounterfactuals.some((row) => row.outcome === 'CLIFF_RUG_70'));
 }
 
 {

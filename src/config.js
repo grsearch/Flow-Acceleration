@@ -2000,6 +2000,71 @@ const config = {
     dumpTop3ReserveWarnPct: numberEnv(
       'FLOW_PRE_ENTRY_RUG_DUMP_TOP3_RESERVE_WARN_PCT', 50, { min: 0, max: 1_000 },
     ),
+    // Paired counterfactual only: evaluate two pre-first-cliff filters on every
+    // entry opportunity that the current guard passes. No entry is blocked and
+    // no RPC/SQLite lookup is added to the hot path.
+    firstCliffCounterfactualEnabled: booleanEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_COUNTERFACTUAL_ENABLED', true,
+    ),
+    firstCliffHorizonMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HORIZON_MS', 30_000, { min: 5_000, max: 120_000 },
+    ),
+    firstCliffMaxPending: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_MAX_PENDING', 10_000, { min: 100, max: 100_000 },
+    ),
+    firstCliffEffectiveBuyersMax: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_EFFECTIVE_BUYERS_MAX', 3, { min: 1, max: 100 },
+    ),
+    firstCliffHc1Top1Pct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC1_TOP1_PCT', 15, { min: 0, max: 1_000 },
+    ),
+    firstCliffHc1Top3Pct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC1_TOP3_PCT', 35, { min: 0, max: 1_000 },
+    ),
+    firstCliffHc2Top1Pct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC2_TOP1_PCT', 20, { min: 0, max: 1_000 },
+    ),
+    firstCliffHc2Top3Pct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC2_TOP3_PCT', 35, { min: 0, max: 1_000 },
+    ),
+    // Lifecycle-specific paired research. These boundaries and PumpSwap
+    // concentration/recovery checks only label counterfactual cohorts; they do
+    // not change the universal live guard until forward precision is proven.
+    firstCliffLifecycleEnabled: booleanEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_LIFECYCLE_ENABLED', true,
+    ),
+    firstCliffLaunchMaxAgeMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_LAUNCH_MAX_AGE_MS', 5_000,
+      { min: 500, max: 30_000 },
+    ),
+    firstCliffCurveEarlyMaxAgeMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_EARLY_MAX_AGE_MS', 30_000,
+      { min: 5_000, max: 300_000 },
+    ),
+    firstCliffCurveMigrationMinPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_MIGRATION_MIN_PCT', 80,
+      { min: 0, max: 100 },
+    ),
+    firstCliffAmmEarlyMaxAgeMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_EARLY_MAX_AGE_MS', 10_000,
+      { min: 500, max: 120_000 },
+    ),
+    firstCliffAmmHc1Top3RecoveryMaxPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC1_TOP3_RECOVERY_MAX_PCT', 50,
+      { min: 0, max: 100 },
+    ),
+    firstCliffAmmHc2Top3RecoveryMaxPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC2_TOP3_RECOVERY_MAX_PCT', 40,
+      { min: 0, max: 100 },
+    ),
+    firstCliffAmmHc1WalletBuyTxSharePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC1_WALLET_BUY_TX_SHARE_PCT', 50,
+      { min: 0, max: 100 },
+    ),
+    firstCliffAmmHc2WalletBuyTxSharePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC2_WALLET_BUY_TX_SHARE_PCT', 60,
+      { min: 0, max: 100 },
+    ),
     // Learn repeated launch/rug families from public trades only. Four large
     // buys in a sub-500ms burst form a template; after that template visibly
     // collapses, later Mints with the same amount/timing vector or at least two
