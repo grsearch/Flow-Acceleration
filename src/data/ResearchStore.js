@@ -6991,7 +6991,8 @@ class ResearchStore {
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active,
-        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+        COALESCE(SUM(status = 'CLOSED' AND net_return_pct IS NOT NULL), 0) AS resolved,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
         AVG(entry_buyers) AS average_entry_buyers,
         AVG(entry_net_flow_sol) AS average_entry_net_flow_sol,
         AVG(entry_sell_buy_ratio) AS average_entry_sell_buy_ratio,
@@ -6999,13 +7000,13 @@ class ResearchStore {
         AVG(entry_jump_pct) AS average_entry_jump_pct,
         AVG(max_favorable_return_pct) AS average_mfe_pct,
         AVG(max_adverse_return_pct) AS average_mae_pct,
-        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+        AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
           AS average_net_return_pct,
-        100.0 * COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0)
-          / NULLIF(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS win_rate_pct,
-        SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0
+        100.0 * COALESCE(SUM(status = 'CLOSED' AND net_return_pct > 0), 0)
+          / NULLIF(SUM(status = 'CLOSED' AND net_return_pct IS NOT NULL), 0) AS win_rate_pct,
+        SUM(CASE WHEN status = 'CLOSED' AND net_return_pct > 0
           THEN net_return_pct ELSE 0 END)
-          / NULLIF(ABS(SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct < 0
+          / NULLIF(ABS(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0
             THEN net_return_pct ELSE 0 END)), 0) AS profit_factor
       FROM migration_continuity_shadow_positions
       GROUP BY cohort_id, exit_profile_id
@@ -7014,7 +7015,7 @@ class ResearchStore {
       const rows = this.db.prepare(`
         SELECT net_return_pct
         FROM migration_continuity_shadow_positions
-        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+        WHERE cohort_id = ? AND status = 'CLOSED'
           AND net_return_pct IS NOT NULL
         ORDER BY net_return_pct
       `).all(cohort.cohort_id).map((row) => Number(row.net_return_pct));
