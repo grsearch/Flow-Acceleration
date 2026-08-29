@@ -21,6 +21,7 @@
     "test:startup": "node scripts/test-startup-dashboard.js",
     "test:startup-db": "node scripts/test-startup-no-history-rewrite.js",
     "test:health-sampler": "node scripts/test-database-health-sampler.js",
+    "test:dashboard-worker": "node scripts/test-dashboard-query-worker.js",
     "test:shadow-execution": "node scripts/test-shadow-execution-model.js",
     "test:rug-risk": "node scripts/test-pre-entry-rug-risk.js && node scripts/test-first-cliff-acceptance.js && node scripts/test-universal-rug-guard.js",
     "test:config": "node scripts/test-config-cost.js",
