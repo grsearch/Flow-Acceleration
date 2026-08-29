@@ -956,3 +956,28 @@ function testFastReversalContinuationConfirmation() {
 }
 
 testFastReversalContinuationConfirmation();
+
+function testNoExitIsCensored() {
+  let written = null;
+  const position = {
+    id: 7,
+    mint: 'NoExitCensored1111111111111111111111111111',
+    maxFavorableReturnPct: 12,
+    maxAdverseReturnPct: -34,
+  };
+  const suite = Object.create(MigratedDropReboundShadowSuite.prototype);
+  suite.store = {
+    updateMigratedDropReboundShadowPosition: (_id, patch) => { written = patch; },
+  };
+  suite.positions = new Map([[position.id, position]]);
+  suite.rowsByMint = new Map([[position.mint, new Set([position.id])]]);
+  suite.metrics = { closed: 0, noExit: 0, lastActionAt: null };
+  suite.now = () => 123;
+  suite._markNoExit(position);
+  assert.strictEqual(written.status, 'NO_EXIT');
+  assert.strictEqual(written.rejectionReason, 'NO_EXECUTABLE_EXIT_TRADE');
+  assert.strictEqual(Object.hasOwn(written, 'grossReturnPct'), false);
+  assert.strictEqual(Object.hasOwn(written, 'netReturnPct'), false);
+}
+
+testNoExitIsCensored();
