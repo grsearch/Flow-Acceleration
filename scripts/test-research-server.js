@@ -595,7 +595,16 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 19);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 21);
+    assert.deepStrictEqual(
+      migratedRebound.runtime.entryProfiles
+        .filter((profile) => profile.id.startsWith('GRT_R23_'))
+        .map((profile) => [profile.id, profile.newEntriesEnabled, profile.exitProfileIds]),
+      [
+        ['GRT_R23_F3_V2', true, ['GRT_F3_XLEG_V2']],
+        ['GRT_R23_F2_ONLY_V2', true, ['GRT_F2_XLEG_V2']],
+      ],
+    );
     assert.deepStrictEqual(
       migratedRebound.runtime.entryProfiles
         .filter((profile) => profile.id.startsWith('GD25_35_RUG_GUARD'))
@@ -612,7 +621,8 @@ async function main() {
       migratedRebound.runtime.exitProfiles.map((profile) => profile.id),
       [
         'X3', 'X8', 'XLEG',
-        'GEXEC_XLEG', 'G2_XLEG', 'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+        'GEXEC_XLEG', 'G2_XLEG', 'GRT_F3_XLEG_V2', 'GRT_F2_XLEG_V2',
+        'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
         'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
         'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
         'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
@@ -835,7 +845,10 @@ async function main() {
     );
     assert.deepStrictEqual(
       migrationContinuity.runtime.exitProfiles.map((profile) => profile.id),
-      ['E60', 'E120', 'E120_GUARD_V2', 'T10', 'T12_5', 'FLOW', 'RUNNER', 'AH60_180'],
+      [
+        'E60', 'E120', 'E120_GUARD_V2', 'T10', 'T12_5', 'E120_CONVERGED_V3',
+        'FLOW', 'RUNNER', 'AH60_180',
+      ],
     );
     assert.ok(Array.isArray(migrationContinuity.cohorts));
     assert.ok(Array.isArray(migrationContinuity.positions));
