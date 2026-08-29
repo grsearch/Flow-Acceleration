@@ -2080,6 +2080,7 @@
 
     function renderLaunchPullbackShadow(data) {
       const runtime = data.runtime || {};
+      const queryStatus = data.dashboardQuery?.status;
       const runtimeCohorts = runtime.cohorts || [];
       const labels = Object.fromEntries(runtimeCohorts.map(cohort => [
         cohort.cohortId,
@@ -2136,6 +2137,11 @@
         return `${cohort.cohortId}: 前${age(entry.flowConfirmationWindowMs)}已有Flow信号 · BuyersW3≥${number(entry.minFlowSignalBuyersW3)} · 跳价≤${rate(entry.maxEntryPriceJumpPct)}`;
       }).join(' | ');
       document.querySelector('#launch-pullback-expression').textContent = `旧 F/FT/FD/FO/NF30 规则和历史保持不变。新增前置Flow共振组：${flowConsensusRules || '等待配置'}。因果组：${causalRules || '等待配置'}。深回踩质量组：${qualityRules || '等待配置'}。最近30分钟市场宽度仅作标签，绝不参与开仓。退出：${holdRules || '等待配置'}`;
+      if (queryStatus === 'PREPARING') {
+        document.querySelector('#launch-pullback-expression').textContent += ' · 历史统计正在后台准备，页面与交易数据流不会被阻塞。';
+      } else if (queryStatus === 'REFRESHING') {
+        document.querySelector('#launch-pullback-expression').textContent += ' · 正在后台刷新历史统计，当前先显示缓存结果。';
+      }
 
       const summaryMetrics = [
         ['运行模式', runtime.enabled ? 'SHADOW F' : '关闭', `独立表 ${research.isolatedTable || 'launch_pullback_shadow_positions'}`],
@@ -2505,6 +2511,7 @@
 
     function renderMigrationSecondLegObserver(data) {
       const runtime = data.runtime || {};
+      const queryStatus = data.dashboardQuery?.status;
       const shadowRuntime = data.runtimeShadow || {};
       const strategy = runtime.strategy || {};
       const summary = data.summary || {};
@@ -2514,6 +2521,11 @@
       const provisionalFeatures = availability.provisional || [];
       const unavailableFeatures = availability.unavailable || data.missingArticleFeatures || [];
       document.querySelector('#m2f-observer-expression').textContent = `迁移 → PumpSwap真实成交驱动的${age(strategy.snapshotIntervalMs || 1000)}快照 → 最长${age(strategy.maxAgeMs || 480000)}；首回撤参考${pct(strategy.pullbackArmPct)}、可观测钱包留存底线${pct(strategy.retentionFloorPct)}。当前不产生入场或收益结论。`;
+      if (queryStatus === 'PREPARING') {
+        document.querySelector('#m2f-observer-expression').textContent += ' 历史统计正在后台准备，页面与交易数据流不会被阻塞。';
+      } else if (queryStatus === 'REFRESHING') {
+        document.querySelector('#m2f-observer-expression').textContent += ' 正在后台刷新历史统计，当前先显示缓存结果。';
+      }
       renderMetricGroups('#m2f-observer-metrics', [
         ['运行模式', runtime.enabled ? 'M2F-OBS' : '关闭', '观察型 Shadow；没有仓位表或交易回调'],
         ['迁移 / 活动', `${number(summary.observations)} / ${number(summary.active)}`, `本次进程观察 ${number(runtime.migrationsObserved)}`],
