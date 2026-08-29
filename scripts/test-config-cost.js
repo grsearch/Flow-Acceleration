@@ -216,6 +216,15 @@ assert.strictEqual(config.cyaOrganicBurstShadow.enabled, true);
 assert.ok(config.cyaOrganicBurstShadow.entryProfiles
   .filter((profile) => ['COB_D', 'COB_F'].includes(profile.id))
   .every((profile) => profile.newEntriesEnabled === true));
+assert.deepStrictEqual(
+  config.cyaOrganicBurstShadow.entryProfiles
+    .filter((profile) => ['COB_D', 'COB_F'].includes(profile.id))
+    .map((profile) => [profile.id, profile.exitProfileIds]),
+  [
+    ['COB_F', ['FIX30', 'CORE25_R75_X120']],
+    ['COB_D', ['FIX30', 'CORE25_R75_X120']],
+  ],
+);
 assert.strictEqual(liveGraduationRecovery.entryEnabled, false);
 assert.strictEqual(liveGraduationRecovery.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');
@@ -559,6 +568,8 @@ assert.deepStrictEqual(
     ['GE30_R23_F1_EXEC', 30_000, 1],
     ['GE30_R23_F1_XQ', 30_000, 1],
     ['GE30_R23_F2_ONLY', 30_000, 2],
+    ['GRT_R23_F3_V2', 30_000, 3],
+    ['GRT_R23_F2_ONLY_V2', 30_000, 2],
     ['GE30_R23_F3_EXEC', 30_000, 3],
     ['GE30_R23_F2_ONLY_EXEC', 30_000, 2],
     ['GE30_R23_F1_NIGHT', 30_000, 1],
@@ -590,7 +601,8 @@ assert.deepStrictEqual(
   config.migratedDropReboundShadow.exitProfiles.map((profile) => profile.id),
   [
     'X3', 'X8', 'XLEG',
-    'GEXEC_XLEG', 'G2_XLEG', 'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+    'GEXEC_XLEG', 'G2_XLEG', 'GRT_F3_XLEG_V2', 'GRT_F2_XLEG_V2',
+    'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
     'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
     'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
     'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
@@ -636,6 +648,7 @@ const gfrProfiles = config.migratedDropReboundShadow.entryProfiles
 assert.strictEqual(config.migratedDropReboundShadow.gfrEnabled, true);
 assert.strictEqual(config.migratedDropReboundShadow.fastFlowMaxTradesPerMint, 512);
 assert.strictEqual(config.migratedDropReboundShadow.fastFlowSweepMs, 5_000);
+assert.strictEqual(config.migratedDropReboundShadow.maxPlausibleReturnPct, 1_000);
 assert.ok([
   'POST_GD25_35_RUG_GUARD_T20_24_',
   'POST_GD25_35_X3',
@@ -700,6 +713,11 @@ assert.ok([
   'PBR_B', 'PBR_C', 'FLOW_R',
   'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
 ].every((id) => bigWinnerEntryProfiles.get(id)?.newEntriesEnabled === false));
+assert.strictEqual(bigWinnerEntryProfiles.get('PBR_B_RT_V2').newEntriesEnabled, true);
+assert.deepStrictEqual(
+  bigWinnerEntryProfiles.get('PBR_B_RT_V2').exitProfileIds,
+  ['X50_12', 'X50_RATCHET'],
+);
 assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A').newEntriesEnabled, false);
 assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A_B10_PB20').newEntriesEnabled, false);
 assert.strictEqual(bigWinnerEntryProfiles.get('PBR_A_B10_PB20').minBuyers3s, 10);
@@ -758,13 +776,22 @@ assert.strictEqual(csfProfiles.get('CSF_E510_Q').newEntriesEnabled, true);
 assert.deepStrictEqual(csfProfiles.get('CSF_E510_Q').managementProfileIds, ['F20']);
 assert.deepStrictEqual(
   config.migrationContinuityShadow.exitProfiles.map((profile) => profile.id),
-  ['E60', 'E120', 'E120_GUARD_V2', 'T10', 'T12_5', 'FLOW', 'RUNNER', 'AH60_180'],
+  [
+    'E60', 'E120', 'E120_GUARD_V2', 'T10', 'T12_5', 'E120_CONVERGED_V3',
+    'FLOW', 'RUNNER', 'AH60_180',
+  ],
 );
 const migrationExitProfiles = new Map(config.migrationContinuityShadow.exitProfiles
   .map((profile) => [profile.id, profile]));
 assert.ok(['E60', 'E120', 'E120_GUARD_V2', 'T10', 'FLOW', 'RUNNER', 'AH60_180']
   .every((id) => migrationExitProfiles.get(id)?.newEntriesEnabled === false));
-assert.notStrictEqual(migrationExitProfiles.get('T12_5')?.newEntriesEnabled, false);
+assert.strictEqual(migrationExitProfiles.get('T12_5')?.newEntriesEnabled, false);
+assert.strictEqual(migrationExitProfiles.get('E120_CONVERGED_V3')?.newEntriesEnabled, true);
+assert.strictEqual(
+  config.postMigrationSurvivorObserver.shadowFullHoldMatrixEnabled,
+  false,
+);
+assert.deepStrictEqual(config.postMigrationSurvivorObserver.shadowHoldMs, [30_000]);
 assert.strictEqual(config.holderGrowthShadow.enabled, false);
 assert.deepStrictEqual(
   config.holderGrowthShadow.entryProfiles.map((profile) => [profile.id, profile.horizonMs]),
