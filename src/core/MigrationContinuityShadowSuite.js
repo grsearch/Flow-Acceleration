@@ -561,11 +561,11 @@ class MigrationContinuityShadowSuite {
     this.metrics.lastActionAt = this.now();
   }
 
-  _markNoExit(position) {
+  _markNoExit(position, reason = 'NO_EXECUTABLE_EXIT_TRADE') {
     this.store.updateMigrationContinuityShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
-      grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
+      rejectionReason: reason,
+      exitReason: reason,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
