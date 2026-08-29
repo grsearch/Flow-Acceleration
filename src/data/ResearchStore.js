@@ -511,6 +511,37 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_raw_trades_mint_ts ON raw_trades(mint, timestamp_ms);
       CREATE INDEX IF NOT EXISTS idx_raw_trades_wallet_ts ON raw_trades(wallet, timestamp_ms);
 
+      CREATE TABLE IF NOT EXISTS pre_entry_rug_first_cliff_audits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        audit_key TEXT NOT NULL UNIQUE,
+        strategy_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        lifecycle_stage TEXT,
+        lifecycle_label TEXT,
+        entry_at INTEGER NOT NULL,
+        resolved_at INTEGER NOT NULL,
+        entry_price REAL,
+        hc1_matched INTEGER NOT NULL DEFAULT 0,
+        hc2_matched INTEGER NOT NULL DEFAULT 0,
+        effective_buyers REAL,
+        top1_inventory_pct REAL,
+        top3_inventory_pct REAL,
+        top1_real_reserve_pct REAL,
+        top3_real_reserve_pct REAL,
+        top3_recovery_pct REAL,
+        max_wallet_buy_tx_share_pct REAL,
+        outcome TEXT NOT NULL,
+        return_pct REAL,
+        cliff_drop_pct REAL,
+        mark_lag_ms INTEGER,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_first_cliff_resolved
+        ON pre_entry_rug_first_cliff_audits(resolved_at);
+      CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_first_cliff_strategy
+        ON pre_entry_rug_first_cliff_audits(strategy_id, resolved_at);
+
       CREATE TABLE IF NOT EXISTS flow_signals (
         signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp_ms INTEGER NOT NULL,
@@ -2643,6 +2674,23 @@ class ResearchStore {
           updated_at = @timestampMs
         WHERE mint = @mint
       `),
+      insertPreEntryRugFirstCliffAudit: this.db.prepare(`
+        INSERT OR IGNORE INTO pre_entry_rug_first_cliff_audits (
+          audit_key, strategy_id, source, mint, lifecycle_stage, lifecycle_label,
+          entry_at, resolved_at, entry_price, hc1_matched, hc2_matched,
+          effective_buyers, top1_inventory_pct, top3_inventory_pct,
+          top1_real_reserve_pct, top3_real_reserve_pct, top3_recovery_pct,
+          max_wallet_buy_tx_share_pct, outcome, return_pct, cliff_drop_pct,
+          mark_lag_ms, created_at
+        ) VALUES (
+          @auditKey, @strategyId, @source, @mint, @lifecycleStage, @lifecycleLabel,
+          @entryAt, @resolvedAt, @entryPrice, @hc1Matched, @hc2Matched,
+          @effectiveBuyers, @top1InventoryPct, @top3InventoryPct,
+          @top1RealReservePct, @top3RealReservePct, @top3RecoveryPct,
+          @maxWalletBuyTxSharePct, @outcome, @returnPct, @cliffDropPct,
+          @markLagMs, @createdAt
+        )
+      `),
       insertSignal: this.db.prepare(`
         INSERT INTO flow_signals (
           timestamp_ms, slot, signature, mint, symbol, age_ms, curve_pct, p0,
@@ -4146,6 +4194,43 @@ class ResearchStore {
       }
       return { ...row, id, inserted: true };
     });
+
+    this._writePreEntryRugFirstCliffAudits = this.db.transaction((rows) => {
+      for (const row of rows) this.stmts.insertPreEntryRugFirstCliffAudit.run(row);
+    });
+  }
+
+  recordPreEntryRugFirstCliffAudits(rows = []) {
+    if (!Array.isArray(rows) || rows.length === 0) return 0;
+    const createdAt = Date.now();
+    const normalized = rows.map((row) => ({
+      auditKey: row.auditKey || `${row.key}|${row.entryAt}`,
+      strategyId: row.strategyId,
+      source: row.source,
+      mint: row.mint,
+      lifecycleStage: row.lifecycleStage || null,
+      lifecycleLabel: row.lifecycleLabel || null,
+      entryAt: row.entryAt,
+      resolvedAt: row.resolvedAt,
+      entryPrice: Number.isFinite(row.entryPrice) ? row.entryPrice : null,
+      hc1Matched: row.hc1Matched ? 1 : 0,
+      hc2Matched: row.hc2Matched ? 1 : 0,
+      effectiveBuyers: Number.isFinite(row.effectiveBuyers) ? row.effectiveBuyers : null,
+      top1InventoryPct: Number.isFinite(row.top1InventoryPct) ? row.top1InventoryPct : null,
+      top3InventoryPct: Number.isFinite(row.top3InventoryPct) ? row.top3InventoryPct : null,
+      top1RealReservePct: Number.isFinite(row.top1RealReservePct) ? row.top1RealReservePct : null,
+      top3RealReservePct: Number.isFinite(row.top3RealReservePct) ? row.top3RealReservePct : null,
+      top3RecoveryPct: Number.isFinite(row.top3RecoveryPct) ? row.top3RecoveryPct : null,
+      maxWalletBuyTxSharePct: Number.isFinite(row.maxWalletBuyTxSharePct)
+        ? row.maxWalletBuyTxSharePct : null,
+      outcome: row.outcome,
+      returnPct: Number.isFinite(row.returnPct) ? row.returnPct : null,
+      cliffDropPct: Number.isFinite(row.cliffDropPct) ? row.cliffDropPct : null,
+      markLagMs: Number.isFinite(row.markLagMs) ? Math.max(0, Math.round(row.markLagMs)) : null,
+      createdAt,
+    }));
+    this._writePreEntryRugFirstCliffAudits(normalized);
+    return normalized.length;
   }
 
   recordCreate(event) {
@@ -8192,7 +8277,8 @@ class ResearchStore {
           )
           AND entry_signature IS NULL AND exit_reason IN (
             'ENTRY_REJECTED', 'ENTRY_PRICE_JUMP', 'ENTRY_WALLET_RESERVE_REJECTED',
-            'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED'
+            'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED',
+            'ENTRY_AMM_QUOTE_STALE'
           )
         ), 0) AS pre_submit_guard_rejected_positions,
         COALESCE(SUM(
@@ -8208,7 +8294,8 @@ class ResearchStore {
             OR (
               entry_signature IS NULL AND exit_reason IN (
                 'ENTRY_REJECTED', 'ENTRY_PRICE_JUMP', 'ENTRY_WALLET_RESERVE_REJECTED',
-                'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED'
+                'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED',
+                'ENTRY_AMM_QUOTE_STALE'
               )
             )
           )

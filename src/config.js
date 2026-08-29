@@ -809,6 +809,32 @@ const config = {
           1_500,
           { min: 100 },
         ),
+        // The latest overlapping 24h sample was sharply negative from
+        // 00:00-04:00 Beijing and positive outside it. Keep this scoped to
+        // this live rule; its source Shadow remains an all-day control.
+        entryBeijingStartHour: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENTRY_BEIJING_START_HOUR',
+          4,
+          { min: 0, max: 24 },
+        ),
+        entryBeijingEndHour: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENTRY_BEIJING_END_HOUR',
+          24,
+          { min: 0, max: 24 },
+        ),
+        // Error 6040 is a stale AMM quote, not a strategy-rule rejection.
+        // One immediate fresh quote is allowed while the original 15% price
+        // guard, self-impact guard and signal-age bound still apply.
+        entryQuoteRefreshRetryCount: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_QUOTE_REFRESH_RETRY_COUNT',
+          1,
+          { min: 0, max: 1 },
+        ),
+        entryQuoteRefreshMaxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_QUOTE_REFRESH_MAX_SIGNAL_AGE_MS',
+          2_500,
+          { min: 100, max: 10_000 },
+        ),
         maxEntriesPerMint: 1,
         reentryCooldownMs: 0,
         maxEntryPriceJumpPct: numberEnv(
@@ -2011,6 +2037,9 @@ const config = {
     ),
     firstCliffMaxPending: integerEnv(
       'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_MAX_PENDING', 10_000, { min: 100, max: 100_000 },
+    ),
+    firstCliffAuditFlushMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AUDIT_FLUSH_MS', 1_000, { min: 250, max: 10_000 },
     ),
     firstCliffEffectiveBuyersMax: numberEnv(
       'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_EFFECTIVE_BUYERS_MAX', 3, { min: 1, max: 100 },

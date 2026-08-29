@@ -328,6 +328,61 @@ assert.strictEqual(sharedMintManager._riskReason({
   strategyId: 'post_gd25_35_xleg', mint: sharedMint,
 }), 'MAX_POSITIONS_PER_MINT');
 
+sharedMintManager.strategies.set('beijing-window-test', {
+  ...config.strategies[0],
+  id: 'beijing-window-test',
+  entryBeijingStartHour: 4,
+  entryBeijingEndHour: 24,
+});
+assert.strictEqual(sharedMintManager._riskReason({
+  strategyId: 'beijing-window-test',
+  mint: 'MintBeijingBlocked11111111111111111111111111',
+  timestampMs: Date.UTC(2026, 7, 28, 18, 0, 0), // Beijing 02:00
+}), 'STRATEGY_TIME_WINDOW');
+assert.strictEqual(sharedMintManager._riskReason({
+  strategyId: 'beijing-window-test',
+  mint: 'MintBeijingAllowed11111111111111111111111111',
+  timestampMs: Date.UTC(2026, 7, 28, 21, 0, 0), // Beijing 05:00
+}), null);
+
+store.recordPreEntryRugFirstCliffAudits([{
+  auditKey: 'audit-test|1000',
+  strategyId: 'beijing-window-test',
+  source: 'LIVE',
+  mint: 'MintAudit111111111111111111111111111111111',
+  lifecycleStage: 'LAUNCH',
+  lifecycleLabel: 'launch',
+  entryAt: 1_000,
+  resolvedAt: 31_000,
+  entryPrice: 1,
+  hc1Matched: true,
+  hc2Matched: false,
+  effectiveBuyers: 2,
+  top1InventoryPct: 20,
+  top3InventoryPct: 40,
+  top1RealReservePct: 10,
+  top3RealReservePct: 20,
+  top3RecoveryPct: 30,
+  maxWalletBuyTxSharePct: 40,
+  outcome: 'NO_CLIFF_30S',
+  returnPct: 5,
+  cliffDropPct: 0,
+  markLagMs: 30_000,
+}]);
+store.recordPreEntryRugFirstCliffAudits([{
+  auditKey: 'audit-test|1000',
+  strategyId: 'beijing-window-test',
+  source: 'LIVE',
+  mint: 'MintAudit111111111111111111111111111111111',
+  entryAt: 1_000,
+  resolvedAt: 31_000,
+  outcome: 'NO_CLIFF_30S',
+}]);
+assert.strictEqual(store.db.prepare(`
+  SELECT COUNT(*) AS n FROM pre_entry_rug_first_cliff_audits
+  WHERE audit_key = 'audit-test|1000'
+`).get().n, 1);
+
 // COB-D's live trailing mode takes the full position at +10% only during the
 // first two seconds. Outside that window the existing +30% trailing rule
 // remains in control.
@@ -412,6 +467,99 @@ setImmediate(() => {
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) AS n FROM live_strategy_decisions WHERE strategy_id='legacy_history_only'
   `).get().n, 0);
+
+  // A stale PumpSwap AMM quote (6040) gets exactly one immediate fresh-quote
+  // retry while the original signal is still young. Both attempts remain
+  // auditable, and the safety price/self-impact checks still run in buyAmm.
+  const quoteRetryStrategy = {
+    ...config.strategies[0],
+    id: 'amm_quote_retry_test',
+    maxSignalAgeMs: 2_500,
+    entryQuoteRefreshRetryCount: 1,
+    entryQuoteRefreshMaxSignalAgeMs: 2_500,
+  };
+  let quoteRetryCalls = 0;
+  const quoteRetryManager = new LiveTradingManager({
+    config: {
+      ...config,
+      dryRun: false,
+      maxConcurrentPositions: 10,
+      strategies: [quoteRetryStrategy],
+    },
+    store,
+    now: () => now,
+    executor: {
+      async buyAmm() {
+        quoteRetryCalls += 1;
+        if (quoteRetryCalls === 1) {
+          const error = new Error(
+            'AnchorError 6040 BuySlippageBelowMinBaseAmountOut: stale AMM quote',
+          );
+          error.code = 'SIMULATION_FAILED';
+          throw error;
+        }
+        return {
+          signature: 'amm-quote-retry-success',
+          venue: 'PUMP_AMM',
+          tokenAmountRaw: '1000000',
+          expectedPrice: 1,
+          execution: {
+            settlement: { walletSolDelta: -0.05, networkFeeSol: 0.0005 },
+          },
+        };
+      },
+    },
+  });
+  const quoteRetryMint = 'MintAmmQuoteRetry111111111111111111111111111';
+  const quoteRetryDecision = store.recordLiveStrategyDecision({
+    strategyId: quoteRetryStrategy.id,
+    episodeId: `${quoteRetryMint}:1`,
+    timestampMs: now,
+    receivedAtMs: now,
+    mint: quoteRetryMint,
+    symbol: 'RETRY',
+    ruleVersion: 'test',
+    market: 'PUMP_AMM',
+    referencePrice: 1,
+    features: {},
+    ruleMatched: true,
+    rejectionReasons: [],
+    mode: 'LIVE',
+    actionStatus: 'MATCHED',
+  });
+  await quoteRetryManager._enter(quoteRetryDecision, {
+    strategyId: quoteRetryStrategy.id,
+    episodeId: `${quoteRetryMint}:1`,
+    mint: quoteRetryMint,
+    symbol: 'RETRY',
+    market: 'PUMP_AMM',
+    price: 1,
+    timestampMs: now,
+    receivedAtMs: now,
+    slot: 123,
+    features: {},
+  });
+  assert.strictEqual(quoteRetryCalls, 2);
+  assert.deepStrictEqual(store.db.prepare(`
+    SELECT attempt, status FROM live_orders
+    WHERE strategy_id = ? ORDER BY attempt
+  `).all(quoteRetryStrategy.id), [
+    { attempt: 1, status: 'FAILED' },
+    { attempt: 2, status: 'CONFIRMED' },
+  ]);
+  const quoteRetryPosition = store.db.prepare(`
+    SELECT status FROM live_positions WHERE strategy_id = ?
+  `).get(quoteRetryStrategy.id);
+  assert.strictEqual(quoteRetryPosition.status, 'OPEN');
+  const quoteRetryPositionId = store.db.prepare(`
+    SELECT id FROM live_positions WHERE strategy_id = ?
+  `).get(quoteRetryStrategy.id).id;
+  store.updateLivePosition(quoteRetryPositionId, {
+    status: 'CLOSED',
+    exitReason: 'TEST_CLEANUP',
+    closedAt: now,
+  });
+  await quoteRetryManager.stop();
 
   // A loss visible at the six-second checkpoint triggers XLEG loss exit.
   trade(70, 7_000);

@@ -60,8 +60,9 @@ function firstCliffCounterRow() {
 }
 
 class PreEntryRugRiskTracker {
-  constructor({ config, now = () => Date.now(), fileSystem = fs }) {
+  constructor({ config, store = null, now = () => Date.now(), fileSystem = fs }) {
     this.config = config;
+    this.store = store;
     this.now = now;
     this.fileSystem = fileSystem;
     this.states = new Map();
@@ -89,6 +90,8 @@ class PreEntryRugRiskTracker {
     this.firstCliffCandidateKeys = new Map();
     this.firstCliffPendingCount = 0;
     this.recentFirstCliffCounterfactuals = [];
+    this.firstCliffAuditQueue = [];
+    this.firstCliffAuditTimer = null;
     this.lastSweepAt = 0;
     this.metrics = {
       observedTrades: 0,
@@ -127,6 +130,8 @@ class PreEntryRugRiskTracker {
       firstCliffCaught: 0,
       firstCliffNoCliff30s: 0,
       firstCliffCensored: 0,
+      firstCliffAuditsPersisted: 0,
+      firstCliffAuditErrors: 0,
       guardEvaluations: 0,
       guardPassed: 0,
       guardRejected: 0,
@@ -140,18 +145,34 @@ class PreEntryRugRiskTracker {
   }
 
   start() {
-    if (this.config.crossMintEnabled === false) return;
-    this._loadToxicMemory();
-    const intervalMs = this._cfg('toxicPersistIntervalMs', 5_000);
-    this.toxicPersistTimer = setInterval(() => {
-      this._persistToxicMemory().catch(() => {});
-    }, intervalMs);
-    this.toxicPersistTimer.unref?.();
+    if (this.config.crossMintEnabled !== false) {
+      this._loadToxicMemory();
+      const intervalMs = this._cfg('toxicPersistIntervalMs', 5_000);
+      this.toxicPersistTimer = setInterval(() => {
+        this._persistToxicMemory().catch(() => {});
+      }, intervalMs);
+      this.toxicPersistTimer.unref?.();
+    }
+    if (this._cfg('firstCliffCounterfactualEnabled', true) !== false
+      && typeof this.store?.recordPreEntryRugFirstCliffAudits === 'function') {
+      const intervalMs = this._cfg('firstCliffAuditFlushMs', 1_000);
+      this.firstCliffAuditTimer = setInterval(() => {
+        // Resolve expired observations even when a Mint stops trading. This
+        // keeps the fixed 24h acceptance window terminal instead of leaving a
+        // growing PENDING tail that would invite another tuning cycle.
+        this._sweepFirstCliffCounterfactuals(this.now());
+        this._flushFirstCliffAudits();
+      }, intervalMs);
+      this.firstCliffAuditTimer.unref?.();
+    }
   }
 
   stop() {
     if (this.toxicPersistTimer) clearInterval(this.toxicPersistTimer);
     this.toxicPersistTimer = null;
+    if (this.firstCliffAuditTimer) clearInterval(this.firstCliffAuditTimer);
+    this.firstCliffAuditTimer = null;
+    this._flushFirstCliffAudits();
     this._persistToxicMemorySync();
     this.states.clear();
     this.toxicWallets.clear();
@@ -165,6 +186,7 @@ class PreEntryRugRiskTracker {
     this.firstCliffCandidateKeys.clear();
     this.firstCliffPendingCount = 0;
     this.recentFirstCliffCounterfactuals = [];
+    this.firstCliffAuditQueue = [];
   }
 
   observeTrade(trade) {
@@ -871,7 +893,10 @@ class PreEntryRugRiskTracker {
 
   _registerFirstCliffCounterfactual({ strategyId, source, mint, timestampMs, risk, stats }) {
     const feature = risk.firstCliffCounterfactual;
-    if (!feature?.eligible || (!feature.hc1Matched && !feature.hc2Matched)) return;
+    // Persist every eligible opportunity, including the unflagged control arm.
+    // Without it we could measure precision, but not recall or missed cliffs.
+    // This remains an in-memory paired Shadow audit and does not block entry.
+    if (!feature?.eligible) return;
     const key = `${source}|${strategyId}|${mint}|${feature.lifecycleStage || 'UNKNOWN'}`;
     const existingExpiry = this.firstCliffCandidateKeys.get(key);
     if (existingExpiry > timestampMs) return;
@@ -939,11 +964,22 @@ class PreEntryRugRiskTracker {
           returnPct, cliffDropPct: cliff.dropPct,
         });
       } else if (observedAt >= candidate.deadlineAt) {
+        const lastMarkAt = finite(state.events.at(-1)?.timestampMs, observedAt);
+        const markLagMs = Math.max(0, observedAt - lastMarkAt);
+        // A quiet Mint cannot be labelled safe from an old mark. Persist it as
+        // censored so tomorrow's precision/recall decision remains honest.
+        if (markLagMs > 5_000) {
+          this._finalizeFirstCliffCounterfactual(candidate, {
+            outcome: 'CENSORED_STALE_MARK', resolvedAt: observedAt,
+            returnPct: null, markLagMs,
+          });
+          continue;
+        }
         const returnPct = candidate.entryPrice > 0 && latestPrice > 0
           ? (latestPrice / candidate.entryPrice - 1) * 100 : null;
         this._finalizeFirstCliffCounterfactual(candidate, {
           outcome: 'NO_CLIFF_30S', resolvedAt: observedAt, returnPct,
-          markLagMs: Math.max(0, observedAt - finite(state.events.at(-1)?.timestampMs, observedAt)),
+          markLagMs,
         });
       } else unresolved.push(candidate);
     }
@@ -951,14 +987,32 @@ class PreEntryRugRiskTracker {
     else this.firstCliffPendingByMint.delete(mint);
   }
 
+  _sweepFirstCliffCounterfactuals(now = this.now()) {
+    if (!this.firstCliffPendingCount) return 0;
+    let swept = 0;
+    for (const [mint, pending] of this.firstCliffPendingByMint) {
+      if (!pending?.some((row) => row.deadlineAt <= now)) continue;
+      const state = this.states.get(mint);
+      if (!state) continue;
+      const before = pending.length;
+      this._resolveFirstCliffCounterfactuals(mint, state, null, now);
+      swept += before - (this.firstCliffPendingByMint.get(mint)?.length || 0);
+    }
+    return swept;
+  }
+
   _finalizeFirstCliffCounterfactual(candidate, result) {
     this.firstCliffPendingCount = Math.max(0, this.firstCliffPendingCount - 1);
     this.firstCliffCandidateKeys.delete(candidate.key);
-    this.metrics.firstCliffResolved += 1;
-    if (result.outcome === 'CLIFF_RUG_70') this.metrics.firstCliffCaught += 1;
-    else this.metrics.firstCliffNoCliff30s += 1;
+    const censored = result.outcome === 'CENSORED_STALE_MARK';
+    if (censored) this.metrics.firstCliffCensored += 1;
+    else {
+      this.metrics.firstCliffResolved += 1;
+      if (result.outcome === 'CLIFF_RUG_70') this.metrics.firstCliffCaught += 1;
+      else this.metrics.firstCliffNoCliff30s += 1;
+    }
     const stats = this.guardStrategies.get(candidate.strategyId);
-    if (stats) {
+    if (stats && !censored) {
       this._initializeFirstCliffStrategyStats(stats);
       const stageStats = stats.firstCliffByStage[candidate.lifecycleStage];
       for (const cohort of ['Hc1', 'Hc2']) {
@@ -977,9 +1031,40 @@ class PreEntryRugRiskTracker {
         }
       }
     }
-    this.recentFirstCliffCounterfactuals.unshift({ ...candidate, ...result });
+    const audit = {
+      ...candidate,
+      ...result,
+      auditKey: `${candidate.key}|${candidate.entryAt}`,
+    };
+    this.recentFirstCliffCounterfactuals.unshift(audit);
     if (this.recentFirstCliffCounterfactuals.length > 100) {
       this.recentFirstCliffCounterfactuals.length = 100;
+    }
+    if (typeof this.store?.recordPreEntryRugFirstCliffAudits === 'function') {
+      this.firstCliffAuditQueue.push(audit);
+      const maxQueue = this._cfg('firstCliffMaxPending', 10_000);
+      if (this.firstCliffAuditQueue.length > maxQueue) {
+        this.firstCliffAuditQueue.splice(0, this.firstCliffAuditQueue.length - maxQueue);
+        this.metrics.firstCliffCensored += 1;
+      }
+    }
+  }
+
+  _flushFirstCliffAudits() {
+    if (!this.firstCliffAuditQueue.length
+      || typeof this.store?.recordPreEntryRugFirstCliffAudits !== 'function') return 0;
+    const batch = this.firstCliffAuditQueue.splice(0, 500);
+    try {
+      const written = this.store.recordPreEntryRugFirstCliffAudits(batch);
+      this.metrics.firstCliffAuditsPersisted += Number(written) || 0;
+      return Number(written) || 0;
+    } catch (error) {
+      this.firstCliffAuditQueue.unshift(...batch);
+      const maxQueue = this._cfg('firstCliffMaxPending', 10_000);
+      if (this.firstCliffAuditQueue.length > maxQueue) this.firstCliffAuditQueue.length = maxQueue;
+      this.metrics.firstCliffAuditErrors += 1;
+      this.metrics.lastError = `first cliff audit: ${error.message}`;
+      return 0;
     }
   }
 

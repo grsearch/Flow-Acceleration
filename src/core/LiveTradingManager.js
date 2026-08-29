@@ -76,6 +76,34 @@ function restoredPosition(row) {
   };
 }
 
+function errorDetails(error) {
+  const parts = [errorText(error)];
+  for (const value of [error?.transactionError, error?.execution?.transactionError]) {
+    if (!value) continue;
+    try {
+      parts.push(JSON.stringify(value));
+    } catch (_) {
+      // The human-readable error remains enough when an RPC payload cannot be serialized.
+    }
+  }
+  return parts.join(' ');
+}
+
+function isRefreshableAmmBuySlippage(error) {
+  return /BuySlippageBelowMinBaseAmountOut|0x1798|Custom["':\s]+6040|Error (?:Code|Number):\s*6040/i
+    .test(errorDetails(error));
+}
+
+function beijingHour(timestampMs) {
+  return new Date(Number(timestampMs) + (8 * 60 * 60 * 1_000)).getUTCHours();
+}
+
+function hourInWindow(hour, startHour, endHour) {
+  if (startHour === endHour) return true;
+  if (startHour < endHour) return hour >= startHour && hour < endHour;
+  return hour >= startHour || hour < endHour;
+}
+
 function rawTokenUnits(value) {
   try {
     const raw = BigInt(value || 0);
@@ -828,6 +856,19 @@ class LiveTradingManager {
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
+    const entryBeijingStartHour = Number(strategy.entryBeijingStartHour);
+    const entryBeijingEndHour = Number(strategy.entryBeijingEndHour);
+    if (Number.isFinite(entryBeijingStartHour) && Number.isFinite(entryBeijingEndHour)) {
+      const eventTime = Number(event.timestampMs ?? event.receivedAtMs ?? this.now());
+      if (Number.isFinite(eventTime)
+        && !hourInWindow(
+          beijingHour(eventTime),
+          entryBeijingStartHour,
+          entryBeijingEndHour,
+        )) {
+        return 'STRATEGY_TIME_WINDOW';
+      }
+    }
     const shadowEntryImpactPct = Number(event.features?.shadowEntryImpactPct);
     const maxShadowEntryImpactPct = Number(strategy.maxShadowEntryImpactPct);
     if (Number.isFinite(shadowEntryImpactPct)
@@ -918,9 +959,11 @@ class LiveTradingManager {
       return;
     }
 
-    const submittedAt = this.now();
+    let submittedAt = this.now();
+    let entryAttempt = 1;
     position.entryStartedAt = submittedAt;
-    try {
+    while (true) {
+      try {
       let result;
       if (this.mode === 'DRY_RUN') {
         if (!(event.price > 0)) throw new Error('Missing strategy signal price for simulation');
@@ -983,7 +1026,7 @@ class LiveTradingManager {
         mint: position.mint,
         side: 'BUY',
         venue: result.venue,
-        attempt: 1,
+        attempt: entryAttempt,
         requestedSol: strategy.positionSizeSol,
         requestedTokenRaw: result.tokenAmountRaw,
         status: 'CONFIRMED',
@@ -1019,7 +1062,8 @@ class LiveTradingManager {
         const token = this.store.getToken(position.mint);
         if (token?.graduated_at) this.onGraduated(token);
       }
-    } catch (error) {
+      return;
+      } catch (error) {
       const failedAt = this.now();
       const transactionFailed = error.transactionFailed || error.code === 'TRANSACTION_FAILED';
       const confirmationUnknown = Boolean(error.signature) && !transactionFailed;
@@ -1030,7 +1074,7 @@ class LiveTradingManager {
         mint: position.mint,
         side: 'BUY',
         venue: event.market || strategy.market || 'PUMP_AMM',
-        attempt: 1,
+        attempt: entryAttempt,
         requestedSol: strategy.positionSizeSol,
         status: confirmationUnknown ? 'CONFIRMATION_UNKNOWN' : 'FAILED',
         signature: error.signature,
@@ -1046,6 +1090,28 @@ class LiveTradingManager {
           positionId: position.id,
           signature: error.signature,
         }));
+      }
+      const quoteRefreshRetryCount = Math.max(
+        0,
+        Number(strategy.entryQuoteRefreshRetryCount) || 0,
+      );
+      const quoteRefreshMaxSignalAgeMs = Math.max(
+        0,
+        Number(strategy.entryQuoteRefreshMaxSignalAgeMs) || 0,
+      );
+      const signalAt = Number(event.receivedAtMs ?? event.timestampMs);
+      const retrySignalAgeMs = Number.isFinite(signalAt) ? failedAt - signalAt : Infinity;
+      const canRefreshQuote = position.mode === 'LIVE'
+        && (event.market || strategy.market) === 'PUMP_AMM'
+        && !confirmationUnknown
+        && isRefreshableAmmBuySlippage(error)
+        && entryAttempt <= quoteRefreshRetryCount
+        && retrySignalAgeMs <= quoteRefreshMaxSignalAgeMs;
+      if (canRefreshQuote) {
+        entryAttempt += 1;
+        submittedAt = this.now();
+        position.entryStartedAt = submittedAt;
+        continue;
       }
       if (confirmationUnknown) {
         position.status = 'EXIT_FAILED';
@@ -1069,7 +1135,9 @@ class LiveTradingManager {
         await this._recoverUnknownEntry(position, { orderId, initialError: error });
         return;
       }
-      const rejectionReason = transactionFailed
+      const rejectionReason = isRefreshableAmmBuySlippage(error)
+        ? 'ENTRY_AMM_QUOTE_STALE'
+        : transactionFailed
         ? 'ENTRY_TRANSACTION_FAILED'
         : error.code === 'CURVE_COMPLETE'
           ? 'ENTRY_MIGRATED_BEFORE_SUBMIT'
@@ -1112,6 +1180,7 @@ class LiveTradingManager {
         receivedAtMs: event.receivedAtMs || null,
         features: event.features || {},
       });
+      }
     }
   }
 

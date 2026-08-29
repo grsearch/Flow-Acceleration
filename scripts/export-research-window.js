@@ -93,7 +93,7 @@ const EXPLICIT_FILTERS = Object.freeze({
 
 const GENERIC_TIME_COLUMNS = [
   'timestamp_ms', 'signal_at', 'reference_at', 'smart_buy_at', 'smart_open_at',
-  'rebound_at', 'observed_at', 'target_at', 'created_at', 'updated_at',
+  'rebound_at', 'observed_at', 'target_at', 'resolved_at', 'created_at', 'updated_at',
 ];
 
 function args(argv) {

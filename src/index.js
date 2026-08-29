@@ -101,6 +101,7 @@ function createRuntime(runtimeConfig = config) {
   ]);
   const preEntryRugRisk = new PreEntryRugRiskTracker({
     config: runtimeConfig.preEntryRugRisk,
+    store,
   });
   preEntryRugRisk.start();
   // All entry-capable live and Shadow strategies share this forward-only guard.

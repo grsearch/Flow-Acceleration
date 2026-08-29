@@ -44,6 +44,7 @@ const config = {
   firstCliffCounterfactualEnabled: true,
   firstCliffHorizonMs: 30_000,
   firstCliffMaxPending: 10_000,
+  firstCliffAuditFlushMs: 1_000,
   firstCliffEffectiveBuyersMax: 3,
   firstCliffHc1Top1Pct: 15,
   firstCliffHc1Top3Pct: 35,
@@ -149,10 +150,18 @@ const config = {
 }
 
 {
-  const tracker = new PreEntryRugRiskTracker({ config });
-  const seedFirstCliffCandidate = (mint, base) => {
+  const persistedAudits = [];
+  const tracker = new PreEntryRugRiskTracker({
+    config,
+    store: {
+      recordPreEntryRugFirstCliffAudits(rows) {
+        persistedAudits.push(...rows);
+        return rows.length;
+      },
+    },
+  });
+  const seedFirstCliffCandidate = (mint, base, buyToken = [22, 4, 4, 4, 4]) => {
     const buySol = [8, 0.5, 0.5, 0.5, 0.5];
-    const buyToken = [22, 4, 4, 4, 4];
     for (let index = 0; index < 10; index += 1) {
       const buyIndex = Math.floor(index / 2);
       tracker.observeTrade({
@@ -204,12 +213,40 @@ const config = {
     timestampMs: 136_000, price: 1.05, tokenAmount: 0.1, solAmount: 0.01,
   });
 
+  // Persist the unflagged control arm too; otherwise recall and missed-cliff
+  // counts would be unknowable tomorrow.
+  seedFirstCliffCandidate('hc-missed-cliff', 201_000, [1, 1, 1, 1, 1]);
+  const controlFeature = tracker.snapshot('hc-missed-cliff', 205_600);
+  assert.equal(controlFeature.firstCliffCounterfactual.eligible, true);
+  assert.equal(controlFeature.firstCliffCounterfactual.hc1Matched, false);
+  assert.equal(controlFeature.firstCliffCounterfactual.hc2Matched, false);
+  tracker.evaluateGuard({
+    strategyId: 'HC-CONTROL', mint: 'hc-missed-cliff', timestampMs: 205_600, source: 'SHADOW',
+  });
+  tracker.observeTrade({
+    mint: 'hc-missed-cliff', side: 'SELL', market: 'PUMP_BONDING_CURVE', wallet: 'control-dumper',
+    timestampMs: 206_500, price: 0.2, tokenAmount: 50,
+  });
+  tracker.observeTrade({
+    mint: 'hc-missed-cliff', side: 'BUY', market: 'PUMP_BONDING_CURVE', wallet: 'control-confirm',
+    timestampMs: 206_600, price: 0.2, tokenAmount: 0.1, solAmount: 0.01,
+  });
+
+  assert.equal(tracker._flushFirstCliffAudits(), 3);
+  assert.equal(persistedAudits.length, 3);
+  assert.deepEqual(
+    persistedAudits.map((row) => row.outcome).sort(),
+    ['CLIFF_RUG_70', 'CLIFF_RUG_70', 'NO_CLIFF_30S'],
+  );
+  assert.ok(persistedAudits.every((row) => row.auditKey));
   const health = tracker.health();
-  assert.equal(health.firstCliffCandidates, 2);
-  assert.equal(health.firstCliffResolved, 2);
-  assert.equal(health.firstCliffCaught, 1);
+  assert.equal(health.firstCliffCandidates, 3);
+  assert.equal(health.firstCliffResolved, 3);
+  assert.equal(health.firstCliffCaught, 2);
   assert.equal(health.firstCliffNoCliff30s, 1);
   assert.equal(health.firstCliffPending, 0);
+  assert.equal(health.firstCliffAuditsPersisted, 3);
+  assert.equal(health.firstCliffAuditErrors, 0);
   const liveStats = health.strategyStats.find((row) => row.strategyId === 'HC-LIVE');
   assert.equal(liveStats.firstCliffHc1Caught, 1);
   assert.equal(liveStats.firstCliffHc2Caught, 1);
