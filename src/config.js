@@ -2873,6 +2873,18 @@ const config = {
         minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
       },
       {
+        // Clean forward-only sample. The legacy PBR_B rows stay frozen so the
+        // fragile right-tail result cannot be mixed with fresh observations.
+        id: 'PBR_B_RT_V2',
+        label: 'PBR-B-RT-V2 · wave50 / pullback18-30 / NF3≥2',
+        newEntriesEnabled: booleanEnv('FLOW_BIG_WINNER_PBR_B_RT_V2_ENABLED', true),
+        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
+        minFirstWavePct: 50, minPullbackPct: 18, maxPullbackPct: 30,
+        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
+        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
+        exitProfileIds: ['X50_12', 'X50_RATCHET'],
+      },
+      {
         id: 'PBR_C',
         label: 'PBR-C frequency: wave 40 / pullback 15-25 / NF3 2',
         newEntriesEnabled: false,
@@ -4151,8 +4163,8 @@ const config = {
       },
       // Strict forward-only replacements. They are mutually exclusive per
       // Mint: >=7 SOL is assigned to F first; 5-7 SOL is assigned to D.
-      // FIX30 remains the historical control. New exits are independent rows;
-      // COB-D live is promoted only from T30_10_X60.
+      // FIX30 remains the execution control. CORE25_R75_X120 preserves the
+      // right-tail research path. The retired live routes are not promoted.
       {
         id: 'COB_F',
         label: 'COB-F · strict 7 SOL organic pullback',
@@ -4160,7 +4172,7 @@ const config = {
         liveStrategyId: 'cya_organic_burst_cob_f_core25_runner_live',
         liveExitProfileId: 'CORE25_R75_X120',
         exclusiveGroup: 'COB_STRICT',
-        exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
+        exitProfileIds: ['FIX30', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
         minBuyers5s: 10, minNetFlow5sSol: 7,
         minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
@@ -4214,7 +4226,7 @@ const config = {
         newEntriesEnabled: true,
         liveStrategyId: 'cya_organic_burst_cob_d_fix30_live',
         exclusiveGroup: 'COB_STRICT',
-        exitProfileIds: ['T30_10_X60', 'FIX30', 'FLOWFADE_X60', 'CORE25_R75_X120'],
+        exitProfileIds: ['FIX30', 'CORE25_R75_X120'],
         minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
         minBuyers5s: 10, minNetFlow5sSol: 5,
         minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
@@ -4790,6 +4802,11 @@ const config = {
       min: 0,
       max: 100,
     }),
+    maxPlausibleReturnPct: numberEnv(
+      'FLOW_MIGRATED_REBOUND_MAX_PLAUSIBLE_RETURN_PCT',
+      1_000,
+      { min: 10, max: 100_000 },
+    ),
     ammPriceContinuity: {
       minRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MIN_RATIO', 0.2, {
         min: 0.0001,
@@ -4938,6 +4955,37 @@ const config = {
         liveExitStrategies: {
           G2_XLEG: 'migrated_ge30_r23_f2_only_g2_xleg_live',
         },
+      },
+      {
+        // New IDs intentionally avoid the retired POST_GE30_R23_F3_* prefix.
+        // They create clean forward samples without rewriting historical rows.
+        id: 'GRT_R23_F3_V2',
+        label: 'G-RT-F3-V2 · 30秒内反弹2%–3% · 前三次前向样本',
+        newEntriesEnabled: booleanEnv('FLOW_MIGRATED_REBOUND_GRT_R23_F3_V2_ENABLED', true),
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 3,
+        exitProfileIds: ['GRT_F3_XLEG_V2'],
+      },
+      {
+        id: 'GRT_R23_F2_ONLY_V2',
+        label: 'G-RT-F2-V2 · 30秒内反弹2%–3% · 只取第二次前向样本',
+        newEntriesEnabled: booleanEnv('FLOW_MIGRATED_REBOUND_GRT_R23_F2_V2_ENABLED', true),
+        windowMs: 1_000,
+        dropMinPct: 25,
+        dropMaxPct: 35,
+        reboundMinPct: 2,
+        reboundMaxPct: 3,
+        reboundTimeoutMs: 1_000,
+        maxLifecycleAgeMs: 30_000,
+        minSignalOrdinal: 2,
+        maxSignalsPerMint: 2,
+        exitProfileIds: ['GRT_F2_XLEG_V2'],
       },
       {
         id: 'GE30_R23_F3_EXEC',
@@ -5200,6 +5248,8 @@ const config = {
       ...[
         ['GEXEC_XLEG', ['GE30_R23_F1_EXEC'], '容量感知 XLEG'],
         ['G2_XLEG', ['GE30_R23_F2_ONLY'], '第二次机会 XLEG'],
+        ['GRT_F3_XLEG_V2', ['GRT_R23_F3_V2'], '前三次机会前向 XLEG'],
+        ['GRT_F2_XLEG_V2', ['GRT_R23_F2_ONLY_V2'], '第二次机会前向 XLEG'],
         ['G3EXEC_XLEG', ['GE30_R23_F3_EXEC'], '前三次机会容量感知 XLEG'],
         ['G2EXEC_XLEG', ['GE30_R23_F2_ONLY_EXEC'], '第二次机会容量感知 XLEG'],
         ['GTIME_XLEG', ['GE30_R23_F1_NIGHT', 'GE30_R23_F1_DAY'], '分时段 XLEG'],
@@ -5538,7 +5588,19 @@ const config = {
       {
         id: 'T12_5', label: '10秒保护 / +15%激活 / 回撤12.5%', exitMode: 'TRAILING',
         minHoldMs: 10_000, trailingActivationPct: 15, trailingStopPct: 12.5,
-        hardStopPct: 20, maxHoldMs: 180_000,
+        hardStopPct: 20, maxHoldMs: 180_000, newEntriesEnabled: false,
+      },
+      {
+        id: 'E120_CONVERGED_V3',
+        label: '固定120秒 · 收敛前向样本',
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 120_000,
+        hardStopPct: 20,
+        maxHoldMs: 120_000,
+        newEntriesEnabled: booleanEnv(
+          'FLOW_MIGRATION_CONTINUITY_E120_CONVERGED_V3_ENABLED',
+          true,
+        ),
       },
       {
         id: 'FLOW', label: '10秒保护 / 3秒订单流转弱', exitMode: 'FLOW_FADE',
@@ -6390,9 +6452,14 @@ const config = {
       { min: 1, max: 100 },
     ),
     shadowEnabled: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ENABLED', true),
-    shadowHoldMs: millisecondListEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_HOLDS_SECONDS', [30, 60, 120],
+    shadowFullHoldMatrixEnabled: booleanEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_FULL_HOLD_MATRIX_ENABLED', false,
     ),
+    shadowHoldMs: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_FULL_HOLD_MATRIX_ENABLED', false)
+      ? millisecondListEnv(
+        'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_HOLDS_SECONDS', [30, 60, 120],
+      )
+      : [30_000],
     shadowRoundTripCostPct: numberEnv(
       'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ROUND_TRIP_COST_PCT', 3.2,
       { min: 0, max: 100 },
