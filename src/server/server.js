@@ -414,29 +414,38 @@ class ResearchServer {
       });
     });
 
-    this.app.get('/api/migration-second-leg-observer', (request, response) => {
-      response.json({
-        generatedAt: Date.now(),
-        runtime: this.migrationSecondLegObserver?.health() || {
-          enabled: false,
-          mode: 'M2F_OBSERVER_ONLY',
-          code: 'M2F-OBS',
-          sendsTransactions: false,
-          opensSimulatedPositions: false,
-          addsRpcRequests: false,
-        },
-        runtimeShadow: this.migrationSecondLegShadow?.health() || {
-          enabled: false,
-          mode: 'SHADOW_M2F_RESEARCH_MATRIX',
-          code: 'M2F-MATRIX',
-          sendsTransactions: false,
-          guardRequired: true,
-        },
-        ...this.store.migrationSecondLegDashboard({
-          observationLimit: numeric(request.query.observationLimit, 40),
-          snapshotLimit: numeric(request.query.snapshotLimit, 100),
-        }),
-      });
+    this.app.get('/api/migration-second-leg-observer', async (request, response, next) => {
+      try {
+        const dashboard = await this.store.dashboardQueryInWorker(
+          'migrationSecondLegDashboard',
+          {
+            observationLimit: numeric(request.query.observationLimit, 40),
+            snapshotLimit: numeric(request.query.snapshotLimit, 100),
+            statsSnapshotLimit: numeric(request.query.statsSnapshotLimit, 200000),
+          },
+        );
+        response.json({
+          generatedAt: Date.now(),
+          runtime: this.migrationSecondLegObserver?.health() || {
+            enabled: false,
+            mode: 'M2F_OBSERVER_ONLY',
+            code: 'M2F-OBS',
+            sendsTransactions: false,
+            opensSimulatedPositions: false,
+            addsRpcRequests: false,
+          },
+          runtimeShadow: this.migrationSecondLegShadow?.health() || {
+            enabled: false,
+            mode: 'SHADOW_M2F_RESEARCH_MATRIX',
+            code: 'M2F-MATRIX',
+            sendsTransactions: false,
+            guardRequired: true,
+          },
+          ...dashboard,
+        });
+      } catch (error) {
+        next(error);
+      }
     });
 
     this.app.get('/api/same-slot-dump-backrun-shadow', (request, response) => {
@@ -456,22 +465,30 @@ class ResearchServer {
       });
     });
 
-    this.app.get('/api/launch-pullback-shadow', (request, response) => {
-      response.json({
-        generatedAt: Date.now(),
-        runtime: this.launchPullbackShadow?.health() || {
-          enabled: false,
-          mode: 'SHADOW_F',
-          sendsTransactions: false,
-          cohorts: [],
-        },
-        timeSessions: this.store.shadowTimeSessionDashboard('launch-pullback'),
-        ...this.store.launchPullbackShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          bigWinnerPct: this.config.launchPullbackShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
-      });
+    this.app.get('/api/launch-pullback-shadow', async (request, response, next) => {
+      try {
+        const result = await this.store.dashboardQueryInWorker(
+          'launchPullbackDashboardBundle',
+          {
+            positionLimit: numeric(request.query.positionLimit, 30),
+            bigWinnerPct: this.config.launchPullbackShadow?.bigWinnerPct ?? 50,
+          },
+        );
+        response.json({
+          generatedAt: Date.now(),
+          runtime: this.launchPullbackShadow?.health() || {
+            enabled: false,
+            mode: 'SHADOW_F',
+            sendsTransactions: false,
+            cohorts: [],
+          },
+          timeSessions: result.timeSessions || [],
+          ...(result.dashboard || {}),
+          dashboardQuery: result.dashboardQuery,
+        });
+      } catch (error) {
+        next(error);
+      }
     });
 
     this.app.get('/api/migrated-drop-rebound-shadow', (request, response) => {
