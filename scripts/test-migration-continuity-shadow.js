@@ -168,3 +168,27 @@ function testAdaptiveHorizonSelection() {
 }
 
 testAdaptiveHorizonSelection();
+
+function testNoExitIsCensored() {
+  let written = null;
+  const position = {
+    id: 9,
+    mint: 'MigrationNoExit11111111111111111111111111111',
+    maxFavorableReturnPct: 8,
+    maxAdverseReturnPct: -25,
+  };
+  const suite = Object.create(MigrationContinuityShadowSuite.prototype);
+  suite.store = {
+    updateMigrationContinuityShadowPosition: (_id, patch) => { written = patch; },
+  };
+  suite.positions = new Map([[position.id, position]]);
+  suite.rowsByMint = new Map([[position.mint, new Set([position.id])]]);
+  suite.metrics = { closed: 0, noExit: 0 };
+  suite._markNoExit(position);
+  assert.strictEqual(written.status, 'NO_EXIT');
+  assert.strictEqual(written.exitReason, 'NO_EXECUTABLE_EXIT_TRADE');
+  assert.strictEqual(Object.hasOwn(written, 'grossReturnPct'), false);
+  assert.strictEqual(Object.hasOwn(written, 'netReturnPct'), false);
+}
+
+testNoExitIsCensored();
