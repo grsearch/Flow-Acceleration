@@ -132,6 +132,8 @@ class ResearchStore {
     this.returnUpdateStatements = new Map();
     this.launchQualityUpdateStatements = new Map();
     this.dashboardStatsCache = new Map();
+    this.dashboardQueryCache = new Map();
+    this.dashboardQueryWorkers = new Map();
     this.databaseHealthSnapshot = null;
     this.databaseHealthWorker = null;
     this.databaseHealthStartTimer = null;
@@ -170,6 +172,148 @@ class ResearchStore {
     const value = compute();
     this.dashboardStatsCache.set(key, { createdAt: now, value });
     return value;
+  }
+
+  _dashboardQueryFallback(task) {
+    if (task === 'migrationSecondLegDashboard') {
+      return {
+        summary: null,
+        publicCandidates: null,
+        featureAvailability: {},
+        missingArticleFeatures: [],
+        observations: [],
+        snapshots: [],
+        shadow: {
+          stats: null,
+          cohorts: [],
+          positions: [],
+        },
+      };
+    }
+    if (task === 'launchPullbackDashboardBundle') {
+      return {
+        timeSessions: {
+          strategyId: 'launch-pullback',
+          strategyLabel: 'Launch 回踩 · F',
+          timezone: 'Asia/Shanghai',
+          observationOnly: true,
+          sessions: [],
+        },
+        dashboard: {
+          cohorts: [],
+          positions: [],
+        },
+      };
+    }
+    return {};
+  }
+
+  _decorateDashboardQuery(value, metadata) {
+    return {
+      ...(value || {}),
+      dashboardQuery: metadata,
+    };
+  }
+
+  dashboardQueryInWorker(
+    task,
+    args = {},
+    { ttlMs = 5 * 60_000, firstWaitMs = 1_500 } = {},
+  ) {
+    const now = Date.now();
+    const cacheKey = `${task}:${JSON.stringify(args)}`;
+    const cached = this.dashboardQueryCache.get(cacheKey);
+    const fresh = cached && now - cached.createdAt < ttlMs;
+    if (fresh) {
+      return Promise.resolve(this._decorateDashboardQuery(cached.value, {
+        status: 'READY',
+        source: 'CACHE',
+        generatedAt: cached.createdAt,
+      }));
+    }
+
+    if (this.config.dbPath === ':memory:') {
+      let value;
+      if (task === 'migrationSecondLegDashboard') {
+        value = this.migrationSecondLegDashboard({ ...args, cacheStats: false });
+      } else if (task === 'launchPullbackDashboardBundle') {
+        value = {
+          timeSessions: this.shadowTimeSessionDashboard('launch-pullback'),
+          dashboard: this.launchPullbackShadowDashboard({ ...args, cacheStats: false }),
+        };
+      } else {
+        throw new Error(`Unsupported dashboard query task: ${task}`);
+      }
+      this.dashboardQueryCache.set(cacheKey, { createdAt: Date.now(), value });
+      return Promise.resolve(this._decorateDashboardQuery(value, {
+        status: 'READY',
+        source: 'DIRECT',
+        generatedAt: Date.now(),
+      }));
+    }
+
+    let active = this.dashboardQueryWorkers.get(cacheKey);
+    if (!active) {
+      const worker = new Worker(path.join(__dirname, 'dashboard-query-worker.js'), {
+        workerData: {
+          dbPath: path.resolve(this.config.dbPath),
+          task,
+          args,
+        },
+      });
+      const promise = new Promise((resolve, reject) => {
+        worker.once('message', (message) => {
+          if (message?.ok) resolve(message.value);
+          else reject(new Error(message?.error || `Dashboard worker ${task} failed`));
+        });
+        worker.once('error', reject);
+        worker.once('exit', (code) => {
+          if (code !== 0) reject(new Error(`Dashboard worker ${task} exited with code ${code}`));
+        });
+      })
+        .then((value) => {
+          this.dashboardQueryCache.set(cacheKey, { createdAt: Date.now(), value });
+          return value;
+        })
+        .catch((error) => {
+          console.error(`[DashboardWorker] ${task} failed:`, error.message);
+          return null;
+        })
+        .finally(() => {
+          const current = this.dashboardQueryWorkers.get(cacheKey);
+          if (current?.worker === worker) this.dashboardQueryWorkers.delete(cacheKey);
+        });
+      active = { worker, promise, startedAt: now };
+      this.dashboardQueryWorkers.set(cacheKey, active);
+    }
+
+    if (cached) {
+      return Promise.resolve(this._decorateDashboardQuery(cached.value, {
+        status: 'REFRESHING',
+        source: 'STALE_CACHE',
+        generatedAt: cached.createdAt,
+        refreshStartedAt: active.startedAt,
+      }));
+    }
+
+    const timeout = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), Math.max(100, firstWaitMs));
+      if (timer.unref) timer.unref();
+    });
+    return Promise.race([active.promise, timeout]).then((value) => {
+      if (value) {
+        return this._decorateDashboardQuery(value, {
+          status: 'READY',
+          source: 'WORKER',
+          generatedAt: Date.now(),
+        });
+      }
+      return this._decorateDashboardQuery(this._dashboardQueryFallback(task), {
+        status: 'PREPARING',
+        source: 'BACKGROUND_WORKER',
+        refreshStartedAt: active.startedAt,
+      });
+    });
   }
 
   startHealthSampler(refreshMs = this.config.healthRefreshMs || 15 * 60_000) {
@@ -6658,9 +6802,17 @@ class ResearchStore {
     };
   }
 
-  migrationSecondLegDashboard({ observationLimit = 40, snapshotLimit = 100 } = {}) {
+  migrationSecondLegDashboard({
+    observationLimit = 40,
+    snapshotLimit = 100,
+    statsSnapshotLimit = 200000,
+  } = {}) {
     const observationsLimit = Math.min(200, Math.max(1, Math.trunc(Number(observationLimit) || 40)));
     const snapshotsLimit = Math.min(500, Math.max(1, Math.trunc(Number(snapshotLimit) || 100)));
+    const sampledSnapshots = Math.min(
+      500000,
+      Math.max(10000, Math.trunc(Number(statsSnapshotLimit) || 200000)),
+    );
     const summary = this.db.prepare(`
       SELECT COUNT(*) AS observations,
         COALESCE(SUM(status = 'OBSERVING'), 0) AS active,
@@ -6675,14 +6827,21 @@ class ResearchStore {
     `).get();
     const publicCandidates = this.db.prepare(`
       SELECT COUNT(*) AS snapshots,
-        COUNT(DISTINCT mint) AS mints
-      FROM migration_second_leg_snapshots
+        COUNT(DISTINCT mint) AS mints,
+        ? AS sampled_snapshots
+      FROM (
+        SELECT mint, age_ms, net_flow_10s, buyers_10s,
+          largest_buyer_share_10s_pct, pullback_pct
+        FROM migration_second_leg_snapshots
+        ORDER BY observed_at DESC, id DESC
+        LIMIT ?
+      ) recent
       WHERE age_ms BETWEEN 75000 AND 300000
         AND net_flow_10s > 0
         AND buyers_10s >= 3
         AND (largest_buyer_share_10s_pct IS NULL OR largest_buyer_share_10s_pct <= 60)
         AND pullback_pct BETWEEN 8 AND 35
-    `).get();
+    `).get(sampledSnapshots, sampledSnapshots);
     const observations = this.db.prepare(`
       SELECT * FROM migration_second_leg_observations
       ORDER BY CASE WHEN status = 'OBSERVING' THEN 0 ELSE 1 END,
@@ -6747,35 +6906,28 @@ class ResearchStore {
       LIMIT ?
     `).all(limit);
     const computeCohorts = () => {
-      const cohortIds = this.db.prepare(`
-        SELECT DISTINCT cohort_id FROM launch_pullback_shadow_positions ORDER BY cohort_id
-      `).all().map((row) => row.cohort_id);
-      return cohortIds.map((cohortId) => {
-        const counts = this.db.prepare(`
-          SELECT
-            COUNT(*) AS evaluated,
-            COUNT(DISTINCT mint) AS independent_mints,
-            COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rule_rejected,
-            COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
-            COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
-            COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
-            COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
-            COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
-            COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
-            AVG(entry_jump_pct) AS average_entry_jump_pct
-          FROM launch_pullback_shadow_positions WHERE cohort_id = ?
-        `).get(cohortId);
-        const resolved = this.db.prepare(`
-          SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
-          FROM launch_pullback_shadow_positions
-          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
-            AND net_return_pct IS NOT NULL
-          ORDER BY net_return_pct
-        `).all(cohortId);
-        const returns = resolved.map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
+      const countsByCohort = this.db.prepare(`
+        SELECT cohort_id,
+          COUNT(*) AS evaluated,
+          COUNT(DISTINCT mint) AS independent_mints,
+          COALESCE(SUM(status = 'RULE_REJECTED'), 0) AS rule_rejected,
+          COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+          COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+          COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+          COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+          COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          AVG(entry_jump_pct) AS average_entry_jump_pct
+        FROM launch_pullback_shadow_positions
+        GROUP BY cohort_id
+        ORDER BY cohort_id
+      `).all();
+      const resolvedSummaryByCohort = new Map();
+      const summarizeResolved = (cohortId, state) => {
+        if (!cohortId || !state) return;
+        const returns = state.returns;
         const wins = returns.filter((value) => value > 0).sort((left, right) => right - left);
         const losses = returns.filter((value) => value < 0);
-        const flat = returns.filter((value) => value === 0);
         const totalProfit = wins.reduce((sum, value) => sum + value, 0);
         const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
         const median = returns.length
@@ -6783,44 +6935,90 @@ class ResearchStore {
             ? returns[(returns.length - 1) / 2]
             : (returns[returns.length / 2 - 1] + returns[returns.length / 2]) / 2
           : null;
-        const exTop5 = [...wins.slice(5), ...flat, ...losses];
-        const bigOpportunities = resolved.filter((row) => (
-          Number(row.max_favorable_return_pct) >= threshold
-        ));
-        const bigWinners = resolved.filter((row) => Number(row.gross_return_pct) >= threshold);
-        const captures = bigOpportunities.map((row) => {
-          const maximum = Number(row.max_favorable_return_pct);
-          const realized = Number(row.gross_return_pct);
-          return maximum > 0 && Number.isFinite(realized) ? realized / maximum * 100 : null;
-        }).filter(Number.isFinite);
+        const top5 = wins.slice(0, 5);
+        const top5Sum = top5.reduce((sum, value) => sum + value, 0);
+        resolvedSummaryByCohort.set(cohortId, {
+          resolved: returns.length,
+          average_net_return_pct: returns.length ? state.totalReturn / returns.length : null,
+          median_net_return_pct: median,
+          average_net_return_ex_top5_pct: returns.length > top5.length
+            ? (state.totalReturn - top5Sum) / (returns.length - top5.length) : null,
+          win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
+          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
+          max_winner_pct: wins[0] ?? null,
+          top_5_winner_contribution_pct: totalProfit > 0 ? top5Sum / totalProfit * 100 : null,
+          big_winner_threshold_pct: threshold,
+          big_winner_opportunities: state.bigOpportunities,
+          big_winners_realized: state.bigWinners,
+          big_winner_realization_rate_pct: state.bigOpportunities
+            ? state.bigWinners / state.bigOpportunities * 100 : null,
+          average_big_winner_capture_pct: state.captureCount
+            ? state.captureSum / state.captureCount : null,
+        });
+      };
+      let activeCohortId = null;
+      let activeResolved = null;
+      for (const row of this.db.prepare(`
+        SELECT cohort_id, net_return_pct, gross_return_pct, max_favorable_return_pct
+        FROM launch_pullback_shadow_positions
+        WHERE status IN ('CLOSED', 'NO_EXIT') AND net_return_pct IS NOT NULL
+        ORDER BY cohort_id, net_return_pct
+      `).iterate()) {
+        if (row.cohort_id !== activeCohortId) {
+          summarizeResolved(activeCohortId, activeResolved);
+          activeCohortId = row.cohort_id;
+          activeResolved = {
+            returns: [],
+            totalReturn: 0,
+            bigOpportunities: 0,
+            bigWinners: 0,
+            captureSum: 0,
+            captureCount: 0,
+          };
+        }
+        const netReturn = Number(row.net_return_pct);
+        if (!Number.isFinite(netReturn)) continue;
+        activeResolved.returns.push(netReturn);
+        activeResolved.totalReturn += netReturn;
+        const maximum = Number(row.max_favorable_return_pct);
+        const realized = Number(row.gross_return_pct);
+        if (Number.isFinite(maximum) && maximum >= threshold) {
+          activeResolved.bigOpportunities += 1;
+          if (Number.isFinite(realized) && maximum > 0) {
+            activeResolved.captureSum += realized / maximum * 100;
+            activeResolved.captureCount += 1;
+          }
+        }
+        if (Number.isFinite(realized) && realized >= threshold) activeResolved.bigWinners += 1;
+      }
+      summarizeResolved(activeCohortId, activeResolved);
+      return countsByCohort.map((counts) => {
+        const cohortId = counts.cohort_id;
+        const resolved = resolvedSummaryByCohort.get(cohortId) || {
+          resolved: 0,
+          average_net_return_pct: null,
+          median_net_return_pct: null,
+          average_net_return_ex_top5_pct: null,
+          win_rate_pct: null,
+          profit_factor: 0,
+          max_winner_pct: null,
+          top_5_winner_contribution_pct: null,
+          big_winner_threshold_pct: threshold,
+          big_winner_opportunities: 0,
+          big_winners_realized: 0,
+          big_winner_realization_rate_pct: null,
+          average_big_winner_capture_pct: null,
+        };
         return {
           cohort_id: cohortId,
           ...counts,
           qualified_references: Number(counts.evaluated || 0) - Number(counts.rule_rejected || 0),
-          resolved: returns.length,
-          average_net_return_pct: returns.length
-            ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
-          median_net_return_pct: median,
-          average_net_return_ex_top5_pct: exTop5.length
-            ? exTop5.reduce((sum, value) => sum + value, 0) / exTop5.length : null,
-          win_rate_pct: returns.length ? wins.length / returns.length * 100 : null,
-          profit_factor: totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? null : 0),
-          max_winner_pct: wins[0] ?? null,
-          top_5_winner_contribution_pct: totalProfit > 0
-            ? wins.slice(0, 5).reduce((sum, value) => sum + value, 0) / totalProfit * 100
-            : null,
-          big_winner_threshold_pct: threshold,
-          big_winner_opportunities: bigOpportunities.length,
-          big_winners_realized: bigWinners.length,
-          big_winner_realization_rate_pct: bigOpportunities.length
-            ? bigWinners.length / bigOpportunities.length * 100 : null,
-          average_big_winner_capture_pct: captures.length
-            ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
+          ...resolved,
         };
       });
     };
     const cohorts = cacheStats
-      ? this._cachedDashboardStats(`launch-pullback-shadow:${threshold}`, 60_000, computeCohorts)
+      ? this._cachedDashboardStats(`launch-pullback-shadow:${threshold}`, 5 * 60_000, computeCohorts)
       : computeCohorts();
     return { cohorts, positions };
   }
@@ -8736,6 +8934,10 @@ class ResearchStore {
       void this.databaseHealthWorker.worker.terminate().catch(() => {});
     }
     this.databaseHealthWorker = null;
+    for (const active of this.dashboardQueryWorkers.values()) {
+      if (active?.worker) void active.worker.terminate().catch(() => {});
+    }
+    this.dashboardQueryWorkers.clear();
     this.flushRawTrades();
     this.db.close();
   }
