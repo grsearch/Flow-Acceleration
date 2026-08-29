@@ -369,6 +369,9 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="cya-organic-burst" data-strategy-code="COB-D/F">
               <b><span class="strategy-code">COB-D/F</span>CYA Organic Burst</b><small>严格公共流 + 健康回撤；FIX30 / FlowFade / Trailing / Runner</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="early-pure-buy-burst" data-strategy-code="EB-A/B/C">
+              <b><span class="strategy-code">EB-A/B/C</span>Early Pure-Buy Burst</b><small>AGE&lt;10s纯买流；立即 / 300–500ms确认 / 回踩收复</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="same-slot-dump-backrun" data-strategy-code="SDBR-S10/S20">
               <b><span class="strategy-code">SDBR-S10/S20</span>Same-Slot Dump Backrun（已停）</b><small>0胜率且样本稀疏；历史数据保留，不再新增</small>
             </button>
@@ -1011,6 +1014,27 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Curve</th><th>Buyers / NetFlow</th><th>Buy占比 / 2s / 5s / 15s</th><th>CYA标签</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="cya-organic-burst-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="early-pure-buy-burst" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Early Pure-Buy Burst Shadow EB-A / B / C</h2>
+                <p>只使用非监控钱包的前向公共成交；不增加 RPC、不发送实盘信号，同一 Mint 只记录首次合格机会。</p>
+              </div>
+              <div class="strategy-expression" id="early-pure-buy-burst-expression">AGE&lt;10s / Curve&lt;50% / W3 3–5 SOL / Buyers 2–4 / 纯买流 × 固定5/20/30秒</div>
+              <div class="strategy-metric-groups" id="early-pure-buy-burst-metrics"></div>
+              <div class="section-title"><h2>确认路径 × 可执行退出</h2><p>EB-A立即模拟，EB-B等待300–500ms延续确认，EB-C等待1–3秒健康回踩收复；NO_EXIT 不计入收益统计。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>信号</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / 100</th><th>RUG50</th><th>活动 / 无入场 / 无退出</th></tr></thead>
+                <tbody id="early-pure-buy-burst-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>1 SOL 储备冲击、200ms成交延迟和市场连续性都参与定价；缺失退出报价明确显示 NO_EXIT。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Curve</th><th>Buyers / NetFlow</th><th>确认</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="early-pure-buy-burst-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1964,6 +1988,36 @@
         const targetLabel = row.target_open_at ? age(row.target_open_delay_ms) : '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.buyers_5s)} / ${number(row.net_flow_5s,2)} SOL</td><td>${rate(row.buy_tx_share_pct)} / ${pct(row.return_2s_pct)} / ${pct(row.return_5s_pct)} / ${pct(row.return_15s_pct)}</td><td>${targetLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="10" class="empty">暂无 CYA Organic Burst 模拟仓位。</td></tr>';
+    }
+
+    function renderEarlyPureBuyBurstShadow(data) {
+      const runtime = data.runtime || data.health || {};
+      const strategy = data.strategy || {};
+      const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#early-pure-buy-burst-expression').textContent = `${(runtime.entryProfiles || []).map(row => row.id).join(' / ')}：AGE<10s、Curve<50%、W3净流3–5 SOL、Buyers 2–4、0卖单；${number(strategy.positionSizeSol || runtime.positionSizeSol,2)} SOL储备成交 × FIX5/20/30。`;
+      renderMetricGroups('#early-pure-buy-burst-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW EB' : '关闭', '独立表；永不签名或发送实盘信号'],
+        ['观察成交 / 候选', `${number(runtime.trades)} / ${number(runtime.candidates)}`, `排除监控钱包成交 ${number(runtime.excludedSmartTrades)}`],
+        ['信号 / 已开 / 已关', `${number(runtime.signals)} / ${number(runtime.opened)} / ${number(runtime.closed)}`, `活动 ${number(runtime.activePositions)}`],
+        ['无入场 / 无退出', `${number(runtime.noEntry)} / ${number(runtime.noExit)}`, 'NO_EXIT 不进入胜率与收益均值'],
+        ['RUG Guard 拦截', number(runtime.blockedByRugGuard), '使用当前通用前置RUG风控；不增加RPC'],
+        ['队列 / 仓位', `${number(runtime.boundedPerMintTradeQueue)} / ${number(runtime.positionSizeSol,2)} SOL`, '每Mint成交状态严格限长'],
+      ], []);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#early-pure-buy-burst-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)}</td><td>${number(row.completed)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averageNetReturnPct)}">${pct(row.averageNetReturnPct)} / ${pct(row.medianNetReturnPct)}</td><td>${number(row.profitFactor,2)} / —</td><td>${rate(row.big50RatePct)} / ${rate(row.big100RatePct)}</td><td>${rate(row.rug50RatePct)}</td><td>${number(row.active)} / ${number(row.no_entry)} / ${number(row.no_exit)}</td></tr>`
+      )).join('') : '<tr><td colspan="8" class="empty">等待 Early Pure-Buy Burst 前向样本。</td></tr>';
+      const rows = data.positions || [];
+      document.querySelector('#early-pure-buy-burst-position-rows').innerHTML = rows.length ? rows.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const confirmation = row.entry_profile_id === 'EB_B'
+          ? `${age(row.confirmation_delay_ms)} / Buyers +${number(row.delta_buyers)} / Flow +${number(row.delta_net_flow,2)}`
+          : row.entry_profile_id === 'EB_C'
+            ? `回撤 ${pct(row.drawdown_pct)} / 收复 ${pct(row.reclaim_pct)}`
+            : '立即确认';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.buyers_3s)} / ${number(row.net_flow_3s,2)} SOL<br><span class="table-note">Buy ${rate(row.buy_tx_share_pct)}</span></td><td>${confirmation}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">暂无 Early Pure-Buy Burst 模拟仓位。</td></tr>';
     }
 
     function renderSameSlotDumpBackrunShadow(data) {
@@ -3055,6 +3109,9 @@
         ],
         'cya-organic-burst': requestContext => [
           loadDashboard('/api/cya-organic-burst-shadow?positionLimit=50', renderCyaOrganicBurstShadow, requestContext),
+        ],
+        'early-pure-buy-burst': requestContext => [
+          loadDashboard('/api/early-pure-buy-burst-shadow?positionLimit=50', renderEarlyPureBuyBurstShadow, requestContext),
         ],
         'same-slot-dump-backrun': requestContext => [
           loadDashboard('/api/same-slot-dump-backrun-shadow?positionLimit=50', renderSameSlotDumpBackrunShadow, requestContext),

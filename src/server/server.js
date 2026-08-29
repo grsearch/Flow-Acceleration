@@ -65,6 +65,7 @@ class ResearchServer {
     creatorAffinityShadow = null,
     cyaSlotFlowShadow = null,
     cyaOrganicBurstShadow = null,
+    earlyPureBuyBurstShadow = null,
     sameSlotDumpBackrunShadow = null,
     launchPullbackShadow = null, launchQualityObserver = null,
     migrationSecondLegObserver = null,
@@ -102,6 +103,7 @@ class ResearchServer {
     this.creatorAffinityShadow = creatorAffinityShadow;
     this.cyaSlotFlowShadow = cyaSlotFlowShadow;
     this.cyaOrganicBurstShadow = cyaOrganicBurstShadow;
+    this.earlyPureBuyBurstShadow = earlyPureBuyBurstShadow;
     this.sameSlotDumpBackrunShadow = sameSlotDumpBackrunShadow;
     this.launchPullbackShadow = launchPullbackShadow;
     this.launchQualityObserver = launchQualityObserver;
@@ -166,6 +168,7 @@ class ResearchServer {
           'smart-like-early': enabled('smartLikeEarlyShadow'),
           'cya-slot-flow': enabled('cyaSlotFlowShadow'),
           'cya-organic-burst': enabled('cyaOrganicBurstShadow'),
+          'early-pure-buy-burst': enabled('earlyPureBuyBurstShadow'),
           'same-slot-dump-backrun': enabled('sameSlotDumpBackrunShadow'),
           'smart-resonance': enabled('smartResonanceShadow'),
           'smart-wallet-rug-escape': enabled('smartWalletRugEscapeShadow'),
@@ -803,6 +806,22 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/early-pure-buy-burst-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.earlyPureBuyBurstShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_EB',
+          sendsTransactions: false,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        ...(this.earlyPureBuyBurstShadow?.dashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+        }) || { cohorts: [], positions: [] }),
+      });
+    });
+
     this.app.get('/api/cya-early-pyramid-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -903,6 +922,7 @@ class ResearchServer {
         creatorAffinityShadow: this.creatorAffinityShadow?.health() || null,
         cyaSlotFlowShadow: this.cyaSlotFlowShadow?.health() || null,
         cyaOrganicBurstShadow: this.cyaOrganicBurstShadow?.health() || null,
+        earlyPureBuyBurstShadow: this.earlyPureBuyBurstShadow?.health() || null,
         sameSlotDumpBackrunShadow: this.sameSlotDumpBackrunShadow?.health() || null,
         launchPullbackShadow: this.launchPullbackShadow?.health() || null,
         launchQualityObserver: this.launchQualityObserver?.health() || null,

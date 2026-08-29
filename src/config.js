@@ -4298,6 +4298,75 @@ const config = {
     }),
   },
 
+  // Forward-only validation of the FEA early pure-buy observation. These
+  // cohorts never emit live signals. Missing executable exits stay NO_EXIT
+  // and are excluded from return statistics instead of becoming -100%.
+  earlyPureBuyBurstShadow: {
+    enabled: booleanEnv('FLOW_EARLY_PURE_BUY_BURST_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_EARLY_PURE_BUY_BURST_POSITION_SOL'),
+    featureWindowMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_FEATURE_WINDOW_MS', 3_000, {
+      min: 3_000, max: 10_000,
+    }),
+    maxTradesPerMint: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_TRADES_PER_MINT', 128, {
+      min: 32, max: 512,
+    }),
+    stateRetentionMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_STATE_RETENTION_MS', 120_000, {
+      min: 30_000, max: 10 * 60_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxEntryPriceJumpPct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_ENTRY_JUMP_PCT', 15, {
+      min: 0, max: 100,
+    }),
+    maxEntryPriceDropPct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_ENTRY_DROP_PCT', 35, {
+      min: 0, max: 100,
+    }),
+    maxEntryImpactPct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_ENTRY_IMPACT_PCT', 15, {
+      min: 0, max: 100,
+    }),
+    base: {
+      maxAgeMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_AGE_MS', 10_000, { min: 1_000 }),
+      maxCurvePct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_CURVE_PCT', 50, {
+        min: 1, max: 100,
+      }),
+      minNetFlow3sSol: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MIN_NETFLOW_3S_SOL', 3, {
+        min: 0,
+      }),
+      maxNetFlow3sSol: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_NETFLOW_3S_SOL', 5, {
+        min: 0,
+      }),
+      minBuyers3s: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MIN_BUYERS_3S', 2, { min: 1 }),
+      maxBuyers3s: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_BUYERS_3S', 4, { min: 1 }),
+      maxSellTx3s: 0,
+    },
+    confirmationB: {
+      minDelayMs: 300, maxDelayMs: 500, minDeltaBuyers: 1,
+      minDeltaNetFlowSol: 0.5, maxJumpPct: 10,
+    },
+    confirmationC: {
+      minDelayMs: 1_000, maxDelayMs: 3_000,
+      minDrawdownPct: 3, maxDrawdownPct: 8,
+      minReclaimPct: 1, maxReclaimPct: 2,
+      maxSingleSellSol: 0.5, maxSellSharePct: 35,
+    },
+    entryProfiles: [
+      { id: 'EB_A', label: 'EB-A · immediate pure-buy burst', newEntriesEnabled: true },
+      { id: 'EB_B', label: 'EB-B · 300-500ms continuation', newEntriesEnabled: true },
+      { id: 'EB_C', label: 'EB-C · 1-3s pullback reclaim', newEntriesEnabled: true },
+    ],
+    exitProfiles: [
+      { id: 'FIX5', label: 'fixed 5s', maxHoldMs: 5_000 },
+      { id: 'FIX20', label: 'fixed 20s', maxHoldMs: 20_000 },
+      { id: 'FIX30', label: 'fixed 30s', maxHoldMs: 30_000 },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_EARLY_PURE_BUY_BURST_POSITION_SOL'),
+    }),
+  },
+
   // Independent early Bonding Curve research derived from the original CYA
   // hypothesis. This retired K matrix is kept separate so its historical rows
   // never mix with the new completed-slot CSF experiment.

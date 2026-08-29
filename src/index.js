@@ -24,6 +24,7 @@ const {
 const { PublicFlowLeadShadowSuite } = require('./core/PublicFlowLeadShadowSuite');
 const { CyaSlotFlowShadowSuite } = require('./core/CyaSlotFlowShadowSuite');
 const { CyaOrganicBurstShadowSuite } = require('./core/CyaOrganicBurstShadowSuite');
+const { EarlyPureBuyBurstShadowSuite } = require('./core/EarlyPureBuyBurstShadowSuite');
 const {
   SameSlotDumpBackrunShadowSuite,
 } = require('./core/SameSlotDumpBackrunShadowSuite');
@@ -193,6 +194,14 @@ function createRuntime(runtimeConfig = config) {
     onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   cyaOrganicBurstShadow.start();
+  const earlyPureBuyBurstShadow = new EarlyPureBuyBurstShadowSuite({
+    config: {
+      ...runtimeConfig.earlyPureBuyBurstShadow,
+      smartWallets: [...smartWallets],
+    },
+    store,
+  });
+  earlyPureBuyBurstShadow.start();
   const sameSlotDumpBackrunShadow = new SameSlotDumpBackrunShadowSuite({
     config: runtimeConfig.sameSlotDumpBackrunShadow,
     store,
@@ -323,6 +332,7 @@ function createRuntime(runtimeConfig = config) {
     creatorAffinityShadow,
     cyaSlotFlowShadow,
     cyaOrganicBurstShadow,
+    earlyPureBuyBurstShadow,
     sameSlotDumpBackrunShadow,
     launchPullbackShadow,
     launchQualityObserver,
@@ -575,6 +585,7 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('creatorAffinity', () => creatorAffinityShadow.observeTrade(trade));
         observeShadow('cyaSlotFlow', () => cyaSlotFlowShadow.observeTrade(trade));
         observeShadow('cyaOrganicBurst', () => cyaOrganicBurstShadow.observeTrade(trade));
+        observeShadow('earlyPureBuyBurst', () => earlyPureBuyBurstShadow.observeTrade(trade));
         observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
         observeShadow('migrationContinuity', () => migrationContinuityShadow.observeTrade(trade));
         observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
@@ -817,6 +828,7 @@ function createRuntime(runtimeConfig = config) {
         ['creatorAffinityAdvance', creatorAffinityShadow],
         ['cyaSlotFlowAdvance', cyaSlotFlowShadow],
         ['cyaOrganicBurstAdvance', cyaOrganicBurstShadow],
+        ['earlyPureBuyBurstAdvance', earlyPureBuyBurstShadow],
         ['sameSlotDumpBackrunAdvance', sameSlotDumpBackrunShadow],
         ['launchPullbackAdvance', launchPullbackShadow],
         ['launchQualityAdvance', launchQualityObserver],
@@ -890,6 +902,7 @@ function createRuntime(runtimeConfig = config) {
     creatorAffinityShadow.stop();
     cyaSlotFlowShadow.stop();
     cyaOrganicBurstShadow.stop();
+    earlyPureBuyBurstShadow.stop();
     sameSlotDumpBackrunShadow.stop();
     launchPullbackShadow.stop();
     launchQualityObserver.stop();
@@ -933,6 +946,7 @@ function createRuntime(runtimeConfig = config) {
       creatorAffinityShadow: creatorAffinityShadow.health(),
       cyaSlotFlowShadow: cyaSlotFlowShadow.health(),
       cyaOrganicBurstShadow: cyaOrganicBurstShadow.health(),
+      earlyPureBuyBurstShadow: earlyPureBuyBurstShadow.health(),
       sameSlotDumpBackrunShadow: sameSlotDumpBackrunShadow.health(),
       launchPullbackShadow: launchPullbackShadow.health(),
       launchQualityObserver: launchQualityObserver.health(),
@@ -959,7 +973,7 @@ function createRuntime(runtimeConfig = config) {
     smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow,
     smartWalletRugEscapeShadow, smartWalletFirstOpenRightTailShadow,
     publicFlowLeadShadow, creatorAffinityShadow,
-    cyaSlotFlowShadow, cyaOrganicBurstShadow,
+    cyaSlotFlowShadow, cyaOrganicBurstShadow, earlyPureBuyBurstShadow,
     sameSlotDumpBackrunShadow,
     launchPullbackShadow,
     launchQualityObserver, migrationSecondLegObserver, migrationSecondLegShadow,

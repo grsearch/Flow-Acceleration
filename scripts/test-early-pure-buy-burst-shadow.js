@@ -1,0 +1,216 @@
+'use strict';
+
+const assert = require('assert');
+const { ResearchStore } = require('../src/data/ResearchStore');
+const { EarlyPureBuyBurstShadowSuite } = require('../src/core/EarlyPureBuyBurstShadowSuite');
+
+function config() {
+  return {
+    enabled: true,
+    smartWallets: ['excluded-smart-wallet'],
+    positionSizeSol: 1,
+    featureWindowMs: 3_000,
+    maxTradesPerMint: 16,
+    stateRetentionMs: 120_000,
+    entryDelayMs: 200,
+    entryTimeoutMs: 2_000,
+    exitDelayMs: 200,
+    exitTimeoutMs: 1_000,
+    maxEntryPriceJumpPct: 15,
+    maxEntryPriceDropPct: 35,
+    maxEntryImpactPct: 15,
+    base: {
+      maxAgeMs: 10_000,
+      maxCurvePct: 50,
+      minNetFlow3sSol: 3,
+      maxNetFlow3sSol: 5,
+      minBuyers3s: 2,
+      maxBuyers3s: 4,
+      maxSellTx3s: 0,
+    },
+    confirmationB: {
+      minDelayMs: 300,
+      maxDelayMs: 500,
+      minDeltaBuyers: 1,
+      minDeltaNetFlowSol: 0.5,
+      maxJumpPct: 10,
+    },
+    confirmationC: {
+      minDelayMs: 1_000,
+      maxDelayMs: 3_000,
+      minDrawdownPct: 3,
+      maxDrawdownPct: 8,
+      minReclaimPct: 1,
+      maxReclaimPct: 2,
+      maxSingleSellSol: 0.5,
+      maxSellSharePct: 35,
+    },
+    entryProfiles: [
+      { id: 'EB_A', label: 'immediate baseline', newEntriesEnabled: true },
+      { id: 'EB_B', label: '300-500ms confirmation', newEntriesEnabled: true },
+      { id: 'EB_C', label: 'pullback reclaim', newEntriesEnabled: true },
+    ],
+    exitProfiles: [
+      { id: 'FIX5', label: 'fixed 5s', maxHoldMs: 5_000 },
+      { id: 'FIX20', label: 'fixed 20s', maxHoldMs: 20_000 },
+      { id: 'FIX30', label: 'fixed 30s', maxHoldMs: 30_000 },
+    ],
+    costModel: {
+      platformFeePct: 1,
+      buySlippagePct: 0,
+      sellSlippagePct: 0,
+      priceImpactPct: 0,
+      baseTxFeeSol: 0.000005,
+      priorityFeeSol: 0,
+      jitoTipSol: 0,
+      fixedCostSol: 0,
+      positionSizeSol: 1,
+      entryFailureRatePct: 0,
+      entryFailureCostPct: 0,
+    },
+  };
+}
+
+function setup(base) {
+  let now = base;
+  let sequence = 0;
+  const store = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const suite = new EarlyPureBuyBurstShadowSuite({
+    config: config(), store, now: () => now,
+  });
+  suite.start();
+  const send = ({ mint, offset, side = 'BUY', sol = 0.1, wallet, price = 0.0000001,
+    reserves = true }) => {
+    now = base + offset;
+    sequence += 1;
+    const trade = {
+      mint, symbol: 'EB', timestampMs: now, slot: 10_000 + Math.floor(offset / 400),
+      market: 'PUMP_BONDING_CURVE', side, solAmount: sol,
+      tokenAmount: sol / price, wallet, price, reservePrice: price,
+      curvePct: 35, ageMs: 6_000 + Math.max(0, offset),
+      signature: `eb-${sequence}`, eventIndex: 0,
+    };
+    if (reserves) {
+      trade.virtualTokenReservesRaw = '1000000000000000';
+      trade.virtualSolReservesRaw = String(Math.max(1, Math.round(price * 1e18)));
+    }
+    return { trade, signals: suite.observeTrade(trade) };
+  };
+  return { store, suite, send, setNow: (value) => { now = value; } };
+}
+
+function seedBaseline(send, mint) {
+  send({ mint, offset: -500, sol: 1.25, wallet: `${mint}-buyer-1` });
+  send({ mint, offset: -250, sol: 1.25, wallet: `${mint}-buyer-2` });
+  return send({ mint, offset: 0, sol: 1.5, wallet: `${mint}-buyer-3` });
+}
+
+function testEntryPathsAndExecutableExits() {
+  const base = 1_850_000_000_000;
+  const { store, suite, send, setNow } = setup(base);
+  const mint = 'EarlyPureBuyBurst111111111111111111111111';
+
+  send({ mint, offset: -750, sol: 20, wallet: 'excluded-smart-wallet' });
+  const baseline = seedBaseline(send, mint);
+  assert.strictEqual(baseline.signals.length, 3, 'EB-A must create isolated FIX5/20/30 cohorts');
+  assert.ok(baseline.signals.every((row) => row.entryProfileId === 'EB_A'));
+
+  // Smart-wallet flow is excluded from the causal feature window.
+  send({ mint, offset: 250, sol: 0.1, wallet: `${mint}-public-fill-a` });
+  assert.strictEqual(suite.health().opened, 3);
+
+  const confirmB = send({
+    mint, offset: 350, sol: 0.5, wallet: `${mint}-buyer-4`, price: 0.000000104,
+  });
+  assert.strictEqual(confirmB.signals.length, 3, 'EB-B must require a fresh public-flow confirmation');
+  assert.ok(confirmB.signals.every((row) => row.entryProfileId === 'EB_B'));
+  send({ mint, offset: 600, sol: 0.1, wallet: `${mint}-public-fill-b`, price: 0.000000104 });
+
+  send({ mint, offset: 1_100, side: 'SELL', sol: 0.3, wallet: `${mint}-seller`, price: 0.000000094 });
+  const confirmC = send({
+    mint, offset: 1_400, sol: 0.5, wallet: `${mint}-buyer-5`, price: 0.0000000952,
+  });
+  assert.strictEqual(confirmC.signals.length, 3, 'EB-C must require a 3-8% pullback and 1-2% reclaim');
+  assert.ok(confirmC.signals.every((row) => row.entryProfileId === 'EB_C'));
+  send({ mint, offset: 1_700, sol: 0.1, wallet: `${mint}-public-fill-c`, price: 0.0000000952 });
+
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM early_pure_buy_burst_shadow_positions WHERE status='OPEN'
+  `).get().n, 9);
+
+  const openRows = store.db.prepare(`
+    SELECT id, entry_at, exit_profile_id FROM early_pure_buy_burst_shadow_positions
+    WHERE status='OPEN'
+  `).all();
+  const holds = new Map([['FIX5', 5_000], ['FIX20', 20_000], ['FIX30', 30_000]]);
+  const dueTimes = [...new Set(openRows.map((row) => row.entry_at + holds.get(row.exit_profile_id)))].sort((a, b) => a - b);
+  dueTimes.forEach((dueAt, index) => {
+    setNow(dueAt);
+    suite.advanceTime(dueAt);
+    send({
+      mint, offset: dueAt - base + 250, sol: 0.01,
+      wallet: `${mint}-exit-${index}`, price: 0.00000012,
+    });
+  });
+
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM early_pure_buy_burst_shadow_positions WHERE status='CLOSED'
+  `).get().n, 9, 'all three entry paths and all fixed exits must close independently');
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM early_pure_buy_burst_shadow_positions
+    WHERE status='CLOSED' AND net_return_pct IS NOT NULL AND exit_impact_pct IS NOT NULL
+  `).get().n, 9, 'completed rows require executable reserve-priced exits');
+
+  for (let index = 0; index < 80; index += 1) {
+    send({ mint, offset: 40_000 + index, wallet: `${mint}-burst-${index}`, sol: 0.01 });
+  }
+  assert.ok(suite.states.get(mint).rows.length <= config().maxTradesPerMint);
+  assert.strictEqual(suite.health().excludedSmartTrades, 1);
+  assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
+
+  const dashboard = suite.dashboard({ positionLimit: 20 });
+  assert.strictEqual(dashboard.cohorts.length, 9);
+  assert.ok(dashboard.cohorts.every((row) => row.completed === 1));
+  assert.strictEqual(dashboard.strategy.missingExitPolicy, 'NO_EXIT_EXCLUDED_FROM_RETURN_STATS');
+  store.close();
+}
+
+function testMissingExitIsCensored() {
+  const base = 1_851_000_000_000;
+  const { store, suite, send, setNow } = setup(base);
+  const mint = 'EarlyPureBuyNoExit1111111111111111111111111';
+  seedBaseline(send, mint);
+  send({ mint, offset: 250, sol: 0.1, wallet: `${mint}-fill` });
+
+  setNow(base + 5_250);
+  suite.advanceTime(base + 5_250);
+  setNow(base + 6_451);
+  suite.advanceTime(base + 6_451);
+
+  const row = store.db.prepare(`
+    SELECT status, exit_reason, gross_return_pct, net_return_pct
+    FROM early_pure_buy_burst_shadow_positions
+    WHERE entry_profile_id='EB_A' AND exit_profile_id='FIX5'
+  `).get();
+  assert.strictEqual(row.status, 'NO_EXIT');
+  assert.strictEqual(row.exit_reason, 'EXIT_QUOTE_UNAVAILABLE');
+  assert.strictEqual(row.gross_return_pct, null);
+  assert.strictEqual(row.net_return_pct, null);
+  const cohort = suite.dashboard().cohorts.find(
+    (item) => item.entry_profile_id === 'EB_A' && item.exit_profile_id === 'FIX5',
+  );
+  assert.strictEqual(cohort.no_exit, 1);
+  assert.strictEqual(cohort.completed, 0, 'NO_EXIT must not enter win-rate or return statistics');
+  store.close();
+}
+
+function main() {
+  testEntryPathsAndExecutableExits();
+  testMissingExitIsCensored();
+  console.log('Early pure-buy burst shadow test passed.');
+}
+
+main();

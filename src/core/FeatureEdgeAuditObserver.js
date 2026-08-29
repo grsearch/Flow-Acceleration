@@ -6,6 +6,7 @@ const HORIZONS = [5, 30, 120, 300];
 const FAMILY_KEYS = ['flow', 'participation', 'balance', 'structure', 'execution'];
 
 function finite(value, fallback = null) {
+  if (value == null || value === '') return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
