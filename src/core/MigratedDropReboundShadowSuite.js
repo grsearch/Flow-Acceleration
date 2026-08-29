@@ -1375,6 +1375,15 @@ class MigratedDropReboundShadowSuite {
         : `RUNNER_${position.runnerHoldMs}MS`;
       exitReason = `BLEND_${position.coreExitReason || 'CORE_AT_RUNNER'}_${runnerTag}`;
     }
+    const maxPlausibleReturnPct = finite(this.config.maxPlausibleReturnPct, 1_000);
+    if (
+      !Number.isFinite(grossReturnPct)
+      || grossReturnPct < -100
+      || grossReturnPct > maxPlausibleReturnPct
+    ) {
+      this._markNoExit(position, 'IMPLAUSIBLE_EXIT_RETURN');
+      return;
+    }
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
       status: STATUS.CLOSED,
       exitAt: trade.timestampMs,
@@ -1396,14 +1405,11 @@ class MigratedDropReboundShadowSuite {
     this.metrics.lastActionAt = this.now();
   }
 
-  _markNoExit(position) {
+  _markNoExit(position, reason = 'NO_EXECUTABLE_EXIT_TRADE') {
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
-      grossReturnPct: -100,
-      netReturnPct: -100 - finite(
-        position.configuredCostPct,
-        this.costs.deterministicCostPct,
-      ),
+      rejectionReason: reason,
+      exitReason: reason,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
