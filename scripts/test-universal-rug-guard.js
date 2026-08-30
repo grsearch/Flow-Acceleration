@@ -40,19 +40,45 @@ for (let index = 0; index < 15; index += 1) {
   });
 }
 const shadow = evaluateUniversalRugGuard(store, {
-  strategyId: 'SHADOW-A', mint: 'rug', timestampMs: 9_000, source: 'SHADOW',
+  strategyId: 'PRIMARY:SHADOW-A', mint: 'rug', timestampMs: 9_000, source: 'SHADOW',
+  market: 'PUMP_BONDING_CURVE', lifecycleStage: 'PRE_MIGRATION',
 });
-assert.equal(shadow.blocked, true);
+assert.equal(shadow.flagged, true);
+assert.equal(shadow.blocked, false);
+assert.equal(shadow.reason, 'RUG_RISK_LABEL_ONLY');
+assert.equal(shadow.enforcementMode, 'LABEL_ONLY');
 const live = evaluateUniversalRugGuard(store, {
   strategyId: 'LIVE-A', mint: 'rug', timestampMs: 9_010, source: 'LIVE',
+  market: 'PUMP_AMM', lifecycleStage: 'POST_MIGRATION',
 });
 assert.equal(live.blocked, true);
+assert.equal(live.enforcementMode, 'HARD_BLOCK');
 assert.equal(tracker.health().liveCacheHits, 1);
+
+const launch = evaluateUniversalRugGuard(store, {
+  strategyId: 'LAUNCH_PULLBACK:FO', mint: 'rug', timestampMs: 9_020, source: 'SHADOW',
+  market: 'PUMP_BONDING_CURVE',
+});
+assert.equal(launch.blocked, false);
+assert.equal(launch.reason, 'RUG_RISK_LABEL_ONLY');
+
+const lifecycle = evaluateUniversalRugGuard(store, {
+  strategyId: 'MIGRATED_DROP_REBOUND:GFR_300', mint: 'rug', timestampMs: 9_030, source: 'SHADOW',
+  market: 'PUMP_AMM',
+});
+assert.equal(lifecycle.blocked, true);
+assert.equal(lifecycle.reason, 'PRE_ENTRY_RUG_RISK');
 
 const incomplete = evaluateUniversalRugGuard(store, {
   strategyId: 'LIVE-B', mint: 'unknown', timestampMs: 9_010, source: 'LIVE',
 });
 assert.equal(incomplete.blocked, false);
+
+const health = tracker.health();
+assert.equal(health.guardRiskFlagged, 4);
+assert.equal(health.guardHardBlocked, 2);
+assert.equal(health.guardLabelOnly, 2);
+assert.equal(health.enforcement, 'POST_MIGRATION_HARD_BLOCK_CURVE_AND_RESEARCH_LABEL_ONLY');
 
 const entryFiles = [
   'BigWinnerShadowSuite.js',

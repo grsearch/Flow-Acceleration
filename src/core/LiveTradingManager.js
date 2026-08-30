@@ -856,10 +856,11 @@ class LiveTradingManager {
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
+    const now = this.now();
     const entryBeijingStartHour = Number(strategy.entryBeijingStartHour);
     const entryBeijingEndHour = Number(strategy.entryBeijingEndHour);
     if (Number.isFinite(entryBeijingStartHour) && Number.isFinite(entryBeijingEndHour)) {
-      const eventTime = Number(event.timestampMs ?? event.receivedAtMs ?? this.now());
+      const eventTime = Number(event.timestampMs ?? event.receivedAtMs ?? now);
       if (Number.isFinite(eventTime)
         && !hourInWindow(
           beijingHour(eventTime),
@@ -878,7 +879,7 @@ class LiveTradingManager {
     }
     const maxSignalAgeMs = strategy?.maxSignalAgeMs || this.config.maxSignalAgeMs;
     if (Number.isFinite(receivedAt)
-      && this.now() - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
+      && now - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
     const maxPerMint = Math.max(
       1,
       Number(this.config.maxConcurrentPositionsPerMint) || 3,
@@ -887,6 +888,31 @@ class LiveTradingManager {
       return 'MAX_POSITIONS_PER_MINT';
     }
     if (this.positions.size >= this.config.maxConcurrentPositions) return 'MAX_POSITIONS';
+    const failedEntryCooldownMs = Number.isFinite(Number(strategy.failedEntryCooldownMs))
+      ? Math.max(0, Number(strategy.failedEntryCooldownMs))
+      : Math.max(0, Number(this.config.failedEntryCooldownMs) || 0);
+    const failedEntryWindowMs = Number.isFinite(Number(strategy.failedEntryWindowMs))
+      ? Math.max(1_000, Number(strategy.failedEntryWindowMs))
+      : Math.max(1_000, Number(this.config.failedEntryWindowMs) || 5 * 60_000);
+    const maxFailedEntriesPerMint = Number.isFinite(Number(strategy.maxFailedEntriesPerMint))
+      ? Math.max(1, Number(strategy.maxFailedEntriesPerMint))
+      : Math.max(1, Number(this.config.maxFailedEntriesPerMint) || 2);
+    const lastFailed = typeof this.store.lastFailedLivePositionForMintStrategy === 'function'
+      ? this.store.lastFailedLivePositionForMintStrategy(event.mint, event.strategyId)
+      : null;
+    if (lastFailed && now - Number(lastFailed.updated_at || lastFailed.created_at)
+      < failedEntryCooldownMs) {
+      return 'MINT_FAILED_ENTRY_COOLDOWN';
+    }
+    const recentFailedEntries = typeof this.store.failedLiveEntryCountForMintStrategySince
+      === 'function'
+      ? this.store.failedLiveEntryCountForMintStrategySince(
+        event.mint,
+        event.strategyId,
+        now - failedEntryWindowMs,
+      )
+      : 0;
+    if (recentFailedEntries >= maxFailedEntriesPerMint) return 'MINT_FAILED_ENTRY_LIMIT';
     const maxEntriesPerMint = Math.max(1, Number(strategy?.maxEntriesPerMint) || 1);
     const successfulEntries = typeof this.store.successfulLiveEntryCountForMintStrategy === 'function'
       ? this.store.successfulLiveEntryCountForMintStrategy(event.mint, event.strategyId)
@@ -899,7 +925,7 @@ class LiveTradingManager {
       ? Math.max(0, Number(strategy.reentryCooldownMs))
       : this.config.mintCooldownMs;
     if (lastSuccessful
-      && this.now() - Number(
+      && now - Number(
         lastSuccessful.closed_at || lastSuccessful.updated_at || lastSuccessful.created_at,
       ) < cooldownMs) {
       return 'MINT_REENTRY_COOLDOWN';
@@ -916,6 +942,8 @@ class LiveTradingManager {
       mint: event.mint,
       timestampMs: this.now(),
       source: 'LIVE',
+      market: event.market || strategy.market,
+      lifecycleStage: event.lifecycleStage || null,
     });
     if (rugGuard.blocked) {
       this.metrics.riskRejected += 1;

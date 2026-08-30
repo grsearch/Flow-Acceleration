@@ -439,7 +439,8 @@ function runNoExitRemainsUnpriced() {
   assert.strictEqual(cohort.resolved, 0, 'unpriced exits must not pollute priced returns');
   assert.strictEqual(cohort.no_exit, 1);
   assert.strictEqual(cohort.no_exit_rate_pct, 100);
-  assert.strictEqual(cohort.conservative_average_net_return_pct, -100);
+  assert.strictEqual(cohort.conservative_average_net_return_pct, null,
+    'NO_EXIT is right-censored and must not be fabricated as a -100% loss');
   store.close();
   console.log('test-holder-growth-shadow no-exit censoring: ok');
 }

@@ -296,7 +296,7 @@ const config = {
   });
   assert.equal(shadowDecision.blocked, true);
   const health = tracker.health();
-  assert.equal(health.scope, 'ALL_LIVE_AND_SHADOW_ENTRIES');
+  assert.equal(health.scope, 'LIFECYCLE_AND_STRATEGY_TIERED');
   assert.equal(health.strategyStats.find((row) => row.strategyId === 'LIVE-TEST').evaluated, 2);
   assert.ok(health.recentFlagged.some((row) => row.strategyId === 'SHADOW-TEST'));
 }

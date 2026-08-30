@@ -376,6 +376,7 @@ class QualityLeaderShadowSuite {
       strategyId: `QUALITY_LEADER:${position.cohortId}`,
       mint: position.mint,
       timestampMs: trade.timestampMs,
+      market: trade.market,
     });
     if (rugGuard.blocked) {
       this.store.updateQualityLeaderShadowPosition(position.id, {

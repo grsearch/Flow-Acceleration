@@ -474,6 +474,8 @@ class MigrationSecondLegShadowSuite {
       mint: position.mint,
       timestampMs: trade.timestampMs,
       source: 'SHADOW',
+      market: trade.market,
+      lifecycleStage: 'POST_MIGRATION',
     });
     if (rugGuard.blocked) {
       this.store.updateMigrationSecondLegShadowPosition(position.id, {

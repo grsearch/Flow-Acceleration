@@ -306,6 +306,22 @@ function addTrade(store, mint, timestampMs, price, market = 'PUMP_BONDING_CURVE'
   assert.strictEqual(result.metrics.noExit, 1);
   assert.strictEqual(result.metrics.roundTripCompletionRatePct, 0);
 
+  const rightCensoredNoExit = runBacktest(store.db, {
+    holdMs: 5_000,
+    executionDelayMs: 200,
+    exitTimeoutMs: 1_000,
+    platformFeePct: 1,
+    ...zeroVariableCosts,
+  });
+  assert.strictEqual(rightCensoredNoExit.rows[0].status, STATUS.NO_EXIT);
+  assert.strictEqual(rightCensoredNoExit.rows[0].netReturnPct, null,
+    'NO_EXIT must remain unpriced unless an explicit stress loss is requested');
+  assert.strictEqual(rightCensoredNoExit.metrics.noExit, 1,
+    'an unpriced NO_EXIT must remain visible as a right-censored outcome');
+  assert.strictEqual(rightCensoredNoExit.metrics.averageNetReturnPct, null);
+  assert.strictEqual(rightCensoredNoExit.metrics.averageExecutedNetReturnPct, null,
+    'an unpriced NO_EXIT must stay out of executed-return PnL');
+
   const failedEntry = runBacktest(store.db, {
     holdMs: 5_000,
     executionDelayMs: 200,

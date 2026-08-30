@@ -16,6 +16,12 @@ function integerEnv(name, fallback, bounds = {}) {
   return Math.trunc(numberEnv(name, fallback, bounds));
 }
 
+function nullableNumberEnv(name, fallback = null, bounds = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  return numberEnv(name, fallback, bounds);
+}
+
 function booleanEnv(name, fallback = false) {
   const raw = process.env[name];
   if (raw == null || raw === '') return fallback;
@@ -526,7 +532,7 @@ const config = {
     entryTimeoutMs: integerEnv('FLOW_BACKTEST_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
     exitExecutionDelayMs: integerEnv('FLOW_BACKTEST_EXIT_DELAY_MS', 200, { min: 0 }),
     exitTimeoutMs: integerEnv('FLOW_BACKTEST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    noExitLossPct: numberEnv('FLOW_BACKTEST_NO_EXIT_LOSS_PCT', 100, { min: 0 }),
+    noExitLossPct: nullableNumberEnv('FLOW_BACKTEST_NO_EXIT_LOSS_PCT', null, { min: 0 }),
     signalCooldownMs: integerEnv('FLOW_BACKTEST_SIGNAL_COOLDOWN_MS', 5_000, { min: 0 }),
     singlePositionPerMint: booleanEnv('FLOW_BACKTEST_SINGLE_POSITION_PER_MINT', true),
   },
@@ -550,6 +556,15 @@ const config = {
     ),
     minWalletReserveSol: numberEnv('FLOW_LIVE_MIN_WALLET_RESERVE_SOL', 0.05, { min: 0 }),
     mintCooldownMs: integerEnv('FLOW_LIVE_MINT_COOLDOWN_MS', 10 * 60_000, { min: 0 }),
+    failedEntryCooldownMs: integerEnv(
+      'FLOW_LIVE_FAILED_ENTRY_COOLDOWN_MS', 30_000, { min: 0 },
+    ),
+    failedEntryWindowMs: integerEnv(
+      'FLOW_LIVE_FAILED_ENTRY_WINDOW_MS', 5 * 60_000, { min: 1 },
+    ),
+    maxFailedEntriesPerMint: integerEnv(
+      'FLOW_LIVE_MAX_FAILED_ENTRIES_PER_MINT', 2, { min: 1, max: 20 },
+    ),
     maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_MAX_ENTRY_PRICE_JUMP_PCT', 10, {
       min: 0,
       max: 100,

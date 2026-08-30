@@ -218,10 +218,10 @@ class ResearchServer {
           request.query.exitTimeoutMs,
           this.config.backtest?.exitTimeoutMs ?? 5_000,
         ),
-        noExitLossPct: numeric(
-          request.query.noExitLossPct,
-          this.config.backtest?.noExitLossPct ?? 100,
-        ),
+        noExitLossPct: request.query.noExitLossPct === undefined
+          || String(request.query.noExitLossPct).trim() === ''
+          ? this.config.backtest?.noExitLossPct
+          : numeric(request.query.noExitLossPct, undefined),
         takeProfitPct: numeric(request.query.takeProfitPct, 0),
         stopLossPct: numeric(request.query.stopLossPct, 0),
         trailingStopPct: numeric(request.query.trailingStopPct, 0),

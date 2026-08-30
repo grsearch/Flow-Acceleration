@@ -47,6 +47,7 @@ assert.strictEqual(costs.entryFailureCostPct, 5);
 assert.ok(Math.abs(expectedNetReturnPct(10, costs) - 6.34) < 1e-12);
 assert.strictEqual(config.backtest.executionDelayMs, 200);
 assert.strictEqual(config.backtest.exitExecutionDelayMs, 200);
+assert.strictEqual(config.backtest.noExitLossPct, null);
 assert.strictEqual(config.backtest.signalCooldownMs, 5_000);
 assert.strictEqual(config.backtest.singlePositionPerMint, true);
 assert.strictEqual(config.storage.rawRetentionHours, 48);
@@ -61,6 +62,9 @@ assert.strictEqual(config.liveTrading.maxDailyTrades, undefined);
 assert.strictEqual(config.liveTrading.maxDailyLossSol, undefined);
 assert.strictEqual(config.liveTrading.maxConcurrentPositions, 10);
 assert.strictEqual(config.liveTrading.maxConcurrentPositionsPerMint, 3);
+assert.strictEqual(config.liveTrading.failedEntryCooldownMs, 30_000);
+assert.strictEqual(config.liveTrading.failedEntryWindowMs, 5 * 60_000);
+assert.strictEqual(config.liveTrading.maxFailedEntriesPerMint, 2);
 const liveContinuity = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'migration_continuity_mc_c5_e120_live'
 ));

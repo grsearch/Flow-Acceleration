@@ -577,6 +577,7 @@ class RangeScalperShadowSuite {
           strategyId: `RANGE_SCALPER:${position.cohortId}`,
           mint: position.mint,
           timestampMs: trade.timestampMs,
+          market: trade.market,
         });
         if (rugGuard.blocked) {
           this.store.updateRangeScalperShadowPosition(position.id, {

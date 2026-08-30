@@ -304,7 +304,7 @@
               <label>出场等待上限（ms）<input name="exitTimeoutMs" type="number" min="1" step="100" value="5000"></label>
               <label>模拟连续卖出失败<input name="exitRetryCount" type="number" min="0" max="20" step="1" value="0"></label>
               <label>卖出重试间隔（ms）<input name="exitRetryDelayMs" type="number" min="0" step="50" value="500"></label>
-              <label>无法出场损失（%）<input name="noExitLossPct" type="number" min="0" step="1" value="100"></label>
+              <label>无法出场压力损失（%）<input name="noExitLossPct" type="number" min="0" step="1" placeholder="留空则右删失"></label>
             </div>
           </fieldset>
 
@@ -1141,9 +1141,9 @@
     <section class="panel" role="tabpanel" id="health" hidden>
       <div class="grid health-grid" id="health-cards"></div>
       <article class="card record-section" style="margin-top:18px">
-        <div class="section-title"><h2>RUG Guard · 分策略入场风控</h2><p>所有实盘和会建立模拟仓位的 Shadow 共用；样本不足放行并单独计数</p></div>
+        <div class="section-title"><h2>RUG Guard · 分策略入场风控</h2><p>毕业后高风险路径硬拦截；Curve、Launch 与右尾研究路径仅记录标签，不改变原策略入场</p></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>策略编号</th><th>类型</th><th>评估</th><th>样本完整</th><th>样本不足</th><th>放行</th><th>拒绝</th><th>拒绝率</th><th>最近拒绝</th></tr></thead>
+          <thead><tr><th>策略编号</th><th>类型</th><th>执行方式</th><th>评估</th><th>样本完整</th><th>样本不足</th><th>风险命中</th><th>硬拦截</th><th>仅标签</th><th>硬拦截率</th><th>最近命中</th></tr></thead>
           <tbody id="rug-guard-strategy-rows"></tbody>
         </table></div>
       </article>
@@ -1169,7 +1169,7 @@
         </table></div>
       </article>
       <article class="card record-section" style="margin-top:18px">
-        <div class="section-title"><h2>最近 RUG 高风险拦截</h2><p>仅显示新版本运行后实际阻止入场的记录；不会回填旧历史</p></div>
+        <div class="section-title"><h2>最近 RUG 高风险判定</h2><p>同时显示硬拦截和仅标签记录；仅标签不会阻止策略入场，不回填旧历史</p></div>
         <div class="table-wrap"><table>
           <thead><tr><th>时间</th><th>策略 / 类型</th><th>Mint</th><th>拦截签名</th><th>阶梯分数</th><th>买入占比</th><th>连续买入</th><th>买单/买家</th><th>同额买单</th><th>最大买入冲击</th><th>短时涨幅</th><th>结果</th></tr></thead>
           <tbody id="rug-guard-recent-rows"></tbody>
@@ -2930,7 +2930,7 @@
         ['Range Scalper J', [['模式', rangeScalper.enabled ? 'SHADOW J（人工重新启用）' : '已停，仅保留历史'], ['订阅 Mint', number(rangeScalper.trackedMints)], ['区间有效', number(rangeScalper.rangeActive)], ['候选 / 信号', `${number(rangeScalper.candidates)} / ${number(rangeScalper.signals)}`], ['待入场', number(rangeScalper.pendingEntries)], ['活动仓位', number(rangeScalper.activePositions)], ['延长订阅', number(rangeScalper.extendedMints)], ['数据库仓位', number(data.database.rangeScalperShadowPositions?.total)], ['链上交易', '永不发送']]],
         ['Stream', [['状态', data.status], ['Regions', regions], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
-        ['Pre-entry RUG Guard', [['模式', rugRisk.enabled ? '全策略强制风控' : '关闭'], ['适用范围', '所有实盘 + 所有开仓型 Shadow'], ['跟踪 Mint', number(rugRisk.trackedMints)], ['风险快照评估', number(rugRisk.evaluations)], ['实际入场评估', number(rugRisk.guardEvaluations)], ['入场拒绝 / 放行', `${number(rugRisk.guardRejected)} / ${number(rugRisk.guardPassed)}`], ['原生样本不足', `${number(rugRisk.guardSampleInsufficient)}（毒模板仍可拦截）`], ['跨 Mint 毒模板拒绝', number(rugRisk.guardCrossMintRejected)], ['已学习 毒模板 / 钱包', `${number(rugRisk.toxicTemplates)} / ${number(rugRisk.toxicWallets)}`], ['重启恢复 / 保存', `${number(rugRisk.toxicMemoryLoaded)} / ${number(rugRisk.toxicMemorySaved)}`], ['近似模板命中', number(rugRisk.toxicFuzzyMatches)], ['持久化错误', `${number(rugRisk.toxicMemoryLoadErrors)} / ${number(rugRisk.toxicMemorySaveErrors)}`], ['已标毒快速崩盘', number(rugRisk.toxicCollapsesLabeled)], ['实盘缓存命中 / 刷新', `${number(rugRisk.liveCacheHits)} / ${number(rugRisk.liveCacheMisses)}`], ['旧阶梯 / 垂直脆弱', `${number(rugRisk.flaggedLegacy)} / ${number(rugRisk.flaggedVerticalFragile)}`], ['买家稀疏 / 同额追涨', `${number(rugRisk.flaggedSparseBreadth)} / ${number(rugRisk.flaggedChaseRepeatedSize)}`], ['毒钱包 / 金额模板命中', `${number(rugRisk.flaggedCrossMintWallets)} / ${number(rugRisk.flaggedCrossMintTemplates)}`], ['北京时间风险窗', `16:00–20:00 · 阶梯 ${number(rugRisk.thresholds?.beijingRiskMinFlags || 4)}/5 即拦截 · 命中 ${number(rugRisk.flaggedBeijingRiskWindow)}`], ['跨 Mint 判定', `≥${number(rugRisk.thresholds?.toxicWalletOverlapMin || 2)}毒钱包，或保守近似的大额买单金额/时序模板`], ['买入热路径', '仅内存；最多扫描 256 笔；无等待'], ['持久化', '后台小文件；入场路径不读盘'], ['额外 RPC / DB', '无 / 无']]],
+        ['Pre-entry RUG Guard', [['模式', rugRisk.enabled ? '按生命周期与策略分层' : '关闭'], ['硬拦截', '毕业后 PumpSwap / Lifecycle 路径'], ['仅标签', 'Curve / Launch / COB右尾研究路径'], ['跟踪 Mint', number(rugRisk.trackedMints)], ['风险快照评估', number(rugRisk.evaluations)], ['实际入场评估', number(rugRisk.guardEvaluations)], ['风险命中', number(rugRisk.guardRiskFlagged)], ['硬拦截 / 仅标签', `${number(rugRisk.guardHardBlocked)} / ${number(rugRisk.guardLabelOnly)}`], ['放行（含仅标签）', number(rugRisk.guardPassed)], ['原生样本不足', `${number(rugRisk.guardSampleInsufficient)}（毒模板仍可判定）`], ['跨 Mint 毒模板硬拦截', number(rugRisk.guardCrossMintRejected)], ['已学习 毒模板 / 钱包', `${number(rugRisk.toxicTemplates)} / ${number(rugRisk.toxicWallets)}`], ['重启恢复 / 保存', `${number(rugRisk.toxicMemoryLoaded)} / ${number(rugRisk.toxicMemorySaved)}`], ['近似模板命中', number(rugRisk.toxicFuzzyMatches)], ['持久化错误', `${number(rugRisk.toxicMemoryLoadErrors)} / ${number(rugRisk.toxicMemorySaveErrors)}`], ['已标毒快速崩盘', number(rugRisk.toxicCollapsesLabeled)], ['实盘缓存命中 / 刷新', `${number(rugRisk.liveCacheHits)} / ${number(rugRisk.liveCacheMisses)}`], ['旧阶梯 / 垂直脆弱', `${number(rugRisk.flaggedLegacy)} / ${number(rugRisk.flaggedVerticalFragile)}`], ['买家稀疏 / 同额追涨', `${number(rugRisk.flaggedSparseBreadth)} / ${number(rugRisk.flaggedChaseRepeatedSize)}`], ['毒钱包 / 金额模板命中', `${number(rugRisk.flaggedCrossMintWallets)} / ${number(rugRisk.flaggedCrossMintTemplates)}`], ['北京时间风险窗', `16:00–20:00 · 阶梯 ${number(rugRisk.thresholds?.beijingRiskMinFlags || 4)}/5 记风险 · 命中 ${number(rugRisk.flaggedBeijingRiskWindow)}`], ['跨 Mint 判定', `≥${number(rugRisk.thresholds?.toxicWalletOverlapMin || 2)}毒钱包，或保守近似的大额买单金额/时序模板`], ['买入热路径', '仅内存；最多扫描 256 笔；无等待'], ['持久化', '后台小文件；入场路径不读盘'], ['额外 RPC / DB', '无 / 无']]],
         ['Database', [['统计快照', escapeHtml(databaseStats.status || 'PENDING')], ['快照年龄', Number.isFinite(databaseStats.staleMs) ? age(databaseStats.staleMs) : '等待后台统计'], ['后台统计耗时', Number.isFinite(databaseStats.durationMs) ? `${number(databaseStats.durationMs)} ms` : '—'], ['历史清理', retentionStatus], ['最近维护', retentionCompletedAt], ['本轮删除', `${number(retention?.deletedRows)} 行`], ['可复用空间', retentionReusable], ['维护保护', `同归档 ${age(retention?.repeatGuardMs || 86400000)} 仅1轮 · 上限 ${number(retention?.hardMaxRowsPerRun || 5000000)} 行`], ['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Holder Growth N仓位', number(data.database.holderGrowthShadowPositions?.total)], ['Quality Leader QL仓位', number(data.database.qualityLeaderShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['M2F观察 / 快照', `${number(data.database.migrationSecondLegObservations?.total)} / ${number(data.database.migrationSecondLegObservations?.snapshots)}`], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
         ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['策略', escapeHtml(activeLiveStrategy.label || '未启用')], ['规则', `毕业后≤${age(liveEntry.trackingAgeMs)} · 1秒跌${number(liveEntry.dropMinPct)}–${number(liveEntry.dropMaxPct)}% · 反弹${number(liveEntry.reboundMinPct)}–${number(liveEntry.reboundMaxPct)}%`], ['单笔', `${number(activeLiveStrategy.positionSizeSol,4)} SOL`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
@@ -2971,14 +2971,21 @@
         ? rugStrategies.map(row => {
           const ready = Number(row.sampleReady || 0);
           const evaluated = Number(row.evaluated || 0);
-          const rejected = Number(row.rejected || 0);
+          const flagged = Number(row.riskFlagged || 0);
+          const rejected = Number(row.hardBlocked ?? row.rejected ?? 0);
+          const labelOnly = Number(row.labelOnly || 0);
           // Cross-Mint toxic-template memory can reject an entry before the
           // native per-Mint sample reaches minTrades. Use every evaluated entry
           // as the denominator so the displayed rate can never exceed 100%.
           const rejectionRate = evaluated > 0 ? rejected / evaluated * 100 : null;
-          return `<tr><td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b></td><td>${statusChip(row.source || 'SHADOW')}</td><td>${number(row.evaluated)}</td><td>${number(ready)}</td><td>${number(row.sampleInsufficient)}</td><td>${number(row.passed)}</td><td class="negative">${number(rejected)}</td><td>${rate(rejectionRate)}</td><td>${dateTime(row.lastRejectedAt)}</td></tr>`;
+          const enforcement = row.enforcementMode === 'HARD_BLOCK'
+            ? '硬拦截'
+            : row.enforcementMode === 'MIXED'
+              ? '分层混合'
+              : '仅标签';
+          return `<tr><td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.policyReason || '—')}</span></td><td>${statusChip(row.source || 'SHADOW')}</td><td>${statusChip(enforcement)}</td><td>${number(row.evaluated)}</td><td>${number(ready)}</td><td>${number(row.sampleInsufficient)}</td><td>${number(flagged)}</td><td class="negative">${number(rejected)}</td><td>${number(labelOnly)}</td><td>${rate(rejectionRate)}</td><td>${dateTime(row.lastFlaggedAt || row.lastRejectedAt)}</td></tr>`;
         }).join('')
-        : '<tr><td colspan="9" class="empty">等待策略产生新的入场机会；旧历史不会回填</td></tr>';
+        : '<tr><td colspan="11" class="empty">等待策略产生新的入场机会；旧历史不会回填</td></tr>';
       const firstCliffStrategies = rugStrategies.filter(row => (
         Number(row.firstCliffHc1Matched || 0) > 0 || Number(row.firstCliffHc2Matched || 0) > 0
       ));
@@ -3034,9 +3041,9 @@
             crossMintToxicTemplate: '跨Mint金额/时序毒模板',
           };
           const reasons = (row.flaggedReasons || []).map(reason => labels[reason] || reason).join(' / ') || '高风险';
-          return `<tr><td>${dateTime(row.observedAt)}</td><td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.source || 'SHADOW')}</span></td><td>${mintLink(row.mint)}</td><td class="negative wrap-cell">${escapeHtml(reasons)}</td><td>${number(row.score)} / ${number(row.maxScore)}</td><td>${rate(row.buySharePct)}</td><td>${number(row.maxConsecutiveBuys)}</td><td>${number(row.buysPerBuyer,2)}<br><span class="table-note">${number(row.uniqueBuyers)} Buyers</span></td><td>${rate(row.repeatedBuySizeSharePct)}</td><td>${rate(row.maxBuyImpactPct)}</td><td class="negative">${pct(row.returnPct)}</td><td>${statusChip('BLOCKED')}</td></tr>`;
+          return `<tr><td>${dateTime(row.observedAt)}</td><td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.source || 'SHADOW')} · ${escapeHtml(row.policyReason || '—')}</span></td><td>${mintLink(row.mint)}</td><td class="negative wrap-cell">${escapeHtml(reasons)}</td><td>${number(row.score)} / ${number(row.maxScore)}</td><td>${rate(row.buySharePct)}</td><td>${number(row.maxConsecutiveBuys)}</td><td>${number(row.buysPerBuyer,2)}<br><span class="table-note">${number(row.uniqueBuyers)} Buyers</span></td><td>${rate(row.repeatedBuySizeSharePct)}</td><td>${rate(row.maxBuyImpactPct)}</td><td class="negative">${pct(row.returnPct)}</td><td>${statusChip(row.blocked ? 'BLOCKED' : 'LABELED')}</td></tr>`;
         }).join('')
-        : '<tr><td colspan="12" class="empty">尚无被 RUG Guard 拦截的入场</td></tr>';
+        : '<tr><td colspan="12" class="empty">尚无 RUG Guard 高风险判定</td></tr>';
       const live = data.status === 'streaming';
       document.querySelector('#status-dot').classList.toggle('live', live);
       document.querySelector('#status-text').textContent = live ? '链上数据流运行中' : '等待数据流';

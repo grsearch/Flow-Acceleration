@@ -135,6 +135,9 @@ class PreEntryRugRiskTracker {
       guardEvaluations: 0,
       guardPassed: 0,
       guardRejected: 0,
+      guardRiskFlagged: 0,
+      guardHardBlocked: 0,
+      guardLabelOnly: 0,
       guardSampleInsufficient: 0,
       guardCrossMintRejected: 0,
       liveCacheHits: 0,
@@ -424,7 +427,16 @@ class PreEntryRugRiskTracker {
     return risk;
   }
 
-  evaluateGuard({ strategyId, mint, timestampMs = this.now(), source = 'SHADOW' }) {
+  evaluateGuard({
+    strategyId,
+    mint,
+    timestampMs = this.now(),
+    source = 'SHADOW',
+    market = null,
+    lifecycleStage = null,
+    enforcementMode = 'HARD_BLOCK',
+    policyReason = 'TRACKER_DEFAULT_HARD_BLOCK',
+  }) {
     const normalizedStrategyId = String(strategyId || 'UNKNOWN');
     const normalizedSource = String(source || 'SHADOW').toUpperCase();
     let risk;
@@ -443,7 +455,8 @@ class PreEntryRugRiskTracker {
         this.metrics.liveCacheMisses += 1;
       }
     } else risk = this.snapshot(mint, timestampMs);
-    const blocked = Boolean(this.config.enabled && risk.flagged);
+    const riskFlagged = Boolean(this.config.enabled && risk.flagged);
+    const blocked = Boolean(riskFlagged && enforcementMode === 'HARD_BLOCK');
     const stats = this.guardStrategies.get(normalizedStrategyId) || {
       strategyId: normalizedStrategyId,
       source: normalizedSource,
@@ -452,22 +465,45 @@ class PreEntryRugRiskTracker {
       sampleInsufficient: 0,
       passed: 0,
       rejected: 0,
+      riskFlagged: 0,
+      hardBlocked: 0,
+      labelOnly: 0,
       lastEvaluatedAt: null,
       lastRejectedAt: null,
+      lastFlaggedAt: null,
     };
     this._initializeFirstCliffStrategyStats(stats);
+    stats.enforcementMode = stats.enforcementMode && stats.enforcementMode !== enforcementMode
+      ? 'MIXED'
+      : enforcementMode;
+    stats.policyReason = stats.policyReason && stats.policyReason !== policyReason
+      ? 'MULTIPLE_LIFECYCLE_POLICIES'
+      : policyReason;
+    stats.market = market;
+    stats.lifecycleStage = lifecycleStage;
     stats.evaluated += 1;
     stats.lastEvaluatedAt = timestampMs;
     if (risk.sampleReady) stats.sampleReady += 1;
     else stats.sampleInsufficient += 1;
+    if (riskFlagged) {
+      stats.riskFlagged += 1;
+      stats.lastFlaggedAt = timestampMs;
+    }
     if (blocked) {
       stats.rejected += 1;
+      stats.hardBlocked += 1;
       stats.lastRejectedAt = timestampMs;
-    } else stats.passed += 1;
+    } else {
+      stats.passed += 1;
+      if (riskFlagged) stats.labelOnly += 1;
+    }
     this.guardStrategies.set(normalizedStrategyId, stats);
 
     this.metrics.guardEvaluations += 1;
     if (!blocked) this.metrics.guardPassed += 1;
+    if (riskFlagged) this.metrics.guardRiskFlagged += 1;
+    if (blocked) this.metrics.guardHardBlocked += 1;
+    if (riskFlagged && !blocked) this.metrics.guardLabelOnly += 1;
     if (!risk.sampleReady) this.metrics.guardSampleInsufficient += 1;
     if (blocked) this.metrics.guardRejected += 1;
     if (blocked && risk.crossMintToxic) this.metrics.guardCrossMintRejected += 1;
@@ -477,13 +513,20 @@ class PreEntryRugRiskTracker {
       source: normalizedSource,
       mint,
       observedAt: timestampMs,
+      enforcementMode,
+      policyReason,
+      market,
+      lifecycleStage,
+      riskFlagged,
       blocked,
       reason: blocked ? 'PRE_ENTRY_RUG_RISK' : (
-        risk.sampleReady ? 'RUG_GUARD_PASS' : 'RUG_GUARD_SAMPLE_INSUFFICIENT'
+        riskFlagged ? 'RUG_RISK_LABEL_ONLY' : (
+          risk.sampleReady ? 'RUG_GUARD_PASS' : 'RUG_GUARD_SAMPLE_INSUFFICIENT'
+        )
       ),
       ...risk,
     };
-    if (blocked) {
+    if (riskFlagged) {
       this.recentGuardDecisions.unshift(decision);
       if (this.recentGuardDecisions.length > 100) this.recentGuardDecisions.length = 100;
     }
@@ -537,8 +580,8 @@ class PreEntryRugRiskTracker {
     return {
       enabled: this.config.enabled,
       mode: 'UNIVERSAL_PRE_ENTRY_RUG_GUARD',
-      scope: 'ALL_LIVE_AND_SHADOW_ENTRIES',
-      enforcement: 'NATIVE_FLAGGED_BLOCK_OR_CROSS_MINT_TOXIC_BLOCK',
+      scope: 'LIFECYCLE_AND_STRATEGY_TIERED',
+      enforcement: 'POST_MIGRATION_HARD_BLOCK_CURVE_AND_RESEARCH_LABEL_ONLY',
       outcomeLabels: 'CLIFF_DROP_50/CLIFF_RUG_70/CLIFF_RUG_80/SLOW_RUG_30',
       dumpabilityMode: 'RESEARCH_ONLY_NO_ENTRY_BLOCK',
       firstCliffCounterfactualMode: 'PAIRED_SHADOW_NO_ENTRY_BLOCK',

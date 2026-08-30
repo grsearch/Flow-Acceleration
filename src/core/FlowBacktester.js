@@ -380,7 +380,7 @@ function runBacktest(db, options = {}) {
   const executionDelayMs = Math.max(0, finite(options.executionDelayMs, 200));
   const entryTimeoutMs = Math.max(1, finite(options.entryTimeoutMs, 2_000));
   const exitTimeoutMs = Math.max(1, finite(options.exitTimeoutMs, 5_000));
-  const noExitLossPct = Math.max(0, finite(options.noExitLossPct, 100));
+  const noExitLossPct = optionalNonNegative(options.noExitLossPct);
   const minNetFlowW3 = Math.max(0, finite(options.minNetFlowW3, 0));
   const maxNetFlowW3 = optionalNonNegative(options.maxNetFlowW3);
   const minFlowAccel = Math.max(0, finite(options.minFlowAccel, 0));
@@ -690,7 +690,7 @@ function runBacktest(db, options = {}) {
         || coverage.max_timestamp_ms < fullExitWindowEnd
         || dataCutoffMs < fullExitWindowEnd) {
         baseRow.status = STATUS.RIGHT_CENSORED;
-      } else {
+      } else if (noExitLossPct != null) {
         baseRow.rawReturnPct = -noExitLossPct;
         baseRow.netReturnPct = baseRow.rawReturnPct - rowCosts.deterministicCostPct;
         baseRow.expectedNetReturnPct = expectedNetReturnPct(baseRow.rawReturnPct, rowCosts);

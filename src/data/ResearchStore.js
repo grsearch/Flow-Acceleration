@@ -558,8 +558,7 @@ class ResearchStore {
           ABS(COALESCE(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0
             THEN net_return_pct ELSE 0 END), 0)) AS total_loss_pct,
           COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
-          AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct
-            WHEN status = 'NO_EXIT' THEN -100 - configured_cost_pct END)
+          AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
             AS conservative_average_net_return_pct
         FROM ${strategy.table}
         WHERE status IN ('CLOSED', 'NO_EXIT')
@@ -3114,6 +3113,23 @@ class ResearchStore {
         ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
         LIMIT 1
       `),
+      failedLiveEntryCountForMintStrategySince: this.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM live_positions
+        WHERE mint = ?
+          AND strategy_id = ?
+          AND status = 'ENTRY_FAILED'
+          AND COALESCE(updated_at, created_at) >= ?
+      `),
+      lastFailedLivePositionForMintStrategy: this.db.prepare(`
+        SELECT *
+        FROM live_positions
+        WHERE mint = ?
+          AND strategy_id = ?
+          AND status = 'ENTRY_FAILED'
+        ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+        LIMIT 1
+      `),
       insertLiveOrder: this.db.prepare(`
         INSERT INTO live_orders (
           position_id, decision_id, primary_decision_id, strategy_decision_id, strategy_id,
@@ -4887,6 +4903,16 @@ class ResearchStore {
 
   lastSuccessfulLivePositionForMintStrategy(mint, strategyId) {
     return this.stmts.lastSuccessfulLivePositionForMintStrategy.get(mint, strategyId) || null;
+  }
+
+  failedLiveEntryCountForMintStrategySince(mint, strategyId, sinceMs) {
+    return Number(
+      this.stmts.failedLiveEntryCountForMintStrategySince.get(mint, strategyId, sinceMs)?.n || 0,
+    );
+  }
+
+  lastFailedLivePositionForMintStrategy(mint, strategyId) {
+    return this.stmts.lastFailedLivePositionForMintStrategy.get(mint, strategyId) || null;
   }
 
   recordLiveOrder(order) {
@@ -7721,11 +7747,10 @@ class ResearchStore {
         const returns = resolvedRows.map((row) => Number(row.net_return_pct))
           .filter(Number.isFinite);
         const noExitRows = outcomeRows.filter((row) => row.status === 'NO_EXIT');
-        const conservativeReturns = outcomeRows.map((row) => (
-          row.status === 'CLOSED' && Number.isFinite(Number(row.net_return_pct))
-            ? Number(row.net_return_pct)
-            : -100 - (Number(row.configured_cost_pct) || 0)
-        ));
+        // NO_EXIT is right-censored: without an observed exit price there is
+        // no defensible realized return. Keep it in the NO_EXIT count, but do
+        // not fabricate a -100% loss in dashboard PnL statistics.
+        const conservativeReturns = [...returns];
         const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);
         const losses = returns.filter((value) => value < 0);
         const totalProfit = wins.reduce((sum, value) => sum + value, 0);

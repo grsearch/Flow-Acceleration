@@ -255,6 +255,9 @@ const config = {
   maxConcurrentPositions: 1,
   minWalletReserveSol: 0.05,
   mintCooldownMs: 10 * 60_000,
+  failedEntryCooldownMs: 1_000,
+  failedEntryWindowMs: 10_000,
+  maxFailedEntriesPerMint: 2,
   buySlippagePct: 10,
   sellSlippagePct: 15,
   maxHoldMs: 15_000,
@@ -433,12 +436,42 @@ const failedPosition = store.createLivePosition({
 store.updateLivePosition(failedPosition.id, {
   status: 'ENTRY_FAILED', exitReason: 'ENTRY_REJECTED', entryError: 'test rejection',
 });
+store.db.prepare(`
+  UPDATE live_positions SET created_at=?, updated_at=? WHERE id=?
+`).run(now, now, failedPosition.id);
 assert.strictEqual(store.successfulLiveEntryCountForMintStrategy(
   failedMint, 'post_gd25_35_xleg',
 ), 0);
 assert.strictEqual(manager._riskReason({
   strategyId: 'post_gd25_35_xleg', mint: failedMint,
-}), null);
+}), 'MINT_FAILED_ENTRY_COOLDOWN');
+now += 1_001;
+assert.strictEqual(manager._riskReason({
+  strategyId: 'post_gd25_35_xleg', mint: failedMint,
+}), null, 'one failed entry may retry after the short cooldown');
+
+const secondFailedPosition = store.createLivePosition({
+  strategyId: 'post_gd25_35_xleg', sourceType: 'post_gd25_35_xleg',
+  mint: failedMint, mode: 'LIVE', status: 'OPENING', positionSol: 0.05,
+  entryMarket: 'PUMP_AMM', entryPrice: 1,
+});
+store.updateLivePosition(secondFailedPosition.id, {
+  status: 'ENTRY_FAILED', exitReason: 'ENTRY_TRANSACTION_FAILED', entryError: 'second failure',
+});
+store.db.prepare(`
+  UPDATE live_positions SET created_at=?, updated_at=? WHERE id=?
+`).run(now, now, secondFailedPosition.id);
+assert.strictEqual(manager._riskReason({
+  strategyId: 'post_gd25_35_xleg', mint: failedMint,
+}), 'MINT_FAILED_ENTRY_COOLDOWN');
+now += 1_001;
+assert.strictEqual(manager._riskReason({
+  strategyId: 'post_gd25_35_xleg', mint: failedMint,
+}), 'MINT_FAILED_ENTRY_LIMIT', 'repeated failed buys must not retry forever');
+now += 10_001;
+assert.strictEqual(manager._riskReason({
+  strategyId: 'post_gd25_35_xleg', mint: failedMint,
+}), null, 'the failed-entry rolling window must eventually release the Mint');
 
 const trade = (price, offset) => {
   now = 1_000_000 + offset;
