@@ -774,14 +774,17 @@ class ResearchServer {
         generatedAt: Date.now(),
         runtime: this.featureEdgeAudit?.health() || {
           enabled: false,
-          mode: 'FEA-OBS',
+          mode: 'FEA-OBS-V2',
           observerOnly: true,
           sendsTransactions: false,
           extraRpcCalls: false,
         },
         ...(this.featureEdgeAudit?.dashboard({
           limit: numeric(request.query.limit, 2_000),
-        }) || { summary: {}, horizons: [], families: [], scores: [], recent: [] }),
+        }) || {
+          summary: {}, horizons: [], families: [], scores: [], recent: [],
+          bnh: {}, bnhRecent: [],
+        }),
       });
     });
 

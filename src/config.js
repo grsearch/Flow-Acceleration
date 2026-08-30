@@ -6300,7 +6300,8 @@ const config = {
 
   // Feature Effectiveness Audit Observer. This forward-only audit measures
   // whether each existing signal family adds predictive value after a real
-  // 1 SOL reserve-impact model. It never opens a simulated or live position.
+  // 1 SOL reserve-impact model. FEA-BNH-120 is an isolated Shadow cohort;
+  // neither path signs or sends a transaction.
   featureEdgeAudit: {
     enabled: booleanEnv('FLOW_FEATURE_EDGE_AUDIT_ENABLED', true),
     positionSol: numberEnv('FLOW_FEATURE_EDGE_AUDIT_POSITION_SOL', 1, { min: 0.01, max: 100 }),
@@ -6325,6 +6326,11 @@ const config = {
     minNetFlowSol: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_NETFLOW_SOL', 10, {
       min: 0, max: 10_000,
     }),
+    minFlowAccelerationSol: numberEnv(
+      'FLOW_FEATURE_EDGE_AUDIT_MIN_FLOW_ACCELERATION_SOL',
+      2,
+      { min: 0, max: 10_000 },
+    ),
     minBuyers: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_BUYERS', 7, { min: 1, max: 10_000 }),
     minBuySharePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_BUY_SHARE_PCT', 70, {
       min: 0, max: 100,
@@ -6344,6 +6350,27 @@ const config = {
     maxAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_AGE_MS', 300_000, {
       min: 1_000, max: 24 * 60 * 60_000,
     }),
+    bnhEnabled: booleanEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_ENABLED', true),
+    bnhMinAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MIN_AGE_MS', 30_000, {
+      min: 0, max: 60 * 60_000,
+    }),
+    bnhMaxAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MAX_AGE_MS', 120_000, {
+      min: 1_000, max: 24 * 60 * 60_000,
+    }),
+    bnhMinCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MIN_CURVE_PCT', 60, {
+      min: 0, max: 100,
+    }),
+    bnhMaxCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MAX_CURVE_PCT', 90, {
+      min: 0, max: 100,
+    }),
+    bnhHoldMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_HOLD_MS', 120_000, {
+      min: 5_000, max: 60 * 60_000,
+    }),
+    bnhRoundTripCostPct: numberEnv(
+      'FLOW_FEATURE_EDGE_AUDIT_BNH_ROUND_TRIP_COST_PCT',
+      3.2,
+      { min: 0, max: 100 },
+    ),
   },
 
   // Post-migration Survivor Observer (PM-SURV). Every migrated mint receives

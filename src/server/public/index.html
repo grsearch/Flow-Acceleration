@@ -916,19 +916,19 @@
           <div class="strategy-pane" data-live-strategy-pane="feature-edge-audit" hidden>
             <article class="card record-section">
               <div class="section-title">
-                <h2>Feature Effectiveness Audit FEA-OBS</h2>
-                <p>独立前向标签观察器；不建仓、不签名、不发链、不增加 RPC 请求</p>
+                <h2>Feature Effectiveness Audit FEA-OBS V2</h2>
+                <p>同市场前向标签 + 独立 FEA-BNH-120 Shadow；不签名、不发链、不增加 RPC 请求</p>
               </div>
-              <div class="strategy-expression" id="feature-edge-audit-expression">订单流 / 参与度 / 买卖平衡 / 生命周期结构 / 1 SOL可执行容量 × 5/30/120/300秒</div>
+              <div class="strategy-expression" id="feature-edge-audit-expression">订单流加速 / 参与度过热惩罚 / 买卖平衡 / 生命周期结构 / 1 SOL可执行容量 × 同市场前向标签</div>
               <div class="strategy-metric-groups" id="feature-edge-audit-metrics"></div>
-              <div class="section-title"><h2>时间窗口真实收益</h2><p>市场价与1 SOL可执行价并列，避免仅用标记价格高估策略效果</p></div>
+              <div class="section-title"><h2>时间窗口真实收益</h2><p>仅统计同一市场连续报价；跨 Bonding Curve / PumpSwap 的价格不直接比较</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>窗口</th><th>市场价样本 / 胜率</th><th>市场平均 / 中位</th><th>1 SOL样本 / 胜率</th><th>1 SOL平均 / 中位</th><th>PF</th><th>Big50 / 快速崩盘</th></tr></thead>
+                <thead><tr><th>窗口 / 覆盖率</th><th>市场价样本 / 胜率</th><th>市场平均 / 中位</th><th>1 SOL样本 / 胜率</th><th>1 SOL平均 / 中位</th><th>PF</th><th>Big50 / 100 / 快速崩盘</th></tr></thead>
                 <tbody id="feature-edge-audit-horizon-rows"></tbody>
               </table></div>
-              <div class="section-title"><h2>单类特征增量</h2><p>与同一批基线比较平均收益和胜率提升；不是策略盈亏表</p></div>
+              <div class="section-title"><h2>单类特征增量</h2><p>正向条件与同批对照直接比较；参与度采用“未过热”为正向条件</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>特征族</th><th>样本 / 胜率</th><th>平均 / 中位</th><th>平均收益增量</th><th>胜率增量</th><th>PF</th><th>Big50 / 快速崩盘</th></tr></thead>
+                <thead><tr><th>特征族 / 偏好</th><th>偏好样本 / 胜率</th><th>偏好平均 / 中位</th><th>对照平均 / 中位</th><th>平均 / 胜率增量</th><th>PF</th><th>Big50 / 快速崩盘</th></tr></thead>
                 <tbody id="feature-edge-audit-family-rows"></tbody>
               </table></div>
               <div class="section-title"><h2>特征分数分层</h2><p>检查更多指标同时满足，是否真的带来单调改善</p></div>
@@ -936,9 +936,15 @@
                 <thead><tr><th>分数</th><th>样本 / 胜率</th><th>平均 / 中位</th><th>PF</th><th>Big50 / 快速崩盘</th></tr></thead>
                 <tbody id="feature-edge-audit-score-rows"></tbody>
               </table></div>
+              <div class="section-title"><h2>FEA-BNH-120 独立 Shadow</h2><p>买卖平衡 + 参与者未过热；AGE 30～120秒、Curve 60～90%，固定120秒并计入真实成本</p></div>
+              <div class="strategy-metric-groups" id="feature-edge-audit-bnh-metrics"></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>Mint / 状态</th><th>AGE / Curve</th><th>入场冲击</th><th>净收益 / MFE / MAE</th><th>持有 / 原因</th></tr></thead>
+                <tbody id="feature-edge-audit-bnh-rows"></tbody>
+              </table></div>
               <div class="section-title"><h2>最近前向样本</h2><p>只展示信号当时可见特征与未来结果，防止未来数据泄漏</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>信号时间</th><th>Mint / 变体</th><th>特征分数</th><th>1 SOL入场冲击</th><th>300秒市场 / 可执行</th><th>MFE / 可执行MFE</th><th>标签状态</th></tr></thead>
+                <thead><tr><th>信号时间</th><th>Mint / 变体</th><th>特征分数</th><th>1 SOL入场冲击</th><th>120秒市场 / 可执行</th><th>MFE / 可执行MFE</th><th>市场连续性 / 标签</th></tr></thead>
                 <tbody id="feature-edge-audit-recent-rows"></tbody>
               </table></div>
             </article>
@@ -1853,37 +1859,49 @@
       const baseline = summary.baseline || {};
       const featureLabels = {
         flow: '订单流加速',
-        participation: '独立参与度增长',
+        participation: '参与度未过热',
         balance: '真实买卖平衡',
         structure: '生命周期结构',
         execution: '1 SOL可执行容量',
       };
-      document.querySelector('#feature-edge-audit-expression').textContent = `订单流 / 参与度 / 买卖平衡 / 生命周期结构 / ${number(runtime.positionSol,2)} SOL可执行容量 × ${(runtime.horizonsSeconds || [5,30,120,300]).join('/')}秒；严格前向标签。`;
+      document.querySelector('#feature-edge-audit-expression').textContent = `订单流加速 / 参与度过热惩罚 / 买卖平衡 / 生命周期结构 / ${number(runtime.positionSol,2)} SOL可执行容量 × 同市场 ${(runtime.horizonsSeconds || [5,30,120,300]).join('/')}秒前向标签。`;
       renderMetricGroups('#feature-edge-audit-metrics', [
-        ['运行模式', runtime.enabled ? 'FEA-OBS' : '关闭', '只观察；不建仓、不签名、不发链'],
+        ['运行模式', runtime.enabled ? 'FEA-OBS V2' : '关闭', `标签版本 ${number(runtime.labelSchemaVersion)} · 旧表不混入`],
         ['评估 / 新样本', `${number(runtime.signalsEvaluated)} / ${number(runtime.samplesCreated)}`, `冷却跳过 ${number(runtime.cooldownSkipped)} · 容量跳过 ${number(runtime.capacitySkipped)}`],
         ['完成 / 删失 / 待观察', `${number(runtime.samplesCompleted)} / ${number(runtime.samplesCensored)} / ${number(runtime.pending)}`, `跟踪 Mint ${number(runtime.trackedMints)}`],
         ['可执行报价 / 缺失', `${number(runtime.quoteAvailable)} / ${number(runtime.quoteMissing)}`, `${number(runtime.positionSol,2)} SOL固定输入，不用标记价格替代成交`],
-        ['审计样本 / 主窗口', `${number(summary.rowsLoaded)} / ${number(summary.targetHorizonSeconds)}s`, `最近完成 ${dateTime(runtime.lastCompletedAt)}`],
+        ['样本完成 / 删失', `${rate(summary.completionRatePct)} / ${rate(summary.censorRatePct)}`, `报价覆盖 ${rate(summary.quoteCoveragePct)} · 跨市场 ${rate(summary.crossMarketRatePct)}`],
+        ['审计样本 / 主窗口', `${number(summary.rowsLoaded)} / ${number(summary.targetHorizonSeconds)}s`, '固定120秒审计，不以幸存300秒挑选结论'],
         ['基线可执行平均 / 中位', `${pct(baseline.averagePct)} / ${pct(baseline.medianPct)}`, `胜率 ${rate(baseline.winRatePct)} · PF ${number(baseline.profitFactor,2)}`],
       ], []);
       const horizons = data.horizons || [];
       document.querySelector('#feature-edge-audit-horizon-rows').innerHTML = horizons.length ? horizons.map(row => {
         const mark = row.mark || {};
         const executable = row.executable || {};
-        return `<tr><td><b>${number(row.horizonSeconds)}秒</b></td><td>${number(mark.count)} / ${rate(mark.winRatePct)}</td><td class="${tone(mark.averagePct)}">${pct(mark.averagePct)} / ${pct(mark.medianPct)}</td><td>${number(executable.count)} / ${rate(executable.winRatePct)}</td><td class="${tone(executable.averagePct)}">${pct(executable.averagePct)} / ${pct(executable.medianPct)}</td><td>${number(executable.profitFactor,2)}</td><td>${rate(executable.big50RatePct)} / ${rate(executable.rug50RatePct)}</td></tr>`;
+        return `<tr><td><b>${number(row.horizonSeconds)}秒</b><br><span class="table-note">覆盖 ${rate(row.coveragePct)}</span></td><td>${number(mark.count)} / ${rate(mark.winRatePct)}</td><td class="${tone(mark.averagePct)}">${pct(mark.averagePct)} / ${pct(mark.medianPct)}</td><td>${number(executable.count)} / ${rate(executable.winRatePct)}</td><td class="${tone(executable.averagePct)}">${pct(executable.averagePct)} / ${pct(executable.medianPct)}</td><td>${number(executable.profitFactor,2)}</td><td>${rate(executable.big50RatePct)} / ${rate(executable.big100RatePct)} / ${rate(executable.rug50RatePct)}</td></tr>`;
       }).join('') : '<tr><td colspan="7" class="empty">等待5/30/120/300秒前向标签。</td></tr>';
       const families = data.families || [];
       document.querySelector('#feature-edge-audit-family-rows').innerHTML = families.length ? families.map(row => (
-        `<tr><td><b>${escapeHtml(featureLabels[row.family] || row.family)}</b><br><span class="table-note">${number(row.horizonSeconds)}秒可执行收益</span></td><td>${number(row.count)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averagePct)}">${pct(row.averagePct)} / ${pct(row.medianPct)}</td><td class="${tone(row.averageLiftPct)}">${pct(row.averageLiftPct)}</td><td class="${tone(row.winRateLiftPct)}">${pct(row.winRateLiftPct)}</td><td>${number(row.profitFactor,2)}</td><td>${rate(row.big50RatePct)} / ${rate(row.rug50RatePct)}</td></tr>`
+        `<tr><td><b>${escapeHtml(featureLabels[row.family] || row.family)}</b><br><span class="table-note">偏好=${number(row.preferredValue)} · ${number(row.horizonSeconds)}秒</span></td><td>${number(row.count)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averagePct)}">${pct(row.averagePct)} / ${pct(row.medianPct)}</td><td class="${tone(row.opposite?.averagePct)}">${pct(row.opposite?.averagePct)} / ${pct(row.opposite?.medianPct)}</td><td class="${tone(row.averageLiftPct)}">${pct(row.averageLiftPct)} / ${pct(row.winRateLiftPct)}</td><td>${number(row.profitFactor,2)}</td><td>${rate(row.big50RatePct)} / ${rate(row.rug50RatePct)}</td></tr>`
       )).join('') : '<tr><td colspan="7" class="empty">等待足够样本计算特征增量。</td></tr>';
       const scores = data.scores || [];
       document.querySelector('#feature-edge-audit-score-rows').innerHTML = scores.length ? scores.map(row => (
-        `<tr><td><b>${number(row.score)} / 5</b></td><td>${number(row.count)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averagePct)}">${pct(row.averagePct)} / ${pct(row.medianPct)}</td><td>${number(row.profitFactor,2)}</td><td>${rate(row.big50RatePct)} / ${rate(row.rug50RatePct)}</td></tr>`
+        `<tr><td><b>${number(row.score)} / 4</b></td><td>${number(row.count)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averagePct)}">${pct(row.averagePct)} / ${pct(row.medianPct)}</td><td>${number(row.profitFactor,2)}</td><td>${rate(row.big50RatePct)} / ${rate(row.rug50RatePct)}</td></tr>`
       )).join('') : '<tr><td colspan="5" class="empty">等待特征分数分层样本。</td></tr>';
+      const bnh = data.bnh || {};
+      renderMetricGroups('#feature-edge-audit-bnh-metrics', [
+        ['组别 / 持有', `${escapeHtml(bnh.profileId || runtime.bnhProfileId || 'FEA_BNH_120')} / ${age(bnh.holdMs || runtime.bnhHoldMs)}`, `成本 ${pct(bnh.roundTripCostPct)}`],
+        ['信号 / 完成 / 无退出', `${number(bnh.signals)} / ${number(bnh.priced)} / ${number(bnh.noExit)}`, `无退出率 ${rate(bnh.noExitRatePct)}`],
+        ['胜率 / 平均 / 中位', `${rate(bnh.winRatePct)} / ${pct(bnh.averagePct)} / ${pct(bnh.medianPct)}`, `PF ${number(bnh.profitFactor,2)} · 最大 ${pct(bnh.maxWinnerPct)}`],
+        ['Big50 / 100 / RUG50', `${rate(bnh.big50RatePct)} / ${rate(bnh.big100RatePct)} / ${rate(bnh.rug50RatePct)}`, bnh.ready ? '达到单窗口统计门槛，仍需第二个独立24h' : escapeHtml(bnh.readinessRule || '等待样本')],
+      ], []);
+      const bnhRecent = data.bnhRecent || [];
+      document.querySelector('#feature-edge-audit-bnh-rows').innerHTML = bnhRecent.length ? bnhRecent.map(row => (
+        `<tr><td>${dateTime(row.signalAtMs)}</td><td>${mintLink(row.mint)}<br>${statusChip(row.status)}</td><td>${age(row.ageMs)} / ${pct(row.curvePct)}</td><td>${pct(row.entryImpactPct)}</td><td class="${tone(row.netReturnPct)}">${pct(row.netReturnPct)} / ${pct(row.mfePct)} / ${pct(row.maePct)}</td><td>${age(row.holdMs)}<br><span class="table-note">${escapeHtml(row.reason || '—')}</span></td></tr>`
+      )).join('') : '<tr><td colspan="6" class="empty">等待 FEA-BNH-120 独立 Shadow 样本。</td></tr>';
       const recent = data.recent || [];
       document.querySelector('#feature-edge-audit-recent-rows').innerHTML = recent.length ? recent.map(row => (
-        `<tr><td>${dateTime(row.signalAtMs)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.signalVariant || '—')}</span></td><td>${number(row.featureScore)} / 5</td><td>${row.quoteAvailable ? pct(row.entryImpactPct) : '报价缺失'}</td><td class="${tone(row.executableReturn300s)}">${pct(row.markReturn300s)} / ${pct(row.executableReturn300s)}</td><td>${pct(row.mfePct)} / ${pct(row.executableMfePct)}</td><td>${statusChip(row.labelStatus)}<br><span class="table-note">${escapeHtml(row.censorReason || '—')}</span></td></tr>`
+        `<tr><td>${dateTime(row.signalAtMs)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.signalVariant || '—')}</span></td><td>${number(row.featureScore)} / 4</td><td>${row.quoteAvailable ? pct(row.entryImpactPct) : '报价缺失'}</td><td class="${tone(row.executableReturn120s)}">${pct(row.markReturn120s)} / ${pct(row.executableReturn120s)}</td><td>${pct(row.mfePct)} / ${pct(row.executableMfePct)}</td><td>${row.crossMarketSeen ? '跨市场删失' : '同市场'}<br>${statusChip(row.labelStatus)}<span class="table-note"> · ${escapeHtml(row.censorReason || '—')}</span></td></tr>`
       )).join('') : '<tr><td colspan="7" class="empty">暂无前向审计样本。</td></tr>';
     }
 
