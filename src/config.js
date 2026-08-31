@@ -4882,6 +4882,14 @@ const config = {
       min: 30_000,
       max: 30 * 60_000,
     })),
+    // Keep lightweight post-migration observation alive for offline labels and
+    // later-stage research. Individual entry profiles retain their own much
+    // shorter causal age gates (the direct-dump cohort remains <=30 seconds).
+    observationAgeMs: integerEnv(
+      'FLOW_MIGRATED_REBOUND_OBSERVATION_MS',
+      30 * 60_000,
+      { min: 120_000, max: 60 * 60_000 },
+    ),
     positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
     entryDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
@@ -5241,6 +5249,53 @@ const config = {
           ['0.05', '0.25', '0.5', '1'],
         ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
       },
+      {
+        id: 'GE30_DUMP5_NB2_M2',
+        label: 'G-DUMP-NB · 毕业后30秒内 · >=5 SOL砸单 · 2秒内下一笔真实买单 · 每Mint最多2次',
+        newEntriesEnabled: booleanEnv(
+          'FLOW_MIGRATED_REBOUND_DUMP_NEXT_BUY_ENABLED',
+          true,
+        ),
+        signalMode: 'DUMP_NEXT_BUY',
+        windowMs: integerEnv('FLOW_MIGRATED_REBOUND_DUMP_WINDOW_MS', 1_000, {
+          min: 250,
+          max: 5_000,
+        }),
+        dropMinPct: numberEnv('FLOW_MIGRATED_REBOUND_DUMP_MIN_DROP_PCT', 15, {
+          min: 1,
+          max: 100,
+        }),
+        dropMaxPct: numberEnv('FLOW_MIGRATED_REBOUND_DUMP_MAX_DROP_PCT', 55, {
+          min: 1,
+          max: 100,
+        }),
+        minDumpSol: numberEnv('FLOW_MIGRATED_REBOUND_DUMP_MIN_SOL', 5, {
+          min: 0.01,
+          max: 10_000,
+        }),
+        nextBuyWindowMs: integerEnv(
+          'FLOW_MIGRATED_REBOUND_DUMP_NEXT_BUY_WINDOW_MS',
+          2_000,
+          { min: 100, max: 10_000 },
+        ),
+        reboundMinPct: 0,
+        reboundMaxPct: 1_000,
+        reboundTimeoutMs: 2_000,
+        maxLifecycleAgeMs: 30_000,
+        maxSignalsPerMint: 2,
+        reentryCooldownMs: 2_000,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_MIGRATED_REBOUND_DUMP_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 100 },
+        ),
+        exitProfileIds: ['G_DUMP_NB_X8'],
+        capacityAware: true,
+        positionSols: [1],
+        // Forward comparison only: record the lifecycle-aware guard decision,
+        // but do not block or add latency to this new causal entry cohort.
+        rugGuardMode: 'LABEL_ONLY',
+      },
       ...(migratedReboundGfrEnabled ? [
         ['GFR_300', 300],
         ['GFR_600', 600],
@@ -5315,6 +5370,16 @@ const config = {
       })) : []),
     ],
     exitProfiles: [
+      {
+        id: 'G_DUMP_NB_X8',
+        label: 'G-DUMP-NB · 固定持有8秒',
+        entryProfileIds: ['GE30_DUMP5_NB2_M2'],
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_DUMP_HOLD_MS', 8_000, {
+          min: 250,
+          max: 60_000,
+        }),
+      },
       {
         id: 'X3',
         label: '固定持有3秒',

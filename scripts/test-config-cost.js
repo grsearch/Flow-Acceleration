@@ -598,6 +598,7 @@ assert.deepStrictEqual(
     ['GE30_D25_32_R24_F1_EXEC1', 30_000, 1],
     ['GE30_D25_32_R24_F1_04_24', 30_000, 1],
     ['GE30_D25_32_R23_F1_FAST200', 30_000, 1],
+    ['GE30_DUMP5_NB2_M2', 30_000, 2],
     ['GFR_300', 30_000, 1],
     ['GFR_600', 30_000, 1],
     ['GFR_1000', 30_000, 1],
@@ -629,7 +630,7 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   config.migratedDropReboundShadow.exitProfiles.map((profile) => profile.id),
   [
-    'X3', 'X8', 'XLEG',
+    'G_DUMP_NB_X8', 'X3', 'X8', 'XLEG',
     'GEXEC_XLEG', 'G2_XLEG', 'GRT_F3_XLEG_V2', 'GRT_F2_XLEG_V2',
     'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG',
     'G2_XLEG_H20_FWD', 'GQ_XLEG',
@@ -816,6 +817,33 @@ assert.deepStrictEqual(
     'E60', 'E120', 'E120_GUARD_V2', 'T10', 'T12_5', 'E120_CONVERGED_V3',
     'FLOW', 'RUNNER', 'AH60_180',
   ],
+);
+assert.strictEqual(config.migratedDropReboundShadow.observationAgeMs, 30 * 60_000);
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.entryProfiles
+    .find((profile) => profile.id === 'GE30_DUMP5_NB2_M2'),
+  {
+    id: 'GE30_DUMP5_NB2_M2',
+    label: 'G-DUMP-NB · 毕业后30秒内 · >=5 SOL砸单 · 2秒内下一笔真实买单 · 每Mint最多2次',
+    newEntriesEnabled: true,
+    signalMode: 'DUMP_NEXT_BUY',
+    windowMs: 1_000,
+    dropMinPct: 15,
+    dropMaxPct: 55,
+    minDumpSol: 5,
+    nextBuyWindowMs: 2_000,
+    reboundMinPct: 0,
+    reboundMaxPct: 1_000,
+    reboundTimeoutMs: 2_000,
+    maxLifecycleAgeMs: 30_000,
+    maxSignalsPerMint: 2,
+    reentryCooldownMs: 2_000,
+    maxEntryPriceJumpPct: 15,
+    exitProfileIds: ['G_DUMP_NB_X8'],
+    capacityAware: true,
+    positionSols: [1],
+    rugGuardMode: 'LABEL_ONLY',
+  },
 );
 const migrationExitProfiles = new Map(config.migrationContinuityShadow.exitProfiles
   .map((profile) => [profile.id, profile]));

@@ -11,18 +11,21 @@ const {
   '../src/core/MigratedDropReboundShadowSuite'
 );
 
-function trade(mint, timestampMs, price, market = 'PUMP_AMM') {
+function trade(mint, timestampMs, price, market = 'PUMP_AMM', overrides = {}) {
+  const resolvedPrice = overrides.price ?? price;
+  const solAmount = overrides.solAmount ?? 1;
   return {
+    ...overrides,
     mint,
     timestampMs,
-    receivedAtMs: timestampMs,
-    market,
-    side: 'BUY',
-    solAmount: 1,
-    tokenAmount: 1 / price,
-    price,
-    reservePrice: price,
-    signature: `${mint}:${timestampMs}:${price}`,
+    receivedAtMs: overrides.receivedAtMs ?? timestampMs,
+    market: overrides.market || market,
+    side: overrides.side || 'BUY',
+    solAmount,
+    tokenAmount: overrides.tokenAmount ?? (solAmount / resolvedPrice),
+    price: resolvedPrice,
+    reservePrice: overrides.reservePrice ?? resolvedPrice,
+    signature: overrides.signature || `${mint}:${timestampMs}:${resolvedPrice}`,
   };
 }
 
@@ -1025,3 +1028,138 @@ function testLiveSignalCapacityGate() {
 }
 
 testLiveSignalCapacityGate();
+
+function testDirectDumpNextBuySequentialOpportunities() {
+  const base = 2_600_000_000_000;
+  let now = base;
+  const store = optimizationStore();
+  const entryProfileId = 'GE30_DUMP5_NB2_M2';
+  const exitProfileId = 'G_DUMP_NB_X8';
+  const config = {
+    ...optimizationConfig([{
+      id: exitProfileId,
+      label: 'fixed 8 seconds',
+      entryProfileIds: [entryProfileId],
+      exitMode: 'FIXED_HOLD',
+      fixedHoldMs: 8_000,
+      maxHoldMs: 8_000,
+    }]),
+    observationAgeMs: 30 * 60_000,
+    entryProfiles: [{
+      id: entryProfileId,
+      label: 'direct dump then next buy',
+      signalMode: 'DUMP_NEXT_BUY',
+      windowMs: 1_000,
+      dropMinPct: 15,
+      dropMaxPct: 55,
+      minDumpSol: 5,
+      nextBuyWindowMs: 2_000,
+      reboundMinPct: 0,
+      reboundMaxPct: 1_000,
+      reboundTimeoutMs: 2_000,
+      maxLifecycleAgeMs: 30_000,
+      maxSignalsPerMint: 2,
+      reentryCooldownMs: 2_000,
+      maxEntryPriceJumpPct: 15,
+      exitProfileIds: [exitProfileId],
+      capacityAware: true,
+      positionSols: [1],
+      rugGuardMode: 'LABEL_ONLY',
+    }],
+  };
+  const mint = 'DirectDumpNextBuy111111111111111111111111111';
+  const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
+  suite.start();
+  recordCreate(store, mint, base);
+  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(mint));
+
+  const observe = (offset, price, overrides = {}) => {
+    now = base + offset;
+    suite.observeTrade(trade(mint, now, price, 'PUMP_AMM', overrides));
+  };
+  const closeFixedHold = (offset, price) => {
+    observe(offset, price, { side: 'BUY', wallet: `exit-arm-${offset}` });
+    observe(offset + 300, price, { side: 'BUY', wallet: `exit-fill-${offset}` });
+  };
+
+  // Opportunity one: a >=5 SOL dump arms the detector; only the next real BUY confirms.
+  observe(100, 1, { side: 'BUY', wallet: 'baseline-1' });
+  observe(200, 0.8, {
+    side: 'SELL', solAmount: 6, wallet: 'dumper-1', slot: 101, signature: 'dump-1',
+  });
+  observe(350, 0.81, {
+    side: 'BUY', solAmount: 0.4, wallet: 'next-buyer-1', slot: 101, signature: 'next-buy-1',
+  });
+  observe(600, 0.82, { side: 'BUY', wallet: 'fill-1' });
+
+  // An overlapping dump sequence while the first position is active must not create another row.
+  observe(1_000, 1, { side: 'BUY', wallet: 'overlap-base' });
+  observe(1_100, 0.8, { side: 'SELL', solAmount: 7, wallet: 'overlap-dumper' });
+  observe(1_200, 0.81, { side: 'BUY', wallet: 'overlap-buyer' });
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=? AND entry_profile_id=?
+  `).get(mint, entryProfileId).n, 1);
+  closeFixedHold(8_700, 0.9);
+
+  // Opportunity two is allowed after the first closes and the cooldown expires.
+  observe(10_000, 1, { side: 'BUY', wallet: 'baseline-2' });
+  observe(10_100, 0.8, {
+    side: 'SELL', solAmount: 6.5, wallet: 'dumper-2', slot: 202, signature: 'dump-2',
+  });
+  observe(10_250, 0.81, {
+    side: 'BUY', solAmount: 0.5, wallet: 'next-buyer-2', slot: 202, signature: 'next-buy-2',
+  });
+  observe(10_500, 0.82, { side: 'BUY', wallet: 'fill-2' });
+  closeFixedHold(18_600, 0.92);
+
+  // A third otherwise-valid opportunity is rejected by the per-Mint maximum of two.
+  observe(20_000, 1, { side: 'BUY', wallet: 'baseline-3' });
+  observe(20_100, 0.8, { side: 'SELL', solAmount: 8, wallet: 'dumper-3' });
+  observe(20_250, 0.81, { side: 'BUY', wallet: 'next-buyer-3' });
+  observe(20_500, 0.82, { side: 'BUY', wallet: 'fill-3' });
+
+  const rows = store.db.prepare(`
+    SELECT status, confirmation_json
+    FROM migrated_drop_rebound_shadow_positions
+    WHERE mint=? AND entry_profile_id=? ORDER BY id
+  `).all(mint, entryProfileId);
+  assert.strictEqual(rows.length, 2);
+  assert.ok(rows.every((row) => row.status === 'CLOSED'));
+  const confirmation = JSON.parse(rows[0].confirmation_json);
+  assert.strictEqual(confirmation.entryConfirmation.mode,
+    'NEXT_ACTUAL_BUY_AFTER_LARGE_SELL');
+  assert.strictEqual(confirmation.entryConfirmation.dumpSignature, 'dump-1');
+  assert.strictEqual(confirmation.entryConfirmation.nextBuySignature, 'next-buy-1');
+  assert.ok(confirmation.preEntryUniversalRugGuard,
+    'the universal RUG result must be retained as a forward label without blocking entry');
+  assert.strictEqual(suite.health().dumpNextBuySignals, 2);
+
+  // Observation continues to 30 minutes, while entry remains hard-limited to 30 seconds.
+  const observedMint = 'DirectDumpObservation111111111111111111111111111';
+  recordCreate(store, observedMint, base);
+  store.recordComplete({ mint: observedMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(observedMint));
+  assert.ok(suite.trackedMints(base + (10 * 60_000)).includes(observedMint));
+  assert.ok(!suite.trackedMints(base + (31 * 60_000)).includes(observedMint));
+
+  const lateMint = 'DirectDumpLate11111111111111111111111111111111';
+  recordCreate(store, lateMint, base);
+  store.recordComplete({ mint: lateMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(lateMint));
+  const lateTrade = (offset, price, overrides = {}) => {
+    now = base + offset;
+    suite.observeTrade(trade(lateMint, now, price, 'PUMP_AMM', overrides));
+  };
+  lateTrade(31_000, 1, { side: 'BUY' });
+  lateTrade(31_100, 0.8, { side: 'SELL', solAmount: 7 });
+  lateTrade(31_250, 0.81, { side: 'BUY' });
+  lateTrade(31_500, 0.82, { side: 'BUY' });
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE mint=?
+  `).get(lateMint).n, 0);
+  store.close();
+}
+
+testDirectDumpNextBuySequentialOpportunities();

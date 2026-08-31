@@ -211,6 +211,9 @@ class MigratedDropReboundShadowSuite {
       replaySignalsSuppressed: 0,
       replayLiveSignalsSuppressed: 0,
       reboundTimeouts: 0,
+      dumpNextBuyCandidates: 0,
+      dumpNextBuySignals: 0,
+      dumpNextBuyTimeouts: 0,
       dropExceededMax: 0,
       reboundExceededMax: 0,
       reboundTooSlow: 0,
@@ -237,7 +240,7 @@ class MigratedDropReboundShadowSuite {
     const now = this.now();
     for (const token of this.store.allTokens()) {
       const graduatedAt = finite(token.graduated_at);
-      if (graduatedAt && now - graduatedAt <= this.config.trackingAgeMs) {
+      if (graduatedAt && now - graduatedAt <= this._observationAgeMs()) {
         this.onGraduated(token);
       }
     }
@@ -291,7 +294,7 @@ class MigratedDropReboundShadowSuite {
 
   trackedMints(now = this.now()) {
     for (const [mint, token] of this.tracked) {
-      if (now - token.graduatedAt <= this.config.trackingAgeMs) continue;
+      if (now - token.graduatedAt <= this._observationAgeMs()) continue;
       if (this._hasActiveMint(mint)) continue;
       this.tracked.delete(mint);
       for (const detector of this.detectors.values()) detector.states.delete(mint);
@@ -329,7 +332,7 @@ class MigratedDropReboundShadowSuite {
     if (!lifecycleStage || !this.lifecycleStageIds.has(lifecycleStage)) return;
     if (lifecycleStage === 'POST_MIGRATION') {
       if (!this.tracked.has(trade.mint)) this.onGraduated(token);
-      if (timestampMs - graduatedAt > this.config.trackingAgeMs
+      if (timestampMs - graduatedAt > this._observationAgeMs()
         && !this._hasActiveMint(trade.mint)) return;
     }
     const anchorAt = lifecycleStage === 'POST_MIGRATION'
@@ -337,6 +340,12 @@ class MigratedDropReboundShadowSuite {
       : finite(token?.created_at, timestampMs);
     for (const profile of this.entryProfiles.values()) {
       if (profile.newEntriesEnabled === false) continue;
+      const maxLifecycleAgeMs = finite(
+        profile.maxLifecycleAgeMs,
+        this.config.trackingAgeMs,
+      );
+      if (lifecycleStage === 'POST_MIGRATION'
+        && timestampMs - anchorAt > maxLifecycleAgeMs) continue;
       this._observeDetector(profile, lifecycleStage, trade, price, anchorAt, replay);
     }
   }
@@ -353,7 +362,8 @@ class MigratedDropReboundShadowSuite {
       for (const [mint, state] of detector.states) {
         if (state.candidate && now > state.candidate.expiresAt) {
           state.candidate = null;
-          this.metrics.reboundTimeouts += 1;
+          if (profile.signalMode === 'DUMP_NEXT_BUY') this.metrics.dumpNextBuyTimeouts += 1;
+          else this.metrics.reboundTimeouts += 1;
         }
         this._prune(state, now, profile.windowMs);
         if (!state.candidate && now - state.lastTimestampMs > this.config.stateRetentionMs) {
@@ -417,6 +427,7 @@ class MigratedDropReboundShadowSuite {
       strategy: {
         scope: 'PRE_MIGRATION_BONDING_CURVE_AND_POST_MIGRATION_PUMP_AMM',
         trackingAgeMs: this.config.trackingAgeMs,
+        observationAgeMs: this._observationAgeMs(),
         entryDelayMs: this.config.entryDelayMs,
         entryTimeoutMs: this.config.entryTimeoutMs,
         maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
@@ -448,6 +459,7 @@ class MigratedDropReboundShadowSuite {
         lastTimestampMs: 0,
         dropReady: true,
         candidate: null,
+        lastSignalAt: 0,
       };
       states.set(mint, state);
     }
@@ -456,6 +468,13 @@ class MigratedDropReboundShadowSuite {
 
   _signalCountKey(lifecycleStage, profileId, mint) {
     return `${lifecycleStage}:${profileId}:${mint}`;
+  }
+
+  _observationAgeMs() {
+    return Math.max(
+      finite(this.config.trackingAgeMs, 0),
+      finite(this.config.observationAgeMs, 0),
+    );
   }
 
   _signalCount(lifecycleStage, profile, mint) {
@@ -617,6 +636,9 @@ class MigratedDropReboundShadowSuite {
       price,
       slot: trade.slot || null,
       signature: trade.signature || null,
+      side: trade.side || null,
+      solAmount: finite(trade.solAmount, 0),
+      wallet: trade.wallet || null,
     });
     this._prune(state, timestampMs, profile.windowMs);
 
@@ -625,6 +647,21 @@ class MigratedDropReboundShadowSuite {
     const rollingDropPct = ((price / rollingPeak.price) - 1) * 100;
     if (rollingDropPct > -profile.dropMinPct) state.dropReady = true;
     if (rollingDropPct < -profile.dropMaxPct) state.dropReady = false;
+
+    if (profile.signalMode === 'DUMP_NEXT_BUY') {
+      this._observeDumpNextBuyDetector({
+        profile,
+        lifecycleStage,
+        trade,
+        price,
+        anchorAt,
+        state,
+        rollingPeak,
+        rollingDropPct,
+        replay,
+      });
+      return;
+    }
 
     if (state.candidate) {
       const candidate = state.candidate;
@@ -714,6 +751,108 @@ class MigratedDropReboundShadowSuite {
     }
   }
 
+  _observeDumpNextBuyDetector({
+    profile,
+    lifecycleStage,
+    trade,
+    price,
+    anchorAt,
+    state,
+    rollingPeak,
+    rollingDropPct,
+    replay,
+  }) {
+    if (lifecycleStage !== 'POST_MIGRATION') return;
+    const timestampMs = finite(trade.timestampMs);
+    const lifecycleAgeMs = Math.max(0, timestampMs - anchorAt);
+    const signalKey = this._signalCountKey(lifecycleStage, profile.id, trade.mint);
+
+    if (state.candidate && timestampMs > state.candidate.expiresAt) {
+      state.candidate = null;
+      this.metrics.dumpNextBuyTimeouts += 1;
+    }
+
+    if (state.candidate && trade.side === 'BUY'
+      && timestampMs > state.candidate.startedAt) {
+      const candidate = state.candidate;
+      const signalCount = this._signalCount(lifecycleStage, profile, trade.mint);
+      const signalOrdinal = signalCount + 1;
+      const agePass = profile.maxLifecycleAgeMs == null
+        || lifecycleAgeMs <= profile.maxLifecycleAgeMs;
+      const countPass = profile.maxSignalsPerMint == null
+        || signalOrdinal <= profile.maxSignalsPerMint;
+      const cooldownPass = timestampMs - finite(state.lastSignalAt, 0)
+        >= finite(profile.reentryCooldownMs, 0);
+      const timePass = beijingHourAllowed(timestampMs, profile.beijingHourRanges);
+      const activePass = !this._hasActiveProfileMint(trade.mint, profile.id);
+      if (agePass && countPass && cooldownPass && timePass && activePass) {
+        const dropPct = ((candidate.lowPrice / candidate.peakPrice) - 1) * 100;
+        const reboundPct = ((price / candidate.lowPrice) - 1) * 100;
+        if (replay) {
+          this.metrics.replaySignalsSuppressed += 1;
+        } else {
+          this._emitSignal({
+            profile,
+            lifecycleStage,
+            trade,
+            price,
+            anchorAt,
+            candidate,
+            dropPct,
+            reboundPct,
+            confirmationDetails: {
+              entryConfirmation: {
+                mode: 'NEXT_ACTUAL_BUY_AFTER_LARGE_SELL',
+                dumpAt: candidate.startedAt,
+                dumpSignature: candidate.dumpSignature,
+                dumpSlot: candidate.dumpSlot,
+                dumpWallet: candidate.dumpWallet,
+                dumpSolAmount: candidate.dumpSolAmount,
+                nextBuyAt: timestampMs,
+                nextBuySignature: trade.signature || null,
+                nextBuySlot: trade.slot || null,
+                nextBuyWallet: trade.wallet || null,
+                nextBuySolAmount: finite(trade.solAmount, 0),
+                confirmationDelayMs: timestampMs - candidate.startedAt,
+              },
+            },
+          });
+          state.lastSignalAt = timestampMs;
+          this.metrics.dumpNextBuySignals += 1;
+        }
+        this.signalCounts.set(signalKey, signalOrdinal);
+        state.candidate = null;
+        state.dropReady = false;
+        return;
+      }
+    }
+
+    const signalCount = this._signalCount(lifecycleStage, profile, trade.mint);
+    const canArm = trade.side === 'SELL'
+      && finite(trade.solAmount, 0) >= finite(profile.minDumpSol, 0)
+      && rollingDropPct <= -profile.dropMinPct
+      && rollingDropPct >= -profile.dropMaxPct
+      && (profile.maxLifecycleAgeMs == null || lifecycleAgeMs <= profile.maxLifecycleAgeMs)
+      && (profile.maxSignalsPerMint == null || signalCount < profile.maxSignalsPerMint)
+      && !this._hasActiveProfileMint(trade.mint, profile.id);
+    if (!canArm) return;
+    state.candidate = {
+      peakPrice: rollingPeak.price,
+      peakAt: rollingPeak.timestampMs,
+      lowPrice: price,
+      lowAt: timestampMs,
+      startedAt: timestampMs,
+      expiresAt: timestampMs + finite(profile.nextBuyWindowMs, profile.reboundTimeoutMs),
+      dumpSignature: trade.signature || null,
+      dumpSlot: trade.slot || null,
+      dumpWallet: trade.wallet || null,
+      dumpSolAmount: finite(trade.solAmount, 0),
+    };
+    state.dropReady = false;
+    this.metrics.candidates += 1;
+    this.metrics.dumpNextBuyCandidates += 1;
+  }
+
   _emitSignal({
     profile,
     lifecycleStage,
@@ -724,6 +863,7 @@ class MigratedDropReboundShadowSuite {
     dropPct,
     reboundPct,
     rugRisk = null,
+    confirmationDetails = null,
   }) {
     const stageCode = lifecycleStage === 'PRE_MIGRATION' ? 'PRE' : 'POST';
     const episodeId = `${trade.mint}:${stageCode}:${profile.id}:${candidate.startedAt}:${trade.timestampMs}`;
@@ -780,7 +920,12 @@ class MigratedDropReboundShadowSuite {
           reboundFromLowMs: trade.timestampMs - candidate.lowAt,
           entryTargetAt,
           entryDeadlineAt: entryTargetAt + this.config.entryTimeoutMs,
-          confirmationJson: rugRisk ? JSON.stringify({ preEntryRugRisk: rugRisk }) : null,
+          confirmationJson: rugRisk || confirmationDetails
+            ? JSON.stringify({
+              ...(rugRisk ? { preEntryRugRisk: rugRisk } : {}),
+              ...(confirmationDetails || {}),
+            })
+            : null,
           exitMode: exitProfile.exitMode,
           fixedHoldMs: exitProfile.fixedHoldMs,
           trailingActivationPct: exitProfile.trailingActivationPct,
@@ -816,6 +961,7 @@ class MigratedDropReboundShadowSuite {
         if (!this._eligibleEntryTrade(position, trade)) continue;
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
+        const entryProfile = this.entryProfiles.get(position.entryProfileId);
         const universalRugGuard = evaluateUniversalRugGuard(this.store, {
           strategyId: `MIGRATED_DROP_REBOUND:${position.cohortId}`,
           mint: position.mint,
@@ -831,7 +977,12 @@ class MigratedDropReboundShadowSuite {
             )
             : null,
         });
-        if (universalRugGuard.blocked) {
+        if (entryProfile?.rugGuardMode === 'LABEL_ONLY') {
+          position.confirmationJson = this._mergeConfirmationJson(
+            position.confirmationJson,
+            { preEntryUniversalRugGuard: universalRugGuard },
+          );
+        } else if (universalRugGuard.blocked) {
           this.store.updateMigratedDropReboundShadowPosition(position.id, {
             status: STATUS.NO_ENTRY,
             rejectionReason: 'PRE_ENTRY_RUG_RISK',
@@ -841,7 +992,6 @@ class MigratedDropReboundShadowSuite {
           continue;
         }
         const jumpPct = ((price / position.reboundPrice) - 1) * 100;
-        const entryProfile = this.entryProfiles.get(position.entryProfileId);
         const maxEntryPriceJumpPct = Number.isFinite(Number(entryProfile?.maxEntryPriceJumpPct))
           ? Number(entryProfile.maxEntryPriceJumpPct)
           : this.config.maxEntryPriceJumpPct;
@@ -1458,6 +1608,26 @@ class MigratedDropReboundShadowSuite {
 
   _hasActiveMint(mint) {
     return (this.rowsByMint.get(mint)?.size || 0) > 0;
+  }
+
+  _hasActiveProfileMint(mint, entryProfileId) {
+    for (const id of this.rowsByMint.get(mint) || []) {
+      const position = this.pendingEntries.get(id) || this.positions.get(id);
+      if (position?.entryProfileId === entryProfileId) return true;
+    }
+    return false;
+  }
+
+  _mergeConfirmationJson(current, extra) {
+    let parsed = {};
+    if (current) {
+      try {
+        parsed = JSON.parse(current) || {};
+      } catch {
+        parsed = {};
+      }
+    }
+    return JSON.stringify({ ...parsed, ...(extra || {}) });
   }
 }
 
