@@ -129,8 +129,19 @@
     .strategy-metric-label b { font-size: 13px; }
     .strategy-metric-label span { color: var(--muted); font-size: 11px; }
     .strategy-grid { grid-template-columns: repeat(4, minmax(0,1fr)); margin-bottom: 14px; }
+    .strategy-card { min-width: 0; overflow: hidden; }
     .strategy-card h3 { margin: 0 0 15px; font-size: 16px; }
-    .strategy-card .health-row { font-size: 12px; }
+    .strategy-card .health-row { align-items: flex-start; font-size: 12px; }
+    .strategy-card .health-row span { flex: 0 0 40%; min-width: 72px; line-height: 1.45; }
+    .strategy-card .health-row b {
+      flex: 1 1 auto;
+      min-width: 0;
+      text-align: right;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.45;
+    }
     .record-section { margin-top: 14px; }
     .strategy-workspace { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 14px; align-items: start; }
     .strategy-sidebar { position: sticky; top: 14px; padding: 14px; }
