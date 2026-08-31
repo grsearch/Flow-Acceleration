@@ -1,5 +1,35 @@
 # Pump.fun Flow Acceleration Research + Multi-Strategy Executor
 
+## 2026-08-31 当前生效口径（优先于下方历史记录）
+
+本节是当前代码的权威状态说明；下方各章节保留历次实验背景，不代表相关策略仍在
+产生新仓位。
+
+- **极速 RUG 按生命周期分层。** Bonding Curve 早期、迁移前、迁移窗口、
+  PumpSwap 早期及成熟期分别记录不同风险标签。当前只有 Lifecycle G 的
+  `AMM_EARLY` 样本在满足 HC2（两个相互独立的高风险证据）时硬拦截；Graduation O、
+  COB 及其他策略先记录标签，不直接阻断，以免未经验证的统一阈值误杀不同阶段机会。
+- **收益只有一个口径。** 仅 `CLOSED` 且入口、出口来自同一市场的仓位计入已实现
+  收益；`NO_EXIT`、失败退出和未完成结算均是未决/删失样本，收益保持 `NULL`，不得
+  按 -100% 计入；跨市场价格只作诊断，不能混算收益。COB-D/F 面板也遵守这一规则。
+- **已退休研究由总闸保护。** PFL、CAF、PM-SURV、M2F/LPS、Launch First Pullback、
+  Launch Quality E、Migration Continuity M、Quality Leader QL、Big Winner/PP
+  停止产生新样本，但历史数据仍可查询。旧服务器即使残留对应 `...ENABLED=true`，
+  也不能重新开启；只有显式设置 `FLOW_RETIRED_RESEARCH_REOPEN_ENABLED=true` 才能
+  进行人工复核后的重启。
+- **继续前向验证。** Lifecycle G 继续测试分阶段极速 RUG 硬拦截；Graduation O
+  继续记录阶段标签但暂不硬拦截；FEA 的 `FEA-BNH-120` 作为独立 Shadow 继续验证
+  “买家广度 + 自然资金流 + 120秒退出”，不进入实盘。现有
+  `GE30_R23_F2_G2_XLEG` 实盘路径保持不变；另以全新编号
+  `G-V2-EXEC01-R2-H15` 接入0.1 SOL可执行容量样本，避免与旧 G 组历史混算。
+
+当前样本中，Lifecycle G 的极速 RUG 标记组平均约 -33.79%，未标记组约 +17.75%；
+13 个标记样本覆盖了全部 7 个 `≤-50%` 大亏样本，且没有拦掉 3 个 `≥+50%` 大赢家，
+样本内差异约 51.5 个百分点（仍需前向样本确认）。Graduation O 当前 23/23 个样本
+均被标记，尚无选择性，因此只能记录标签，不能直接硬拦截。FEA 已有 7,231 个完整
+标签，但另有 20,093 个右删失样本（约 73.3%）；其中候选子集的高收益可能包含明显
+选择偏差，所以只建立 Shadow，不能据此直接实盘。
+
 ## Big Winner Pullback + Flow Shadow (BW)
 
 `BigWinnerShadowSuite` is an isolated, post-graduation PumpSwap research path. It crosses
@@ -663,7 +693,7 @@ Shadow G 先按生命周期分成两个完全独立的研究层：`PRE_MIGRATION
 
 旧矩阵保持原 ID 与规则不变。毕业后专用前向 profile `GE30_R23_F1` 与 `GE30_R23_F3` 继续积累原样数据。另增完全独立的 `GE30_D25_32_R24_F1`：只取毕业后30秒内、1秒跌25%～32%、低点反弹2%～4%的首次机会，并要求200ms模拟成交相对信号价上跳不超过3%。`GE30_D25_32_R24_F1_04_24` 只在北京时间04:00～24:00生成独立 Shadow 样本，并同时按0.1/0.5/1 SOL容量模型记录；它不接入实盘。新 ID 不回填、不覆盖旧 cohort。
 
-新 V2 入场除继续与 X3、X8、XLEG 对照外，还独立测试 `V2_R2_H10/H15`（2秒弱势确认、10%/15%硬止损）和 `V2_B75_H20/H60`（25%按XLEG退出，75% runner固定持有20/60秒）。后两组专门检验“保住主体收益，同时提高大赢家捕获率”。模拟入场和退出均使用200ms执行延迟后的对应市场真实成交，新样本收益扣除默认1 SOL仓位的确定性成本；MFE、MAE和实际入场跳价一并保存。兼容接口仍为 `GET /api/migrated-drop-rebound-shadow`。该策略没有执行器、不读取私钥，永不签名或发送交易。
+新 V2 入场除继续与 X3、X8、XLEG 对照外，还独立测试 `V2_R2_H10/H15`（2秒弱势确认、10%/15%硬止损）和 `V2_B75_H20/H60`（25%按XLEG退出，75% runner固定持有20/60秒）。`GE30_D25_32_R24_F1_EXEC1` 同时保留0.1/1 SOL容量对照，但只有0.1 SOL的 `V2_R2_H15` 行会发出 `G-V2-EXEC01-R2-H15` 实盘信号。`GE30_R23_F2_ONLY` 另增 `G2_XLEG_H20_FWD`，将20%硬止损作为独立前向 Shadow 持续记录，不回填离线回测结果。模拟入场和退出均使用200ms执行延迟后的对应市场真实成交，新样本收益扣除确定性成本；MFE、MAE和实际入场跳价一并保存。兼容接口仍为 `GET /api/migrated-drop-rebound-shadow`。
 
 2026-08-16 起新增的 G 组优化全部使用新 ID，不回填旧数据。`GE30_R23_F1_EXEC` 对同一首次机会并行模拟 0.05/0.1/0.25/0.5/1 SOL，利用已经随 PumpSwap 成交保存的真实储备计算各仓位买入和卖出的 AMM 曲线平均成交价与自身冲击；它不增加 RPC/API 请求。`GE30_R23_F2_ONLY` 只记录同 Mint 第二次独立跌落反弹，`GE30_R23_F1_NIGHT/DAY` 分别冻结北京时间18:00–08:00和08:00–18:00样本，避免事后切时段。2026-08-18 又增加 `GE30_R23_F3_EXEC` 与 `GE30_R23_F2_ONLY_EXEC`，在不改变原 F3/F2 记录的前提下，分别对前三次机会和第二次机会按0.05/0.1/0.25 SOL做容量感知的XLEG对照。
 
@@ -955,8 +985,8 @@ PumpSwap 成交。默认对照 `Sell≥10 SOL/跌幅≥15%` 与
 只保留历史，不再参与新版统计。Dashboard 的主审计窗口固定为 120 秒，并展示
 完成率、删失率、报价覆盖率和跨市场删失率，避免用 300 秒幸存样本挑选结论。
 
-`FEA-BNH-120` 是唯一由审计结果派生的独立 Shadow：要求买卖平衡成立、参与者
-未过热、AGE 30～120 秒、Curve 60%～90%，在同一 Bonding Curve 市场模拟
+`FEA-BNH-120` 是唯一由审计结果派生的独立 Shadow：要求资金流继续加速、买卖
+平衡成立、参与者未过热、AGE 30～120 秒、Curve 60%～90%，在同一 Bonding Curve 市场模拟
 1 SOL 入场并固定持有 120 秒，计入 3.2% 往返成本。没有同市场退出容量记为
 `NO_EXIT`。它写入 `feature_edge_audit_bnh_shadow_positions`，不与旧策略混表，
 不签名、不发链、不读取私钥，也不增加 RPC。

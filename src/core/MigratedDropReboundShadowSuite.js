@@ -336,6 +336,7 @@ class MigratedDropReboundShadowSuite {
       ? graduatedAt
       : finite(token?.created_at, timestampMs);
     for (const profile of this.entryProfiles.values()) {
+      if (profile.newEntriesEnabled === false) continue;
       this._observeDetector(profile, lifecycleStage, trade, price, anchorAt, replay);
     }
   }
@@ -405,6 +406,12 @@ class MigratedDropReboundShadowSuite {
         .reduce((total, buffer) => total + Math.max(0, buffer.rows.length - buffer.start), 0),
       activePositions: this.positions.size,
       entryProfiles: [...this.entryProfiles.values()],
+      enabledEntryProfileIds: [...this.entryProfiles.values()]
+        .filter((profile) => profile.newEntriesEnabled !== false)
+        .map((profile) => profile.id),
+      stoppedEntryProfileIds: [...this.entryProfiles.values()]
+        .filter((profile) => profile.newEntriesEnabled === false)
+        .map((profile) => profile.id),
       exitProfiles: [...this.exitProfiles.values()],
       lifecycleStages: this.lifecycleStages,
       strategy: {
@@ -813,6 +820,16 @@ class MigratedDropReboundShadowSuite {
           strategyId: `MIGRATED_DROP_REBOUND:${position.cohortId}`,
           mint: position.mint,
           timestampMs: trade.timestampMs,
+          source: 'SHADOW',
+          market: trade.market,
+          lifecycleStage: position.lifecycleStage,
+          lifecycleAgeMs: position.lifecycleStage === 'POST_MIGRATION'
+            ? trade.timestampMs - finite(
+              this.store.getToken(position.mint)?.graduated_at
+                ?? this.tracked.get(position.mint)?.graduatedAt,
+              trade.timestampMs,
+            )
+            : null,
         });
         if (universalRugGuard.blocked) {
           this.store.updateMigratedDropReboundShadowPosition(position.id, {
@@ -1000,6 +1017,9 @@ class MigratedDropReboundShadowSuite {
     const strategyId = profile?.liveExitStrategies?.[position.exitProfileId]
       || profile?.liveStrategyId;
     if (!this.onLiveSignal || !strategyId) return;
+    const livePositionSol = Number(profile?.livePositionSol);
+    if (Number.isFinite(livePositionSol) && livePositionSol > 0
+      && Math.abs(Number(position.positionSol) - livePositionSol) > 1e-9) return;
     if (replay) {
       this.metrics.replayLiveSignalsSuppressed += 1;
       return;

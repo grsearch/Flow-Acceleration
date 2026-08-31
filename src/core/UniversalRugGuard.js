@@ -9,11 +9,14 @@ function evaluateUniversalRugGuard(store, {
   source = 'SHADOW',
   market = null,
   lifecycleStage = null,
+  lifecycleAgeMs = null,
   enforcementMode = null,
 }) {
   const policy = enforcementMode
     ? { enforcementMode, policyReason: 'CALLER_OVERRIDE' }
-    : resolveRugGuardPolicy({ strategyId, source, market, lifecycleStage });
+    : resolveRugGuardPolicy({
+      strategyId, source, market, lifecycleStage, lifecycleAgeMs,
+    });
   const tracker = store?.preEntryRugRisk;
   if (!tracker?.config?.enabled || typeof tracker.evaluateGuard !== 'function') {
     return {
@@ -32,6 +35,7 @@ function evaluateUniversalRugGuard(store, {
     source,
     market,
     lifecycleStage,
+    lifecycleAgeMs,
     ...policy,
   });
 }

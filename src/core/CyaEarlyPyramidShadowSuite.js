@@ -576,8 +576,6 @@ class CyaEarlyPyramidShadowSuite {
     const estimatedCostSol = this._estimatedCostSol(position);
     this.store.updateCyaEarlyPyramidShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
-      grossReturnPct: -100,
-      netReturnPct: -100 - estimatedCostSol / position.totalInvestedSol * 100,
       estimatedCostSol,
     });
     this.positions.delete(position.id);

@@ -847,11 +847,14 @@ class CyaOrganicBurstShadowSuite {
   }
 
   _comparable(position, trade, price) {
-    if (trade.market === position.entryMarket || trade.market === position.lastMarket) return true;
-    if (trade.market !== 'PUMP_AMM') return false;
-    const reference = position.lastPrice || position.averageEntryPrice || position.entryPrice;
-    const ratio = reference > 0 ? price / reference : 0;
-    return ratio >= 0.05 && ratio <= 20;
+    void price;
+    // A COB return is valid only inside the exact market where the simulated
+    // fill happened. Bonding Curve and PumpSwap prices use different reserve
+    // domains; accepting a later PUMP_AMM print silently manufactured both
+    // huge winners and huge losses. Migration before an observed same-market
+    // exit is right-censored (NO_EXIT), never a priced close.
+    return Boolean(position.entryMarket)
+      && String(trade.market || '') === String(position.entryMarket);
   }
 
   _open(position, trade, marketPrice) {
@@ -1063,9 +1066,14 @@ class CyaOrganicBurstShadowSuite {
         COUNT(*) signals, COUNT(DISTINCT mint) independent_mints,
         SUM(status='PRICE_JUMP') price_jump, SUM(status='NO_ENTRY') no_entry,
         SUM(status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING')) active,
-        SUM(status='CLOSED') resolved, SUM(status='NO_EXIT') no_exit,
-        SUM(status='CLOSED' AND net_return_pct IS NOT NULL) priced_exits,
-        SUM(status='CLOSED' AND net_return_pct IS NULL) closed_without_return,
+        SUM(status='CLOSED' AND net_return_pct IS NOT NULL
+          AND entry_market=exit_market) resolved,
+        SUM(status='NO_EXIT') no_exit,
+        SUM(status='CLOSED' AND net_return_pct IS NOT NULL
+          AND entry_market=exit_market) priced_exits,
+        SUM(status='CLOSED' AND (net_return_pct IS NULL
+          OR entry_market IS NULL OR exit_market IS NULL
+          OR entry_market<>exit_market)) closed_without_return,
         AVG(age_ms) average_age_ms, AVG(curve_pct) average_curve_pct,
         AVG(buyers_5s) average_buyers_5s, AVG(net_flow_5s) average_net_flow_5s,
         AVG(buy_tx_share_pct) average_buy_tx_share_pct,
@@ -1073,23 +1081,30 @@ class CyaOrganicBurstShadowSuite {
         AVG(exit_impact_pct) average_exit_impact_pct,
         AVG(max_favorable_return_pct) average_mfe_pct,
         AVG(max_adverse_return_pct) average_mae_pct,
-        AVG(net_return_pct) average_net_return_pct,
+        AVG(CASE WHEN status='CLOSED' AND entry_market=exit_market
+          THEN net_return_pct END) average_net_return_pct,
         AVG(CASE WHEN target_open_delay_ms BETWEEN 0 AND 5000 THEN 100.0 ELSE 0 END)
           target_open_5s_rate_pct,
-        AVG(CASE WHEN status='CLOSED' THEN CASE WHEN net_return_pct>0 THEN 100.0 ELSE 0 END END)
+        AVG(CASE WHEN status='CLOSED' AND entry_market=exit_market
+          THEN CASE WHEN net_return_pct>0 THEN 100.0 ELSE 0 END END)
           win_rate_pct,
-        AVG(CASE WHEN status='CLOSED' THEN CASE WHEN net_return_pct>=50 THEN 100.0 ELSE 0 END END)
+        AVG(CASE WHEN status='CLOSED' AND entry_market=exit_market
+          THEN CASE WHEN net_return_pct>=50 THEN 100.0 ELSE 0 END END)
           big50_rate_pct,
-        AVG(CASE WHEN status='CLOSED' THEN CASE WHEN net_return_pct>=100 THEN 100.0 ELSE 0 END END)
+        AVG(CASE WHEN status='CLOSED' AND entry_market=exit_market
+          THEN CASE WHEN net_return_pct>=100 THEN 100.0 ELSE 0 END END)
           big100_rate_pct,
-        MAX(net_return_pct) max_winner_pct
+        MAX(CASE WHEN status='CLOSED' AND entry_market=exit_market
+          THEN net_return_pct END) max_winner_pct
       FROM cya_organic_burst_shadow_positions
       GROUP BY cohort_id, entry_profile_id, exit_profile_id
       ORDER BY entry_profile_id, exit_profile_id
     `).all();
     const returns = this.store.db.prepare(`
       SELECT net_return_pct FROM cya_organic_burst_shadow_positions
-      WHERE cohort_id=? AND status='CLOSED' AND net_return_pct IS NOT NULL ORDER BY net_return_pct
+      WHERE cohort_id=? AND status='CLOSED' AND net_return_pct IS NOT NULL
+        AND entry_market=exit_market
+      ORDER BY net_return_pct
     `);
     const cohorts = groups.map((group) => {
       const values = returns.all(group.cohort_id).map((row) => Number(row.net_return_pct));

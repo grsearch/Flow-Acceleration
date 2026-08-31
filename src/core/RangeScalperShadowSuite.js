@@ -755,8 +755,6 @@ class RangeScalperShadowSuite {
     this.store.updateRangeScalperShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
       exitReason: position.exitReason || 'NO_EXIT_TRADE',
-      grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
     });
     this.positions.delete(position.id);
     this._unindexRow(position);

@@ -10,7 +10,9 @@ const {
   BNH_PROFILE_ID,
 } = require('../src/core/FeatureEdgeAuditObserver');
 
-function baseSignal({ mint, signalAtMs, participation = true, balance = true } = {}) {
+function baseSignal({
+  mint, signalAtMs, flow = true, participation = true, balance = true,
+} = {}) {
   return {
     signalId: signalAtMs,
     signalAtMs,
@@ -21,8 +23,8 @@ function baseSignal({ mint, signalAtMs, participation = true, balance = true } =
     price: 0.0000001,
     virtualTokenReservesRaw: '1000000000000000',
     virtualSolReservesRaw: '100000000000',
-    netFlowW1: 2,
-    netFlowW2: 6,
+    netFlowW1: flow ? 2 : 8,
+    netFlowW2: flow ? 6 : 11,
     netFlowW3: 12,
     uniqueBuyersW1: 2,
     uniqueBuyersW2: participation ? 5 : 3,
@@ -121,13 +123,26 @@ function main() {
     participation: false,
   });
   const bnhSample = observer.onSignal(bnhSignal);
-  assert(bnhSample?.bnhOpen, 'balanced non-overheated sample should open isolated BNH Shadow');
+  assert(bnhSample?.bnhOpen,
+    'flowing, balanced and non-overheated sample should open isolated BNH Shadow');
   observeAllHorizons(observer, bnhSignal, [1.05, 1.10, 1.20, 1.40]);
   const bnhRow = db.prepare(`SELECT * FROM ${BNH_TABLE} WHERE observation_id=?`)
     .get(bnhSample.id);
   assert.strictEqual(bnhRow.profile_id, BNH_PROFILE_ID);
   assert.strictEqual(bnhRow.status, 'CLOSED');
   assert(Number.isFinite(bnhRow.net_return_pct));
+
+  const noFlowSignal = baseSignal({
+    mint: 'FeatureEdgeAuditNoFlow1111111111111111111111',
+    signalAtMs: signalAtMs + 1_500_000,
+    flow: false,
+    participation: false,
+  });
+  const noFlowSample = observer.onSignal(noFlowSignal);
+  assert(noFlowSample, 'no-flow sample should remain available to the feature audit');
+  assert.strictEqual(noFlowSample.features.flow, false);
+  assert.strictEqual(noFlowSample.bnhOpen, false,
+    'BNH must not open from balance alone when public Flow is not accelerating');
 
   const crossSignal = baseSignal({
     mint: 'FeatureEdgeAuditCross11111111111111111111111',

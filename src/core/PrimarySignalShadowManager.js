@@ -306,8 +306,6 @@ class PrimarySignalShadowManager {
   _markNoExit(position) {
     this.store.updatePrimarySignalShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
-      grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
     });
     this.positions.delete(position.mint);
     this.metrics.closed += 1;

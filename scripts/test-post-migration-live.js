@@ -425,6 +425,53 @@ cobFastManager._evaluatePositionExit({
 }, now + 2_001, 111);
 assert.strictEqual(cobExitReason, null);
 
+// The executable 0.1 SOL G-V2 strategy must not turn every temporary loss at
+// the two-second checkpoint into an exit.  It exits only when the bounce from
+// the observed low is still weak; a real recovery remains open.
+const gV2RiskStrategy = {
+  exitMode: 'RISK_XLEG',
+  trailingActivationPct: 8,
+  trailingStopPct: 3,
+  hardStopPct: 15,
+  fastTakeProfitPct: 18,
+  fastTakeProfitWindowMs: 5_000,
+  lossCheckAtMs: 2_000,
+  lossCheckRecoveryPct: 1,
+  maxHoldMs: 15_000,
+};
+const gV2RiskManager = new LiveTradingManager({ config, store, now: () => now });
+let gV2ExitReason = null;
+gV2RiskManager._requestExit = (_position, reason) => { gV2ExitReason = reason; };
+const weakRecoveryPosition = {
+  id: 9012,
+  mint: 'MintGV2Weak111111111111111111111111111111111',
+  status: 'OPEN',
+  strategy: gV2RiskStrategy,
+  entryPrice: 100,
+  highestPrice: 100,
+  lowestPrice: 100,
+  openedAt: now,
+};
+gV2RiskManager._evaluatePositionExit(weakRecoveryPosition, now + 1_000, 90);
+assert.strictEqual(gV2ExitReason, null);
+gV2RiskManager._evaluatePositionExit(weakRecoveryPosition, now + 2_100, 90.5);
+assert.strictEqual(gV2ExitReason, 'RISK_LOSS_CHECK');
+
+gV2ExitReason = null;
+const recoveredPosition = {
+  id: 9013,
+  mint: 'MintGV2Recovered111111111111111111111111111111',
+  status: 'OPEN',
+  strategy: gV2RiskStrategy,
+  entryPrice: 100,
+  highestPrice: 100,
+  lowestPrice: 100,
+  openedAt: now,
+};
+gV2RiskManager._evaluatePositionExit(recoveredPosition, now + 1_000, 90);
+gV2RiskManager._evaluatePositionExit(recoveredPosition, now + 2_100, 92);
+assert.strictEqual(gV2ExitReason, null);
+
 // A rejected/failed buy is not a successful entry and must not consume one of
 // the two durable per-Mint slots.
 const failedMint = 'MintFailedEntry11111111111111111111111111111';
@@ -439,12 +486,20 @@ store.updateLivePosition(failedPosition.id, {
 store.db.prepare(`
   UPDATE live_positions SET created_at=?, updated_at=? WHERE id=?
 `).run(now, now, failedPosition.id);
+manager.strategies.set('cross_strategy_retry_test', {
+  ...config.strategies[0],
+  id: 'cross_strategy_retry_test',
+});
 assert.strictEqual(store.successfulLiveEntryCountForMintStrategy(
   failedMint, 'post_gd25_35_xleg',
 ), 0);
 assert.strictEqual(manager._riskReason({
   strategyId: 'post_gd25_35_xleg', mint: failedMint,
 }), 'MINT_FAILED_ENTRY_COOLDOWN');
+assert.strictEqual(manager._riskReason({
+  strategyId: 'cross_strategy_retry_test', mint: failedMint,
+}), 'MINT_FAILED_ENTRY_COOLDOWN',
+  'a failed Mint must cool down globally instead of retrying through another strategy');
 now += 1_001;
 assert.strictEqual(manager._riskReason({
   strategyId: 'post_gd25_35_xleg', mint: failedMint,
@@ -468,6 +523,10 @@ now += 1_001;
 assert.strictEqual(manager._riskReason({
   strategyId: 'post_gd25_35_xleg', mint: failedMint,
 }), 'MINT_FAILED_ENTRY_LIMIT', 'repeated failed buys must not retry forever');
+assert.strictEqual(manager._riskReason({
+  strategyId: 'cross_strategy_retry_test', mint: failedMint,
+}), 'MINT_FAILED_ENTRY_LIMIT',
+  'the failed-entry limit must aggregate the same Mint across all strategies');
 now += 10_001;
 assert.strictEqual(manager._riskReason({
   strategyId: 'post_gd25_35_xleg', mint: failedMint,

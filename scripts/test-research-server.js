@@ -622,7 +622,8 @@ async function main() {
       [
         'X3', 'X8', 'XLEG',
         'GEXEC_XLEG', 'G2_XLEG', 'GRT_F3_XLEG_V2', 'GRT_F2_XLEG_V2',
-        'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+        'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG',
+        'G2_XLEG_H20_FWD', 'GQ_XLEG',
         'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
         'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
         'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
@@ -687,6 +688,17 @@ async function main() {
     );
     assert.strictEqual(gqProfile.maxReboundFromLowMs, 200);
     assert.deepStrictEqual(gqProfile.positionSols, [0.05, 0.25, 0.5, 1]);
+    const g2Profile = migratedRebound.runtime.entryProfiles.find(
+      (profile) => profile.id === 'GE30_R23_F2_ONLY',
+    );
+    assert.deepStrictEqual(g2Profile.exitProfileIds, ['G2_XLEG', 'G2_XLEG_H20_FWD']);
+    const executableV2 = migratedRebound.runtime.entryProfiles.find(
+      (profile) => profile.id === 'GE30_D25_32_R24_F1_EXEC1',
+    );
+    assert.strictEqual(executableV2.livePositionSol, 0.1);
+    assert.deepStrictEqual(executableV2.liveExitStrategies, {
+      V2_R2_H15: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
+    });
     assert.ok(Array.isArray(migratedRebound.cohorts));
     assert.ok(Array.isArray(migratedRebound.positions));
     const rangeScalper = await (await fetch(

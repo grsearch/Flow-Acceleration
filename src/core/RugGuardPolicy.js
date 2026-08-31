@@ -24,7 +24,6 @@ const LABEL_ONLY_FAMILIES = [
 ];
 
 const HARD_BLOCK_FAMILIES = [
-  'MIGRATED_DROP_REBOUND:',
   'MIGRATION_CONTINUITY:',
   'MIGRATION_SECOND_LEG:',
 ];
@@ -42,14 +41,26 @@ function resolveRugGuardPolicy({
   source = 'SHADOW',
   market,
   lifecycleStage,
+  lifecycleAgeMs,
+  ammEarlyMaxAgeMs = 10_000,
 } = {}) {
   const id = normalized(strategyId);
   const normalizedSource = normalized(source) || 'SHADOW';
   const normalizedMarket = normalized(market);
   const stage = normalized(lifecycleStage);
+  const ageMs = Number(lifecycleAgeMs);
+  const earlyLimitMs = Number.isFinite(Number(ammEarlyMaxAgeMs))
+    ? Math.max(0, Number(ammEarlyMaxAgeMs))
+    : 10_000;
+  const isAmmEarly = stage === 'AMM_EARLY'
+    || (normalizedMarket === 'PUMP_AMM'
+      && Number.isFinite(ageMs)
+      && ageMs >= 0
+      && ageMs <= earlyLimitMs);
 
-  // These families were measured as post-migration execution paths and the
-  // fast-RUG label materially reduced their executable losses.
+  // Keep the previously validated post-migration guards unchanged. G is
+  // deliberately excluded: its broad AMM_EARLY rejection removed profitable
+  // right tails together with the rugs in the independent lifecycle audit.
   if (startsWithAny(id, HARD_BLOCK_FAMILIES)) {
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.HARD_BLOCK,
@@ -57,12 +68,13 @@ function resolveRugGuardPolicy({
     };
   }
 
-  // COB/Big-Winner and Launch cohorts currently over-block profitable right
-  // tails. Keep collecting the exact same risk labels without rejecting entry.
+  // Research families keep collecting the same labels without changing their
+  // historical entry semantics.
   if (startsWithAny(id, LABEL_ONLY_FAMILIES)) {
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.LABEL_ONLY,
-      policyReason: 'PRE_MIGRATION_OR_RESEARCH_FAMILY_LABEL_ONLY',
+      policyReason: 'RESEARCH_FAMILY_LIFECYCLE_LABEL_ONLY',
+      requireHc2: false,
     };
   }
 
@@ -72,20 +84,36 @@ function resolveRugGuardPolicy({
     || stage.startsWith('CURVE_')) {
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.LABEL_ONLY,
-      policyReason: 'CURVE_LIFECYCLE_LABEL_ONLY',
+      policyReason: stage === 'LAUNCH'
+        ? 'LAUNCH_CONCENTRATION_LABEL_ONLY'
+        : stage === 'CURVE_EARLY'
+          ? 'CURVE_EARLY_INVENTORY_LABEL_ONLY'
+          : stage === 'CURVE_LATE'
+            ? 'CURVE_LATE_DUMPABILITY_LABEL_ONLY'
+            : stage === 'CURVE_MIGRATION'
+              ? 'CURVE_MIGRATION_EXIT_PATH_LABEL_ONLY'
+              : 'CURVE_LIFECYCLE_LABEL_ONLY',
+      requireHc2: false,
     };
   }
 
   if (normalizedMarket === 'PUMP_AMM'
     || stage === 'POST_MIGRATION'
     || stage.startsWith('AMM_')) {
+    if (id.startsWith('MIGRATED_DROP_REBOUND:') && isAmmEarly) {
+      return {
+        enforcementMode: RUG_GUARD_ENFORCEMENT.LABEL_ONLY,
+        policyReason: 'AMM_EARLY_STAGE_CANDIDATE_LABEL_ONLY',
+        requireHc2: false,
+      };
+    }
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.HARD_BLOCK,
       policyReason: 'POST_MIGRATION_AMM_HARD_BLOCK',
     };
   }
 
-  // Unknown live routes stay fail-safe. Unknown research routes remain
+  // Unknown live routes remain fail-safe. Unknown research routes remain
   // observable without silently changing historical Shadow entry semantics.
   return normalizedSource === 'LIVE'
     ? {

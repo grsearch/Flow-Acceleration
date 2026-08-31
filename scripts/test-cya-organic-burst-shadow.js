@@ -134,6 +134,21 @@ function main() {
     onLiveSignal: (event) => liveSignals.push(event),
   });
   suite.start();
+  assert.strictEqual(
+    suite._comparable(
+      { entryMarket: 'PUMP_BONDING_CURVE' },
+      { market: 'PUMP_AMM' },
+    ),
+    false,
+    'COB must never compare a bonding-curve entry with a PumpSwap exit',
+  );
+  assert.strictEqual(
+    suite._comparable(
+      { entryMarket: 'PUMP_BONDING_CURVE' },
+      { market: 'PUMP_BONDING_CURVE' },
+    ),
+    true,
+  );
 
   const trade = (offset, side, sol, wallet, price) => {
     now = base + offset;
@@ -295,6 +310,21 @@ function main() {
   assert.strictEqual(replayRow.entry_target_at - replayRow.signal_at, 200);
   assert.strictEqual(replayRow.entry_deadline_at - replayRow.entry_target_at, 1_500);
   assert.strictEqual(liveSignals.length, 2, 'live replay must never emit a live signal');
+
+  // A historical row carrying a cross-market CLOSED price remains visible as
+  // an unpriced outcome, but can never contaminate COB return statistics.
+  store.db.prepare(`
+    UPDATE cya_organic_burst_shadow_positions
+    SET exit_market='PUMP_AMM', gross_return_pct=9999, net_return_pct=9999
+    WHERE entry_profile_id='COB_D' AND exit_profile_id='FIX30'
+  `).run();
+  const guardedDashboard = suite.dashboard({ positionLimit: 20 });
+  const guardedFixed30 = guardedDashboard.cohorts.find(
+    (row) => row.entry_profile_id === 'COB_D' && row.exit_profile_id === 'FIX30',
+  );
+  assert.strictEqual(guardedFixed30.priced_exits, 0);
+  assert.strictEqual(guardedFixed30.closed_without_return, 1);
+  assert.strictEqual(guardedFixed30.average_net_return_pct, null);
   store.close();
   console.log('CYA Organic Burst Shadow tests: PASS');
 }

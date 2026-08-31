@@ -781,13 +781,13 @@ class SmartLikeEarlyShadowSuite {
         AVG(add_count) average_add_count, AVG(partial_exit_count) average_partial_exit_count,
         AVG(total_invested_sol) average_invested_sol, AVG(max_favorable_return_pct) average_mfe_pct,
         AVG(max_adverse_return_pct) average_mae_pct,
-        AVG(CASE WHEN status IN ('CLOSED','NO_EXIT')
+        AVG(CASE WHEN status='CLOSED'
           THEN CASE WHEN smart_confirmed_at IS NOT NULL THEN 100.0 ELSE 0 END END)
           smart_confirmation_rate_pct,
-        AVG(net_return_pct) average_net_return_pct,
+        AVG(CASE WHEN status='CLOSED' THEN net_return_pct END) average_net_return_pct,
         AVG(CASE WHEN status='CLOSED'
           THEN CASE WHEN net_return_pct>0 THEN 100.0 ELSE 0 END END) win_rate_pct,
-        MAX(net_return_pct) max_winner_pct
+        MAX(CASE WHEN status='CLOSED' THEN net_return_pct END) max_winner_pct
       FROM smart_like_early_shadow_positions
       GROUP BY cohort_id, entry_profile_id, add_profile_id, exit_profile_id
       ORDER BY entry_profile_id, add_profile_id, exit_profile_id

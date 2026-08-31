@@ -638,11 +638,6 @@ class QualityLeaderShadowSuite {
     this.store.updateQualityLeaderShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
       rejectionReason: reason,
-      grossReturnPct: -100,
-      netReturnPct: -100 - finite(
-        position.configuredCostPct,
-        this.costs.deterministicCostPct,
-      ),
     });
     this.positions.delete(position.id);
     this._unindex(position);

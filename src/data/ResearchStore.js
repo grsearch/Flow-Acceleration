@@ -543,7 +543,7 @@ class ResearchStore {
           ABS(COALESCE(SUM(CASE WHEN net_return_pct < 0 THEN net_return_pct ELSE 0 END), 0))
             AS total_loss_pct
         FROM ${strategy.table}
-        WHERE status IN ('CLOSED', 'NO_EXIT') AND net_return_pct IS NOT NULL
+        WHERE status = 'CLOSED' AND net_return_pct IS NOT NULL
         GROUP BY session_id
       `;
       const holderGrowthSql = `
@@ -3121,11 +3121,26 @@ class ResearchStore {
           AND status = 'ENTRY_FAILED'
           AND COALESCE(updated_at, created_at) >= ?
       `),
+      failedLiveEntryCountForMintSince: this.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM live_positions
+        WHERE mint = ?
+          AND status = 'ENTRY_FAILED'
+          AND COALESCE(updated_at, created_at) >= ?
+      `),
       lastFailedLivePositionForMintStrategy: this.db.prepare(`
         SELECT *
         FROM live_positions
         WHERE mint = ?
           AND strategy_id = ?
+          AND status = 'ENTRY_FAILED'
+        ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+        LIMIT 1
+      `),
+      lastFailedLivePositionForMint: this.db.prepare(`
+        SELECT *
+        FROM live_positions
+        WHERE mint = ?
           AND status = 'ENTRY_FAILED'
         ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
         LIMIT 1
@@ -4913,6 +4928,16 @@ class ResearchStore {
 
   lastFailedLivePositionForMintStrategy(mint, strategyId) {
     return this.stmts.lastFailedLivePositionForMintStrategy.get(mint, strategyId) || null;
+  }
+
+  failedLiveEntryCountForMintSince(mint, sinceMs) {
+    return Number(
+      this.stmts.failedLiveEntryCountForMintSince.get(mint, sinceMs)?.n || 0,
+    );
+  }
+
+  lastFailedLivePositionForMint(mint) {
+    return this.stmts.lastFailedLivePositionForMint.get(mint) || null;
   }
 
   recordLiveOrder(order) {
@@ -6747,18 +6772,18 @@ class ResearchStore {
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(rejection_reason = 'PRE_ENTRY_RUG_RISK'), 0) AS rug_rejected,
-        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+        AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
           AS average_net_return_pct,
-        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN gross_return_pct END)
+        AVG(CASE WHEN status = 'CLOSED' THEN gross_return_pct END)
           AS average_gross_return_pct,
-        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0) AS wins,
-        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct IS NOT NULL), 0)
+        COALESCE(SUM(status = 'CLOSED' AND net_return_pct > 0), 0) AS wins,
+        COALESCE(SUM(status = 'CLOSED' AND net_return_pct IS NOT NULL), 0)
           AS resolved,
-        MAX(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+        MAX(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
           AS maximum_winner_pct,
-        SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0
+        SUM(CASE WHEN status = 'CLOSED' AND net_return_pct > 0
           THEN net_return_pct ELSE 0 END) AS gross_profit_pct,
-        ABS(SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct < 0
+        ABS(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0
           THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
       FROM migration_second_leg_shadow_positions
     `).get();
@@ -6771,20 +6796,20 @@ class ResearchStore {
         COUNT(DISTINCT mint) AS mints,
         COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
-        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(rejection_reason = 'PRE_ENTRY_RUG_RISK'), 0) AS rug_rejected,
-        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0)
+        COALESCE(SUM(status = 'CLOSED' AND net_return_pct > 0), 0)
           AS wins,
-        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+        AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
           AS average_net_return_pct,
-        MAX(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+        MAX(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
           AS maximum_winner_pct,
-        SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0
+        SUM(CASE WHEN status = 'CLOSED' AND net_return_pct > 0
           THEN net_return_pct ELSE 0 END) AS gross_profit_pct,
-        ABS(SUM(CASE WHEN status IN ('CLOSED', 'NO_EXIT') AND net_return_pct < 0
+        ABS(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0
           THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
       FROM migration_second_leg_shadow_positions
       GROUP BY cohort_id
@@ -6987,7 +7012,7 @@ class ResearchStore {
       for (const row of this.db.prepare(`
         SELECT cohort_id, net_return_pct, gross_return_pct, max_favorable_return_pct
         FROM launch_pullback_shadow_positions
-        WHERE status IN ('CLOSED', 'NO_EXIT') AND net_return_pct IS NOT NULL
+        WHERE status = 'CLOSED' AND net_return_pct IS NOT NULL
         ORDER BY cohort_id, net_return_pct
       `).iterate()) {
         if (row.cohort_id !== activeCohortId) {
@@ -7123,7 +7148,7 @@ class ResearchStore {
         const resolved = this.db.prepare(`
           SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
           FROM migrated_drop_rebound_shadow_positions
-          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          WHERE cohort_id = ? AND status = 'CLOSED'
             AND net_return_pct IS NOT NULL
           ORDER BY net_return_pct
         `).all(cohort.cohort_id);
@@ -7285,7 +7310,7 @@ class ResearchStore {
           COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
           COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
           COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
-          COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
           AVG(range_score) AS average_range_score,
           AVG(volume_sol) AS average_volume_sol,
           AVG(unique_wallets) AS average_unique_wallets,
@@ -7301,7 +7326,7 @@ class ResearchStore {
       const resolvedStatement = this.db.prepare(`
         SELECT net_return_pct
         FROM range_scalper_shadow_positions
-        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+        WHERE cohort_id = ? AND status = 'CLOSED'
           AND net_return_pct IS NOT NULL
         ORDER BY net_return_pct
       `);
@@ -7355,7 +7380,7 @@ class ResearchStore {
           COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
           COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
           COALESCE(SUM(status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')), 0) AS active,
-          COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
           AVG(age_ms) AS average_age_ms,
           AVG(curve_pct) AS average_curve_pct,
           AVG(buyers_5s) AS average_buyers_5s,
@@ -7373,7 +7398,7 @@ class ResearchStore {
       `).all();
       const resolved = this.db.prepare(`
         SELECT net_return_pct FROM cya_early_pyramid_shadow_positions
-        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+        WHERE cohort_id = ? AND status = 'CLOSED'
           AND net_return_pct IS NOT NULL ORDER BY net_return_pct
       `);
       return groups.map((group) => {
@@ -7439,7 +7464,7 @@ class ResearchStore {
           COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
           COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
           COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active,
-          COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+          COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
           AVG(entry_jump_pct) AS average_entry_jump_pct,
           AVG(max_favorable_return_pct) AS average_mfe_pct,
           AVG(max_adverse_return_pct) AS average_mae_pct
@@ -7451,7 +7476,7 @@ class ResearchStore {
         const resolved = this.db.prepare(`
           SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
           FROM bonding_curve_momentum_shadow_positions
-          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          WHERE cohort_id = ? AND status = 'CLOSED'
             AND net_return_pct IS NOT NULL
           ORDER BY net_return_pct
         `).all(group.cohort_id);
@@ -7553,7 +7578,7 @@ class ResearchStore {
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active,
-        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT')), 0) AS resolved,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
         COALESCE(SUM(graduation_ready = 1), 0) AS graduation_ready,
         COALESCE(SUM(graduated_at IS NOT NULL), 0) AS graduated,
         AVG(gates_passed) AS average_gates_passed,
@@ -7569,7 +7594,7 @@ class ResearchStore {
       const resolved = this.db.prepare(`
         SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
         FROM graduation_hold_shadow_positions
-        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+        WHERE cohort_id = ? AND status = 'CLOSED'
           AND net_return_pct IS NOT NULL
         ORDER BY net_return_pct
       `).all(group.cohort_id);
@@ -7963,9 +7988,9 @@ class ResearchStore {
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
         COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
-        AVG(CASE WHEN status IN ('CLOSED', 'NO_EXIT') THEN net_return_pct END)
+        AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
           AS average_net_return_pct,
-        COALESCE(SUM(status IN ('CLOSED', 'NO_EXIT') AND net_return_pct > 0), 0) AS wins,
+        COALESCE(SUM(status = 'CLOSED' AND net_return_pct > 0), 0) AS wins,
         AVG(CASE
           WHEN status = 'CLOSED' AND entry_at IS NOT NULL AND exit_at IS NOT NULL
             THEN exit_at - entry_at
@@ -7982,9 +8007,9 @@ class ResearchStore {
         COALESCE(SUM(p.rule_matched = 1), 0) AS matched,
         COALESCE(SUM(p.status = 'CLOSED'), 0) AS closed_positions,
         COALESCE(SUM(p.status = 'NO_EXIT'), 0) AS no_exit,
-        AVG(CASE WHEN p.status IN ('CLOSED', 'NO_EXIT') THEN p.net_return_pct END)
+        AVG(CASE WHEN p.status = 'CLOSED' THEN p.net_return_pct END)
           AS average_net_return_pct,
-        COALESCE(SUM(p.status IN ('CLOSED', 'NO_EXIT') AND p.net_return_pct > 0), 0) AS wins
+        COALESCE(SUM(p.status = 'CLOSED' AND p.net_return_pct > 0), 0) AS wins
       FROM primary_signal_shadow_positions p
       JOIN flow_signals s ON s.signal_id = p.signal_id
       GROUP BY s.signal_variant
@@ -8048,7 +8073,7 @@ class ResearchStore {
       const resolved = this.db.prepare(`
         SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
         FROM flow_first_shadow_positions
-        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+        WHERE cohort_id = ? AND status = 'CLOSED'
           AND net_return_pct IS NOT NULL
         ORDER BY net_return_pct
       `).all(cohortId);
@@ -8147,7 +8172,7 @@ class ResearchStore {
       const resolved = this.db.prepare(`
         SELECT net_return_pct, gross_return_pct, max_favorable_return_pct
         FROM smart_pullback_shadow_positions
-        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+        WHERE cohort_id = ? AND status = 'CLOSED'
           AND net_return_pct IS NOT NULL
         ORDER BY net_return_pct
       `).all(cohortId);
@@ -8239,7 +8264,7 @@ class ResearchStore {
         const resolved = this.db.prepare(`
           SELECT net_return_pct, gross_return_pct, max_favorable_return_pct, entry_jump_pct
           FROM smart_open_shadow_positions
-          WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+          WHERE cohort_id = ? AND status = 'CLOSED'
             AND net_return_pct IS NOT NULL
           ORDER BY net_return_pct
         `).all(cohortId);
@@ -8350,7 +8375,7 @@ class ResearchStore {
       `).get(cohortId);
       const returns = this.db.prepare(`
         SELECT net_return_pct FROM flow_smart_confirm_shadow_positions
-        WHERE cohort_id = ? AND status IN ('CLOSED', 'NO_EXIT')
+        WHERE cohort_id = ? AND status = 'CLOSED'
           AND net_return_pct IS NOT NULL ORDER BY net_return_pct
       `).all(cohortId).map((row) => Number(row.net_return_pct)).filter(Number.isFinite);
       const wins = returns.filter((value) => value > 0).sort((a, b) => b - a);

@@ -243,6 +243,7 @@ class MigrationSecondLegShadowSuite {
     }));
     return {
       enabled: this.config.enabled,
+      newEntriesEnabled: this.config.newEntriesEnabled !== false,
       mode: 'SHADOW_LPS_RESEARCH_MATRIX',
       code: this.cohorts.map((cohort) => cohort.id).join(' / '),
       sendsTransactions: false,
@@ -297,6 +298,7 @@ class MigrationSecondLegShadowSuite {
   }
 
   _createSignal(snapshot, trade, cohort, regime) {
+    if (this.config.newEntriesEnabled === false) return;
     const migrationAt = finite(snapshot.migrationAt, snapshot.observedAt - snapshot.ageMs);
     const episodeId = `${snapshot.mint}:${migrationAt}:${cohort.id}`;
     const features = {
@@ -647,8 +649,6 @@ class MigrationSecondLegShadowSuite {
   _markNoExit(position) {
     this.store.updateMigrationSecondLegShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
-      grossReturnPct: -100,
-      netReturnPct: -100 - position.configuredCostPct,
       exitReason: position.exitReason || 'NO_EXIT',
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,

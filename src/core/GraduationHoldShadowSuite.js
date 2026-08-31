@@ -610,8 +610,6 @@ class GraduationHoldShadowSuite {
   _markNoExit(position) {
     this.store.updateGraduationHoldShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
-      grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
     });
     this.positions.delete(position.id);
     this._unindex(position);

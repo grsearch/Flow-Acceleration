@@ -77,6 +77,9 @@ const liveGfr300 = config.liveTrading.strategies.find((strategy) => (
 const liveGe30R23F2G2 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'migrated_ge30_r23_f2_only_g2_xleg_live'
 ));
+const liveGe30V2Exec01 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live'
+));
 const liveGd25X8 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'migrated_gd25_35_x8_live'
 ));
@@ -164,6 +167,18 @@ assert.strictEqual(liveGe30R23F2G2.entryBeijingStartHour, 4);
 assert.strictEqual(liveGe30R23F2G2.entryBeijingEndHour, 24);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshRetryCount, 1);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshMaxSignalAgeMs, 2_500);
+assert.strictEqual(liveGe30V2Exec01.entryEnabled, true);
+assert.strictEqual(liveGe30V2Exec01.positionSizeSol, 0.1);
+assert.strictEqual(liveGe30V2Exec01.code, 'G-V2-EXEC01-R2-H15');
+assert.strictEqual(liveGe30V2Exec01.market, 'PUMP_AMM');
+assert.strictEqual(liveGe30V2Exec01.exitMode, 'RISK_XLEG');
+assert.strictEqual(liveGe30V2Exec01.hardStopPct, 15);
+assert.strictEqual(liveGe30V2Exec01.lossCheckAtMs, 2_000);
+assert.strictEqual(liveGe30V2Exec01.lossCheckRecoveryPct, 1);
+assert.strictEqual(
+  liveGe30V2Exec01.sourceShadowCohortId,
+  'POST_GE30_D25_32_R24_F1_EXEC1_V2_R2_H15_0_1SOL',
+);
 assert.strictEqual(liveGd25X8.entryEnabled, true);
 assert.strictEqual(liveGd25X8.positionSizeSol, 0.1);
 assert.strictEqual(liveGd25X8.code, 'POST-GD25-35-X8');
@@ -285,6 +300,7 @@ assert.deepStrictEqual(
     .map((strategy) => strategy.code),
   [
     'POST-GE30-R23-F2-G2-XLEG',
+    'G-V2-EXEC01-R2-H15',
     'POST-GD25-35-X8',
     'O90-M5-STAIR120',
     'QL-STRICT-GUARD',
@@ -408,7 +424,7 @@ assert.deepStrictEqual(
   ],
 );
 assert.strictEqual(config.smartWalletFirstOpenRightTailShadow.enabled, false);
-assert.strictEqual(config.publicFlowLeadShadow.enabled, true);
+assert.strictEqual(config.publicFlowLeadShadow.enabled, false);
 assert.strictEqual(config.publicFlowLeadShadow.simulatePositions, false);
 assert.strictEqual(config.publicFlowLeadShadow.positionSizeSol, 1);
 assert.strictEqual(config.publicFlowLeadShadow.smartLabelWindowMs, 15_000);
@@ -443,7 +459,7 @@ assert.deepStrictEqual([
   pflBalanced.maxReturn5sPct, pflBalanced.maxPreReturnPct,
   pflBalanced.maxPreConsecutiveBuys, pflBalanced.requirePreRiskSampleReady,
 ], [3_000, 60_000, 1, 4, 0.25, 1, 0.5, 45, 40, 70, 10, true]);
-assert.strictEqual(config.launchPullbackShadow.enabled, true);
+assert.strictEqual(config.launchPullbackShadow.enabled, false);
 assert.strictEqual(config.launchPullbackShadow.positionSizeSol, 1);
 assert.strictEqual(config.launchPullbackShadow.maxEntryPriceJumpPct, 10);
 assert.deepStrictEqual(
@@ -514,7 +530,7 @@ assert.ok(
   Math.abs(costBreakdown(config.launchPullbackShadow.costModel).deterministicCostPct - 2.251)
     < 1e-12,
 );
-assert.strictEqual(config.launchQualityObserver.enabled, true);
+assert.strictEqual(config.launchQualityObserver.enabled, false);
 assert.deepStrictEqual(
   config.launchQualityObserver.snapshotHorizonsMs,
   [5_000, 10_000, 20_000, 30_000, 60_000],
@@ -596,6 +612,15 @@ const v2ExecutableProfile = config.migratedDropReboundShadow.entryProfiles
   .find((profile) => profile.id === 'GE30_D25_32_R24_F1_EXEC1');
 assert.deepStrictEqual(v2ExecutableProfile.positionSols, [0.1, 1]);
 assert.deepStrictEqual(v2ExecutableProfile.exitProfileIds, ['V2_R2_H15']);
+assert.strictEqual(v2ExecutableProfile.livePositionSol, 0.1);
+assert.deepStrictEqual(v2ExecutableProfile.liveExitStrategies, {
+  V2_R2_H15: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
+});
+assert.deepStrictEqual(
+  config.migratedDropReboundShadow.entryProfiles
+    .find((profile) => profile.id === 'GE30_R23_F2_ONLY').exitProfileIds,
+  ['G2_XLEG', 'G2_XLEG_H20_FWD'],
+);
 assert.deepStrictEqual(
   config.migratedDropReboundShadow.entryProfiles
     .find((profile) => profile.id === 'GE30_R23_F1_NIGHT').beijingHourRanges,
@@ -606,7 +631,8 @@ assert.deepStrictEqual(
   [
     'X3', 'X8', 'XLEG',
     'GEXEC_XLEG', 'G2_XLEG', 'GRT_F3_XLEG_V2', 'GRT_F2_XLEG_V2',
-    'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG', 'GQ_XLEG',
+    'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG',
+    'G2_XLEG_H20_FWD', 'GQ_XLEG',
     'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
     'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
     'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
@@ -629,6 +655,12 @@ assert.deepStrictEqual(
     .find((profile) => profile.id === 'V2_R2_H15').entryProfileIds,
   ['GE30_D25_32_R24_F1', 'GE30_D25_32_R24_F1_EXEC1'],
 );
+const g2HardStopForward = config.migratedDropReboundShadow.exitProfiles
+  .find((profile) => profile.id === 'G2_XLEG_H20_FWD');
+assert.deepStrictEqual(g2HardStopForward.entryProfileIds, ['GE30_R23_F2_ONLY']);
+assert.strictEqual(g2HardStopForward.exitMode, 'RISK_XLEG');
+assert.strictEqual(g2HardStopForward.hardStopPct, 20);
+assert.strictEqual(g2HardStopForward.lossCheckRecoveryPct, 1);
 const v2TimeProfile = config.migratedDropReboundShadow.entryProfiles
   .find((profile) => profile.id === 'GE30_D25_32_R24_F1_04_24');
 assert.deepStrictEqual(v2TimeProfile.beijingHourRanges, [[4, 24]]);
@@ -696,7 +728,7 @@ assert.ok(gfrProfiles.every((profile) => (
   && profile.positionSols.join(',') === '0.05,0.1'
 )));
 assert.strictEqual(config.bigWinnerShadow.transientUpPriceRatio, 2);
-assert.strictEqual(config.bigWinnerShadow.enabled, true);
+assert.strictEqual(config.bigWinnerShadow.enabled, false);
 assert.strictEqual(config.bigWinnerShadow.priceConfirmationWindowMs, 500);
 assert.strictEqual(config.bigWinnerShadow.priceConfirmationMinPersistenceMs, 150);
 assert.strictEqual(config.bigWinnerShadow.priceConfirmationTolerancePct, 25);
@@ -761,7 +793,7 @@ assert.deepStrictEqual(
     'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
   ],
 );
-assert.strictEqual(config.migrationContinuityShadow.enabled, true);
+assert.strictEqual(config.migrationContinuityShadow.enabled, false);
 assert.strictEqual(config.migrationContinuityShadow.positionSizeSol, 1);
 assert.deepStrictEqual(config.migrationContinuityShadow.entryProfile, {
   id: 'MC_C5', label: 'MC-C · 毕业后5秒质量延续',
@@ -921,8 +953,8 @@ assert.ok(liveMigrationHandoffProfiles.every((profile) => (
   && profile.postMigrationEntryGate.waitForQualification === true
   && !profile.liveStrategyId
 )));
-assert.strictEqual(config.migrationSecondLegShadow.enabled, true);
-assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, true);
+assert.strictEqual(config.migrationSecondLegShadow.enabled, false);
+assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, false);
 assert.strictEqual(config.migrationSecondLegShadow.maxObservedPriceRatio, 100);
 assert.deepStrictEqual(
   config.migrationSecondLegShadow.cohorts

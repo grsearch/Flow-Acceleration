@@ -285,6 +285,14 @@ const m2fNearHighThresholds = Object.freeze({
   maxEstimatedImpact1SolPct: 1,
 });
 
+// Retired research paths stay queryable for historical analysis, but an old server
+// .env must not silently reopen them. Reopening requires this explicit master gate
+// as well as the individual strategy switch.
+const retiredResearchReopenEnabled = booleanEnv(
+  'FLOW_RETIRED_RESEARCH_REOPEN_ENABLED',
+  false,
+);
+
 // Late post-migration stabilization (LPS) is intentionally isolated from the
 // retired M2F entry matrix. M2F-OBS already keeps eight minutes of causal
 // PumpSwap snapshots, so these delayed controls add no RPC calls. The 150s
@@ -870,6 +878,63 @@ const config = {
         lossCheckAtMs: 6_000,
         maxHoldMs: 15_000,
         sourceShadowCohortId: 'POST_GE30_R23_F2_ONLY_G2_XLEG',
+      },
+      {
+        id: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
+        code: 'G-V2-EXEC01-R2-H15',
+        label: 'Lifecycle Drop/Rebound G · V2可执行0.1 SOL / R2-H15',
+        ruleVersion: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live_v1',
+        signalSource: 'MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15',
+        enabled: booleanEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_ENABLED',
+          true,
+        ),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        entryQuoteRefreshRetryCount: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_QUOTE_REFRESH_RETRY_COUNT',
+          1,
+          { min: 0, max: 1 },
+        ),
+        entryQuoteRefreshMaxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_QUOTE_REFRESH_MAX_SIGNAL_AGE_MS',
+          2_500,
+          { min: 100, max: 10_000 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_MAX_ENTRY_JUMP_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        hardStopPct: 15,
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: 2_000,
+        lossCheckRecoveryPct: 1,
+        maxHoldMs: 15_000,
+        sourceShadowCohortId: 'POST_GE30_D25_32_R24_F1_EXEC1_V2_R2_H15_0_1SOL',
       },
       {
         id: 'migrated_gd25_35_x8_live',
@@ -2109,6 +2174,25 @@ const config = {
       'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC2_WALLET_BUY_TX_SHARE_PCT', 60,
       { min: 0, max: 100 },
     ),
+    // Stage-specific forward candidates derived from independent historical
+    // episodes. They are audit labels only: no live/Shadow entry rejection and
+    // no additional RPC or database lookup is allowed on the entry path.
+    firstCliffCurveLateCandidateRecoveryMaxPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_LATE_CANDIDATE_RECOVERY_MAX_PCT', 2,
+      { min: 0, max: 100 },
+    ),
+    firstCliffCurveMigrationCandidateWalletBuyTxSharePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_MIGRATION_CANDIDATE_WALLET_BUY_TX_SHARE_PCT', 70,
+      { min: 0, max: 100 },
+    ),
+    firstCliffAmmEarlyCandidateRecoveryMaxPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_EARLY_CANDIDATE_RECOVERY_MAX_PCT', 20,
+      { min: 0, max: 100 },
+    ),
+    firstCliffAmmEarlyCandidateWalletBuyTxSharePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_EARLY_CANDIDATE_WALLET_BUY_TX_SHARE_PCT', 25,
+      { min: 0, max: 100 },
+    ),
     // Learn repeated launch/rug families from public trades only. Four large
     // buys in a sub-500ms burst form a template; after that template visibly
     // collapses, later Mints with the same amount/timing vector or at least two
@@ -2550,7 +2634,8 @@ const config = {
   // ADD events are intentionally ignored because repeated small adds can be
   // promotional rather than incremental conviction.
   publicFlowLeadShadow: {
-    enabled: booleanEnv('FLOW_PUBLIC_FLOW_LEAD_V2_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_PUBLIC_FLOW_LEAD_V2_ENABLED', false),
     // Forward public-flow signals remain useful as labels, but the first live
     // sample invalidated the simulated-entry edge. Keep observation on while
     // stopping new paper positions by default; historical rows stay queryable.
@@ -2686,7 +2771,8 @@ const config = {
   // Smart-Wallet trade sample. Historical simulated positions remain readable,
   // but the disproven CAF entry family no longer creates new positions.
   creatorAffinityShadow: {
-    enabled: booleanEnv('FLOW_CREATOR_AFFINITY_SHADOW_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_CREATOR_AFFINITY_SHADOW_ENABLED', false),
     simulatePositions: false,
     storageTable: 'creator_affinity_shadow_positions',
     strategyCode: 'CAF',
@@ -2815,7 +2901,8 @@ const config = {
     // The new key prevents a stale server V2=false from silently keeping the
     // suite paused after deployment; every other entry profile remains gated
     // independently below.
-    enabled: booleanEnv('FLOW_BIG_WINNER_SHADOW_V3_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_BIG_WINNER_SHADOW_V3_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_BIG_WINNER_SHADOW_POSITION_SOL'),
     stateWindowMs: integerEnv('FLOW_BIG_WINNER_SHADOW_STATE_WINDOW_MS', 10_000, {
       min: 8_000,
@@ -3139,7 +3226,8 @@ const config = {
   // Independent first-pullback execution research. References are emitted by
   // LaunchQualityObserver, but every simulated position lives in its own table.
   launchPullbackShadow: {
-    enabled: booleanEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
     entryDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_TIMEOUT_MS', 2_000, {
@@ -4966,7 +5054,7 @@ const config = {
         maxLifecycleAgeMs: 30_000,
         minSignalOrdinal: 2,
         maxSignalsPerMint: 2,
-        exitProfileIds: ['G2_XLEG'],
+        exitProfileIds: ['G2_XLEG', 'G2_XLEG_H20_FWD'],
         liveExitStrategies: {
           G2_XLEG: 'migrated_ge30_r23_f2_only_g2_xleg_live',
         },
@@ -5086,7 +5174,7 @@ const config = {
       },
       {
         id: 'GE30_D25_32_R24_F1_EXEC1',
-        label: 'V2-EXEC1 · 首次可执行1 SOL对照 · H15固定退出',
+        label: 'V2-EXEC1 · 0.1/1 SOL执行容量对照 · R2-H15',
         windowMs: 1_000,
         dropMinPct: 25,
         dropMaxPct: 32,
@@ -5103,6 +5191,10 @@ const config = {
         exitProfileIds: ['V2_R2_H15'],
         capacityAware: true,
         positionSols: [0.1, 1],
+        livePositionSol: 0.1,
+        liveExitStrategies: {
+          V2_R2_H15: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
+        },
       },
       {
         id: 'GE30_D25_32_R24_F1_04_24',
@@ -5155,6 +5247,10 @@ const config = {
         ['GFR_1000', 1_000],
       ].map(([id, confirmationMs]) => ({
         id,
+        // Keep GFR_300 as the measured fast path. The 600/1000ms variants
+        // remain queryable but stop producing new positions after a
+        // persistently negative forward sample.
+        newEntriesEnabled: id === 'GFR_300',
         liveStrategyId: id === 'GFR_300' ? 'migrated_gfr_300_hs20_h30_live' : null,
         label: `G-FR · 快速反转延续 · ${confirmationMs}ms确认`,
         windowMs: 1_000,
@@ -5280,6 +5376,20 @@ const config = {
         lossCheckAtMs: 6_000,
         maxHoldMs: 15_000,
       })),
+      {
+        id: 'G2_XLEG_H20_FWD',
+        label: '第二次机会 XLEG + 20%硬止损（前向）',
+        entryProfileIds: ['GE30_R23_F2_ONLY'],
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        hardStopPct: 20,
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: 6_000,
+        lossCheckRecoveryPct: 1,
+        maxHoldMs: 15_000,
+      },
       {
         id: 'GQ_XLEG',
         label: 'GQ fast-rebound capacity XLEG',
@@ -5542,7 +5652,8 @@ const config = {
   // selected from the chronological migration-cohort backtest; every exit is
   // stored as a separate cohort so long-hold winner capture stays auditable.
   migrationContinuityShadow: {
-    enabled: booleanEnv('FLOW_MIGRATION_CONTINUITY_SHADOW_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_MIGRATION_CONTINUITY_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
     confirmWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_CONFIRM_MS', 5_000, {
       min: 1_000, max: 15_000,
@@ -6160,7 +6271,8 @@ const config = {
   // Independent two-stage Quality Leader research. It consumes existing 10s/20s
   // Launch Quality snapshots and therefore adds no RPC or gRPC subscriptions.
   qualityLeaderShadow: {
-    enabled: booleanEnv('FLOW_QUALITY_LEADER_SHADOW_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_QUALITY_LEADER_SHADOW_ENABLED', false),
     positionSizeSol: shadowPositionEnv('FLOW_QUALITY_LEADER_POSITION_SOL'),
     snapshot10Ms: 10_000,
     snapshot20Ms: 20_000,
@@ -6379,7 +6491,11 @@ const config = {
   // Passing 5m also opens isolated capacity-aware 30/60/120s Shadow rows. It
   // never opens a live position, calls extra RPC endpoints, or signs.
   postMigrationSurvivorObserver: {
-    enabled: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_ENABLED', false),
+    newEntriesEnabled: booleanEnv(
+      'FLOW_POST_MIGRATION_SURVIVOR_NEW_ENTRIES_ENABLED', false,
+    ),
     positionSol: numberEnv('FLOW_POST_MIGRATION_SURVIVOR_POSITION_SOL', 1, {
       min: 0.01, max: 100,
     }),
@@ -6493,7 +6609,8 @@ const config = {
       'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_MIN_WALLETS', 2,
       { min: 1, max: 100 },
     ),
-    shadowEnabled: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ENABLED', true),
+    shadowEnabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ENABLED', false),
     shadowFullHoldMatrixEnabled: booleanEnv(
       'FLOW_POST_MIGRATION_SURVIVOR_FULL_HOLD_MATRIX_ENABLED', false,
     ),
@@ -6803,7 +6920,8 @@ const config = {
   // Observer-only Launch Quality research. Reference percentages label market
   // structure for later analysis; they never become an entry or execution rule.
   launchQualityObserver: {
-    enabled: booleanEnv('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED', false),
     snapshotHorizonsMs: millisecondListEnv(
       'FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS',
       [5, 10, 20, 30, 60],
@@ -6861,7 +6979,8 @@ const config = {
   // M2F-OBS collects causal post-migration second-leg evidence only. It has
   // no position model, execution callback, RPC enrichment or transaction path.
   migrationSecondLegObserver: {
-    enabled: booleanEnv('FLOW_M2F_OBSERVER_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_M2F_OBSERVER_ENABLED', false),
     maxAgeMs: integerEnv('FLOW_M2F_OBSERVER_MAX_AGE_MS', 480_000, {
       min: 60_000,
       max: 30 * 60_000,
@@ -6896,12 +7015,15 @@ const config = {
   // Reuse the independent eight-minute M2F-OBS tape for a separately named
   // late-stabilization matrix; old M2F rows remain untouched and queryable.
   migrationSecondLegShadow: {
-    enabled: booleanEnv('FLOW_LPS_SHADOW_ENABLED', true),
+    enabled: retiredResearchReopenEnabled
+      && booleanEnv('FLOW_LPS_SHADOW_ENABLED', false),
+    newEntriesEnabled: booleanEnv('FLOW_LPS_SHADOW_NEW_ENTRIES_ENABLED', false),
     strategyName: 'Late Post-Migration Stabilization LPS',
     // Labels the broad post-migration tape for Shadow research only. This
     // object is not consumed by LiveTradingManager or any live strategy.
     marketRegime: {
-      enabled: booleanEnv('FLOW_M2F_MARKET_REGIME_SHADOW_ENABLED', true),
+      enabled: retiredResearchReopenEnabled
+        && booleanEnv('FLOW_M2F_MARKET_REGIME_SHADOW_ENABLED', false),
       maturityAgeMs: integerEnv('FLOW_M2F_MARKET_REGIME_MATURITY_MS', 120_000, {
         min: 10_000, max: 10 * 60_000,
       }),
@@ -7299,6 +7421,7 @@ function validateConfig() {
     if (!process.env.FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_POSITION_SOL
+      && !process.env.FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATED_GD25_35_X8_POSITION_SOL
       && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_POSITION_SOL
       && !process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_POSITION_SOL

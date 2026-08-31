@@ -297,7 +297,7 @@ class FeatureEdgeAuditObserver {
   _maybeOpenBnh(sample) {
     const eligible = this.config.bnhEnabled
       && sample.market === 'PUMP_BONDING_CURVE'
-      && sample.features.balance && !sample.features.participation
+      && sample.features.flow && sample.features.balance && !sample.features.participation
       && sample.features.structure && sample.features.execution
       && sample.ageMs >= this.config.bnhMinAgeMs && sample.ageMs <= this.config.bnhMaxAgeMs
       && sample.curvePct >= this.config.bnhMinCurvePct

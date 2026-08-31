@@ -754,6 +754,7 @@ class PostMigrationSurvivorObserver {
   _openShadowPositions(state, trade, timestampMs, rawPrice) {
     const signalAtMs = state.shadowEntryPendingAtMs;
     state.shadowEntryPendingAtMs = null;
+    if (this.config.newEntriesEnabled === false) return;
     for (const holdMs of this.config.shadowHoldMs) {
       const profileId = this._shadowProfileId(holdMs);
       const entry = executableBuy(trade, this.config.positionSol, rawPrice);
@@ -1127,6 +1128,7 @@ class PostMigrationSurvivorObserver {
     );
     return {
       enabled: this.config.enabled,
+      newEntriesEnabled: this.config.newEntriesEnabled !== false,
       mode: 'PM_SURV_OBSERVER_SHADOW',
       observerOnly: true,
       sendsTransactions: false,

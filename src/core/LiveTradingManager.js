@@ -68,6 +68,7 @@ function restoredPosition(row) {
     entrySignature: row.entry_signature,
     entryError: row.entry_error,
     highestPrice: row.highest_price,
+    lowestPrice: row.entry_price,
     exitReason: row.exit_reason,
     exitError: row.exit_error,
     openedAt: row.opened_at,
@@ -897,21 +898,24 @@ class LiveTradingManager {
     const maxFailedEntriesPerMint = Number.isFinite(Number(strategy.maxFailedEntriesPerMint))
       ? Math.max(1, Number(strategy.maxFailedEntriesPerMint))
       : Math.max(1, Number(this.config.maxFailedEntriesPerMint) || 2);
-    const lastFailed = typeof this.store.lastFailedLivePositionForMintStrategy === 'function'
-      ? this.store.lastFailedLivePositionForMintStrategy(event.mint, event.strategyId)
-      : null;
+    const lastFailed = typeof this.store.lastFailedLivePositionForMint === 'function'
+      ? this.store.lastFailedLivePositionForMint(event.mint)
+      : (typeof this.store.lastFailedLivePositionForMintStrategy === 'function'
+        ? this.store.lastFailedLivePositionForMintStrategy(event.mint, event.strategyId)
+        : null);
     if (lastFailed && now - Number(lastFailed.updated_at || lastFailed.created_at)
       < failedEntryCooldownMs) {
       return 'MINT_FAILED_ENTRY_COOLDOWN';
     }
-    const recentFailedEntries = typeof this.store.failedLiveEntryCountForMintStrategySince
-      === 'function'
-      ? this.store.failedLiveEntryCountForMintStrategySince(
-        event.mint,
-        event.strategyId,
-        now - failedEntryWindowMs,
-      )
-      : 0;
+    const recentFailedEntries = typeof this.store.failedLiveEntryCountForMintSince === 'function'
+      ? this.store.failedLiveEntryCountForMintSince(event.mint, now - failedEntryWindowMs)
+      : (typeof this.store.failedLiveEntryCountForMintStrategySince === 'function'
+        ? this.store.failedLiveEntryCountForMintStrategySince(
+          event.mint,
+          event.strategyId,
+          now - failedEntryWindowMs,
+        )
+        : 0);
     if (recentFailedEntries >= maxFailedEntriesPerMint) return 'MINT_FAILED_ENTRY_LIMIT';
     const maxEntriesPerMint = Math.max(1, Number(strategy?.maxEntriesPerMint) || 1);
     const successfulEntries = typeof this.store.successfulLiveEntryCountForMintStrategy === 'function'
@@ -944,6 +948,12 @@ class LiveTradingManager {
       source: 'LIVE',
       market: event.market || strategy.market,
       lifecycleStage: event.lifecycleStage || null,
+      lifecycleAgeMs: Number(
+        event.lifecycleAgeMs
+          ?? event.features?.migrationAgeMs
+          ?? event.features?.graduationAgeMs
+          ?? event.features?.ageMs,
+      ),
     });
     if (rugGuard.blocked) {
       this.metrics.riskRejected += 1;
@@ -1044,6 +1054,7 @@ class LiveTradingManager {
       position.tokenAmountRaw = result.tokenAmountRaw;
       position.entryPrice = result.expectedPrice || event.price;
       position.highestPrice = position.entryPrice;
+      position.lowestPrice = position.entryPrice;
       position.lastObservedPrice = null;
       position.openedAt = openedAt;
       const settlement = result.execution?.settlement || null;
@@ -1292,6 +1303,7 @@ class LiveTradingManager {
       position.openedAt = openedAt;
       position.exitReason = 'ENTRY_RECONCILED';
       position.highestPrice = position.entryPrice;
+      position.lowestPrice = position.entryPrice;
       position.lastObservedPrice = null;
       this.store.updateLivePosition(position.id, {
         status: 'OPEN',
@@ -1468,6 +1480,10 @@ class LiveTradingManager {
   _evaluatePositionExit(position, timestampMs, price, trade = null) {
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     if (!strategy || position.status !== 'OPEN' || !(position.entryPrice > 0) || !(price > 0)) return;
+    const previousLow = Number(position.lowestPrice);
+    position.lowestPrice = Number.isFinite(previousLow) && previousLow > 0
+      ? Math.min(previousLow, price)
+      : Math.min(position.entryPrice, price);
     const ageMs = timestampMs - position.openedAt;
     const grossReturnPct = ((price / position.entryPrice) - 1) * 100;
     const peakReturnPct = ((position.highestPrice / position.entryPrice) - 1) * 100;
@@ -1589,7 +1605,15 @@ class LiveTradingManager {
     if (!reason && peakReturnPct >= strategy.trailingActivationPct
       && drawdownPct >= strategy.trailingStopPct) reason = 'TRAILING_XLEG';
     if (!reason && strategy.lossCheckAtMs > 0 && ageMs >= strategy.lossCheckAtMs
-      && grossReturnPct < 0) reason = 'LOSS_CHECK';
+      && grossReturnPct < 0) {
+      const recoveryPct = position.lowestPrice > 0
+        ? ((price / position.lowestPrice) - 1) * 100
+        : 0;
+      const maxRecoveryPct = Number(strategy.lossCheckRecoveryPct);
+      if (!Number.isFinite(maxRecoveryPct) || recoveryPct <= maxRecoveryPct) {
+        reason = strategy.exitMode === 'RISK_XLEG' ? 'RISK_LOSS_CHECK' : 'LOSS_CHECK';
+      }
+    }
     if (!reason && ageMs >= strategy.maxHoldMs) reason = 'MAX_HOLD';
     if (reason) this._requestExit(position, reason, price);
   }

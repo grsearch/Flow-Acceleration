@@ -44,6 +44,12 @@ const FIRST_CLIFF_LIFECYCLE_STAGES = Object.freeze([
 
 function firstCliffCounterRow() {
   return {
+    firstCliffStageCandidateMatched: 0,
+    firstCliffStageCandidateResolved: 0,
+    firstCliffStageCandidateCaught: 0,
+    firstCliffStageCandidateNoCliff30s: 0,
+    firstCliffStageCandidateReturnSumPct: 0,
+    firstCliffStageCandidateReturnSamples: 0,
     firstCliffHc1Matched: 0,
     firstCliffHc2Matched: 0,
     firstCliffHc1Resolved: 0,
@@ -126,6 +132,7 @@ class PreEntryRugRiskTracker {
       firstCliffCandidates: 0,
       firstCliffHc1Matched: 0,
       firstCliffHc2Matched: 0,
+      firstCliffStageCandidateMatched: 0,
       firstCliffResolved: 0,
       firstCliffCaught: 0,
       firstCliffNoCliff30s: 0,
@@ -434,8 +441,10 @@ class PreEntryRugRiskTracker {
     source = 'SHADOW',
     market = null,
     lifecycleStage = null,
+    lifecycleAgeMs = null,
     enforcementMode = 'HARD_BLOCK',
     policyReason = 'TRACKER_DEFAULT_HARD_BLOCK',
+    requireHc2 = false,
   }) {
     const normalizedStrategyId = String(strategyId || 'UNKNOWN');
     const normalizedSource = String(source || 'SHADOW').toUpperCase();
@@ -456,7 +465,10 @@ class PreEntryRugRiskTracker {
       }
     } else risk = this.snapshot(mint, timestampMs);
     const riskFlagged = Boolean(this.config.enabled && risk.flagged);
-    const blocked = Boolean(riskFlagged && enforcementMode === 'HARD_BLOCK');
+    const hc2Matched = Boolean(risk.firstCliffCounterfactual?.hc2Matched);
+    const blocked = Boolean(riskFlagged
+      && enforcementMode === 'HARD_BLOCK'
+      && (!requireHc2 || hc2Matched));
     const stats = this.guardStrategies.get(normalizedStrategyId) || {
       strategyId: normalizedStrategyId,
       source: normalizedSource,
@@ -481,6 +493,8 @@ class PreEntryRugRiskTracker {
       : policyReason;
     stats.market = market;
     stats.lifecycleStage = lifecycleStage;
+    stats.lifecycleAgeMs = lifecycleAgeMs;
+    stats.requireHc2 = Boolean(requireHc2);
     stats.evaluated += 1;
     stats.lastEvaluatedAt = timestampMs;
     if (risk.sampleReady) stats.sampleReady += 1;
@@ -517,6 +531,9 @@ class PreEntryRugRiskTracker {
       policyReason,
       market,
       lifecycleStage,
+      lifecycleAgeMs,
+      requireHc2: Boolean(requireHc2),
+      hc2Matched,
       riskFlagged,
       blocked,
       reason: blocked ? 'PRE_ENTRY_RUG_RISK' : (
@@ -581,7 +598,7 @@ class PreEntryRugRiskTracker {
       enabled: this.config.enabled,
       mode: 'UNIVERSAL_PRE_ENTRY_RUG_GUARD',
       scope: 'LIFECYCLE_AND_STRATEGY_TIERED',
-      enforcement: 'POST_MIGRATION_HARD_BLOCK_CURVE_AND_RESEARCH_LABEL_ONLY',
+      enforcement: 'EXISTING_GUARDS_PLUS_LIFECYCLE_CANDIDATES_FORWARD_LABEL_ONLY',
       outcomeLabels: 'CLIFF_DROP_50/CLIFF_RUG_70/CLIFF_RUG_80/SLOW_RUG_30',
       dumpabilityMode: 'RESEARCH_ONLY_NO_ENTRY_BLOCK',
       firstCliffCounterfactualMode: 'PAIRED_SHADOW_NO_ENTRY_BLOCK',
@@ -643,6 +660,14 @@ class PreEntryRugRiskTracker {
           this._cfg('firstCliffAmmHc1WalletBuyTxSharePct', 50),
         firstCliffAmmHc2WalletBuyTxSharePct:
           this._cfg('firstCliffAmmHc2WalletBuyTxSharePct', 60),
+        firstCliffCurveLateCandidateRecoveryMaxPct:
+          this._cfg('firstCliffCurveLateCandidateRecoveryMaxPct', 2),
+        firstCliffCurveMigrationCandidateWalletBuyTxSharePct:
+          this._cfg('firstCliffCurveMigrationCandidateWalletBuyTxSharePct', 70),
+        firstCliffAmmEarlyCandidateRecoveryMaxPct:
+          this._cfg('firstCliffAmmEarlyCandidateRecoveryMaxPct', 20),
+        firstCliffAmmEarlyCandidateWalletBuyTxSharePct:
+          this._cfg('firstCliffAmmEarlyCandidateWalletBuyTxSharePct', 25),
         crossMintEnabled: this.config.crossMintEnabled !== false,
         templateWindowMs: this._cfg('templateWindowMs', 5_000),
         templateMinLargeBuys: this._cfg('templateMinLargeBuys', 4),
@@ -802,6 +827,10 @@ class PreEntryRugRiskTracker {
       && maxWalletBuyTxSharePct >= profile.hc2.walletBuyTxShareMinPct;
     const hc1Matched = eligible && (inventoryHc1 || ammFlowHc1);
     const hc2Matched = eligible && (inventoryHc2 || ammFlowHc2);
+    const stageCandidate = this._firstCliffStageCandidate(lifecycle.stage, {
+      top3RecoveryPct,
+      maxWalletBuyTxSharePct,
+    });
     return {
       mode,
       observedAt: timestampMs,
@@ -823,6 +852,10 @@ class PreEntryRugRiskTracker {
       top3RecoveryPct,
       hc1Matched,
       hc2Matched,
+      stageCandidateId: stageCandidate.id,
+      stageCandidateLabel: stageCandidate.label,
+      stageCandidateMatched: eligible && stageCandidate.matched,
+      stageCandidateCriteria: stageCandidate.criteria,
       hc1: profile.hc1,
       hc2: profile.hc2,
     };
@@ -914,6 +947,61 @@ class PreEntryRugRiskTracker {
     return adjusted;
   }
 
+  _firstCliffStageCandidate(stage, {
+    top3RecoveryPct = null,
+    maxWalletBuyTxSharePct = null,
+  } = {}) {
+    const recovery = finite(top3RecoveryPct);
+    const walletShare = finite(maxWalletBuyTxSharePct);
+    if (stage === 'CURVE_LATE') {
+      const maxRecovery = this._cfg('firstCliffCurveLateCandidateRecoveryMaxPct', 2);
+      return {
+        id: 'CL-R2',
+        label: `Top3回收≤${maxRecovery}%`,
+        criteria: { top3RecoveryMaxPct: maxRecovery },
+        matched: recovery != null && recovery <= maxRecovery,
+      };
+    }
+    if (stage === 'CURVE_MIGRATION') {
+      const minWalletShare = this._cfg(
+        'firstCliffCurveMigrationCandidateWalletBuyTxSharePct', 70,
+      );
+      return {
+        id: 'CM-W70',
+        label: `单钱包买单≥${minWalletShare}%`,
+        criteria: { walletBuyTxShareMinPct: minWalletShare },
+        matched: walletShare != null && walletShare >= minWalletShare,
+      };
+    }
+    if (stage === 'AMM_EARLY') {
+      // A deliberately broad forward candidate: the last independent sample
+      // caught every observed first cliff while selecting six of seven cases.
+      // It is a label, not an entry rejection; tomorrow's data can measure the
+      // false-positive cost before any enforcement decision is reconsidered.
+      const maxRecovery = this._cfg('firstCliffAmmEarlyCandidateRecoveryMaxPct', 20);
+      const minWalletShare = this._cfg(
+        'firstCliffAmmEarlyCandidateWalletBuyTxSharePct', 25,
+      );
+      return {
+        id: 'AE-R20-OR-W25',
+        label: `Top3回收≤${maxRecovery}% 或 单钱包买单≥${minWalletShare}%`,
+        criteria: {
+          top3RecoveryMaxPct: maxRecovery,
+          walletBuyTxShareMinPct: minWalletShare,
+          operator: 'OR',
+        },
+        matched: (recovery != null && recovery <= maxRecovery)
+          || (walletShare != null && walletShare >= minWalletShare),
+      };
+    }
+    return {
+      id: null,
+      label: '仅分层标签',
+      criteria: null,
+      matched: false,
+    };
+  }
+
   _initializeFirstCliffStrategyStats(stats) {
     for (const name of Object.keys(firstCliffCounterRow())) {
       if (!Number.isFinite(stats[name])) stats[name] = 0;
@@ -959,6 +1047,9 @@ class PreEntryRugRiskTracker {
       entryPrice: finite(risk.lastPrice),
       hc1Matched: Boolean(feature.hc1Matched),
       hc2Matched: Boolean(feature.hc2Matched),
+      stageCandidateId: feature.stageCandidateId,
+      stageCandidateLabel: feature.stageCandidateLabel,
+      stageCandidateMatched: Boolean(feature.stageCandidateMatched),
       lifecycleStage: feature.lifecycleStage,
       lifecycleLabel: feature.lifecycleLabel,
       effectiveBuyers: feature.effectiveBuyers,
@@ -975,6 +1066,11 @@ class PreEntryRugRiskTracker {
     this.firstCliffCandidateKeys.set(key, candidate.deadlineAt);
     this.firstCliffPendingCount += 1;
     this.metrics.firstCliffCandidates += 1;
+    if (candidate.stageCandidateMatched) {
+      stats.firstCliffStageCandidateMatched += 1;
+      stats.firstCliffByStage[candidate.lifecycleStage].firstCliffStageCandidateMatched += 1;
+      this.metrics.firstCliffStageCandidateMatched += 1;
+    }
     if (candidate.hc1Matched) {
       stats.firstCliffHc1Matched += 1;
       stats.firstCliffByStage[candidate.lifecycleStage].firstCliffHc1Matched += 1;
@@ -1058,6 +1154,23 @@ class PreEntryRugRiskTracker {
     if (stats && !censored) {
       this._initializeFirstCliffStrategyStats(stats);
       const stageStats = stats.firstCliffByStage[candidate.lifecycleStage];
+      if (candidate.stageCandidateMatched) {
+        stats.firstCliffStageCandidateResolved += 1;
+        stageStats.firstCliffStageCandidateResolved += 1;
+        if (result.outcome === 'CLIFF_RUG_70') {
+          stats.firstCliffStageCandidateCaught += 1;
+          stageStats.firstCliffStageCandidateCaught += 1;
+        } else {
+          stats.firstCliffStageCandidateNoCliff30s += 1;
+          stageStats.firstCliffStageCandidateNoCliff30s += 1;
+        }
+        if (Number.isFinite(result.returnPct)) {
+          stats.firstCliffStageCandidateReturnSumPct += result.returnPct;
+          stats.firstCliffStageCandidateReturnSamples += 1;
+          stageStats.firstCliffStageCandidateReturnSumPct += result.returnPct;
+          stageStats.firstCliffStageCandidateReturnSamples += 1;
+        }
+      }
       for (const cohort of ['Hc1', 'Hc2']) {
         if (!candidate[`${cohort.toLowerCase()}Matched`]) continue;
         stats[`firstCliff${cohort}Resolved`] += 1;
@@ -1131,6 +1244,11 @@ class PreEntryRugRiskTracker {
 
   _firstCliffCounterHealth(row) {
     return {
+      firstCliffStageCandidatePrecisionPct: row.firstCliffStageCandidateResolved > 0
+        ? row.firstCliffStageCandidateCaught / row.firstCliffStageCandidateResolved * 100 : null,
+      firstCliffStageCandidateAverageReturnPct: row.firstCliffStageCandidateReturnSamples > 0
+        ? row.firstCliffStageCandidateReturnSumPct
+          / row.firstCliffStageCandidateReturnSamples : null,
       firstCliffHc1PrecisionPct: row.firstCliffHc1Resolved > 0
         ? row.firstCliffHc1Caught / row.firstCliffHc1Resolved * 100 : null,
       firstCliffHc2PrecisionPct: row.firstCliffHc2Resolved > 0
@@ -1160,10 +1278,15 @@ class PreEntryRugRiskTracker {
         for (const name of Object.keys(firstCliffCounterRow())) target[name] += source[name];
       }
     }
-    return FIRST_CLIFF_LIFECYCLE_STAGES.map((stage) => ({
-      ...aggregates[stage.id],
-      ...this._firstCliffCounterHealth(aggregates[stage.id]),
-    }));
+    return FIRST_CLIFF_LIFECYCLE_STAGES.map((stage) => {
+      const candidate = this._firstCliffStageCandidate(stage.id);
+      return {
+        ...aggregates[stage.id],
+        stageCandidateId: candidate.id,
+        stageCandidateLabel: candidate.label,
+        ...this._firstCliffCounterHealth(aggregates[stage.id]),
+      };
+    });
   }
 
   _observeRugPath(mint, state, event) {

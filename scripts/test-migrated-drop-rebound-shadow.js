@@ -981,3 +981,47 @@ function testNoExitIsCensored() {
 }
 
 testNoExitIsCensored();
+
+function testLiveSignalCapacityGate() {
+  const emitted = [];
+  const suite = Object.create(MigratedDropReboundShadowSuite.prototype);
+  suite.onLiveSignal = (signal) => emitted.push(signal);
+  suite.liveSignalsEmitted = new Set();
+  suite.metrics = { replayLiveSignalsSuppressed: 0, lastError: null };
+  const profile = {
+    id: 'GE30_D25_32_R24_F1_EXEC1',
+    livePositionSol: 0.1,
+    liveExitStrategies: {
+      V2_R2_H15: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
+    },
+  };
+  const tradeRow = {
+    slot: 42,
+    timestampMs: 1_000,
+    receivedAtMs: 1_001,
+  };
+  const position = {
+    episodeId: 'capacity-gate-episode',
+    cohortId: 'POST_GE30_D25_32_R24_F1_EXEC1_V2_R2_H15_0_1SOL',
+    mint: 'MintCapacityGate1111111111111111111111111111',
+    symbol: 'CAP',
+    exitProfileId: 'V2_R2_H15',
+    entryPrice: 1,
+    migrationAgeMs: 5_000,
+    dropPct: 28,
+    reboundPct: 3,
+    entryJumpPct: 1,
+    entryImpactPct: 2,
+  };
+  suite._emitOpenedLiveSignal({ ...position, positionSol: 1 }, profile, tradeRow, 1);
+  assert.strictEqual(emitted.length, 0,
+    'the 1 SOL capacity row must never trigger the 0.1 SOL live strategy');
+  suite._emitOpenedLiveSignal({ ...position, positionSol: 0.1 }, profile, tradeRow, 1);
+  assert.strictEqual(emitted.length, 1);
+  assert.strictEqual(emitted[0].strategyId,
+    'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live');
+  assert.strictEqual(emitted[0].features.sourceShadowCohortId,
+    'POST_GE30_D25_32_R24_F1_EXEC1_V2_R2_H15_0_1SOL');
+}
+
+testLiveSignalCapacityGate();

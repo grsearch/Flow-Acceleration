@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { PreEntryRugRiskTracker } = require('../src/core/PreEntryRugRiskTracker');
 const { evaluateUniversalRugGuard } = require('../src/core/UniversalRugGuard');
+const { resolveRugGuardPolicy } = require('../src/core/RugGuardPolicy');
 
 const config = {
   enabled: true,
@@ -49,11 +50,32 @@ assert.equal(shadow.reason, 'RUG_RISK_LABEL_ONLY');
 assert.equal(shadow.enforcementMode, 'LABEL_ONLY');
 const live = evaluateUniversalRugGuard(store, {
   strategyId: 'LIVE-A', mint: 'rug', timestampMs: 9_010, source: 'LIVE',
-  market: 'PUMP_AMM', lifecycleStage: 'POST_MIGRATION',
+  market: 'PUMP_AMM', lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 20_000,
 });
 assert.equal(live.blocked, true);
+assert.equal(live.reason, 'PRE_ENTRY_RUG_RISK');
 assert.equal(live.enforcementMode, 'HARD_BLOCK');
 assert.equal(tracker.health().liveCacheHits, 1);
+
+const earlyPolicy = resolveRugGuardPolicy({
+  strategyId: 'LIVE-A', source: 'LIVE', market: 'PUMP_AMM',
+  lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 5_000,
+});
+assert.equal(earlyPolicy.enforcementMode, 'HARD_BLOCK');
+assert.equal(earlyPolicy.policyReason, 'POST_MIGRATION_AMM_HARD_BLOCK');
+const gEarlyPolicy = resolveRugGuardPolicy({
+  strategyId: 'MIGRATED_DROP_REBOUND:GFR_300', source: 'SHADOW', market: 'PUMP_AMM',
+  lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 5_000,
+});
+assert.equal(gEarlyPolicy.enforcementMode, 'LABEL_ONLY');
+assert.equal(gEarlyPolicy.requireHc2, false);
+assert.equal(gEarlyPolicy.policyReason, 'AMM_EARLY_STAGE_CANDIDATE_LABEL_ONLY');
+const maturePolicy = resolveRugGuardPolicy({
+  strategyId: 'LIVE-A', source: 'LIVE', market: 'PUMP_AMM',
+  lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 20_000,
+});
+assert.equal(maturePolicy.enforcementMode, 'HARD_BLOCK');
+assert.equal(maturePolicy.policyReason, 'POST_MIGRATION_AMM_HARD_BLOCK');
 
 const launch = evaluateUniversalRugGuard(store, {
   strategyId: 'LAUNCH_PULLBACK:FO', mint: 'rug', timestampMs: 9_020, source: 'SHADOW',
@@ -64,10 +86,17 @@ assert.equal(launch.reason, 'RUG_RISK_LABEL_ONLY');
 
 const lifecycle = evaluateUniversalRugGuard(store, {
   strategyId: 'MIGRATED_DROP_REBOUND:GFR_300', mint: 'rug', timestampMs: 9_030, source: 'SHADOW',
-  market: 'PUMP_AMM',
+  market: 'PUMP_AMM', lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 30_000,
 });
 assert.equal(lifecycle.blocked, true);
 assert.equal(lifecycle.reason, 'PRE_ENTRY_RUG_RISK');
+
+const migrationFamilyPolicy = resolveRugGuardPolicy({
+  strategyId: 'MIGRATION_CONTINUITY:M-C5', source: 'SHADOW', market: 'PUMP_AMM',
+  lifecycleStage: 'AMM_EARLY', lifecycleAgeMs: 5_000,
+});
+assert.equal(migrationFamilyPolicy.enforcementMode, 'HARD_BLOCK');
+assert.equal(migrationFamilyPolicy.policyReason, 'POST_MIGRATION_FAMILY_HARD_BLOCK');
 
 const incomplete = evaluateUniversalRugGuard(store, {
   strategyId: 'LIVE-B', mint: 'unknown', timestampMs: 9_010, source: 'LIVE',
@@ -78,7 +107,36 @@ const health = tracker.health();
 assert.equal(health.guardRiskFlagged, 4);
 assert.equal(health.guardHardBlocked, 2);
 assert.equal(health.guardLabelOnly, 2);
-assert.equal(health.enforcement, 'POST_MIGRATION_HARD_BLOCK_CURVE_AND_RESEARCH_LABEL_ONLY');
+assert.equal(
+  health.enforcement,
+  'EXISTING_GUARDS_PLUS_LIFECYCLE_CANDIDATES_FORWARD_LABEL_ONLY',
+);
+
+assert.equal(tracker._firstCliffStageCandidate('CURVE_LATE', {
+  top3RecoveryPct: 2,
+}).matched, true);
+assert.equal(tracker._firstCliffStageCandidate('CURVE_LATE', {
+  top3RecoveryPct: 2.01,
+}).matched, false);
+assert.equal(tracker._firstCliffStageCandidate('CURVE_MIGRATION', {
+  maxWalletBuyTxSharePct: 70,
+}).matched, true);
+assert.equal(tracker._firstCliffStageCandidate('AMM_EARLY', {
+  top3RecoveryPct: 20,
+  maxWalletBuyTxSharePct: 24.99,
+}).matched, true);
+assert.equal(tracker._firstCliffStageCandidate('AMM_EARLY', {
+  top3RecoveryPct: 20.01,
+  maxWalletBuyTxSharePct: 25,
+}).matched, true);
+assert.equal(tracker._firstCliffStageCandidate('AMM_EARLY', {
+  top3RecoveryPct: 20.01,
+  maxWalletBuyTxSharePct: 24.99,
+}).matched, false);
+assert.equal(tracker._firstCliffStageCandidate('LAUNCH', {
+  top3RecoveryPct: 0,
+  maxWalletBuyTxSharePct: 100,
+}).matched, false);
 
 const entryFiles = [
   'BigWinnerShadowSuite.js',

@@ -390,8 +390,6 @@ class SmartOpenShadowManager {
   _markNoExit(position) {
     this.store.updateSmartOpenShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
-      grossReturnPct: -100,
-      netReturnPct: -100 - this.costs.deterministicCostPct,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
     });
     this.positions.delete(position.mint);
