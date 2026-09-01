@@ -4,7 +4,7 @@ const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 
 const HORIZONS = [5, 30, 120, 300];
 const FAMILY_KEYS = ['flow', 'participation', 'balance', 'structure', 'execution'];
-const LABEL_SCHEMA_VERSION = 2;
+const LABEL_SCHEMA_VERSION = 3;
 const OBSERVATION_TABLE = 'feature_edge_audit_observations_v2';
 const BNH_TABLE = 'feature_edge_audit_bnh_shadow_positions';
 const BNH_PROFILE_ID = 'FEA_BNH_120';
@@ -69,6 +69,7 @@ class FeatureEdgeAuditObserver {
       bnhMaxCurvePct: finite(config.bnhMaxCurvePct, 90),
       bnhHoldMs: finite(config.bnhHoldMs, 120_000),
       bnhRoundTripCostPct: finite(config.bnhRoundTripCostPct, 3.2),
+      canonicalSignalSource: config.canonicalSignalSource || 'FLOW_ACCEL_SIGNAL',
     };
     this.store = store;
     this.db = store?.db;
@@ -83,6 +84,8 @@ class FeatureEdgeAuditObserver {
       samplesCensored: 0,
       capacitySkipped: 0,
       cooldownSkipped: 0,
+      sourceSkipped: 0,
+      canonicalDuplicateSkipped: 0,
       quoteAvailable: 0,
       quoteMissing: 0,
       crossMarketInvalidated: 0,
@@ -101,7 +104,10 @@ class FeatureEdgeAuditObserver {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         label_schema_version INTEGER NOT NULL DEFAULT ${LABEL_SCHEMA_VERSION},
         signal_id INTEGER, signal_at_ms INTEGER NOT NULL, mint TEXT NOT NULL,
-        signal_variant TEXT, market TEXT, age_ms INTEGER, curve_pct REAL,
+        signal_variant TEXT, signal_source TEXT NOT NULL DEFAULT 'UNKNOWN',
+        canonical_episode_id TEXT, market TEXT, age_ms INTEGER, curve_pct REAL,
+        lifecycle_stage_at_signal TEXT,
+        graduated_at_ms INTEGER, signal_to_graduation_ms INTEGER,
         entry_market_price REAL NOT NULL, entry_executable_price REAL,
         entry_impact_pct REAL, entry_quote_available INTEGER NOT NULL DEFAULT 0,
         position_sol REAL NOT NULL, token_units REAL,
@@ -127,7 +133,6 @@ class FeatureEdgeAuditObserver {
         ON ${OBSERVATION_TABLE}(signal_at_ms DESC);
       CREATE INDEX IF NOT EXISTS idx_feature_edge_audit_v2_status
         ON ${OBSERVATION_TABLE}(label_status, signal_at_ms DESC);
-
       CREATE TABLE IF NOT EXISTS ${BNH_TABLE} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         observation_id INTEGER NOT NULL UNIQUE, profile_id TEXT NOT NULL,
@@ -145,15 +150,36 @@ class FeatureEdgeAuditObserver {
       CREATE INDEX IF NOT EXISTS idx_feature_edge_audit_bnh_status
         ON ${BNH_TABLE}(status, signal_at_ms DESC);
     `);
+    const columns = new Set(this.db.prepare(`PRAGMA table_info(${OBSERVATION_TABLE})`)
+      .all().map((column) => column.name));
+    const ensure = (name, definition) => {
+      if (!columns.has(name)) {
+        this.db.exec(`ALTER TABLE ${OBSERVATION_TABLE} ADD COLUMN ${name} ${definition}`);
+        columns.add(name);
+      }
+    };
+    ensure('signal_source', "TEXT NOT NULL DEFAULT 'UNKNOWN'");
+    ensure('canonical_episode_id', 'TEXT');
+    ensure('lifecycle_stage_at_signal', 'TEXT');
+    ensure('graduated_at_ms', 'INTEGER');
+    ensure('signal_to_graduation_ms', 'INTEGER');
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_feature_edge_audit_v2_canonical
+        ON ${OBSERVATION_TABLE}(canonical_episode_id, signal_source)
+    `);
     this.statements.insert = this.db.prepare(`
       INSERT INTO ${OBSERVATION_TABLE} (
-        signal_id, signal_at_ms, mint, signal_variant, market, age_ms, curve_pct,
+        label_schema_version, signal_id, signal_at_ms, mint, signal_variant,
+        signal_source, canonical_episode_id, market, age_ms, curve_pct,
+        lifecycle_stage_at_signal, graduated_at_ms, signal_to_graduation_ms,
         entry_market_price, entry_executable_price, entry_impact_pct,
         entry_quote_available, position_sol, token_units, flow_feature,
         participation_feature, balance_feature, structure_feature,
         execution_feature, feature_score, feature_json, created_at_ms
       ) VALUES (
-        @signalId, @signalAtMs, @mint, @signalVariant, @market, @ageMs, @curvePct,
+        @labelSchemaVersion, @signalId, @signalAtMs, @mint, @signalVariant,
+        @signalSource, @canonicalEpisodeId, @market, @ageMs, @curvePct,
+        @lifecycleStageAtSignal, @graduatedAtMs, @signalToGraduationMs,
         @entryMarketPrice, @entryExecutablePrice, @entryImpactPct,
         @entryQuoteAvailable, @positionSol, @tokenUnits, @flowFeature,
         @participationFeature, @balanceFeature, @structureFeature,
@@ -173,7 +199,25 @@ class FeatureEdgeAuditObserver {
         censor_reason=@censorReason, finalized_at_ms=@finalizedAtMs WHERE id=@id
     `);
     this.statements.recent = this.db.prepare(`
-      SELECT * FROM ${OBSERVATION_TABLE} ORDER BY signal_at_ms DESC LIMIT ?
+      SELECT * FROM ${OBSERVATION_TABLE}
+      WHERE label_schema_version=? AND signal_source=?
+      ORDER BY signal_at_ms DESC LIMIT ?
+    `);
+    this.statements.canonical = this.db.prepare(`
+      SELECT id FROM ${OBSERVATION_TABLE}
+      WHERE label_schema_version=? AND signal_source=? AND canonical_episode_id=?
+      LIMIT 1
+    `);
+    this.statements.graduate = this.db.prepare(`
+      UPDATE ${OBSERVATION_TABLE} SET
+        graduated_at_ms=COALESCE(graduated_at_ms,@graduatedAtMs),
+        signal_to_graduation_ms=COALESCE(
+          signal_to_graduation_ms, @graduatedAtMs-signal_at_ms
+        ),
+        lifecycle_stage_at_signal=COALESCE(lifecycle_stage_at_signal,'PRE_MIGRATION')
+      WHERE mint=@mint AND signal_at_ms<=@graduatedAtMs
+        AND label_schema_version=@labelSchemaVersion
+        AND signal_source=@signalSource
     `);
     this.statements.insertBnh = this.db.prepare(`
       INSERT OR IGNORE INTO ${BNH_TABLE} (
@@ -194,7 +238,10 @@ class FeatureEdgeAuditObserver {
       WHERE observation_id=@observationId AND status='OPEN'
     `);
     this.statements.recentBnh = this.db.prepare(`
-      SELECT * FROM ${BNH_TABLE} ORDER BY signal_at_ms DESC LIMIT ?
+      SELECT b.* FROM ${BNH_TABLE} b
+      JOIN ${OBSERVATION_TABLE} o ON o.id=b.observation_id
+      WHERE o.label_schema_version=? AND o.signal_source=?
+      ORDER BY b.signal_at_ms DESC LIMIT ?
     `);
     this.db.prepare(`
       UPDATE ${BNH_TABLE} SET status='NO_EXIT',
@@ -210,9 +257,26 @@ class FeatureEdgeAuditObserver {
   onSignal(signal = {}) {
     if (!this.config.enabled || !this.statements.insert) return null;
     this.metrics.signalsEvaluated += 1;
+    const signalSource = String(
+      signal.auditSignalSource || signal.signalSource || 'FLOW_ACCEL_SIGNAL',
+    );
+    if (signalSource !== this.config.canonicalSignalSource) {
+      this.metrics.sourceSkipped += 1;
+      return null;
+    }
     const signalAtMs = finite(signal.timestampMs ?? signal.signalAtMs);
     const entryMarketPrice = finite(signal.price);
     if (!signal.mint || !(signalAtMs > 0) || !(entryMarketPrice > 0)) return null;
+    const canonicalEpisodeId = String(signal.auditCanonicalEpisodeId
+      || `${signal.mint}:${signal.signature || `${signal.slot || 'na'}:${signalAtMs}`}`);
+    if (this.statements.canonical.get(
+      LABEL_SCHEMA_VERSION,
+      signalSource,
+      canonicalEpisodeId,
+    )) {
+      this.metrics.canonicalDuplicateSkipped += 1;
+      return null;
+    }
     if (this.pending.size >= this.config.maxPending) {
       this.metrics.capacitySkipped += 1;
       return null;
@@ -238,6 +302,17 @@ class FeatureEdgeAuditObserver {
     const quote = executableBuy(signal, this.config.positionSol, entryMarketPrice);
     const ageMs = finite(signal.ageMs);
     const curvePct = finite(signal.curvePct);
+    const token = this.store?.getToken?.(signal.mint) || null;
+    const graduatedAtMs = finite(
+      signal.graduatedAtMs ?? signal.graduatedAt ?? signal.migratedAt
+      ?? token?.graduated_at ?? token?.graduatedAt ?? token?.migrated_at ?? token?.migratedAt,
+    );
+    const lifecycleStageAtSignal = Number.isFinite(graduatedAtMs)
+      && signalAtMs >= graduatedAtMs
+      ? 'POST_MIGRATION'
+      : signal.market === 'PUMP_AMM' ? 'POST_MIGRATION' : 'PRE_MIGRATION';
+    const signalToGraduationMs = Number.isFinite(graduatedAtMs)
+      ? graduatedAtMs - signalAtMs : null;
     const features = {
       flow: net3 >= this.config.minNetFlowSol
         && net3 - net2 >= this.config.minFlowAccelerationSol
@@ -263,8 +338,11 @@ class FeatureEdgeAuditObserver {
       participationInterpretation: 'OVERHEAT_PENALTY', features,
     };
     const row = {
+      labelSchemaVersion: LABEL_SCHEMA_VERSION,
       signalId: finite(signal.signalId), signalAtMs, mint: signal.mint,
       signalVariant: signal.signalVariant || null, market: signal.market || null,
+      signalSource, canonicalEpisodeId, lifecycleStageAtSignal,
+      graduatedAtMs, signalToGraduationMs,
       ageMs, curvePct, entryMarketPrice,
       entryExecutablePrice: quote.available ? quote.price : null,
       entryImpactPct: finite(quote.impactPct), entryQuoteAvailable: Number(quote.available),
@@ -292,6 +370,31 @@ class FeatureEdgeAuditObserver {
     this.metrics.lastSignalAt = signalAtMs;
     this._maybeOpenBnh(sample);
     return sample;
+  }
+
+  onGraduated(event = {}) {
+    if (!this.config.enabled || !this.statements.graduate || !event.mint) return 0;
+    const graduatedAtMs = finite(
+      event.graduatedAtMs ?? event.graduatedAt ?? event.graduated_at
+      ?? event.completedAt ?? event.completed_at
+      ?? event.migratedAt ?? event.migrated_at ?? event.timestampMs,
+    );
+    if (!(graduatedAtMs > 0)) return 0;
+    const result = this.statements.graduate.run({
+      mint: event.mint,
+      graduatedAtMs,
+      labelSchemaVersion: LABEL_SCHEMA_VERSION,
+      signalSource: this.config.canonicalSignalSource,
+    });
+    const ids = this.pendingByMint.get(event.mint);
+    for (const id of ids || []) {
+      const sample = this.pending.get(id);
+      if (!sample || sample.signalAtMs > graduatedAtMs) continue;
+      sample.graduatedAtMs ??= graduatedAtMs;
+      sample.signalToGraduationMs ??= graduatedAtMs - sample.signalAtMs;
+      sample.lifecycleStageAtSignal ||= 'PRE_MIGRATION';
+    }
+    return result.changes;
   }
 
   _maybeOpenBnh(sample) {
@@ -462,7 +565,11 @@ class FeatureEdgeAuditObserver {
       };
     }
     const rowLimit = Math.max(100, Math.min(5_000, Number(limit) || 2_000));
-    const rows = this.statements.recent.all(rowLimit);
+    const rows = this.statements.recent.all(
+      LABEL_SCHEMA_VERSION,
+      this.config.canonicalSignalSource,
+      rowLimit,
+    );
     const horizons = HORIZONS.map((seconds) => {
       const eligible = rows.filter((row) => !row.cross_market_seen);
       return {
@@ -499,7 +606,11 @@ class FeatureEdgeAuditObserver {
       ...aggregate(validRows.filter((row) => row.feature_score === score)
         .map((row) => finite(row[targetField]))),
     }));
-    const bnhRows = this.statements.recentBnh.all(rowLimit);
+    const bnhRows = this.statements.recentBnh.all(
+      LABEL_SCHEMA_VERSION,
+      this.config.canonicalSignalSource,
+      rowLimit,
+    );
     const bnhPriced = bnhRows.filter((row) => row.status === 'CLOSED'
       && Number.isFinite(finite(row.net_return_pct)));
     const bnhStats = aggregate(bnhPriced.map((row) => finite(row.net_return_pct)));
@@ -538,7 +649,12 @@ class FeatureEdgeAuditObserver {
       })),
       recent: rows.slice(0, 100).map((row) => ({
         id: row.id, signalAtMs: row.signal_at_ms, mint: row.mint,
-        signalVariant: row.signal_variant, featureScore: row.feature_score,
+        signalVariant: row.signal_variant, signalSource: row.signal_source,
+        canonicalEpisodeId: row.canonical_episode_id,
+        lifecycleStageAtSignal: row.lifecycle_stage_at_signal,
+        graduatedAtMs: row.graduated_at_ms,
+        signalToGraduationMs: row.signal_to_graduation_ms,
+        featureScore: row.feature_score,
         quoteAvailable: Boolean(row.entry_quote_available),
         entryImpactPct: finite(row.entry_impact_pct),
         markReturn120s: finite(row.mark_return_120s),
@@ -555,6 +671,7 @@ class FeatureEdgeAuditObserver {
       enabled: this.config.enabled, mode: 'FEA-OBS-V2', observerOnly: true,
       sendsTransactions: false, extraRpcCalls: false, simulatesPositions: true,
       labelSchemaVersion: LABEL_SCHEMA_VERSION, observationTable: OBSERVATION_TABLE,
+      canonicalSignalSource: this.config.canonicalSignalSource,
       positionSol: this.config.positionSol, horizonsSeconds: HORIZONS,
       bnhProfileId: BNH_PROFILE_ID, bnhHoldMs: this.config.bnhHoldMs,
       pending: this.pending.size, trackedMints: this.pendingByMint.size, ...this.metrics,

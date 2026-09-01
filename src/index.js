@@ -21,6 +21,10 @@ const {
 const {
   SmartWalletFirstOpenRightTailShadowSuite,
 } = require('./core/SmartWalletFirstOpenRightTailShadowSuite');
+const { SmartWalletRegistry } = require('./core/SmartWalletRegistry');
+const {
+  SmartWalletConsensusFlowRunnerShadowSuite,
+} = require('./core/SmartWalletConsensusFlowRunnerShadowSuite');
 const { PublicFlowLeadShadowSuite } = require('./core/PublicFlowLeadShadowSuite');
 const { CyaSlotFlowShadowSuite } = require('./core/CyaSlotFlowShadowSuite');
 const { CyaOrganicBurstShadowSuite } = require('./core/CyaOrganicBurstShadowSuite');
@@ -108,6 +112,22 @@ function createRuntime(runtimeConfig = config) {
   // All entry-capable live and Shadow strategies share this forward-only guard.
   // Observers still collect every trade so risk labels remain available for research.
   store.preEntryRugRisk = preEntryRugRisk;
+  const smartWalletRegistry = new SmartWalletRegistry({
+    config: {
+      ...runtimeConfig.smartWalletRegistry,
+      seedWallets: [...smartWallets],
+      seedClusters: runtimeConfig.smartLikeEarlyShadow.walletClusters || [],
+    },
+    store,
+  });
+  smartWalletRegistry.start();
+  const smartWalletConsensusFlowRunnerShadow = new SmartWalletConsensusFlowRunnerShadowSuite({
+    config: runtimeConfig.smartWalletConsensusFlowRunnerShadow,
+    store,
+    registry: smartWalletRegistry,
+    rugRiskTracker: preEntryRugRisk,
+  });
+  smartWalletConsensusFlowRunnerShadow.start();
   const signalShadow = new PrimarySignalShadowSuite({
     config: runtimeConfig.signalShadow,
     store,
@@ -325,6 +345,8 @@ function createRuntime(runtimeConfig = config) {
     flowSmartConfirmShadow,
     smartLikeEarlyShadow,
     preEntryRugRisk,
+    smartWalletRegistry,
+    smartWalletConsensusFlowRunnerShadow,
     smartResonanceShadow,
     smartWalletRugEscapeShadow,
     smartWalletFirstOpenRightTailShadow,
@@ -399,6 +421,7 @@ function createRuntime(runtimeConfig = config) {
       ...smartResonanceShadow.trackedMints(),
       ...smartWalletRugEscapeShadow.trackedMints(),
       ...smartWalletFirstOpenRightTailShadow.trackedMints(),
+      ...smartWalletConsensusFlowRunnerShadow.trackedMints(),
       ...publicFlowLeadShadow.trackedMints(),
       ...creatorAffinityShadow.trackedMints(),
       ...cyaSlotFlowShadow.trackedMints(),
@@ -429,7 +452,12 @@ function createRuntime(runtimeConfig = config) {
     try {
       const saved = store.recordSignal(signal);
       labeler.addSignal(saved);
-      observeShadow('featureEdgeAuditSignal', () => featureEdgeAudit.onSignal(saved));
+      observeShadow('featureEdgeAuditSignal', () => featureEdgeAudit.onSignal({
+        ...saved,
+        auditSignalSource: logPrefix,
+        auditCanonicalEpisodeId: `${saved.mint}:${saved.signature
+          || `${saved.slot || 'na'}:${saved.timestampMs}`}`,
+      }));
       observeShadow('launchPullbackSignal', () => launchPullbackShadow.onSignal(saved));
       observeShadow('smartLikeEarlySignal', () => smartLikeEarlyShadow.onSignal(saved));
       console.log(
@@ -492,6 +520,9 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('migrationContinuityGraduate', () => (
             migrationContinuityShadow.onGraduated(token || event)
           ));
+          observeShadow('featureEdgeAuditGraduate', () => (
+            featureEdgeAudit.onGraduated(token || event)
+          ));
           observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
@@ -509,6 +540,12 @@ function createRuntime(runtimeConfig = config) {
           ));
           observeShadow('sameSlotDumpBackrunGraduate', () => (
             sameSlotDumpBackrunShadow.onGraduated(token || event)
+          ));
+          observeShadow('smartWalletRegistryGraduate', () => (
+            smartWalletRegistry.onGraduated(token || event)
+          ));
+          observeShadow('smartConsensusV2Graduate', () => (
+            smartWalletConsensusFlowRunnerShadow.onGraduated(token || event)
           ));
           refreshAmmSubscriptions(event.completedAt || event.timestampMs || Date.now());
           continue;
@@ -522,6 +559,9 @@ function createRuntime(runtimeConfig = config) {
           observeShadow('migrationContinuityGraduate', () => (
             migrationContinuityShadow.onGraduated(token || event)
           ));
+          observeShadow('featureEdgeAuditGraduate', () => (
+            featureEdgeAudit.onGraduated(token || event)
+          ));
           observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
           trader.onGraduated(token || event);
           observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
@@ -539,6 +579,12 @@ function createRuntime(runtimeConfig = config) {
           ));
           observeShadow('sameSlotDumpBackrunGraduate', () => (
             sameSlotDumpBackrunShadow.onGraduated(token || event)
+          ));
+          observeShadow('smartWalletRegistryGraduate', () => (
+            smartWalletRegistry.onGraduated(token || event)
+          ));
+          observeShadow('smartConsensusV2Graduate', () => (
+            smartWalletConsensusFlowRunnerShadow.onGraduated(token || event)
           ));
           refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
           continue;
@@ -559,8 +605,10 @@ function createRuntime(runtimeConfig = config) {
         }
 
         const trade = store.enrichTrade(event);
-        const isSmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
-        const smartOpenContext = isSmartWalletTrade
+        const isLegacySmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
+        const isRegistrySmartWalletTrade = Boolean(trade.wallet
+          && smartWalletRegistry.walletSnapshot(trade.wallet, trade.timestampMs));
+        const smartOpenContext = isLegacySmartWalletTrade
           ? engine.recentBuyContext(
             trade.mint,
             trade.timestampMs,
@@ -573,6 +621,10 @@ function createRuntime(runtimeConfig = config) {
         // in-memory state here; all SQLite writes are deferred to maintenance.
         observeShadow('sameSlotDumpBackrun', () => sameSlotDumpBackrunShadow.observeTrade(trade));
         observeShadow('preEntryRugRisk', () => preEntryRugRisk.observeTrade(trade));
+        observeShadow('smartWalletRegistry', () => smartWalletRegistry.observeTrade(trade));
+        observeShadow('smartConsensusV2', () => (
+          smartWalletConsensusFlowRunnerShadow.observeTrade(trade)
+        ));
         observeShadow('smartLikeEarly', () => smartLikeEarlyShadow.observeTrade(trade));
         observeShadow('smartResonance', () => smartResonanceShadow.observeTrade(trade));
         observeShadow('smartWalletRugEscape', () => (
@@ -609,44 +661,54 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('flowFirst', () => flowFirstShadow.observeTrade(trade));
         labeler.onTrade(trade);
         trader.observeTrade(trade);
-        if (isSmartWalletTrade) {
+        if (isLegacySmartWalletTrade || isRegistrySmartWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
           if (smartEvent?.inserted) {
             const normalizedSmartEvent = { ...trade, ...smartEvent, id: smartEvent.id };
-            observeShadow('smartOpenEvent', () => (
-              smartOpenShadow.onSmartWalletEvent(normalizedSmartEvent, smartOpenContext || {})
-            ));
-            observeShadow('flowSmartConfirmEvent', () => (
-              flowSmartConfirmShadow.onSmartWalletOpen(normalizedSmartEvent)
-            ));
-            observeShadow('smartLikeEarlyEvent', () => (
-              smartLikeEarlyShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            observeShadow('smartResonanceEvent', () => (
-              smartResonanceShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            observeShadow('smartWalletRugEscapeEvent', () => (
-              smartWalletRugEscapeShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            observeShadow('smartWalletFirstOpenRightTailEvent', () => (
-              smartWalletFirstOpenRightTailShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            observeShadow('publicFlowLeadLabel', () => (
-              publicFlowLeadShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            observeShadow('creatorAffinityLabel', () => (
-              creatorAffinityShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            observeShadow('cyaSlotFlowLabel', () => (
-              cyaSlotFlowShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            observeShadow('cyaOrganicBurstLabel', () => (
-              cyaOrganicBurstShadow.onSmartWalletEvent(normalizedSmartEvent)
-            ));
-            if (trade.side === 'BUY') {
-              observeShadow('smartPullbackEvent', () => (
-                smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id })
+            if (isRegistrySmartWalletTrade) {
+              observeShadow('smartWalletRegistryEvent', () => (
+                smartWalletRegistry.onSmartWalletEvent(normalizedSmartEvent)
               ));
+              observeShadow('smartConsensusV2Event', () => (
+                smartWalletConsensusFlowRunnerShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+            }
+            if (isLegacySmartWalletTrade) {
+              observeShadow('smartOpenEvent', () => (
+                smartOpenShadow.onSmartWalletEvent(normalizedSmartEvent, smartOpenContext || {})
+              ));
+              observeShadow('flowSmartConfirmEvent', () => (
+                flowSmartConfirmShadow.onSmartWalletOpen(normalizedSmartEvent)
+              ));
+              observeShadow('smartLikeEarlyEvent', () => (
+                smartLikeEarlyShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              observeShadow('smartResonanceEvent', () => (
+                smartResonanceShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              observeShadow('smartWalletRugEscapeEvent', () => (
+                smartWalletRugEscapeShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              observeShadow('smartWalletFirstOpenRightTailEvent', () => (
+                smartWalletFirstOpenRightTailShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              observeShadow('publicFlowLeadLabel', () => (
+                publicFlowLeadShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              observeShadow('creatorAffinityLabel', () => (
+                creatorAffinityShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              observeShadow('cyaSlotFlowLabel', () => (
+                cyaSlotFlowShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              observeShadow('cyaOrganicBurstLabel', () => (
+                cyaOrganicBurstShadow.onSmartWalletEvent(normalizedSmartEvent)
+              ));
+              if (trade.side === 'BUY') {
+                observeShadow('smartPullbackEvent', () => (
+                  smartPullbackShadow.onSmartWalletBuy({ ...trade, id: smartEvent.id })
+                ));
+              }
             }
           }
         }
@@ -821,6 +883,8 @@ function createRuntime(runtimeConfig = config) {
       [
         ['smartLikeEarlyAdvance', smartLikeEarlyShadow],
         ['preEntryRugRiskAdvance', preEntryRugRisk],
+        ['smartWalletRegistryAdvance', smartWalletRegistry],
+        ['smartConsensusV2Advance', smartWalletConsensusFlowRunnerShadow],
         ['smartResonanceAdvance', smartResonanceShadow],
         ['smartWalletRugEscapeAdvance', smartWalletRugEscapeShadow],
         ['smartWalletFirstOpenRightTailAdvance', smartWalletFirstOpenRightTailShadow],
@@ -895,6 +959,8 @@ function createRuntime(runtimeConfig = config) {
     flowSmartConfirmShadow.stop();
     smartLikeEarlyShadow.stop();
     preEntryRugRisk.stop();
+    smartWalletConsensusFlowRunnerShadow.stop();
+    smartWalletRegistry.stop();
     smartResonanceShadow.stop();
     smartWalletRugEscapeShadow.stop();
     smartWalletFirstOpenRightTailShadow.stop();
@@ -939,6 +1005,8 @@ function createRuntime(runtimeConfig = config) {
       flowSmartConfirmShadow: flowSmartConfirmShadow.health(),
       smartLikeEarlyShadow: smartLikeEarlyShadow.health(),
       preEntryRugRisk: preEntryRugRisk.health(),
+      smartWalletRegistry: smartWalletRegistry.health(),
+      smartWalletConsensusFlowRunnerShadow: smartWalletConsensusFlowRunnerShadow.health(),
       smartResonanceShadow: smartResonanceShadow.health(),
       smartWalletRugEscapeShadow: smartWalletRugEscapeShadow.health(),
       smartWalletFirstOpenRightTailShadow: smartWalletFirstOpenRightTailShadow.health(),
@@ -971,6 +1039,7 @@ function createRuntime(runtimeConfig = config) {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow,
+    smartWalletRegistry, smartWalletConsensusFlowRunnerShadow,
     smartWalletRugEscapeShadow, smartWalletFirstOpenRightTailShadow,
     publicFlowLeadShadow, creatorAffinityShadow,
     cyaSlotFlowShadow, cyaOrganicBurstShadow, earlyPureBuyBurstShadow,

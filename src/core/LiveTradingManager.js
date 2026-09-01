@@ -69,6 +69,10 @@ function restoredPosition(row) {
     entryError: row.entry_error,
     highestPrice: row.highest_price,
     lowestPrice: row.entry_price,
+    hardStopTriggerAt: row.hard_stop_trigger_at,
+    hardStopTriggerPrice: row.hard_stop_trigger_price,
+    hardStopTriggerReturnPct: row.hard_stop_trigger_return_pct,
+    hardStopExecutableReturnPct: row.hard_stop_executable_return_pct,
     exitReason: row.exit_reason,
     exitError: row.exit_error,
     openedAt: row.opened_at,
@@ -146,6 +150,8 @@ class LiveTradingManager {
     this.settlementOrdersInFlight = new Set();
     this.settlementSweepPromise = null;
     this.nextSettlementSweepAt = 0;
+    this.mintLockSweepPromise = null;
+    this.nextMintLockSweepAt = 0;
     this.coreExitPending = new Set();
     this.mintExitQueues = new Map();
     this.graduationGateTrades = new Map();
@@ -163,6 +169,9 @@ class LiveTradingManager {
       entryTransactionFailures: 0,
       entryUnknown: 0,
       entryRecoveries: 0,
+      walletBalanceLocksCreated: 0,
+      walletBalanceLocksReleased: 0,
+      walletBalanceLockChecks: 0,
       exits: 0,
       exitFailures: 0,
       lastActionAt: null,
@@ -349,7 +358,50 @@ class LiveTradingManager {
     this._track(sweep);
   }
 
+  _scheduleMintLockRecheck(now = this.now(), force = false) {
+    const intervalMs = Math.max(
+      1_000,
+      Number(this.config.heldMintLockRecheckMs) || 60_000,
+    );
+    if (this.mode !== 'LIVE' || this.stopping
+      || typeof this.executor?.tokenBalanceRaw !== 'function'
+      || typeof this.store.activeLiveMintEntryLocks !== 'function') return;
+    if (this.mintLockSweepPromise || (!force && now < this.nextMintLockSweepAt)) return;
+    this.nextMintLockSweepAt = now + intervalMs;
+    const batchSize = Math.max(1, Number(this.config.heldMintLockRecheckBatch) || 10);
+    const locks = this.store.activeLiveMintEntryLocks(batchSize)
+      .filter((lock) => now - Number(lock.last_checked_at || 0) >= intervalMs);
+    if (!locks.length) return;
+    const sweep = (async () => {
+      for (const lock of locks) {
+        try {
+          const balanceRaw = await this.executor.tokenBalanceRaw(lock.mint);
+          this.metrics.walletBalanceLockChecks += 1;
+          if (BigInt(balanceRaw || 0) <= 0n) {
+            if (this.store.releaseLiveMintEntryLock(
+              lock.mint,
+              'VERIFIED_WALLET_BALANCE_ZERO',
+              this.now(),
+            )) this.metrics.walletBalanceLocksReleased += 1;
+          } else {
+            this.store.touchLiveMintEntryLock(lock.mint, balanceRaw, this.now());
+          }
+        } catch (error) {
+          this.store.touchLiveMintEntryLock(lock.mint, null, this.now());
+          this._rememberError(error);
+        }
+      }
+    })()
+      .finally(() => {
+        if (this.mintLockSweepPromise === sweep) this.mintLockSweepPromise = null;
+      });
+    this.mintLockSweepPromise = sweep;
+    this._track(sweep);
+  }
+
   health() {
+    const activeMintEntryLocks = typeof this.store.activeLiveMintEntryLocks === 'function'
+      ? this.store.activeLiveMintEntryLocks(1_000).length : 0;
     return {
       mode: this.mode,
       enabled: this.config.enabled,
@@ -373,6 +425,7 @@ class LiveTradingManager {
       priorityFeeMicroLamports: this.config.priorityFeeMicroLamports,
       trackedMints: this.tracked.size,
       activePositions: this.positions.size,
+      activeMintEntryLocks,
       killSwitchActive: this._killSwitchActive(),
       ...this.metrics,
     };
@@ -493,6 +546,19 @@ class LiveTradingManager {
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     const graduatedAt = Number(this.store.getToken(observedTrade.mint)?.graduated_at)
       || position.graduatedAt;
+    if (position.entryPrice > 0) {
+      position.lastObservedAt = observedTrade.timestampMs;
+      const immediateStop = this._immediateHardStopReason(
+        position,
+        strategy,
+        observedTrade,
+        observedTrade.price,
+      );
+      if (immediateStop) {
+        this._requestExit(position, immediateStop, observedTrade.price);
+        return;
+      }
+    }
     if (strategy?.exitMode === 'GRADUATION_CORE_RUNNER') {
       if (graduatedAt) {
         position.graduatedAt = position.graduatedAt || graduatedAt;
@@ -503,16 +569,6 @@ class LiveTradingManager {
         if (highest !== position.highestPrice) {
           position.highestPrice = highest;
           this.store.updateLivePosition(position.id, { highestPrice: highest });
-        }
-        const immediateStop = this._immediateHardStopReason(
-          position,
-          strategy,
-          observedTrade,
-          observedTrade.price,
-        );
-        if (immediateStop) {
-          this._requestExit(position, immediateStop, observedTrade.price);
-          return;
         }
         this._recordGraduationGateTrade(position, observedTrade);
         const gate = this._graduationGateDecision(position, observedTrade.timestampMs);
@@ -560,6 +616,7 @@ class LiveTradingManager {
 
   advanceTime(now = this.now()) {
     this._scheduleSettlementReconciliation(now);
+    this._scheduleMintLockRecheck(now);
     for (const states of this.detectors.values()) {
       for (const [mint, state] of states) {
         if (state.candidate && now > state.candidate.expiresAt) state.candidate = null;
@@ -857,6 +914,10 @@ class LiveTradingManager {
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
+    if (typeof this.store.activeLiveMintEntryLock === 'function'
+      && this.store.activeLiveMintEntryLock(event.mint)) {
+      return 'MINT_WALLET_BALANCE_LOCK';
+    }
     const now = this.now();
     const entryBeijingStartHour = Number(strategy.entryBeijingStartHour);
     const entryBeijingEndHour = Number(strategy.entryBeijingEndHour);
@@ -1130,6 +1191,23 @@ class LiveTradingManager {
           signature: error.signature,
         }));
       }
+      if (error.code === 'WALLET_ALREADY_HOLDS_MINT'
+        && typeof this.store.upsertLiveMintEntryLock === 'function') {
+        this.store.upsertLiveMintEntryLock({
+          mint: position.mint,
+          lockType: 'WALLET_BALANCE',
+          reason: error.code,
+          tokenBalanceRaw: error.tokenBalanceRaw || null,
+          sourcePositionId: position.id,
+          observedAt: failedAt,
+          metadata: {
+            strategyId: strategy.id,
+            decisionId: decision.id,
+            entryMarket: event.market || strategy.market || null,
+          },
+        });
+        this.metrics.walletBalanceLocksCreated += 1;
+      }
       const quoteRefreshRetryCount = Math.max(
         0,
         Number(strategy.entryQuoteRefreshRetryCount) || 0,
@@ -1176,6 +1254,8 @@ class LiveTradingManager {
       }
       const rejectionReason = isRefreshableAmmBuySlippage(error)
         ? 'ENTRY_AMM_QUOTE_STALE'
+        : error.code === 'WALLET_ALREADY_HOLDS_MINT'
+          ? 'ENTRY_WALLET_BALANCE_LOCKED'
         : transactionFailed
         ? 'ENTRY_TRANSACTION_FAILED'
         : error.code === 'CURVE_COMPLETE'
@@ -1219,6 +1299,9 @@ class LiveTradingManager {
         receivedAtMs: event.receivedAtMs || null,
         features: event.features || {},
       });
+      // A failed entry is terminal for this decision. Only the bounded AMM
+      // stale-quote branch above is allowed to continue the loop.
+      return;
       }
     }
   }
@@ -1480,6 +1563,7 @@ class LiveTradingManager {
   _evaluatePositionExit(position, timestampMs, price, trade = null) {
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     if (!strategy || position.status !== 'OPEN' || !(position.entryPrice > 0) || !(price > 0)) return;
+    position.lastObservedAt = timestampMs;
     const previousLow = Number(position.lowestPrice);
     position.lowestPrice = Number.isFinite(previousLow) && previousLow > 0
       ? Math.min(previousLow, price)
@@ -1820,6 +1904,23 @@ class LiveTradingManager {
 
   _requestExit(position, reason, observedPrice) {
     if (this.stopping || !position || !['OPEN', 'EXIT_FAILED'].includes(position.status)) return;
+    if (/HARD_STOP/i.test(String(reason || '')) && !position.hardStopTriggerAt) {
+      const triggerAt = Number(position.lastObservedAt) || this.now();
+      const triggerReturnPct = position.entryPrice > 0 && observedPrice > 0
+        ? ((observedPrice / position.entryPrice) - 1) * 100
+        : null;
+      position.hardStopTriggerAt = triggerAt;
+      position.hardStopTriggerPrice = Number(observedPrice) || null;
+      position.hardStopTriggerReturnPct = triggerReturnPct;
+      position.hardStopExecutableReturnPct = Number.isFinite(position.lastExecutableReturnPct)
+        ? position.lastExecutableReturnPct : null;
+      this.store.updateLivePosition(position.id, {
+        hardStopTriggerAt: triggerAt,
+        hardStopTriggerPrice: position.hardStopTriggerPrice,
+        hardStopTriggerReturnPct: triggerReturnPct,
+        hardStopExecutableReturnPct: position.hardStopExecutableReturnPct,
+      });
+    }
     if (this.coreExitPending.has(position.id)) {
       const timer = setTimeout(() => this._requestExit(position, reason, observedPrice), 1_000);
       if (timer.unref) timer.unref();

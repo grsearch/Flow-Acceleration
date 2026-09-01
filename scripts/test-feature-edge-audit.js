@@ -100,12 +100,30 @@ function main() {
     'bonding-curve reserves should produce a 1 SOL executable quote');
   assert(sample.entryImpactPct > 0 && sample.entryImpactPct < 15,
     'entry capacity impact must be measured and pass the configured ceiling');
+  assert.strictEqual(observer.onSignal(signal), null,
+    'the same canonical event must never be counted twice');
+  assert.strictEqual(observer.health().canonicalDuplicateSkipped, 1);
   assert.strictEqual(observer.onSignal({ ...signal, timestampMs: signalAtMs + 1_000 }), null,
     'same-Mint signal spam must be sampled only once inside the cooldown');
   assert.strictEqual(observer.health().cooldownSkipped, 1);
+  assert.strictEqual(observer.onSignal({
+    ...signal,
+    mint: 'FeatureEdgeAuditNonCanonical111111111111111111',
+    timestampMs: signalAtMs + 2_000,
+    auditSignalSource: 'PRIMARY_THRESHOLD_SIGNAL',
+  }), null, 'non-canonical signal sources must not enter the FEA population');
+  assert.strictEqual(observer.health().sourceSkipped, 1);
+
+  const graduatedAtMs = signalAtMs + 45_000;
+  assert.strictEqual(observer.onGraduated({ mint: signal.mint, migratedAt: graduatedAtMs }), 1);
 
   observeAllHorizons(observer, signal);
   const row = db.prepare(`SELECT * FROM ${OBSERVATION_TABLE} WHERE id=?`).get(sample.id);
+  assert.strictEqual(row.label_schema_version, 3);
+  assert.strictEqual(row.signal_source, 'FLOW_ACCEL_SIGNAL');
+  assert.strictEqual(row.lifecycle_stage_at_signal, 'PRE_MIGRATION');
+  assert.strictEqual(row.graduated_at_ms, graduatedAtMs);
+  assert.strictEqual(row.signal_to_graduation_ms, 45_000);
   assert.strictEqual(row.label_status, 'COMPLETE');
   assert.strictEqual(row.cross_market_seen, 0);
   for (const seconds of [5, 30, 120, 300]) {
@@ -169,7 +187,9 @@ function main() {
   assert.strictEqual(dashboard.bnh.profileId, BNH_PROFILE_ID);
   assert.strictEqual(dashboard.bnh.priced, 1);
   assert.strictEqual(dashboard.bnhRecent.length, 1);
-  assert(dashboard.recent.some((item) => item.featureScore === 3));
+  assert(dashboard.recent.some((item) => item.featureScore === 3
+    && item.signalSource === 'FLOW_ACCEL_SIGNAL'
+    && item.signalToGraduationMs === 45_000));
 
   const health = observer.health();
   assert.strictEqual(health.mode, 'FEA-OBS-V2');
@@ -177,6 +197,8 @@ function main() {
   assert.strictEqual(health.sendsTransactions, false);
   assert.strictEqual(health.extraRpcCalls, false);
   assert.strictEqual(health.simulatesPositions, true);
+  assert.strictEqual(health.canonicalSignalSource, 'FLOW_ACCEL_SIGNAL');
+  assert.strictEqual(health.labelSchemaVersion, 3);
   assert.strictEqual(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name='live_positions'")
     .get().count, 0, 'observer must not create or reuse a live-trading table');
 

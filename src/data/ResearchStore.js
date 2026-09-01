@@ -915,6 +915,12 @@ class ResearchStore {
         entry_signature TEXT,
         entry_error TEXT,
         highest_price REAL,
+        hard_stop_trigger_at INTEGER,
+        hard_stop_trigger_price REAL,
+        hard_stop_trigger_return_pct REAL,
+        hard_stop_executable_return_pct REAL,
+        hard_stop_fill_return_pct REAL,
+        hard_stop_slippage_pct REAL,
         exit_market TEXT,
         exit_price REAL,
         exit_signature TEXT,
@@ -960,6 +966,25 @@ class ResearchStore {
         ON live_orders(position_id, id);
       CREATE INDEX IF NOT EXISTS idx_live_orders_created_id
         ON live_orders(created_at DESC, id DESC);
+
+      CREATE TABLE IF NOT EXISTS live_mint_entry_locks (
+        mint TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        lock_type TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        token_balance_raw TEXT,
+        source_position_id INTEGER,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        last_checked_at INTEGER,
+        released_at INTEGER,
+        release_reason TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_live_mint_entry_locks_status
+        ON live_mint_entry_locks(status, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS primary_signal_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2742,6 +2767,12 @@ class ResearchStore {
     ensure('live_positions', 'exit_sol_delta', 'REAL');
     ensure('live_positions', 'realized_pnl_sol', 'REAL');
     ensure('live_positions', 'realized_return_pct', 'REAL');
+    ensure('live_positions', 'hard_stop_trigger_at', 'INTEGER');
+    ensure('live_positions', 'hard_stop_trigger_price', 'REAL');
+    ensure('live_positions', 'hard_stop_trigger_return_pct', 'REAL');
+    ensure('live_positions', 'hard_stop_executable_return_pct', 'REAL');
+    ensure('live_positions', 'hard_stop_fill_return_pct', 'REAL');
+    ensure('live_positions', 'hard_stop_slippage_pct', 'REAL');
     ensure('live_orders', 'wallet_sol_delta', 'REAL');
     ensure('live_orders', 'network_fee_sol', 'REAL');
   }
@@ -3059,6 +3090,18 @@ class ResearchStore {
           entry_error = @entryError,
           entry_sol_delta = COALESCE(@entrySolDelta, entry_sol_delta),
           highest_price = COALESCE(@highestPrice, highest_price),
+          hard_stop_trigger_at = COALESCE(@hardStopTriggerAt, hard_stop_trigger_at),
+          hard_stop_trigger_price = COALESCE(@hardStopTriggerPrice, hard_stop_trigger_price),
+          hard_stop_trigger_return_pct = COALESCE(
+            @hardStopTriggerReturnPct, hard_stop_trigger_return_pct
+          ),
+          hard_stop_executable_return_pct = COALESCE(
+            @hardStopExecutableReturnPct, hard_stop_executable_return_pct
+          ),
+          hard_stop_fill_return_pct = COALESCE(
+            @hardStopFillReturnPct, hard_stop_fill_return_pct
+          ),
+          hard_stop_slippage_pct = COALESCE(@hardStopSlippagePct, hard_stop_slippage_pct),
           exit_market = COALESCE(@exitMarket, exit_market),
           exit_price = COALESCE(@exitPrice, exit_price),
           exit_signature = COALESCE(@exitSignature, exit_signature),
@@ -3144,6 +3187,42 @@ class ResearchStore {
           AND status = 'ENTRY_FAILED'
         ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
         LIMIT 1
+      `),
+      upsertLiveMintEntryLock: this.db.prepare(`
+        INSERT INTO live_mint_entry_locks (
+          mint, status, lock_type, reason, token_balance_raw, source_position_id,
+          first_seen_at, last_seen_at, last_checked_at, released_at, release_reason,
+          metadata_json, created_at, updated_at
+        ) VALUES (
+          @mint, 'ACTIVE', @lockType, @reason, @tokenBalanceRaw, @sourcePositionId,
+          @observedAt, @observedAt, @observedAt, NULL, NULL,
+          @metadataJson, @createdAt, @updatedAt
+        ) ON CONFLICT(mint) DO UPDATE SET
+          status='ACTIVE', lock_type=excluded.lock_type, reason=excluded.reason,
+          token_balance_raw=COALESCE(excluded.token_balance_raw, token_balance_raw),
+          source_position_id=COALESCE(excluded.source_position_id, source_position_id),
+          first_seen_at=CASE WHEN status='ACTIVE' THEN first_seen_at ELSE excluded.first_seen_at END,
+          last_seen_at=excluded.last_seen_at, last_checked_at=excluded.last_checked_at,
+          released_at=NULL, release_reason=NULL, metadata_json=excluded.metadata_json,
+          updated_at=excluded.updated_at
+      `),
+      activeLiveMintEntryLock: this.db.prepare(`
+        SELECT * FROM live_mint_entry_locks WHERE mint=? AND status='ACTIVE'
+      `),
+      activeLiveMintEntryLocks: this.db.prepare(`
+        SELECT * FROM live_mint_entry_locks
+        WHERE status='ACTIVE' ORDER BY COALESCE(last_checked_at, 0), first_seen_at LIMIT ?
+      `),
+      touchLiveMintEntryLock: this.db.prepare(`
+        UPDATE live_mint_entry_locks SET
+          token_balance_raw=COALESCE(@tokenBalanceRaw, token_balance_raw),
+          last_checked_at=@checkedAt, last_seen_at=@checkedAt, updated_at=@updatedAt
+        WHERE mint=@mint AND status='ACTIVE'
+      `),
+      releaseLiveMintEntryLock: this.db.prepare(`
+        UPDATE live_mint_entry_locks SET status='RELEASED', released_at=@releasedAt,
+          release_reason=@releaseReason, last_checked_at=@releasedAt, updated_at=@updatedAt
+        WHERE mint=@mint AND status='ACTIVE'
       `),
       insertLiveOrder: this.db.prepare(`
         INSERT INTO live_orders (
@@ -4871,6 +4950,12 @@ class ResearchStore {
       entryError: value('entryError'),
       entrySolDelta: finiteOrNull(value('entrySolDelta')),
       highestPrice: finiteOrNull(value('highestPrice')),
+      hardStopTriggerAt: value('hardStopTriggerAt'),
+      hardStopTriggerPrice: finiteOrNull(value('hardStopTriggerPrice')),
+      hardStopTriggerReturnPct: finiteOrNull(value('hardStopTriggerReturnPct')),
+      hardStopExecutableReturnPct: finiteOrNull(value('hardStopExecutableReturnPct')),
+      hardStopFillReturnPct: finiteOrNull(value('hardStopFillReturnPct')),
+      hardStopSlippagePct: finiteOrNull(value('hardStopSlippagePct')),
       exitMarket: value('exitMarket'),
       exitPrice: finiteOrNull(value('exitPrice')),
       exitSignature: value('exitSignature'),
@@ -4938,6 +5023,54 @@ class ResearchStore {
 
   lastFailedLivePositionForMint(mint) {
     return this.stmts.lastFailedLivePositionForMint.get(mint) || null;
+  }
+
+  upsertLiveMintEntryLock({
+    mint, lockType = 'WALLET_BALANCE', reason = 'WALLET_ALREADY_HOLDS_MINT',
+    tokenBalanceRaw = null, sourcePositionId = null, observedAt = Date.now(), metadata = {},
+  }) {
+    const now = Date.now();
+    this.stmts.upsertLiveMintEntryLock.run({
+      mint,
+      lockType,
+      reason,
+      tokenBalanceRaw: tokenBalanceRaw == null ? null : String(tokenBalanceRaw),
+      sourcePositionId,
+      observedAt,
+      metadataJson: JSON.stringify(metadata || {}),
+      createdAt: now,
+      updatedAt: now,
+    });
+    return this.activeLiveMintEntryLock(mint);
+  }
+
+  activeLiveMintEntryLock(mint) {
+    return this.stmts.activeLiveMintEntryLock.get(mint) || null;
+  }
+
+  activeLiveMintEntryLocks(limit = 100) {
+    return this.stmts.activeLiveMintEntryLocks.all(
+      Math.max(1, Math.min(1_000, Math.trunc(Number(limit) || 100))),
+    );
+  }
+
+  touchLiveMintEntryLock(mint, tokenBalanceRaw, checkedAt = Date.now()) {
+    this.stmts.touchLiveMintEntryLock.run({
+      mint,
+      tokenBalanceRaw: tokenBalanceRaw == null ? null : String(tokenBalanceRaw),
+      checkedAt,
+      updatedAt: Date.now(),
+    });
+  }
+
+  releaseLiveMintEntryLock(mint, releaseReason = 'BALANCE_CLEARED', releasedAt = Date.now()) {
+    const result = this.stmts.releaseLiveMintEntryLock.run({
+      mint,
+      releaseReason,
+      releasedAt,
+      updatedAt: Date.now(),
+    });
+    return result.changes > 0;
   }
 
   recordLiveOrder(order) {
@@ -5019,7 +5152,10 @@ class ResearchStore {
     const entryDelta = finiteOrNull(totals.entry_delta);
     const exitDelta = finiteOrNull(totals.exit_delta);
     const pnlSol = finiteOrNull(totals.pnl_sol);
-    const position = this.db.prepare('SELECT status FROM live_positions WHERE id = ?').get(positionId);
+    const position = this.db.prepare(`
+      SELECT status, hard_stop_trigger_return_pct
+      FROM live_positions WHERE id = ?
+    `).get(positionId);
     const complete = position?.status === 'CLOSED'
       && Number(totals.settled_buys) > 0
       && Number(totals.settled_sells) > 0
@@ -5027,20 +5163,37 @@ class ResearchStore {
       && entryDelta < 0;
     const realizedPnlSol = complete ? pnlSol : null;
     const realizedReturnPct = complete ? (pnlSol / Math.abs(entryDelta)) * 100 : null;
+    const hardStopFillReturnPct = complete
+      && Number.isFinite(position?.hard_stop_trigger_return_pct)
+      ? realizedReturnPct : null;
+    const hardStopSlippagePct = hardStopFillReturnPct == null
+      ? null : hardStopFillReturnPct - position.hard_stop_trigger_return_pct;
     this.db.prepare(`
       UPDATE live_positions SET
         entry_sol_delta = ?,
         exit_sol_delta = ?,
         realized_pnl_sol = ?,
         realized_return_pct = ?,
+        hard_stop_fill_return_pct = COALESCE(?, hard_stop_fill_return_pct),
+        hard_stop_slippage_pct = COALESCE(?, hard_stop_slippage_pct),
         updated_at = updated_at
       WHERE id = ?
-    `).run(entryDelta, exitDelta, realizedPnlSol, realizedReturnPct, positionId);
+    `).run(
+      entryDelta,
+      exitDelta,
+      realizedPnlSol,
+      realizedReturnPct,
+      hardStopFillReturnPct,
+      hardStopSlippagePct,
+      positionId,
+    );
     return {
       entrySolDelta: entryDelta,
       exitSolDelta: exitDelta,
       realizedPnlSol,
       realizedReturnPct,
+      hardStopFillReturnPct,
+      hardStopSlippagePct,
       complete,
       pendingSettlements: Number(totals.pending_settlements) || 0,
     };
@@ -8527,7 +8680,7 @@ class ResearchStore {
           AND entry_signature IS NULL AND exit_reason IN (
             'ENTRY_REJECTED', 'ENTRY_PRICE_JUMP', 'ENTRY_WALLET_RESERVE_REJECTED',
             'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED',
-            'ENTRY_AMM_QUOTE_STALE'
+            'ENTRY_AMM_QUOTE_STALE', 'ENTRY_WALLET_BALANCE_LOCKED'
           )
         ), 0) AS pre_submit_guard_rejected_positions,
         COALESCE(SUM(
@@ -8544,7 +8697,7 @@ class ResearchStore {
               entry_signature IS NULL AND exit_reason IN (
                 'ENTRY_REJECTED', 'ENTRY_PRICE_JUMP', 'ENTRY_WALLET_RESERVE_REJECTED',
                 'ENTRY_MARKET_PRICE_MOVED', 'ENTRY_SELF_IMPACT_REJECTED',
-                'ENTRY_AMM_QUOTE_STALE'
+                'ENTRY_AMM_QUOTE_STALE', 'ENTRY_WALLET_BALANCE_LOCKED'
               )
             )
           )
@@ -8587,6 +8740,7 @@ class ResearchStore {
       positions,
       orders,
       decisions,
+      entryLocks: this.activeLiveMintEntryLocks(100),
       strategyId: strategy,
     };
   }

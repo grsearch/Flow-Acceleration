@@ -573,6 +573,12 @@ const config = {
     maxFailedEntriesPerMint: integerEnv(
       'FLOW_LIVE_MAX_FAILED_ENTRIES_PER_MINT', 2, { min: 1, max: 20 },
     ),
+    heldMintLockRecheckMs: integerEnv(
+      'FLOW_LIVE_HELD_MINT_LOCK_RECHECK_MS', 60_000, { min: 1_000 },
+    ),
+    heldMintLockRecheckBatch: integerEnv(
+      'FLOW_LIVE_HELD_MINT_LOCK_RECHECK_BATCH', 10, { min: 1, max: 100 },
+    ),
     maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_MAX_ENTRY_PRICE_JUMP_PCT', 10, {
       min: 0,
       max: 100,
@@ -2456,6 +2462,150 @@ const config = {
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
+    }),
+  },
+
+  // Versioned, forward-only wallet registry. New wallets are nominated from
+  // early buyers of graduated tokens, need repeated seed-token evidence, and
+  // become eligible only after a delay. The discovery token itself is excluded
+  // from grading so the registry cannot grade on its own selection sample.
+  smartWalletRegistry: {
+    enabled: booleanEnv('FLOW_SMART_WALLET_REGISTRY_ENABLED', true),
+    discoveryEnabled: booleanEnv('FLOW_SMART_WALLET_DISCOVERY_ENABLED', true),
+    discoveryMinSeedMints: integerEnv('FLOW_SMART_WALLET_DISCOVERY_MIN_SEEDS', 2, { min: 1 }),
+    discoveryMinBuySol: numberEnv('FLOW_SMART_WALLET_DISCOVERY_MIN_BUY_SOL', 0.2, { min: 0 }),
+    discoveryMaxEarlyBuyers: integerEnv('FLOW_SMART_WALLET_DISCOVERY_MAX_BUYERS', 25, {
+      min: 1, max: 500,
+    }),
+    discoveryMaxCurvePct: numberEnv('FLOW_SMART_WALLET_DISCOVERY_MAX_CURVE_PCT', 80, {
+      min: 0, max: 100,
+    }),
+    discoveryDelayMs: integerEnv('FLOW_SMART_WALLET_DISCOVERY_DELAY_MS', 24 * 60 * 60_000, {
+      min: 0,
+    }),
+    gradeRefreshMs: integerEnv('FLOW_SMART_WALLET_GRADE_REFRESH_MS', 24 * 60 * 60_000, {
+      min: 60_000,
+    }),
+    lookbackMs: integerEnv('FLOW_SMART_WALLET_GRADE_LOOKBACK_MS', 60 * 24 * 60 * 60_000, {
+      min: 7 * 24 * 60 * 60_000,
+    }),
+    labelPositionSol: shadowPositionEnv('FLOW_SMART_WALLET_LABEL_POSITION_SOL'),
+    labelEntryDelayMs: integerEnv('FLOW_SMART_WALLET_LABEL_ENTRY_DELAY_MS', 5_000, { min: 0 }),
+    labelEntryTimeoutMs: integerEnv('FLOW_SMART_WALLET_LABEL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    labelGraceMs: integerEnv('FLOW_SMART_WALLET_LABEL_GRACE_MS', 10_000, { min: 0 }),
+    copyReturnHorizonMs: integerEnv('FLOW_SMART_WALLET_COPY_HORIZON_MS', 30_000, {
+      min: 1_000,
+    }),
+    selectionHorizonMs: integerEnv('FLOW_SMART_WALLET_SELECTION_HORIZON_MS', 300_000, {
+      min: 30_000,
+    }),
+    maxCrossMarketJumpPct: numberEnv('FLOW_SMART_WALLET_MAX_CROSS_MARKET_JUMP_PCT', 500, {
+      min: 0, max: 10_000,
+    }),
+    selectionMinSamples: integerEnv('FLOW_SMART_WALLET_SELECTION_MIN_SAMPLES', 30, { min: 5 }),
+    copyMinSamples: integerEnv('FLOW_SMART_WALLET_COPY_MIN_SAMPLES', 30, { min: 5 }),
+    holdingMinSamples: integerEnv('FLOW_SMART_WALLET_HOLDING_MIN_SAMPLES', 30, { min: 5 }),
+    minActiveDays: integerEnv('FLOW_SMART_WALLET_MIN_ACTIVE_DAYS', 7, { min: 1 }),
+    minGraduationLift: numberEnv('FLOW_SMART_WALLET_MIN_GRAD_LIFT', 1.5, { min: 0 }),
+    minBig50Lift: numberEnv('FLOW_SMART_WALLET_MIN_BIG50_LIFT', 1.5, { min: 0 }),
+    minSelectionBLift: numberEnv('FLOW_SMART_WALLET_MIN_SELECTION_B_LIFT', 1.1, { min: 0 }),
+    minCopyPf: numberEnv('FLOW_SMART_WALLET_MIN_COPY_PF', 1.2, { min: 0 }),
+    minPositiveWindowPct: numberEnv('FLOW_SMART_WALLET_MIN_POSITIVE_WINDOW_PCT', 70, {
+      min: 0, max: 100,
+    }),
+    maxTop1ProfitPct: numberEnv('FLOW_SMART_WALLET_MAX_TOP1_PROFIT_PCT', 35, {
+      min: 0, max: 100,
+    }),
+    holdingBigWinnerPct: numberEnv('FLOW_SMART_WALLET_HOLDING_BIG_WINNER_PCT', 100, {
+      min: 0,
+    }),
+    holdingMinRunnerUpliftPct: numberEnv(
+      'FLOW_SMART_WALLET_HOLDING_MIN_RUNNER_UPLIFT_PCT', 20, { min: 0 },
+    ),
+    holdingMinBigWinnerRatePct: numberEnv(
+      'FLOW_SMART_WALLET_HOLDING_MIN_BIG_WINNER_RATE_PCT', 10, { min: 0, max: 100 },
+    ),
+    gradeConfirmationRuns: integerEnv('FLOW_SMART_WALLET_GRADE_CONFIRMATION_RUNS', 2, {
+      min: 1, max: 10,
+    }),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_WALLET_LABEL_POSITION_SOL'),
+    }),
+  },
+
+  // FEA-OBS V2: smart-wallet consensus is the causal candidate trigger. A
+  // pre-graduation scout is optional, graduation must be followed by independent
+  // public AMM flow before scaling, and the long-tail arm sells a core while
+  // retaining a trailing runner. RUG output is recorded as a label only.
+  smartWalletConsensusFlowRunnerShadow: {
+    enabled: booleanEnv('FLOW_SMART_CONSENSUS_V2_SHADOW_ENABLED', true),
+    positionSizeSol: shadowPositionEnv('FLOW_SMART_CONSENSUS_V2_POSITION_SOL'),
+    probationVoteWeight: numberEnv('FLOW_SMART_CONSENSUS_V2_PROBATION_WEIGHT', 1, {
+      min: 0, max: 1,
+    }),
+    enforceAGradeAfterClusters: integerEnv(
+      'FLOW_SMART_CONSENSUS_V2_ENFORCE_A_AFTER_CLUSTERS', 12, { min: 1 },
+    ),
+    stateRetentionMs: integerEnv('FLOW_SMART_CONSENSUS_V2_STATE_RETENTION_MS', 24 * 60 * 60_000, {
+      min: 60_000,
+    }),
+    episodeCooldownMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EPISODE_COOLDOWN_MS', 30 * 60_000, {
+      min: 1_000,
+    }),
+    entryDelayMs: integerEnv('FLOW_SMART_CONSENSUS_V2_ENTRY_DELAY_MS', 200, { min: 0 }),
+    entryTimeoutMs: integerEnv('FLOW_SMART_CONSENSUS_V2_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
+    exitDelayMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EXIT_DELAY_MS', 200, { min: 0 }),
+    exitTimeoutMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    maxScoutWaitMs: integerEnv('FLOW_SMART_CONSENSUS_V2_MAX_SCOUT_WAIT_MS', 15 * 60_000, {
+      min: 30_000,
+    }),
+    maxFlowWaitMs: integerEnv('FLOW_SMART_CONSENSUS_V2_MAX_FLOW_WAIT_MS', 2 * 60_000, {
+      min: 10_000,
+    }),
+    flowWindowMs: integerEnv('FLOW_SMART_CONSENSUS_V2_FLOW_WINDOW_MS', 20_000, {
+      min: 2_000,
+    }),
+    minFlowNetSol: numberEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_NET_SOL', 0.1, { min: 0 }),
+    minFlowBuyers: integerEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_BUYERS', 3, { min: 1 }),
+    minFlowBuyTx: integerEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_BUY_TX', 3, { min: 1 }),
+    dynamicThresholds: [
+      { maxEligibleClusters: 10, ordinary: 2, strong: 3 },
+      { maxEligibleClusters: 25, ordinary: 3, strong: 5 },
+      { maxEligibleClusters: 50, ordinary: 4, strong: 7 },
+      { maxEligibleClusters: Number.MAX_SAFE_INTEGER, ordinary: 6, strong: 10 },
+    ],
+    entryProfiles: [
+      {
+        id: 'POST_FLOW', label: '毕业后公共流确认', strength: 'ORDINARY',
+        consensusWindowMs: 180_000, scoutFraction: 0,
+        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
+      },
+      {
+        id: 'SCOUT15_FLOW', label: '毕业前15%试仓 + 毕业后公共流加仓', strength: 'ORDINARY',
+        consensusWindowMs: 180_000, scoutFraction: 0.15,
+        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
+      },
+      {
+        id: 'STRONG25_FLOW', label: '强共识毕业前25%试仓 + 毕业后公共流加仓', strength: 'STRONG',
+        consensusWindowMs: 300_000, scoutFraction: 0.25,
+        minSelectionAClusters: 3, minWeightedScoreRatio: 0.6,
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'FIX120_H20', label: '固定120秒对照', mode: 'FIXED_HOLD',
+        fixedHoldMs: 120_000, maxHoldMs: 120_000, hardStopPct: 20,
+      },
+      {
+        id: 'CORE80_RUNNER6H', label: '+30%卖80%核心仓，余仓30%回撤退出',
+        mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
+        runnerTrailPct: 30, maxHoldMs: 6 * 60 * 60_000, hardStopPct: 20,
+      },
+    ],
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: shadowPositionEnv('FLOW_SMART_CONSENSUS_V2_POSITION_SOL'),
     }),
   },
 
@@ -6481,6 +6631,8 @@ const config = {
   // neither path signs or sends a transaction.
   featureEdgeAudit: {
     enabled: booleanEnv('FLOW_FEATURE_EDGE_AUDIT_ENABLED', true),
+    canonicalSignalSource: process.env.FLOW_FEATURE_EDGE_AUDIT_CANONICAL_SOURCE
+      || 'FLOW_ACCEL_SIGNAL',
     positionSol: numberEnv('FLOW_FEATURE_EDGE_AUDIT_POSITION_SOL', 1, { min: 0.01, max: 100 }),
     sampleCooldownMs: integerEnv(
       'FLOW_FEATURE_EDGE_AUDIT_SAMPLE_COOLDOWN_MS',

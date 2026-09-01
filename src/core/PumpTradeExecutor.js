@@ -711,10 +711,12 @@ class PumpTradeExecutor {
       };
       mark('state_and_blockhash_ready_ms');
       if (balanceBefore > 0n && !allowExistingBalance) {
-        throw errorWithCode(
+        const error = errorWithCode(
           'Trading wallet already holds this mint',
           'WALLET_ALREADY_HOLDS_MINT',
         );
+        error.tokenBalanceRaw = balanceBefore.toString();
+        throw error;
       }
 
       const reserveLamports = Math.round(this.config.minWalletReserveSol * LAMPORTS_PER_SOL);
@@ -869,10 +871,12 @@ class PumpTradeExecutor {
       const tokenProgram = await this._tokenProgram(mint);
       const balanceBefore = await this._tokenBalanceRaw(mint, tokenProgram);
       if (balanceBefore > 0n && !allowExistingBalance) {
-        throw errorWithCode(
+        const error = errorWithCode(
           'Trading wallet already holds this mint',
           'WALLET_ALREADY_HOLDS_MINT',
         );
+        error.tokenBalanceRaw = balanceBefore.toString();
+        throw error;
       }
 
       const spendLamports = BigInt(Math.round(solAmount * LAMPORTS_PER_SOL));
@@ -1083,6 +1087,23 @@ class PumpTradeExecutor {
         settlement,
       };
     }
+  }
+
+  async tokenBalanceRaw(mintValue) {
+    const mint = new PublicKey(mintValue);
+    const tokenProgram = await this._tokenProgram(mint);
+    const snapshot = await this._tokenBalanceSnapshot(
+      mint,
+      tokenProgram,
+      this.confirmationCommitment,
+    );
+    if (!snapshot.observed) {
+      throw errorWithCode(
+        `Token balance is not indexed yet for ${mint.toBase58()}`,
+        'TOKEN_BALANCE_UNAVAILABLE',
+      );
+    }
+    return snapshot.amount.toString();
   }
 
   async sell({ mint: mintValue, tokenAmountRaw = null }) {

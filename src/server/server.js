@@ -58,6 +58,8 @@ class ResearchServer {
     flowSmartConfirmShadow = null,
     smartLikeEarlyShadow = null,
     preEntryRugRisk = null,
+    smartWalletRegistry = null,
+    smartWalletConsensusFlowRunnerShadow = null,
     smartResonanceShadow = null,
     smartWalletRugEscapeShadow = null,
     smartWalletFirstOpenRightTailShadow = null,
@@ -96,6 +98,8 @@ class ResearchServer {
     this.flowSmartConfirmShadow = flowSmartConfirmShadow;
     this.smartLikeEarlyShadow = smartLikeEarlyShadow;
     this.preEntryRugRisk = preEntryRugRisk;
+    this.smartWalletRegistry = smartWalletRegistry;
+    this.smartWalletConsensusFlowRunnerShadow = smartWalletConsensusFlowRunnerShadow;
     this.smartResonanceShadow = smartResonanceShadow;
     this.smartWalletRugEscapeShadow = smartWalletRugEscapeShadow;
     this.smartWalletFirstOpenRightTailShadow = smartWalletFirstOpenRightTailShadow;
@@ -171,6 +175,7 @@ class ResearchServer {
           'early-pure-buy-burst': enabled('earlyPureBuyBurstShadow'),
           'same-slot-dump-backrun': enabled('sameSlotDumpBackrunShadow'),
           'smart-resonance': enabled('smartResonanceShadow'),
+          'smart-consensus-v2': enabled('smartWalletConsensusFlowRunnerShadow'),
           'smart-wallet-rug-escape': enabled('smartWalletRugEscapeShadow'),
           'smart-first-open-right-tail': enabled('smartWalletFirstOpenRightTailShadow'),
           'public-flow-lead': enabled('publicFlowLeadShadow'),
@@ -299,6 +304,18 @@ class ResearchServer {
 
     this.app.get('/api/smart-wallets', (_request, response) => {
       response.json(this.store.smartWalletStats(this.config.smartWallets));
+    });
+
+    this.app.get('/api/smart-wallet-registry', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        ...(this.smartWalletRegistry?.dashboard(numeric(request.query.limit, 100)) || {
+          enabled: false,
+          observerOnly: true,
+          sendsTransactions: false,
+          wallets: [],
+        }),
+      });
     });
 
     this.app.get('/api/signal-repetition', (_request, response) => {
@@ -673,6 +690,21 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/smart-consensus-v2-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        ...(this.smartWalletConsensusFlowRunnerShadow?.dashboard(
+          numeric(request.query.positionLimit, 100),
+        ) || {
+          enabled: false,
+          observerOnly: true,
+          sendsTransactions: false,
+          recent: [],
+          summary: [],
+        }),
+      });
+    });
+
     this.app.get('/api/smart-wallet-rug-escape-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -934,6 +966,9 @@ class ResearchServer {
         flowSmartConfirmShadow: this.flowSmartConfirmShadow?.health() || null,
         smartLikeEarlyShadow: this.smartLikeEarlyShadow?.health() || null,
         preEntryRugRisk: this.preEntryRugRisk?.health() || null,
+        smartWalletRegistry: this.smartWalletRegistry?.health() || null,
+        smartWalletConsensusFlowRunnerShadow:
+          this.smartWalletConsensusFlowRunnerShadow?.health() || null,
         smartResonanceShadow: this.smartResonanceShadow?.health() || null,
         smartWalletRugEscapeShadow: this.smartWalletRugEscapeShadow?.health() || null,
         smartWalletFirstOpenRightTailShadow:
