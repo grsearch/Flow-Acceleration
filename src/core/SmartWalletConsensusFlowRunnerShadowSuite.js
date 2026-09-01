@@ -344,8 +344,10 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         selectionGrade: snapshot.selectionGrade,
         copyGrade: snapshot.copyGrade,
         holdingGrade: snapshot.holdingGrade,
-        weight: snapshot.status === 'PROBATION'
-          ? this.config.probationVoteWeight : snapshot.selectionWeight,
+        weight: Number.isFinite(snapshot.voteWeight)
+          ? snapshot.voteWeight
+          : (snapshot.status === 'PROBATION'
+            ? this.config.probationVoteWeight : snapshot.selectionWeight),
         market: event.market,
         price,
       });

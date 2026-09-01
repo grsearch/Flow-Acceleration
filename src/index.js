@@ -122,6 +122,7 @@ function createRuntime(runtimeConfig = config) {
       seedClusters: runtimeConfig.smartLikeEarlyShadow.walletClusters || [],
     },
     store,
+    transactionParser: parser,
   });
   smartWalletRegistry.start();
   const smartWalletConsensusFlowRunnerShadow = new SmartWalletConsensusFlowRunnerShadowSuite({

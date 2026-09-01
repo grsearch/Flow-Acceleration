@@ -128,6 +128,9 @@ const FULL_STATE_TABLES = new Set([
   'smart_wallet_registry_meta',
   'smart_wallet_cluster_memberships',
   'smart_wallet_cluster_evaluations',
+  'smart_wallet_history_backfill_meta',
+  'smart_wallet_history_backfills',
+  'smart_wallet_history_backfill_daily',
   'smart_wallet_consensus_overlay_meta',
 ]);
 

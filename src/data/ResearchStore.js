@@ -767,6 +767,7 @@ class ResearchStore {
         position_phase TEXT,
         token_balance_before REAL,
         token_balance_after REAL,
+        event_source TEXT NOT NULL DEFAULT 'LIVE',
         nearest_flow_signal INTEGER,
         time_from_flow_signal_ms INTEGER,
         UNIQUE(signature, event_index, wallet)
@@ -2385,6 +2386,10 @@ class ResearchStore {
         'token_balance_after',
         'ALTER TABLE smart_wallet_events ADD COLUMN token_balance_after REAL',
       ],
+      [
+        'event_source',
+        "ALTER TABLE smart_wallet_events ADD COLUMN event_source TEXT NOT NULL DEFAULT 'LIVE'",
+      ],
     ];
     let smartEventBackfillRequired = false;
     let smartPositionBackfillRequired = false;
@@ -2976,11 +2981,13 @@ class ResearchStore {
         INSERT OR IGNORE INTO smart_wallet_events (
           timestamp_ms, received_at_ms, slot, signature, event_index, wallet, mint, side, market,
           sol_amount, token_amount, price, curve_pct, age_ms, position_phase,
-          token_balance_before, token_balance_after, nearest_flow_signal, time_from_flow_signal_ms
+          token_balance_before, token_balance_after, event_source,
+          nearest_flow_signal, time_from_flow_signal_ms
         ) VALUES (
           @timestampMs, @receivedAtMs, @slot, @signature, @eventIndex, @wallet, @mint, @side, @market,
           @solAmount, @tokenAmount, @price, @curvePct, @ageMs, @positionPhase,
-          @tokenBalanceBefore, @tokenBalanceAfter, @nearestFlowSignal, @timeFromFlowSignalMs
+          @tokenBalanceBefore, @tokenBalanceAfter, @eventSource,
+          @nearestFlowSignal, @timeFromFlowSignalMs
         )
       `),
       insertSmartSignalConfirmation: this.db.prepare(`
@@ -4775,10 +4782,42 @@ class ResearchStore {
       positionPhase: null,
       tokenBalanceBefore: null,
       tokenBalanceAfter: null,
+      eventSource: 'LIVE',
       nearestFlowSignal: nearest?.signal_id || null,
       timeFromFlowSignalMs: nearest ? trade.timestampMs - nearest.timestamp_ms : null,
     };
     return this._writeSmartWalletEvent(row);
+  }
+
+  recordHistoricalSmartWalletEvent(trade) {
+    const row = {
+      timestampMs: trade.timestampMs,
+      receivedAtMs: receivedTimestampMs(trade.receivedAtMs, trade.timestampMs),
+      slot: trade.slot || null,
+      signature: trade.signature || null,
+      eventIndex: trade.eventIndex || 0,
+      wallet: trade.wallet,
+      mint: trade.mint,
+      side: String(trade.side || '').toUpperCase(),
+      market: trade.market || null,
+      solAmount: trade.solAmount,
+      tokenAmount: finiteOrNull(trade.tokenAmount),
+      price: finiteOrNull(trade.price),
+      curvePct: finiteOrNull(trade.curvePct),
+      ageMs: Number.isFinite(trade.ageMs) ? trade.ageMs : null,
+      positionPhase: null,
+      tokenBalanceBefore: null,
+      tokenBalanceAfter: null,
+      eventSource: 'HISTORICAL_BACKFILL',
+      nearestFlowSignal: null,
+      timeFromFlowSignalMs: null,
+    };
+    const result = this.stmts.insertSmartWallet.run(row);
+    return {
+      ...row,
+      id: result.changes > 0 ? Number(result.lastInsertRowid) : null,
+      inserted: result.changes > 0,
+    };
   }
 
   recordSmartOpenDecision(decision) {

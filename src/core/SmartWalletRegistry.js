@@ -65,17 +65,24 @@ function copyWeight(grade) {
 }
 
 class SmartWalletRegistry {
-  constructor({ config, store, now = () => Date.now(), fetchImpl = globalThis.fetch }) {
+  constructor({
+    config, store, now = () => Date.now(), fetchImpl = globalThis.fetch,
+    transactionParser = null,
+  }) {
     this.config = config;
     this.store = store;
     this.now = now;
     this.fetchImpl = fetchImpl;
+    this.transactionParser = transactionParser;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.labelPositionSol });
     this.labels = new Map();
     this.labelsByMint = new Map();
     this.pnlSnapshotCache = new Map();
     this.ageChecks = new Map();
     this.ageAbortControllers = new Set();
+    this.historyAbortControllers = new Set();
+    this.historyBackfills = new Map();
+    this.lastHistoryScheduleAt = 0;
     this.ageHistoryFloor = null;
     this.ageHistoryFloorCheckedAt = 0;
     this.gradeRefreshRequested = false;
@@ -100,6 +107,13 @@ class SmartWalletRegistry {
       ageChecksStarted: 0,
       ageChecksCompleted: 0,
       ageChecksFailed: 0,
+      historyWalletsCompleted: 0,
+      historyWalletsFailed: 0,
+      historyPagesFetched: 0,
+      historyCreditsSpent: 0,
+      historyTransactionsSeen: 0,
+      historyTradeEventsParsed: 0,
+      historyEventsInserted: 0,
       lastGradeRefreshAt: null,
       lastAgeCheckAt: null,
       lastActionAt: null,
@@ -282,6 +296,46 @@ class SmartWalletRegistry {
       );
       CREATE INDEX IF NOT EXISTS idx_swr_pnl_event_position
         ON smart_wallet_pnl_processed_events(position_id, smart_event_id);
+
+      CREATE TABLE IF NOT EXISTS smart_wallet_history_backfill_meta (
+        id INTEGER PRIMARY KEY CHECK(id=1),
+        initial_cutoff_at INTEGER NOT NULL,
+        initialized_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS smart_wallet_history_backfills (
+        wallet TEXT PRIMARY KEY,
+        cohort TEXT NOT NULL,
+        status TEXT NOT NULL,
+        window_start_at INTEGER NOT NULL,
+        window_end_at INTEGER NOT NULL,
+        pagination_token TEXT,
+        pages_fetched INTEGER NOT NULL DEFAULT 0,
+        credits_spent INTEGER NOT NULL DEFAULT 0,
+        transactions_seen INTEGER NOT NULL DEFAULT 0,
+        trade_events_parsed INTEGER NOT NULL DEFAULT 0,
+        inserted_events INTEGER NOT NULL DEFAULT 0,
+        ledger_complete INTEGER NOT NULL DEFAULT 0,
+        orphan_events INTEGER NOT NULL DEFAULT 0,
+        first_started_at INTEGER,
+        last_started_at INTEGER,
+        next_attempt_at INTEGER,
+        completed_at INTEGER,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_swr_history_queue
+        ON smart_wallet_history_backfills(status, cohort, next_attempt_at, created_at);
+
+      CREATE TABLE IF NOT EXISTS smart_wallet_history_backfill_daily (
+        day_start_at INTEGER PRIMARY KEY,
+        wallets_started INTEGER NOT NULL DEFAULT 0,
+        pages_fetched INTEGER NOT NULL DEFAULT 0,
+        credits_spent INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
     `);
     const registryColumns = new Set(this.store.db.prepare(
       'PRAGMA table_info(smart_wallet_registry)',
@@ -437,6 +491,9 @@ class SmartWalletRegistry {
     `);
     this.processActualWalletEvent = this.store.db.transaction(
       (event) => this._applyActualWalletEvent(event),
+    );
+    this.rebuildActualWalletLedger = this.store.db.transaction(
+      (wallet) => this._rebuildActualWalletLedger(wallet),
     );
   }
 
@@ -601,6 +658,7 @@ class SmartWalletRegistry {
       LEFT JOIN smart_wallet_pnl_processed_events processed
         ON processed.smart_event_id=event.id
       WHERE processed.smart_event_id IS NULL
+        AND COALESCE(event.event_source, 'LIVE')<>'HISTORICAL_BACKFILL'
       ORDER BY event.timestamp_ms, event.id
     `).all();
     let processed = 0;
@@ -609,6 +667,346 @@ class SmartWalletRegistry {
     }
     this.metrics.actualBackfilled += processed;
     return processed;
+  }
+
+  _rebuildActualWalletLedger(wallet) {
+    const events = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_events
+      WHERE wallet=? ORDER BY timestamp_ms, id
+    `).all(wallet);
+    this.store.db.prepare(`
+      DELETE FROM smart_wallet_pnl_processed_events
+      WHERE smart_event_id IN (SELECT id FROM smart_wallet_events WHERE wallet=?)
+    `).run(wallet);
+    this.store.db.prepare('DELETE FROM smart_wallet_actual_positions WHERE wallet=?').run(wallet);
+    this.store.db.prepare('DELETE FROM smart_wallet_positions WHERE wallet=?').run(wallet);
+    const balances = new Map();
+    let orphanEvents = 0;
+    for (const row of events) {
+      const mint = String(row.mint || '');
+      const side = String(row.side || '').toUpperCase();
+      const amount = Math.max(0, finite(row.token_amount, 0));
+      const before = Math.max(0, balances.get(mint) || 0);
+      let after = before;
+      let phase = row.position_phase;
+      if (side === 'BUY') {
+        phase = before > 0 ? 'ADD' : 'OPEN';
+        after = before + amount;
+      } else if (side === 'SELL' && before > 0 && amount > 0) {
+        after = Math.max(0, before - amount);
+        const dust = Math.max(1e-9, before * 0.005);
+        phase = after <= dust ? 'CLOSE' : 'REDUCE';
+        if (phase === 'CLOSE') after = 0;
+      } else if (side === 'SELL') {
+        phase = 'SELL';
+        after = 0;
+      }
+      balances.set(mint, after);
+      this.store.db.prepare(`
+        UPDATE smart_wallet_events SET position_phase=?, token_balance_before=?,
+          token_balance_after=? WHERE id=?
+      `).run(phase, before, after, row.id);
+      const accounting = this._applyActualWalletEvent({
+        ...row,
+        position_phase: phase,
+        token_balance_before: before,
+        token_balance_after: after,
+      });
+      if (!accounting || String(accounting.accountingStatus || '').startsWith('IGNORED_')) {
+        orphanEvents += 1;
+      }
+    }
+    const upsert = this.store.db.prepare(`
+      INSERT INTO smart_wallet_positions (wallet, mint, token_balance, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(wallet, mint) DO UPDATE SET token_balance=excluded.token_balance,
+        updated_at=excluded.updated_at
+    `);
+    for (const [mint, balance] of balances) {
+      upsert.run(wallet, mint, balance, this.now());
+    }
+    this.pnlSnapshotCache.delete(wallet);
+    this.gradeRefreshRequested = true;
+    return { events: events.length, orphanEvents, ledgerComplete: orphanEvents === 0 };
+  }
+
+  _historyDayStart(at = this.now()) {
+    const cstOffsetMs = 8 * 60 * 60_000;
+    return Math.floor((at + cstOffsetMs) / DAY_MS) * DAY_MS - cstOffsetMs;
+  }
+
+  _initializeHistoryBackfills(at = this.now()) {
+    if (this.config.historyBackfillEnabled !== true) return;
+    this.store.db.prepare(`
+      INSERT OR IGNORE INTO smart_wallet_history_backfill_meta (
+        id, initial_cutoff_at, initialized_at, updated_at
+      ) VALUES (1, ?, ?, ?)
+    `).run(at, at, at);
+    this.store.db.prepare(`
+      UPDATE smart_wallet_history_backfills SET status='PENDING', updated_at=?
+      WHERE status='RUNNING'
+    `).run(at);
+    this._enqueueHistoryBackfills(at);
+  }
+
+  _enqueueHistoryBackfills(at = this.now()) {
+    if (this.config.historyBackfillEnabled !== true) return 0;
+    const meta = this.store.db.prepare(
+      'SELECT * FROM smart_wallet_history_backfill_meta WHERE id=1',
+    ).get();
+    if (!meta) return 0;
+    const historyWindowMs = Math.max(
+      7 * DAY_MS, finite(this.config.historyWindowMs, 60 * DAY_MS),
+    );
+    const warmupMs = Math.max(0, finite(this.config.historyWarmupMs, 30 * DAY_MS));
+    const insert = this.store.db.prepare(`
+      INSERT OR IGNORE INTO smart_wallet_history_backfills (
+        wallet, cohort, status, window_start_at, window_end_at,
+        created_at, updated_at
+      ) VALUES (?, ?, 'PENDING', ?, ?, ?, ?)
+    `);
+    let inserted = 0;
+    const wallets = this.store.db.prepare(`
+      SELECT r.wallet, r.discovered_at FROM smart_wallet_registry r
+      LEFT JOIN smart_wallet_history_backfills h ON h.wallet=r.wallet
+      WHERE h.wallet IS NULL ORDER BY r.discovered_at, r.wallet
+    `).all();
+    for (const row of wallets) {
+      const initial = this.config.historyInitialAllEnabled !== false
+        && row.discovered_at <= meta.initial_cutoff_at;
+      inserted += insert.run(
+        row.wallet,
+        initial ? 'INITIAL' : 'DAILY',
+        at - historyWindowMs - warmupMs,
+        at,
+        at,
+        at,
+      ).changes;
+    }
+    return inserted;
+  }
+
+  _historyDailyUsage(at = this.now()) {
+    const dayStartAt = this._historyDayStart(at);
+    this.store.db.prepare(`
+      INSERT OR IGNORE INTO smart_wallet_history_backfill_daily (
+        day_start_at, wallets_started, pages_fetched, credits_spent, updated_at
+      ) VALUES (?, 0, 0, 0, ?)
+    `).run(dayStartAt, at);
+    return this.store.db.prepare(`
+      SELECT * FROM smart_wallet_history_backfill_daily WHERE day_start_at=?
+    `).get(dayStartAt);
+  }
+
+  _claimHistoryBackfill(at = this.now()) {
+    const candidates = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_history_backfills
+      WHERE status IN ('PENDING','FAILED','PAUSED')
+        AND COALESCE(next_attempt_at, 0)<=?
+      ORDER BY CASE cohort WHEN 'INITIAL' THEN 0 ELSE 1 END,
+        CASE WHEN first_started_at IS NULL THEN 1 ELSE 0 END,
+        COALESCE(last_started_at, 0), created_at, wallet
+      LIMIT 200
+    `).all(at);
+    const daily = this._historyDailyUsage(at);
+    const walletLimit = Math.max(1, finite(this.config.historyDailyWalletLimit, 50));
+    const creditLimit = Math.max(1_000, finite(
+      this.config.historyDailyCreditLimit, 250_000,
+    ));
+    const row = candidates.find((candidate) => candidate.cohort === 'INITIAL'
+      || candidate.first_started_at != null
+      || (daily.wallets_started < walletLimit && daily.credits_spent < creditLimit));
+    if (!row) return null;
+    const firstStart = row.first_started_at == null;
+    this.store.db.prepare(`
+      UPDATE smart_wallet_history_backfills SET status='RUNNING',
+        first_started_at=COALESCE(first_started_at, ?), last_started_at=?,
+        next_attempt_at=NULL, last_error=NULL, updated_at=? WHERE wallet=?
+    `).run(at, at, at, row.wallet);
+    if (row.cohort === 'DAILY' && firstStart) {
+      this.store.db.prepare(`
+        UPDATE smart_wallet_history_backfill_daily
+        SET wallets_started=wallets_started+1, updated_at=? WHERE day_start_at=?
+      `).run(at, daily.day_start_at);
+    }
+    return this.store.db.prepare(
+      'SELECT * FROM smart_wallet_history_backfills WHERE wallet=?',
+    ).get(row.wallet);
+  }
+
+  async _historyRpc(wallet, row) {
+    if (!this.config.historyRpcUrl) throw new Error('HISTORY_RPC_URL_MISSING');
+    if (typeof this.fetchImpl !== 'function') throw new Error('HISTORY_FETCH_UNAVAILABLE');
+    const controller = new AbortController();
+    this.historyAbortControllers.add(controller);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.max(1_000, finite(this.config.historyRpcTimeoutMs, 30_000)),
+    );
+    const filters = {
+      blockTime: {
+        gte: Math.floor(row.window_start_at / 1_000),
+        lt: Math.ceil(row.window_end_at / 1_000),
+      },
+      status: 'succeeded',
+      tokenAccounts: 'balanceChanged',
+    };
+    const options = {
+      transactionDetails: 'full',
+      encoding: 'json',
+      maxSupportedTransactionVersion: 0,
+      sortOrder: 'asc',
+      limit: Math.max(1, Math.min(1_000, finite(this.config.historyPageSize, 1_000))),
+      filters,
+    };
+    if (row.pagination_token) options.paginationToken = row.pagination_token;
+    try {
+      const response = await this.fetchImpl(this.config.historyRpcUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'getTransactionsForAddress',
+          params: [wallet, options],
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HISTORY_RPC_HTTP_${response.status}`);
+      const json = await response.json();
+      if (json.error) throw new Error(`HISTORY_RPC_${json.error.code || 'ERROR'}`);
+      const result = json.result || {};
+      const data = Array.isArray(result)
+        ? result : (Array.isArray(result.data) ? result.data : (result.transactions || []));
+      const paginationToken = result.paginationToken
+        || result.pagination_token
+        || data[data.length - 1]?.paginationToken
+        || data[data.length - 1]?.pagination_token
+        || null;
+      return { data, paginationToken };
+    } finally {
+      clearTimeout(timeout);
+      this.historyAbortControllers.delete(controller);
+    }
+  }
+
+  _recordHistoryPage(wallet, transactions) {
+    let parsed = 0;
+    let inserted = 0;
+    for (const transaction of transactions) {
+      const receivedAt = finite(transaction?.blockTime, 0) * 1_000 || this.now();
+      const events = this.transactionParser.parseTransaction(transaction, receivedAt) || [];
+      for (const event of events) {
+        if (!['trade', 'ammTrade'].includes(event.type) || event.wallet !== wallet
+          || !['BUY', 'SELL'].includes(String(event.side || '').toUpperCase())) continue;
+        parsed += 1;
+        if (this.store.recordHistoricalSmartWalletEvent(event).inserted) inserted += 1;
+      }
+    }
+    return { parsed, inserted };
+  }
+
+  async _runHistoryBackfill(claimed) {
+    let row = claimed;
+    try {
+      const maxPages = Math.max(1, finite(this.config.historyMaxPagesPerWallet, 500));
+      while (!this.stopping && row.pages_fetched < maxPages) {
+        if (row.cohort === 'DAILY') {
+          const daily = this._historyDailyUsage(this.now());
+          const creditLimit = Math.max(1_000, finite(
+            this.config.historyDailyCreditLimit, 250_000,
+          ));
+          if (daily.credits_spent >= creditLimit) {
+            const nextDay = daily.day_start_at + DAY_MS;
+            this.store.db.prepare(`
+              UPDATE smart_wallet_history_backfills SET status='PAUSED',
+                next_attempt_at=?, updated_at=? WHERE wallet=?
+            `).run(nextDay, this.now(), row.wallet);
+            return;
+          }
+        }
+        const page = await this._historyRpc(row.wallet, row);
+        const stats = this._recordHistoryPage(row.wallet, page.data);
+        const credits = Math.max(1, finite(this.config.historyCreditsPerPage, 50));
+        const now = this.now();
+        this.store.db.prepare(`
+          UPDATE smart_wallet_history_backfills SET
+            pagination_token=?, pages_fetched=pages_fetched+1,
+            credits_spent=credits_spent+?, transactions_seen=transactions_seen+?,
+            trade_events_parsed=trade_events_parsed+?, inserted_events=inserted_events+?,
+            updated_at=? WHERE wallet=?
+        `).run(
+          page.paginationToken, credits, page.data.length, stats.parsed,
+          stats.inserted, now, row.wallet,
+        );
+        if (row.cohort === 'DAILY') {
+          const dayStart = this._historyDayStart(now);
+          this.store.db.prepare(`
+            UPDATE smart_wallet_history_backfill_daily SET
+              pages_fetched=pages_fetched+1, credits_spent=credits_spent+?, updated_at=?
+            WHERE day_start_at=?
+          `).run(credits, now, dayStart);
+        }
+        this.metrics.historyPagesFetched += 1;
+        this.metrics.historyCreditsSpent += credits;
+        this.metrics.historyTransactionsSeen += page.data.length;
+        this.metrics.historyTradeEventsParsed += stats.parsed;
+        this.metrics.historyEventsInserted += stats.inserted;
+        const priorToken = row.pagination_token;
+        row = this.store.db.prepare(
+          'SELECT * FROM smart_wallet_history_backfills WHERE wallet=?',
+        ).get(row.wallet);
+        if (!page.paginationToken || page.paginationToken === priorToken || !page.data.length) {
+          const rebuilt = this.rebuildActualWalletLedger(row.wallet);
+          this.store.db.prepare(`
+            UPDATE smart_wallet_history_backfills SET status='COMPLETE',
+              pagination_token=NULL, ledger_complete=?, orphan_events=?,
+              completed_at=?, next_attempt_at=NULL, last_error=NULL, updated_at=?
+            WHERE wallet=?
+          `).run(
+            rebuilt.ledgerComplete ? 1 : 0,
+            rebuilt.orphanEvents,
+            now,
+            now,
+            row.wallet,
+          );
+          this.metrics.historyWalletsCompleted += 1;
+          return;
+        }
+      }
+      throw new Error('HISTORY_MAX_PAGES_REACHED');
+    } catch (error) {
+      if (this.stopping && error?.name === 'AbortError') return;
+      const now = this.now();
+      this.store.db.prepare(`
+        UPDATE smart_wallet_history_backfills SET status='FAILED', last_error=?,
+          next_attempt_at=?, updated_at=? WHERE wallet=?
+      `).run(
+        String(error?.message || error).slice(0, 500),
+        now + Math.max(60_000, finite(this.config.historyRetryMs, 60 * 60_000)),
+        now,
+        row.wallet,
+      );
+      this.metrics.historyWalletsFailed += 1;
+    }
+  }
+
+  _scheduleHistoryBackfills(at = this.now(), { force = false } = {}) {
+    if (this.config.historyBackfillEnabled !== true || this.stopping
+      || !this.config.historyRpcUrl || !this.transactionParser) return;
+    if (!force && at - this.lastHistoryScheduleAt < 1_000) return;
+    this.lastHistoryScheduleAt = at;
+    this._enqueueHistoryBackfills(at);
+    const concurrency = Math.max(1, finite(this.config.historyConcurrency, 2));
+    while (this.historyBackfills.size < concurrency) {
+      const row = this._claimHistoryBackfill(at);
+      if (!row || this.historyBackfills.has(row.wallet)) break;
+      const task = this._runHistoryBackfill(row)
+        .catch(() => null)
+        .finally(() => {
+          this.historyBackfills.delete(row.wallet);
+          if (!this.stopping) this._scheduleHistoryBackfills(this.now(), { force: true });
+        });
+      this.historyBackfills.set(row.wallet, task);
+    }
   }
 
   _pnlWindowSummary(rows, startAt, endAt) {
@@ -658,6 +1056,7 @@ class SmartWalletRegistry {
       30 * DAY_MS,
       finite(this.config.lookbackMs, 60 * DAY_MS),
       finite(this.config.pnlWindowMs, DAY_MS),
+      finite(this.config.elite60dWindowMs, 60 * DAY_MS),
     );
     const rows = this.store.db.prepare(`
       SELECT * FROM smart_wallet_actual_positions
@@ -674,19 +1073,42 @@ class SmartWalletRegistry {
     const window24h = this._pnlWindowSummary(rows, at - pnlWindowMs, at);
     const window7d = this._pnlWindowSummary(rows, at - 7 * DAY_MS, at);
     const window30d = this._pnlWindowSummary(rows, at - 30 * DAY_MS, at);
+    const eliteWindowMs = Math.max(
+      7 * DAY_MS, finite(this.config.elite60dWindowMs, 60 * DAY_MS),
+    );
+    const window60d = this._pnlWindowSummary(rows, at - eliteWindowMs, at);
     const lookback = this._pnlWindowSummary(rows, at - maxLookbackMs, at);
     const minClosedPositions = Math.max(1, finite(this.config.pnlMinClosedPositions, 1));
     const minRealizedSol = Math.max(0, finite(this.config.pnlMinRealizedSol, 0));
     const minCapitalReturnPct = Math.max(0, finite(this.config.pnlMinCapitalReturnPct, 0));
+    const history = this.store.db.prepare(`
+      SELECT status, window_start_at, window_end_at, ledger_complete,
+        orphan_events, completed_at, pages_fetched, credits_spent, last_error
+      FROM smart_wallet_history_backfills WHERE wallet=?
+    `).get(wallet);
+    const historyComplete = history?.status === 'COMPLETE'
+      && Boolean(history.ledger_complete)
+      && history.window_start_at <= at - eliteWindowMs;
+    const eliteMinRealizedSol = Math.max(
+      0, finite(this.config.elite60dMinRealizedSol, 200),
+    );
+    const eliteQualified = this.config.elite60dEnabled === true
+      && historyComplete
+      && window60d.realizedPnlSol > eliteMinRealizedSol;
     let status = 'PNL_BYPASS';
     let eligible = true;
-    if (this.config.pnlGateEnabled !== false) {
+    let eligibilityClass = 'BYPASS';
+    if (eliteQualified) {
+      status = 'PNL_ELITE_60D';
+      eligibilityClass = 'LONG_TERM_ELITE';
+    } else if (this.config.pnlGateEnabled !== false) {
       if (window24h.closedPositions < minClosedPositions) {
         status = 'PNL_PENDING';
         eligible = false;
       } else if (window24h.realizedPnlSol > minRealizedSol
         && window24h.capitalReturnPct > minCapitalReturnPct) {
         status = 'PNL_PROFITABLE';
+        eligibilityClass = 'ACTIVE_24H';
       } else {
         status = 'LOSS_BLOCKED';
         eligible = false;
@@ -698,10 +1120,17 @@ class SmartWalletRegistry {
       minClosedPositions,
       minRealizedSol,
       minCapitalReturnPct,
+      eliteMinRealizedSol,
+      eliteWindowMs,
+      eliteQualified,
+      eligibilityClass,
+      historyComplete,
+      history: history || null,
       windowMs: pnlWindowMs,
       window24h,
       window7d,
       window30d,
+      window60d,
       lookback,
       openPositions: Number(open?.open_positions) || 0,
       openCostSol: finite(open?.open_cost_sol, 0),
@@ -739,6 +1168,7 @@ class SmartWalletRegistry {
       }
     }
     this._backfillActualWalletEvents();
+    this._initializeHistoryBackfills(now);
     this.refreshClusters(now, { force: true });
     const active = this.store.db.prepare(`
       SELECT * FROM smart_wallet_forward_labels
@@ -756,16 +1186,20 @@ class SmartWalletRegistry {
     else if (!meta.last_grade_refresh_at
       || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) this.refreshGrades(now);
     this._scheduleAgeChecks(now);
+    this._scheduleHistoryBackfills(now, { force: true });
   }
 
   stop() {
     this.stopping = true;
     for (const controller of this.ageAbortControllers) controller.abort();
+    for (const controller of this.historyAbortControllers) controller.abort();
     this.ageAbortControllers.clear();
+    this.historyAbortControllers.clear();
     this.labels.clear();
     this.labelsByMint.clear();
     this.pnlSnapshotCache.clear();
     this.ageChecks.clear();
+    this.historyBackfills.clear();
   }
 
   _meta() {
@@ -814,12 +1248,14 @@ class SmartWalletRegistry {
   }
 
   _votingEligibleRow(row, at = this.now()) {
+    const pnl = row?.wallet ? this._actualPnlSnapshot(row.wallet, at) : null;
     if (!row || row.effective_from > at || row.risk_status !== 'OK'
       || !['PROBATION', 'ACTIVE'].includes(row.status)
       || !this._ageEligibleRow(row, at)
-      || !this._pnlEligibleRow(row, at)) return false;
+      || !pnl?.eligible) return false;
     if (row.source === 'CONFIG_SEED') return true;
-    if (this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') return false;
+    if (!pnl.eliteQualified
+      && this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') return false;
     if (this.config.autoVoteRequiresKnownCluster !== false
       && (!row.cluster_id || row.cluster_confidence === 'UNKNOWN')) return false;
     return true;
@@ -1097,6 +1533,8 @@ class SmartWalletRegistry {
     if (result.changes) {
       this.metrics.discovered += 1;
       this.metrics.lastActionAt = now;
+      this._enqueueHistoryBackfills(now);
+      this._scheduleHistoryBackfills(now, { force: true });
     }
     return Boolean(result.changes);
   }
@@ -1466,7 +1904,8 @@ class SmartWalletRegistry {
     if (!snapshot.ageEligible) return null;
     if (!snapshot.pnlEligible) return null;
     if (snapshot.source !== 'CONFIG_SEED') {
-      if (this.config.autoVoteRequiresActive !== false && snapshot.status !== 'ACTIVE') return null;
+      if (snapshot.pnlEligibilityClass !== 'LONG_TERM_ELITE'
+        && this.config.autoVoteRequiresActive !== false && snapshot.status !== 'ACTIVE') return null;
       if (this.config.autoVoteRequiresKnownCluster !== false && !snapshot.clusterKnown) return null;
     }
     return { ...snapshot, votingEligible: true };
@@ -1502,9 +1941,16 @@ class SmartWalletRegistry {
       ageEligible: this._ageEligibleRow(row, at),
       pnlStatus: pnl.status,
       pnlEligible: pnl.eligible,
+      pnlEligibilityClass: pnl.eligibilityClass,
+      longTermElite: pnl.eliteQualified,
+      voteWeight: pnl.eliteQualified
+        ? 1 : (row.status === 'PROBATION' ? null : gradeWeight(row.selection_grade)),
       actualPnl24h: pnl.window24h,
       actualPnl7d: pnl.window7d,
       actualPnl30d: pnl.window30d,
+      actualPnl60d: pnl.window60d,
+      historyBackfill: pnl.history,
+      historyComplete: pnl.historyComplete,
       actualOpenPositions: pnl.openPositions,
       actualOpenCostSol: pnl.openCostSol,
       registryVersion: row.registry_version,
@@ -1768,6 +2214,7 @@ class SmartWalletRegistry {
       }
     }
     this._scheduleAgeChecks(now);
+    this._scheduleHistoryBackfills(now);
     this.refreshClusters(now);
     const meta = this._meta();
     if (this.gradeRefreshRequested || !meta.last_grade_refresh_at
@@ -1840,7 +2287,8 @@ class SmartWalletRegistry {
       else if (sample.length >= Math.ceil(this.config.holdingMinSamples / 2)
         && profitable30d && bigWinnerRate > 0) holdingGrade = 'H_B';
       const ageEligible = this._ageEligibleRow(current, now);
-      const performanceQualified = selectionGrade !== 'S_C' || copyGrade !== 'C_C';
+      const performanceQualified = pnl.eliteQualified
+        || selectionGrade !== 'S_C' || copyGrade !== 'C_C';
       const desiredStatus = performanceQualified && ageEligible && pnl.eligible
         ? 'ACTIVE' : 'PROBATION';
       const metrics = {
@@ -1854,9 +2302,13 @@ class SmartWalletRegistry {
         bigWinnerRatePct: bigWinnerRate,
         pnlStatus: pnl.status,
         pnlEligible: pnl.eligible,
+        pnlEligibilityClass: pnl.eligibilityClass,
+        longTermElite: pnl.eliteQualified,
         actualPnl24h: pnl.window24h,
         actualPnl7d: pnl.window7d,
         actualPnl30d: pnl.window30d,
+        actualPnl60d: pnl.window60d,
+        historyBackfillComplete: pnl.historyComplete,
         actualOpenPositions: pnl.openPositions,
         actualOpenCostSol: pnl.openCostSol,
         ageStatus: current.age_status || 'UNKNOWN',
@@ -1932,11 +2384,20 @@ class SmartWalletRegistry {
         age_eligible: this._ageEligibleRow(row, observedAt) ? 1 : 0,
         pnl_status: pnl.status,
         pnl_eligible: pnl.eligible ? 1 : 0,
+        pnl_eligibility_class: pnl.eligibilityClass,
+        long_term_elite: pnl.eliteQualified ? 1 : 0,
         pnl_24h_realized_sol: pnl.window24h.realizedPnlSol,
         pnl_24h_return_pct: pnl.window24h.capitalReturnPct,
         pnl_24h_closed_positions: pnl.window24h.closedPositions,
         pnl_7d_realized_sol: pnl.window7d.realizedPnlSol,
         pnl_30d_realized_sol: pnl.window30d.realizedPnlSol,
+        pnl_60d_realized_sol: pnl.window60d.realizedPnlSol,
+        pnl_60d_closed_positions: pnl.window60d.closedPositions,
+        history_backfill_status: pnl.history?.status || 'NOT_QUEUED',
+        history_backfill_complete: pnl.historyComplete ? 1 : 0,
+        history_backfill_pages: pnl.history?.pages_fetched || 0,
+        history_backfill_credits: pnl.history?.credits_spent || 0,
+        history_backfill_error: pnl.history?.last_error || null,
         actual_open_positions: pnl.openPositions,
         actual_open_cost_sol: pnl.openCostSol,
         voting_eligible: votingEligible ? 1 : 0,
@@ -1966,6 +2427,31 @@ class SmartWalletRegistry {
         ),
         realizedOnly: true,
         openPositionsAreNoExit: false,
+        elite60d: {
+          enabled: this.config.elite60dEnabled === true,
+          windowMs: Math.max(
+            7 * DAY_MS, finite(this.config.elite60dWindowMs, 60 * DAY_MS),
+          ),
+          minRealizedSolExclusive: Math.max(
+            0, finite(this.config.elite60dMinRealizedSol, 200),
+          ),
+          ignores24hLoss: true,
+          realizedOnly: true,
+          requiresCompleteHistory: true,
+        },
+      },
+      historyBackfillPolicy: {
+        enabled: this.config.historyBackfillEnabled === true,
+        rpcConfigured: Boolean(this.config.historyRpcUrl),
+        initialAllEnabled: this.config.historyInitialAllEnabled !== false,
+        dailyWalletLimit: Math.max(1, finite(this.config.historyDailyWalletLimit, 50)),
+        dailyCreditLimit: Math.max(
+          1_000, finite(this.config.historyDailyCreditLimit, 250_000),
+        ),
+        windowMs: Math.max(
+          7 * DAY_MS, finite(this.config.historyWindowMs, 60 * DAY_MS),
+        ),
+        warmupMs: Math.max(0, finite(this.config.historyWarmupMs, 30 * DAY_MS)),
       },
       clusterPolicy: {
         enabled: this.config.clusterAutoEnabled !== false,
@@ -2006,6 +2492,12 @@ class SmartWalletRegistry {
         SELECT * FROM smart_wallet_actual_positions
         ORDER BY COALESCE(closed_at, opened_at) DESC, id DESC LIMIT ?
       `).all(capped),
+      historyBackfills: this.store.db.prepare(`
+        SELECT * FROM smart_wallet_history_backfills
+        ORDER BY CASE status WHEN 'RUNNING' THEN 0 WHEN 'FAILED' THEN 1
+          WHEN 'PENDING' THEN 2 WHEN 'PAUSED' THEN 3 ELSE 4 END,
+          updated_at DESC, wallet LIMIT ?
+      `).all(capped),
       legacyForwardLabels: this.store.db.prepare(`
         SELECT * FROM smart_wallet_forward_labels ORDER BY signal_at DESC, id DESC LIMIT ?
       `).all(capped),
@@ -2045,6 +2537,17 @@ class SmartWalletRegistry {
       FROM smart_wallet_cluster_evaluations
       GROUP BY status
     `).all().map((row) => [row.status, row.count]));
+    const historyCounts = Object.fromEntries(this.store.db.prepare(`
+      SELECT status, COUNT(*) count FROM smart_wallet_history_backfills GROUP BY status
+    `).all().map((row) => [row.status, row.count]));
+    const historyTotals = this.store.db.prepare(`
+      SELECT COALESCE(SUM(pages_fetched), 0) pages,
+        COALESCE(SUM(credits_spent), 0) credits,
+        COALESCE(SUM(transactions_seen), 0) transactions,
+        COALESCE(SUM(inserted_events), 0) events
+      FROM smart_wallet_history_backfills
+    `).get();
+    const historyDaily = this._historyDailyUsage(now);
     return {
       enabled: this.config.enabled,
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
@@ -2064,6 +2567,7 @@ class SmartWalletRegistry {
       pendingLabels: this.labels.size,
       pendingLegacyLabels: this.labels.size,
       pnlProfitable: pnlCounts.PNL_PROFITABLE || 0,
+      pnlElite60d: pnlCounts.PNL_ELITE_60D || 0,
       pnlLossBlocked: pnlCounts.LOSS_BLOCKED || 0,
       pnlPending: pnlCounts.PNL_PENDING || 0,
       pnlBypassed: pnlCounts.PNL_BYPASS || 0,
@@ -2084,6 +2588,25 @@ class SmartWalletRegistry {
       monitored: monitoredRows.length,
       votingEligible,
       observationOnly: Math.max(0, monitoredRows.length - votingEligible),
+      historyBackfillEnabled: this.config.historyBackfillEnabled === true,
+      historyRpcConfigured: Boolean(this.config.historyRpcUrl),
+      historyInFlight: this.historyBackfills.size,
+      historyPending: historyCounts.PENDING || 0,
+      historyRunning: historyCounts.RUNNING || 0,
+      historyPaused: historyCounts.PAUSED || 0,
+      historyComplete: historyCounts.COMPLETE || 0,
+      historyFailed: historyCounts.FAILED || 0,
+      historyLedgerIncomplete: this.store.db.prepare(`
+        SELECT COUNT(*) n FROM smart_wallet_history_backfills
+        WHERE status='COMPLETE' AND ledger_complete=0
+      `).get().n,
+      historyPagesTotal: historyTotals.pages,
+      historyCreditsTotal: historyTotals.credits,
+      historyTransactionsTotal: historyTotals.transactions,
+      historyEventsTotal: historyTotals.events,
+      historyDailyWalletsStarted: historyDaily.wallets_started,
+      historyDailyPages: historyDaily.pages_fetched,
+      historyDailyCredits: historyDaily.credits_spent,
       ...this.metrics,
     };
   }

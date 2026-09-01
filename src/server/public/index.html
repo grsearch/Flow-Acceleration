@@ -356,7 +356,7 @@
         <div class="quality-grid" id="smart-wallet-registry-summary"></div>
         <p class="registry-note" id="smart-wallet-registry-note"></p>
         <div class="table-wrap"><table>
-          <thead><tr><th>钱包</th><th>来源</th><th>状态 / 风险</th><th>链上 AGE</th><th>24h 真实已实现收益</th><th>选币 / 盈利稳定 / 持仓等级</th><th>独立集群</th><th>生效 / 最近出现</th><th>版本</th></tr></thead>
+          <thead><tr><th>钱包</th><th>来源</th><th>状态 / 风险</th><th>链上 AGE</th><th>24h / 60d 真实已实现收益</th><th>选币 / 盈利稳定 / 持仓等级</th><th>独立集群</th><th>生效 / 最近出现</th><th>版本</th></tr></thead>
           <tbody id="smart-wallet-registry-rows"></tbody>
         </table></div>
       </article>
@@ -1501,8 +1501,14 @@
         ['AGE 7–30天观察', number(health.ageProbation)],
         ['AGE 待确认', number(health.ageUnknown)],
         ['24h 盈利可投票', number(health.pnlProfitable)],
+        ['60天长期精英', number(health.pnlElite60d)],
         ['24h 亏损屏蔽', number(health.pnlLossBlocked)],
         ['24h 待平仓样本', number(health.pnlPending)],
+        ['历史回填完成', number(health.historyComplete)],
+        ['历史回填待处理', number((health.historyPending || 0) + (health.historyPaused || 0))],
+        ['历史回填失败', number(health.historyFailed)],
+        ['今日回填钱包', number(health.historyDailyWalletsStarted)],
+        ['今日预计 Credits', number(health.historyDailyCredits)],
       ];
       document.querySelector('#smart-wallet-registry-summary').innerHTML = items
         .map(([label,value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
@@ -1524,7 +1530,7 @@
         .join(' · ') || '暂无来源数据';
       const total = Number.isFinite(health.wallets) ? health.wallets : rows.length;
       const displaySummary = rows.length < total ? `当前展示 ${number(rows.length)} / ${number(total)}。` : '';
-      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}监控 ${number(health.monitored)} · 可投票 ${number(health.votingEligible)} · 仅观察 ${number(health.observationOnly)}。收益只按钱包自身真实 OPEN / ADD / REDUCE / CLOSE 账本统计；滚动 24h 至少有一笔完整平仓且已实现收益和资金回报率都必须大于 0。尚未卖完显示 OPEN / PARTIAL，不是 NO_EXIT，也不进入已实现收益。AGE &lt; 7天硬排除，7–30天仅观察，≥30天后才具备年龄资格。自动发现钱包观察 ${longAge(clusterPolicy.observationMs)} 且至少交易 ${number(clusterPolicy.minDistinctMints)} 个不同 Mint 后确认集群；同 Mint 在 ${age(clusterPolicy.syncWindowMs)} 内、金额差不超过 ${number(clusterPolicy.amountTolerancePct,1)}%，至少重复 ${number(clusterPolicy.minCorrelatedMints)} 个 Mint 且覆盖较少样本钱包的 ${number(clusterPolicy.minCorrelationPct,1)}% 时归为关联地址，同集群只计一票。已确认关联关系不会因短期样本滚出而自动拆分。12小时集群确认不会缩短24小时真实盈利门槛；仍需完成分级后才能投票。隔离 ${number(health.quarantined)} · AGE校验中 ${number(health.ageChecksInFlight)} · 集群刷新 ${dateTime(health.lastClusterRefreshAt)} · 历史模拟待完成 ${number(health.pendingLegacyLabels)} · Registry v${number(data.registryVersion)}`;
+      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}监控 ${number(health.monitored)} · 可投票 ${number(health.votingEligible)} · 仅观察 ${number(health.observationOnly)}。收益只按钱包自身真实 OPEN / ADD / REDUCE / CLOSE 账本统计。普通组仍要求滚动24h已实现收益和资金回报率都大于0；长期精英组只要求完整60天真实已实现收益严格超过200 SOL，近24h即使亏损也不禁票，并获得1个有效票权。未平仓显示 OPEN / PARTIAL，不是 NO_EXIT，也不进入已实现收益。首轮对当前 Registry 全量回填，此后北京时间每天最多新增50个钱包；当前进行中 ${number(health.historyRunning)}，累计页数 ${number(health.historyPagesTotal)}，预计 Credits ${number(health.historyCreditsTotal)}。AGE &lt; 7天硬排除，7–30天仅观察，≥30天后才具备年龄资格；长期精英仍须通过风险和独立集群检查，同集群只计一票。自动发现钱包观察 ${longAge(clusterPolicy.observationMs)} 且至少交易 ${number(clusterPolicy.minDistinctMints)} 个不同 Mint 后确认集群。隔离 ${number(health.quarantined)} · AGE校验中 ${number(health.ageChecksInFlight)} · 集群刷新 ${dateTime(health.lastClusterRefreshAt)} · Registry v${number(data.registryVersion)}`;
 
       const target = document.querySelector('#smart-wallet-registry-rows');
       if (!rows.length) {
@@ -1558,9 +1564,14 @@
         const pnlStatus = row.pnl_status || 'PNL_PENDING';
         const pnlValue = Number(row.pnl_24h_realized_sol);
         const pnlClass = Number.isFinite(pnlValue) ? tone(pnlValue) : 'muted';
+        const pnl60dValue = Number(row.pnl_60d_realized_sol);
+        const pnl60dClass = Number.isFinite(pnl60dValue) ? tone(pnl60dValue) : 'muted';
+        const backfillState = row.history_backfill_complete
+          ? `历史完整 · ${number(row.history_backfill_pages)}页`
+          : `${row.history_backfill_status || 'NOT_QUEUED'} · ${number(row.history_backfill_pages)}页`;
         const openNote = Number(row.actual_open_positions) > 0
           ? ` · 未平仓 ${number(row.actual_open_positions)}` : '';
-        return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)} · ${voteState}</span></td><td>${statusChip(ageStatus)}<br><b>${longAge(row.age_ms)}</b><br><span class="table-note" title="${escapeHtml(ageDetail)}">验证 ${dateTime(row.age_verified_at)}</span></td><td>${statusChip(pnlStatus)}<br><b class="${pnlClass}">${number(row.pnl_24h_realized_sol,4)} SOL</b> · ${pct(row.pnl_24h_return_pct,1)}<br><span class="table-note">完整平仓 ${number(row.pnl_24h_closed_positions)}${openNote}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}</td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(clusterState)}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
+        return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)} · ${voteState}</span></td><td>${statusChip(ageStatus)}<br><b>${longAge(row.age_ms)}</b><br><span class="table-note" title="${escapeHtml(ageDetail)}">验证 ${dateTime(row.age_verified_at)}</span></td><td>${statusChip(pnlStatus)}<br><b class="${pnlClass}">24h ${number(row.pnl_24h_realized_sol,4)} SOL</b> · ${pct(row.pnl_24h_return_pct,1)}<br><b class="${pnl60dClass}">60d ${number(row.pnl_60d_realized_sol,4)} SOL</b><br><span class="table-note" title="${escapeHtml(row.history_backfill_error || '')}">${escapeHtml(backfillState)} · 60d平仓 ${number(row.pnl_60d_closed_positions)}${openNote}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}</td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(clusterState)}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
       }).join('');
     }
 

@@ -2523,6 +2523,55 @@ const config = {
     pnlSnapshotCacheMs: integerEnv('FLOW_SMART_WALLET_PNL_CACHE_MS', 1_000, {
       min: 100, max: 60_000,
     }),
+    historyBackfillEnabled: booleanEnv(
+      'FLOW_SMART_WALLET_HISTORY_BACKFILL_ENABLED', true,
+    ),
+    historyRpcUrl: process.env.FLOW_SMART_WALLET_HISTORY_RPC_URL
+      || process.env.FLOW_RPC_URL || '',
+    historyWindowMs: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_WINDOW_MS', 60 * 24 * 60 * 60_000,
+      { min: 7 * 24 * 60 * 60_000 },
+    ),
+    historyWarmupMs: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_WARMUP_MS', 30 * 24 * 60 * 60_000,
+      { min: 0 },
+    ),
+    historyInitialAllEnabled: booleanEnv(
+      'FLOW_SMART_WALLET_HISTORY_INITIAL_ALL_ENABLED', true,
+    ),
+    historyDailyWalletLimit: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_DAILY_WALLET_LIMIT', 50, { min: 1, max: 10_000 },
+    ),
+    historyConcurrency: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_CONCURRENCY', 2, { min: 1, max: 10 },
+    ),
+    historyPageSize: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_PAGE_SIZE', 1_000, { min: 1, max: 1_000 },
+    ),
+    historyMaxPagesPerWallet: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_MAX_PAGES_PER_WALLET', 500, { min: 1, max: 10_000 },
+    ),
+    historyRpcTimeoutMs: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_RPC_TIMEOUT_MS', 30_000, { min: 1_000, max: 120_000 },
+    ),
+    historyRetryMs: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_RETRY_MS', 60 * 60_000, { min: 60_000 },
+    ),
+    historyCreditsPerPage: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_CREDITS_PER_PAGE', 50, { min: 1, max: 10_000 },
+    ),
+    historyDailyCreditLimit: integerEnv(
+      'FLOW_SMART_WALLET_HISTORY_DAILY_CREDIT_LIMIT', 250_000,
+      { min: 1_000, max: 100_000_000 },
+    ),
+    elite60dEnabled: booleanEnv('FLOW_SMART_WALLET_ELITE_60D_ENABLED', true),
+    elite60dWindowMs: integerEnv(
+      'FLOW_SMART_WALLET_ELITE_60D_WINDOW_MS', 60 * 24 * 60 * 60_000,
+      { min: 7 * 24 * 60 * 60_000 },
+    ),
+    elite60dMinRealizedSol: numberEnv(
+      'FLOW_SMART_WALLET_ELITE_60D_MIN_REALIZED_SOL', 200, { min: 0 },
+    ),
     clusterAutoEnabled: booleanEnv('FLOW_SMART_WALLET_CLUSTER_AUTO_ENABLED', true),
     clusterObservationMs: integerEnv(
       'FLOW_SMART_WALLET_CLUSTER_OBSERVATION_MS', 12 * 60 * 60_000,
