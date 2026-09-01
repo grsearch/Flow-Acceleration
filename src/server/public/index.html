@@ -1230,7 +1230,7 @@
     }
     const statusChip = status => `<span class="status-chip ${recordTone(status)}">${escapeHtml(status || '—')}</span>`;
     const mintLink = mint => mint ? `<a class="mint" href="https://gmgn.ai/sol/token/${encodeURIComponent(mint)}" target="_blank" rel="noreferrer" title="${escapeHtml(mint)}">${escapeHtml(short(mint))}</a>` : '—';
-    const walletLink = wallet => wallet ? `<a class="mint" href="https://solscan.io/account/${encodeURIComponent(wallet)}" target="_blank" rel="noreferrer" title="${escapeHtml(wallet)}">${escapeHtml(short(wallet))}</a>` : '—';
+    const walletLink = (wallet, full = false) => wallet ? `<a class="mint" href="https://gmgn.ai/sol/address/${encodeURIComponent(wallet)}" target="_blank" rel="noopener noreferrer" title="在 GMGN 查看 ${escapeHtml(wallet)}">${escapeHtml(full ? wallet : short(wallet))}</a>` : '—';
     function transactionLink(signature, label) {
       if (!signature) return '';
       const safe = escapeHtml(short(signature));
@@ -1519,7 +1519,7 @@
         target.innerHTML = '<div class="card empty">FLOW_SMART_WALLETS 暂无可统计记录</div>';
         return;
       }
-      target.innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">配置种子钱包</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
+      target.innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">配置种子钱包</p><div class="wallet-address">${walletLink(row.wallet, true)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
     function renderLiveTrading(data) {
