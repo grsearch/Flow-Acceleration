@@ -167,7 +167,7 @@ assert.strictEqual(liveGe30R23F2G2.entryBeijingStartHour, 4);
 assert.strictEqual(liveGe30R23F2G2.entryBeijingEndHour, 24);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshRetryCount, 1);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshMaxSignalAgeMs, 2_500);
-assert.strictEqual(liveGe30V2Exec01.entryEnabled, true);
+assert.strictEqual(liveGe30V2Exec01.entryEnabled, false);
 assert.strictEqual(liveGe30V2Exec01.positionSizeSol, 0.1);
 assert.strictEqual(liveGe30V2Exec01.code, 'G-V2-EXEC01-R2-H15');
 assert.strictEqual(liveGe30V2Exec01.market, 'PUMP_AMM');
@@ -300,7 +300,6 @@ assert.deepStrictEqual(
     .map((strategy) => strategy.code),
   [
     'POST-GE30-R23-F2-G2-XLEG',
-    'G-V2-EXEC01-R2-H15',
     'POST-GD25-35-X8',
     'O90-M5-STAIR120',
     'QL-STRICT-GUARD',

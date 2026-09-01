@@ -104,6 +104,8 @@
     .quality-grid div { padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: rgba(5,17,24,.45); }
     .quality-grid span { display: block; color: var(--muted); font-size: 11px; }
     .quality-grid b { display: block; margin-top: 6px; font-size: 19px; }
+    .registry-note { margin: 14px 0 4px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .wallet-history-title { margin-top: 18px; }
     .health-grid { grid-template-columns: 1fr 1fr; }
     .live-summary { grid-template-columns: 1.1fr .9fr; margin-bottom: 14px; }
     .mode-card { position: relative; overflow: hidden; min-height: 220px; }
@@ -349,6 +351,16 @@
         <div class="section-title"><h2>Primary 同 Mint 再触发</h2><p>与钱包买入覆盖率分开统计</p></div>
         <div class="quality-grid" id="signal-quality"></div>
       </article>
+      <article class="card signal-quality">
+        <div class="section-title"><h2>滚动 Smart Wallet Registry</h2><p>配置种子与自动发现钱包的统一观察池；最多展示前 100 个</p></div>
+        <div class="quality-grid" id="smart-wallet-registry-summary"></div>
+        <p class="registry-note" id="smart-wallet-registry-note"></p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>钱包</th><th>来源</th><th>状态 / 风险</th><th>选币 / 跟单 / 持仓等级</th><th>独立集群</th><th>生效 / 最近出现</th><th>版本</th></tr></thead>
+          <tbody id="smart-wallet-registry-rows"></tbody>
+        </table></div>
+      </article>
+      <div class="section-title wallet-history-title"><h2>种子钱包历史行为统计</h2><p>这里只统计 FLOW_SMART_WALLETS，不代表滚动 Registry 总数</p></div>
       <div class="grid wallet-grid" id="wallet-cards"></div>
     </section>
 
@@ -1211,9 +1223,9 @@
       return text.length > 13 ? `${text.slice(0,6)}…${text.slice(-4)}` : text || '—';
     };
     function recordTone(status) {
-      if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED','COMPLETE'].includes(status)) return 'good';
-      if (['OPENING','EXITING','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','PRICE_JUMP','NO_ENTRY','OBSERVING','RIGHT_CENSORED','NO_REFERENCE_PULLBACK'].includes(status)) return 'warn';
-      if (String(status || '').includes('FAILED') || ['RISK_REJECTED','NO_EXIT'].includes(status)) return 'bad';
+      if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED','COMPLETE','ACTIVE','OK'].includes(status)) return 'good';
+      if (['OPENING','EXITING','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','PRICE_JUMP','NO_ENTRY','OBSERVING','RIGHT_CENSORED','NO_REFERENCE_PULLBACK','PROBATION'].includes(status)) return 'warn';
+      if (String(status || '').includes('FAILED') || ['RISK_REJECTED','NO_EXIT','QUARANTINED'].includes(status)) return 'bad';
       return 'neutral';
     }
     const statusChip = status => `<span class="status-chip ${recordTone(status)}">${escapeHtml(status || '—')}</span>`;
@@ -1453,8 +1465,58 @@
       document.querySelector('#signal-quality').innerHTML = items.map(([label,value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
     }
 
+    function renderSmartWalletRegistry(data) {
+      const rows = Array.isArray(data.wallets) ? data.wallets : [];
+      const health = data.health || {};
+      const clusters = data.clusterCounts || {};
+      const items = [
+        ['Registry 总数', number(health.wallets ?? rows.length)],
+        ['观察期', number(health.probation)],
+        ['已晋级 ACTIVE', number(health.active)],
+        ['可用独立集群', number(clusters.eligible)],
+        ['S_A 独立集群', number(clusters.selectionA)],
+      ];
+      document.querySelector('#smart-wallet-registry-summary').innerHTML = items
+        .map(([label,value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
+
+      const sourceLabels = {
+        CONFIG_SEED: '配置种子',
+        GRADUATED_EARLY_BUYER: '毕业币早期买家',
+      };
+      const computedSourceCounts = rows.reduce((counts, row) => {
+        const source = row.source || 'UNKNOWN';
+        counts[source] = (counts[source] || 0) + 1;
+        return counts;
+      }, {});
+      const sourceCounts = Object.keys(data.sourceCounts || {}).length
+        ? data.sourceCounts
+        : computedSourceCounts;
+      const sourceSummary = Object.entries(sourceCounts)
+        .map(([source, count]) => `${escapeHtml(sourceLabels[source] || source)} ${number(count)}`)
+        .join(' · ') || '暂无来源数据';
+      const total = Number.isFinite(health.wallets) ? health.wallets : rows.length;
+      const displaySummary = rows.length < total ? `当前展示 ${number(rows.length)} / ${number(total)}。` : '';
+      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}PROBATION 是观察期，不等同于 S_A / C_A / H_A 正式等级；是否参与 V2 共识由当前权重配置决定。隔离 ${number(health.quarantined)} · 待完成前向标签 ${number(health.pendingLabels)} · Registry v${number(data.registryVersion)}`;
+
+      const target = document.querySelector('#smart-wallet-registry-rows');
+      if (!rows.length) {
+        target.innerHTML = '<tr><td colspan="7" class="empty">Registry 暂无钱包</td></tr>';
+        return;
+      }
+      target.innerHTML = rows.map(row => {
+        const source = sourceLabels[row.source] || row.source || 'UNKNOWN';
+        const cluster = row.cluster_id || row.wallet;
+        return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}</td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(row.cluster_confidence || '默认独立')}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
+      }).join('');
+    }
+
     function renderWallets(rows) {
-      document.querySelector('#wallet-cards').innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">Smart Wallet Label</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
+      const target = document.querySelector('#wallet-cards');
+      if (!rows.length) {
+        target.innerHTML = '<div class="card empty">FLOW_SMART_WALLETS 暂无可统计记录</div>';
+        return;
+      }
+      target.innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">配置种子钱包</p><div class="wallet-address" title="${escapeHtml(row.wallet)}">${escapeHtml(row.wallet)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
     function renderLiveTrading(data) {
@@ -3229,6 +3291,7 @@
         ],
         backtest: () => [],
         wallets: requestContext => [
+          loadDashboard('/api/smart-wallet-registry?limit=100', renderSmartWalletRegistry, requestContext),
           loadDashboard('/api/smart-wallets', renderWallets, requestContext),
           loadDashboard('/api/signal-repetition', renderSignalQuality, requestContext),
         ],

@@ -888,17 +888,17 @@ const config = {
       {
         id: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
         code: 'G-V2-EXEC01-R2-H15',
-        label: 'Lifecycle Drop/Rebound G · V2可执行0.1 SOL / R2-H15',
+        label: 'Lifecycle Drop/Rebound G · V2可执行0.1 SOL / R2-H15（停止新开仓）',
         ruleVersion: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live_v1',
         signalSource: 'MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15',
         enabled: booleanEnv(
           'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_ENABLED',
           true,
         ),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_ENTRY_ENABLED',
-          true,
-        ),
+        // Keep the definition loaded for historical display and management of
+        // already-open positions, but permanently stop new entries. This is a
+        // code-level lock so a stale deployment environment cannot reopen it.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_POSITION_SOL',

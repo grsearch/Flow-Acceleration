@@ -204,6 +204,14 @@ function main() {
   assert.strictEqual(candidate.effective_from, now + 102 + registryConfig.discoveryDelayMs);
   assert.strictEqual(registry.walletSnapshot('candidate-wallet', now + 500), null);
   assert(registry.walletSnapshot('candidate-wallet', now + 2_000));
+  const registryDashboard = registry.dashboard(2);
+  assert.strictEqual(registryDashboard.health.wallets, 4);
+  assert.strictEqual(registryDashboard.wallets.length, 2);
+  assert.strictEqual(registryDashboard.walletLimit, 2);
+  assert.deepStrictEqual(registryDashboard.sourceCounts, {
+    CONFIG_SEED: 3,
+    GRADUATED_EARLY_BUYER: 1,
+  });
 
   const dashboard = suite.dashboard(20);
   assert.strictEqual(dashboard.sendsTransactions, false);

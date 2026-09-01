@@ -879,12 +879,20 @@ class SmartWalletRegistry {
       sendsTransactions: false,
       registryVersion: this.version(),
       clusterCounts: this.activeClusterCounts(),
+      sourceCounts: Object.fromEntries(this.store.db.prepare(`
+        SELECT source, COUNT(*) count
+        FROM smart_wallet_registry
+        GROUP BY source
+        ORDER BY source
+      `).all().map((row) => [row.source, row.count])),
       wallets: this.store.db.prepare(`
         SELECT r.*, c.cluster_id, c.confidence cluster_confidence
         FROM smart_wallet_registry r
         LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
         ORDER BY r.status, r.selection_grade, r.copy_grade, r.wallet
-      `).all(),
+        LIMIT ?
+      `).all(capped),
+      walletLimit: capped,
       recentGradeChanges: this.store.db.prepare(`
         SELECT * FROM smart_wallet_grade_history ORDER BY effective_at DESC, id DESC LIMIT ?
       `).all(capped),

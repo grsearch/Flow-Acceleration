@@ -33,6 +33,10 @@ async function main() {
   assert.ok(dashboard.includes('name="exitOnSmartWalletSell"'));
   assert.ok(dashboard.includes('name="minDeltaNetFlow12"'));
   assert.ok(dashboard.includes('OPEN 10秒覆盖'));
+  assert.ok(dashboard.includes('id="smart-wallet-registry-summary"'));
+  assert.ok(dashboard.includes('id="smart-wallet-registry-rows"'));
+  assert.ok(dashboard.includes('PROBATION 是观察期'));
+  assert.ok(dashboard.includes("loadDashboard('/api/smart-wallet-registry?limit=100'"));
   assert.ok(dashboard.includes('value="shadow_2w"'));
   assert.ok(dashboard.includes('aria-controls="live-trading"'));
   assert.ok(dashboard.includes('id="live-trading"'));
@@ -299,6 +303,7 @@ async function main() {
       '/api/signals',
       '/api/backtest',
       '/api/smart-wallets',
+      '/api/smart-wallet-registry?limit=100',
       '/api/signal-repetition',
       '/api/live-trading',
       '/api/primary-signal-shadow',
@@ -373,6 +378,9 @@ async function main() {
     const launchPullbackLive = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'launch_pullback_fo_rb10_30s_live'
     ));
+    const ge30V2Exec01 = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live'
+    ));
     const retiredV3 = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
     ));
@@ -381,6 +389,8 @@ async function main() {
     ));
     assert.strictEqual(continuity.entryEnabled, false);
     assert.strictEqual(continuity.code, 'M-C5-E120');
+    assert.strictEqual(ge30V2Exec01.entryEnabled, false);
+    assert.strictEqual(ge30V2Exec01.code, 'G-V2-EXEC01-R2-H15');
     assert.strictEqual(graduationAccel.entryEnabled, true);
     assert.strictEqual(graduationAccel.code, 'O-C80-D5-B2-S0-NC');
     assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
