@@ -124,6 +124,7 @@ const FULL_STATE_TABLES = new Set([
   'smart_wallet_registry',
   'smart_wallet_registry_meta',
   'smart_wallet_cluster_memberships',
+  'smart_wallet_cluster_evaluations',
 ]);
 
 const GENERIC_TIME_COLUMNS = [

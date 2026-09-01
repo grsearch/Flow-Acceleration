@@ -50,6 +50,10 @@ function main() {
     CREATE TABLE smart_wallet_cluster_memberships (
       wallet TEXT PRIMARY KEY, cluster_id TEXT NOT NULL, created_at INTEGER NOT NULL
     );
+    CREATE TABLE smart_wallet_cluster_evaluations (
+      wallet TEXT PRIMARY KEY, status TEXT NOT NULL, eligible_at INTEGER NOT NULL,
+      distinct_mints INTEGER NOT NULL, created_at INTEGER NOT NULL
+    );
     CREATE TABLE smart_wallet_actual_positions (
       id INTEGER PRIMARY KEY, wallet TEXT NOT NULL, mint TEXT NOT NULL,
       status TEXT NOT NULL, opened_at INTEGER NOT NULL, closed_at INTEGER,
@@ -91,6 +95,8 @@ function main() {
     .run('old-wallet', 'old-seed', startMs - 10_000);
   db.prepare('INSERT INTO smart_wallet_cluster_memberships VALUES (?, ?, ?)')
     .run('old-wallet', 'known-cluster', startMs - 10_000);
+  db.prepare('INSERT INTO smart_wallet_cluster_evaluations VALUES (?, ?, ?, ?, ?)')
+    .run('old-wallet', 'CONFIRMED_INDEPENDENT', startMs - 5_000, 3, startMs - 10_000);
   db.prepare('INSERT INTO smart_wallet_actual_positions VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(50, 'old-wallet', 'cross-day-close', 'CLOSED', startMs - 10_000, startMs + 50,
       startMs - 10_000);
@@ -157,6 +163,8 @@ function main() {
     .get().count, 1);
   assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_cluster_memberships')
     .get().count, 1);
+  assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_cluster_evaluations')
+    .get().count, 1, 'the current automatic cluster evaluation must be exported in full');
   assert.deepStrictEqual(
     exported.prepare('SELECT id FROM smart_wallet_actual_positions ORDER BY id')
       .all().map((row) => row.id),

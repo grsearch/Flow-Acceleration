@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 const { tradePrice } = require('./PreEntryRugRiskTracker');
@@ -78,6 +79,7 @@ class SmartWalletRegistry {
     this.ageHistoryFloor = null;
     this.ageHistoryFloorCheckedAt = 0;
     this.gradeRefreshRequested = false;
+    this.lastClusterRefreshAt = 0;
     this.stopping = false;
     this.metrics = {
       discovered: 0,
@@ -91,6 +93,9 @@ class SmartWalletRegistry {
       actualPositionsOpened: 0,
       actualPositionsClosed: 0,
       actualBackfilled: 0,
+      clusterRefreshes: 0,
+      clusterConfirmations: 0,
+      clusterRelatedLinks: 0,
       gradeRefreshes: 0,
       ageChecksStarted: 0,
       ageChecksCompleted: 0,
@@ -167,6 +172,20 @@ class SmartWalletRegistry {
       );
       CREATE INDEX IF NOT EXISTS idx_swr_cluster_active
         ON smart_wallet_cluster_memberships(cluster_id, valid_from, valid_to);
+
+      CREATE TABLE IF NOT EXISTS smart_wallet_cluster_evaluations (
+        wallet TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        eligible_at INTEGER NOT NULL,
+        distinct_mints INTEGER NOT NULL DEFAULT 0,
+        correlated_wallets INTEGER NOT NULL DEFAULT 0,
+        cluster_id TEXT,
+        reason_json TEXT NOT NULL,
+        evaluated_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_swr_cluster_eval_status
+        ON smart_wallet_cluster_evaluations(status, eligible_at);
 
       CREATE TABLE IF NOT EXISTS smart_wallet_grade_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,6 +338,29 @@ class SmartWalletRegistry {
         valid_to=NULL,
         registry_version=excluded.registry_version,
         updated_at=excluded.updated_at
+    `);
+    this.upsertClusterEvaluation = this.store.db.prepare(`
+      INSERT INTO smart_wallet_cluster_evaluations (
+        wallet, status, eligible_at, distinct_mints, correlated_wallets,
+        cluster_id, reason_json, evaluated_at, updated_at
+      ) VALUES (
+        @wallet, @status, @eligibleAt, @distinctMints, @correlatedWallets,
+        @clusterId, @reasonJson, @evaluatedAt, @updatedAt
+      ) ON CONFLICT(wallet) DO UPDATE SET
+        status=excluded.status,
+        eligible_at=excluded.eligible_at,
+        distinct_mints=excluded.distinct_mints,
+        correlated_wallets=excluded.correlated_wallets,
+        cluster_id=excluded.cluster_id,
+        reason_json=excluded.reason_json,
+        evaluated_at=excluded.evaluated_at,
+        updated_at=excluded.updated_at
+      WHERE smart_wallet_cluster_evaluations.status<>excluded.status
+        OR smart_wallet_cluster_evaluations.eligible_at<>excluded.eligible_at
+        OR smart_wallet_cluster_evaluations.distinct_mints<>excluded.distinct_mints
+        OR smart_wallet_cluster_evaluations.correlated_wallets<>excluded.correlated_wallets
+        OR smart_wallet_cluster_evaluations.cluster_id IS NOT excluded.cluster_id
+        OR smart_wallet_cluster_evaluations.reason_json<>excluded.reason_json
     `);
     this.insertLabel = this.store.db.prepare(`
       INSERT OR IGNORE INTO smart_wallet_forward_labels (
@@ -697,6 +739,7 @@ class SmartWalletRegistry {
       }
     }
     this._backfillActualWalletEvents();
+    this.refreshClusters(now, { force: true });
     const active = this.store.db.prepare(`
       SELECT * FROM smart_wallet_forward_labels
       WHERE status IN ('PENDING_ENTRY','OPEN')
@@ -1068,6 +1111,285 @@ class SmartWalletRegistry {
     `).get(wallet).n;
     if (seedCount < this.config.discoveryMinSeedMints) return false;
     return this.discoverWallet({ wallet, source, discoveredAt });
+  }
+
+  _clusterObservationMs() {
+    return Math.max(60 * 60_000, finite(this.config.clusterObservationMs, 12 * 60 * 60_000));
+  }
+
+  _clusterRefreshMs() {
+    return Math.max(60_000, finite(this.config.clusterRefreshMs, 5 * 60_000));
+  }
+
+  refreshClusters(at = this.now(), { force = false } = {}) {
+    if (!this.config.enabled || this.config.clusterAutoEnabled === false) return null;
+    if (!force && this.lastClusterRefreshAt
+      && at - this.lastClusterRefreshAt < this._clusterRefreshMs()) return null;
+    const observationMs = this._clusterObservationMs();
+    const lookbackMs = Math.max(
+      observationMs,
+      finite(this.config.clusterLookbackMs, 7 * DAY_MS),
+    );
+    const minDistinctMints = Math.max(1, finite(this.config.clusterMinDistinctMints, 3));
+    const syncWindowMs = Math.max(0, finite(this.config.clusterSyncWindowMs, 5_000));
+    const amountTolerancePct = Math.max(
+      0, finite(this.config.clusterAmountTolerancePct, 15),
+    );
+    const minCorrelatedMints = Math.max(
+      1, finite(this.config.clusterMinCorrelatedMints, 2),
+    );
+    const minCorrelationPct = Math.max(
+      0, finite(this.config.clusterMinCorrelationPct, 50),
+    );
+    const registryRows = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_registry
+      WHERE discovered_at<=? AND status<>'QUARANTINED' AND risk_status='OK'
+      ORDER BY wallet
+    `).all(at);
+    if (!registryRows.length) {
+      this.lastClusterRefreshAt = at;
+      return { wallets: 0, confirmed: 0, relatedLinks: 0 };
+    }
+    const registryByWallet = new Map(registryRows.map((row) => [row.wallet, row]));
+    const events = this.store.db.prepare(`
+      SELECT event.id, event.wallet, event.mint, event.timestamp_ms, event.sol_amount
+      FROM smart_wallet_events event
+      JOIN smart_wallet_registry registry ON registry.wallet=event.wallet
+      WHERE event.side='BUY' AND COALESCE(event.position_phase, 'OPEN')='OPEN'
+        AND event.timestamp_ms>=? AND event.timestamp_ms<=?
+      ORDER BY event.timestamp_ms, event.id
+    `).all(at - lookbackMs, at);
+
+    // Keep only the first observed OPEN per wallet/Mint. Repeated ADD behavior is
+    // deliberately excluded so a pyramiding style cannot create a false identity link.
+    const firstOpenByWalletMint = new Map();
+    for (const event of events) {
+      const registry = registryByWallet.get(event.wallet);
+      if (!registry || event.timestamp_ms < registry.discovered_at) continue;
+      const key = `${event.wallet}\u0000${event.mint}`;
+      if (!firstOpenByWalletMint.has(key)) firstOpenByWalletMint.set(key, event);
+    }
+    const mintsByWallet = new Map(registryRows.map((row) => [row.wallet, new Set()]));
+    const eventsByMint = new Map();
+    for (const event of firstOpenByWalletMint.values()) {
+      mintsByWallet.get(event.wallet)?.add(event.mint);
+      const bucket = eventsByMint.get(event.mint) || [];
+      bucket.push(event);
+      eventsByMint.set(event.mint, bucket);
+    }
+
+    const parent = new Map(registryRows.map((row) => [row.wallet, row.wallet]));
+    const find = (wallet) => {
+      let root = parent.get(wallet) || wallet;
+      while (parent.get(root) && parent.get(root) !== root) root = parent.get(root);
+      let cursor = wallet;
+      while (parent.get(cursor) && parent.get(cursor) !== root) {
+        const next = parent.get(cursor);
+        parent.set(cursor, root);
+        cursor = next;
+      }
+      return root;
+    };
+    const unite = (left, right) => {
+      const leftRoot = find(left);
+      const rightRoot = find(right);
+      if (leftRoot === rightRoot) return;
+      const [first, second] = [leftRoot, rightRoot].sort();
+      parent.set(second, first);
+    };
+    const memberships = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_cluster_memberships
+      WHERE valid_from<=? AND (valid_to IS NULL OR valid_to>?)
+        AND confidence='CONFIRMED'
+    `).all(at, at);
+    const membershipByWallet = new Map(memberships.map((row) => [row.wallet, row]));
+    const membersByExistingCluster = new Map();
+    for (const membership of memberships) {
+      if (!registryByWallet.has(membership.wallet)) continue;
+      const bucket = membersByExistingCluster.get(membership.cluster_id) || [];
+      bucket.push(membership.wallet);
+      membersByExistingCluster.set(membership.cluster_id, bucket);
+    }
+    // Existing multi-wallet relationships are sticky. Automatic refreshes may
+    // merge a cluster but never split a previously confirmed related cluster.
+    for (const members of membersByExistingCluster.values()) {
+      if (members.length < 2) continue;
+      for (let index = 1; index < members.length; index += 1) {
+        unite(members[0], members[index]);
+      }
+    }
+    const priorEvaluations = this.store.db.prepare(`
+      SELECT wallet, reason_json FROM smart_wallet_cluster_evaluations
+      WHERE status<>'CONFIG_SEED'
+    `).all();
+    for (const evaluation of priorEvaluations) {
+      const reason = parseJson(evaluation.reason_json, {});
+      if (reason.kind !== 'AUTO_RELATED' || !Array.isArray(reason.componentWallets)) continue;
+      const members = reason.componentWallets.filter((wallet) => registryByWallet.has(wallet));
+      for (let index = 1; index < members.length; index += 1) {
+        unite(members[0], members[index]);
+      }
+    }
+
+    const pairStats = new Map();
+    const pairKey = (left, right) => [left, right].sort().join('\u0000');
+    for (const mintEvents of eventsByMint.values()) {
+      for (let leftIndex = 0; leftIndex < mintEvents.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < mintEvents.length; rightIndex += 1) {
+          const left = mintEvents[leftIndex];
+          const right = mintEvents[rightIndex];
+          if (left.wallet === right.wallet) continue;
+          const key = pairKey(left.wallet, right.wallet);
+          const stats = pairStats.get(key) || { sharedMints: 0, synchronizedMints: 0 };
+          stats.sharedMints += 1;
+          const timeSynchronized = Math.abs(left.timestamp_ms - right.timestamp_ms)
+            <= syncWindowMs;
+          const maxAmount = Math.max(
+            Math.abs(finite(left.sol_amount, 0)),
+            Math.abs(finite(right.sol_amount, 0)),
+          );
+          const amountDifferencePct = maxAmount > 0
+            ? Math.abs(left.sol_amount - right.sol_amount) / maxAmount * 100
+            : Infinity;
+          if (timeSynchronized && amountDifferencePct <= amountTolerancePct) {
+            stats.synchronizedMints += 1;
+          }
+          pairStats.set(key, stats);
+        }
+      }
+    }
+    const linkedPairs = [];
+    for (const [key, stats] of pairStats) {
+      const [left, right] = key.split('\u0000');
+      const leftMints = mintsByWallet.get(left)?.size || 0;
+      const rightMints = mintsByWallet.get(right)?.size || 0;
+      const comparableMints = Math.max(1, Math.min(leftMints, rightMints));
+      const correlationPct = stats.synchronizedMints / comparableMints * 100;
+      if (stats.synchronizedMints < minCorrelatedMints
+        || correlationPct < minCorrelationPct) continue;
+      unite(left, right);
+      linkedPairs.push({
+        left, right,
+        sharedMints: stats.sharedMints,
+        synchronizedMints: stats.synchronizedMints,
+        correlationPct,
+      });
+    }
+
+    const components = new Map();
+    for (const row of registryRows) {
+      const root = find(row.wallet);
+      const bucket = components.get(root) || [];
+      bucket.push(row.wallet);
+      components.set(root, bucket);
+    }
+    const clusterIdByRoot = new Map();
+    for (const [root, members] of components) {
+      const configuredSeeds = members
+        .filter((wallet) => registryByWallet.get(wallet)?.source === 'CONFIG_SEED')
+        .sort();
+      const reusableIds = members.map((wallet) => membershipByWallet.get(wallet))
+        .filter(Boolean)
+        .filter((membership) => (
+          (membersByExistingCluster.get(membership.cluster_id)?.length || 0) > 1
+          || membership.cluster_id !== membership.wallet
+        ))
+        .map((membership) => membership.cluster_id)
+        .sort();
+      let clusterId;
+      if (reusableIds.length) clusterId = reusableIds[0];
+      else if (configuredSeeds.length) {
+        clusterId = membershipByWallet.get(configuredSeeds[0])?.cluster_id
+          || configuredSeeds[0];
+      } else if (members.length > 1) {
+        const digest = crypto.createHash('sha256').update([...members].sort().join('|'))
+          .digest('hex').slice(0, 16);
+        clusterId = `AUTO_RELATED_${digest}`;
+      } else clusterId = members[0];
+      clusterIdByRoot.set(root, clusterId);
+    }
+
+    const linkedByWallet = new Map();
+    for (const link of linkedPairs) {
+      for (const [wallet, peer] of [[link.left, link.right], [link.right, link.left]]) {
+        const bucket = linkedByWallet.get(wallet) || [];
+        bucket.push({ wallet: peer, ...link });
+        linkedByWallet.set(wallet, bucket);
+      }
+    }
+    const evaluations = [];
+    let confirmed = 0;
+    let confirmationsChanged = 0;
+    for (const row of registryRows) {
+      const root = find(row.wallet);
+      const members = components.get(root) || [row.wallet];
+      const existing = membershipByWallet.get(row.wallet);
+      const distinctMints = mintsByWallet.get(row.wallet)?.size || 0;
+      const eligibleAt = row.discovered_at + observationMs;
+      const alreadyConfirmed = existing?.confidence === 'CONFIRMED';
+      const observationComplete = at >= eligibleAt;
+      const activityComplete = distinctMints >= minDistinctMints;
+      const related = members.length > 1;
+      const desiredClusterId = clusterIdByRoot.get(root) || row.wallet;
+      let status = 'OBSERVING';
+      if (alreadyConfirmed || (observationComplete && activityComplete)) {
+        status = related ? 'CONFIRMED_RELATED' : 'CONFIRMED_INDEPENDENT';
+      } else if (observationComplete) status = 'INSUFFICIENT_ACTIVITY';
+      const reason = {
+        model: 'AUTO_CLUSTER_V1',
+        kind: related ? 'AUTO_RELATED' : 'AUTO_INDEPENDENT',
+        observationMs,
+        minDistinctMints,
+        syncWindowMs,
+        amountTolerancePct,
+        minCorrelatedMints,
+        minCorrelationPct,
+        componentWallets: [...members].sort().slice(0, 25),
+        directLinks: (linkedByWallet.get(row.wallet) || []).slice(0, 25),
+      };
+      const canConfirm = status.startsWith('CONFIRMED_');
+      // Configured seeds already vote as trusted seeds, but an observed relation
+      // still receives a membership so it shares one cluster vote with its peers.
+      const shouldWriteMembership = canConfirm
+        || (row.source === 'CONFIG_SEED' && related);
+      if (shouldWriteMembership) {
+        const changed = this.setCluster({
+          wallet: row.wallet,
+          clusterId: desiredClusterId,
+          confidence: 'CONFIRMED',
+          reason,
+          validFrom: at,
+        });
+        if (changed) confirmationsChanged += 1;
+        confirmed += 1;
+      }
+      evaluations.push({
+        wallet: row.wallet,
+        status: row.source === 'CONFIG_SEED' && !related ? 'CONFIG_SEED' : status,
+        eligibleAt,
+        distinctMints,
+        correlatedWallets: Math.max(0, members.length - 1),
+        clusterId: shouldWriteMembership ? desiredClusterId : null,
+        reasonJson: JSON.stringify(reason),
+        evaluatedAt: at,
+        updatedAt: at,
+      });
+    }
+    const writeEvaluations = this.store.db.transaction((rows) => {
+      for (const row of rows) this.upsertClusterEvaluation.run(row);
+    });
+    writeEvaluations(evaluations);
+    this.lastClusterRefreshAt = at;
+    this.metrics.clusterRefreshes += 1;
+    this.metrics.clusterConfirmations += confirmationsChanged;
+    this.metrics.clusterRelatedLinks = linkedPairs.length;
+    this.metrics.lastActionAt = at;
+    return {
+      wallets: registryRows.length,
+      confirmed,
+      confirmationsChanged,
+      relatedLinks: linkedPairs.length,
+    };
   }
 
   setCluster({
@@ -1446,6 +1768,7 @@ class SmartWalletRegistry {
       }
     }
     this._scheduleAgeChecks(now);
+    this.refreshClusters(now);
     const meta = this._meta();
     if (this.gradeRefreshRequested || !meta.last_grade_refresh_at
       || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
@@ -1585,10 +1908,18 @@ class SmartWalletRegistry {
     const capped = Math.max(1, Math.min(500, Number(limit) || 100));
     const observedAt = this.now();
     const wallets = this.store.db.prepare(`
-      SELECT r.*, c.cluster_id, c.confidence cluster_confidence
+      SELECT r.*,
+        c.cluster_id, c.confidence cluster_confidence,
+        c.reason_json cluster_reason_json, c.valid_from cluster_valid_from,
+        e.status cluster_evaluation_status, e.eligible_at cluster_eligible_at,
+        e.distinct_mints cluster_distinct_mints,
+        e.correlated_wallets cluster_correlated_wallets,
+        e.reason_json cluster_evaluation_reason_json,
+        e.evaluated_at cluster_evaluated_at
       FROM smart_wallet_registry r
       LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
         AND c.valid_from<=? AND (c.valid_to IS NULL OR c.valid_to>?)
+      LEFT JOIN smart_wallet_cluster_evaluations e ON e.wallet=r.wallet
       ORDER BY r.status, r.selection_grade, r.copy_grade, r.wallet
       LIMIT ?
     `).all(observedAt, observedAt, capped).map((row) => {
@@ -1635,6 +1966,29 @@ class SmartWalletRegistry {
         ),
         realizedOnly: true,
         openPositionsAreNoExit: false,
+      },
+      clusterPolicy: {
+        enabled: this.config.clusterAutoEnabled !== false,
+        observationMs: this._clusterObservationMs(),
+        refreshMs: this._clusterRefreshMs(),
+        lookbackMs: Math.max(
+          this._clusterObservationMs(),
+          finite(this.config.clusterLookbackMs, 7 * DAY_MS),
+        ),
+        minDistinctMints: Math.max(
+          1, finite(this.config.clusterMinDistinctMints, 3),
+        ),
+        syncWindowMs: Math.max(0, finite(this.config.clusterSyncWindowMs, 5_000)),
+        amountTolerancePct: Math.max(
+          0, finite(this.config.clusterAmountTolerancePct, 15),
+        ),
+        minCorrelatedMints: Math.max(
+          1, finite(this.config.clusterMinCorrelatedMints, 2),
+        ),
+        minCorrelationPct: Math.max(
+          0, finite(this.config.clusterMinCorrelationPct, 50),
+        ),
+        stickyRelationships: true,
       },
       clusterCounts: this.activeClusterCounts(),
       sourceCounts: Object.fromEntries(this.store.db.prepare(`
@@ -1686,6 +2040,11 @@ class SmartWalletRegistry {
       counts[status] = (counts[status] || 0) + 1;
       return counts;
     }, {});
+    const clusterEvaluationCounts = Object.fromEntries(this.store.db.prepare(`
+      SELECT status, COUNT(*) count
+      FROM smart_wallet_cluster_evaluations
+      GROUP BY status
+    `).all().map((row) => [row.status, row.count]));
     return {
       enabled: this.config.enabled,
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
@@ -1714,6 +2073,14 @@ class SmartWalletRegistry {
       ageUnknown: (ageCounts.UNKNOWN || 0) + (ageCounts.PENDING || 0),
       ageBypassed: ageCounts.BYPASSED || 0,
       ageChecksInFlight: this.ageChecks.size,
+      clusterConfirmedIndependent:
+        clusterEvaluationCounts.CONFIRMED_INDEPENDENT || 0,
+      clusterConfirmedRelated: clusterEvaluationCounts.CONFIRMED_RELATED || 0,
+      clusterObserving: clusterEvaluationCounts.OBSERVING || 0,
+      clusterInsufficientActivity:
+        clusterEvaluationCounts.INSUFFICIENT_ACTIVITY || 0,
+      clusterConfiguredSeeds: clusterEvaluationCounts.CONFIG_SEED || 0,
+      lastClusterRefreshAt: this.lastClusterRefreshAt || null,
       monitored: monitoredRows.length,
       votingEligible,
       observationOnly: Math.max(0, monitoredRows.length - votingEligible),

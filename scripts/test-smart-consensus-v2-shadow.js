@@ -315,6 +315,7 @@ async function main() {
   store.close();
   await testWalletAgeGate(costModel);
   testActualWalletPnlGate(costModel);
+  testAutomaticClusterConfirmation(costModel);
   console.log('Smart Wallet Consensus Flow Runner V2 tests: PASS');
 }
 
@@ -601,6 +602,140 @@ function testActualWalletPnlGate(costModel) {
   assert.strictEqual(
     registry.monitoringSnapshot('wallet-profit', now).pnlStatus,
     'PNL_PENDING',
+  );
+  registry.stop();
+  store.close();
+}
+
+function testAutomaticClusterConfirmation(costModel) {
+  const HOUR = 60 * 60_000;
+  const DAY = 24 * HOUR;
+  let now = 1_900_300_000_000;
+  const store = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const registry = new SmartWalletRegistry({
+    config: {
+      enabled: true,
+      seedWallets: [],
+      seedClusters: [],
+      ageCheckEnabled: false,
+      pnlGateEnabled: false,
+      autoVoteRequiresActive: true,
+      autoVoteRequiresKnownCluster: true,
+      clusterAutoEnabled: true,
+      clusterObservationMs: 12 * HOUR,
+      clusterRefreshMs: 60_000,
+      clusterLookbackMs: 7 * DAY,
+      clusterMinDistinctMints: 3,
+      clusterSyncWindowMs: 5_000,
+      clusterAmountTolerancePct: 15,
+      clusterMinCorrelatedMints: 2,
+      clusterMinCorrelationPct: 50,
+      labelPositionSol: 1,
+      lookbackMs: 60 * DAY,
+      costModel,
+    },
+    store,
+    now: () => now,
+  });
+  const wallets = [
+    'cluster-independent', 'cluster-related-a', 'cluster-related-b',
+    'cluster-low-activity', 'cluster-too-fresh',
+  ];
+  for (const wallet of wallets) {
+    const discoveredAt = wallet === 'cluster-too-fresh'
+      ? now - 11 * HOUR : now - 12 * HOUR - 1_000;
+    registry.discoverWallet({
+      wallet, source: 'GRADUATED_EARLY_BUYER', discoveredAt,
+      effectiveFrom: discoveredAt,
+    });
+    registry.setGrades({
+      wallet, selectionGrade: 'S_A', copyGrade: 'C_A', holdingGrade: 'H_A',
+      status: 'ACTIVE', effectiveAt: discoveredAt,
+    });
+  }
+  let sequence = 20_000;
+  const recordOpen = (wallet, mint, timestampMs, solAmount = 1) => {
+    sequence += 1;
+    const result = store.recordSmartWalletEvent({
+      wallet, mint, side: 'BUY', timestampMs, receivedAtMs: timestampMs,
+      market: 'PUMP_BONDING_CURVE', solAmount, tokenAmount: 1_000,
+      price: solAmount / 1_000, signature: `cluster-${sequence}`, eventIndex: 0,
+    });
+    assert(result.inserted);
+    assert.strictEqual(result.positionPhase, 'OPEN');
+  };
+  const eventAt = now - 10 * HOUR;
+  for (let index = 1; index <= 3; index += 1) {
+    recordOpen('cluster-independent', `independent-mint-${index}`, eventAt + index * 20_000);
+  }
+  for (let index = 1; index <= 2; index += 1) {
+    const at = eventAt + index * 60_000;
+    recordOpen('cluster-related-a', `shared-mint-${index}`, at, 1);
+    recordOpen('cluster-related-b', `shared-mint-${index}`, at + 1_000, 1.1);
+  }
+  recordOpen('cluster-related-a', 'related-a-unique', eventAt + 180_000, 0.8);
+  recordOpen('cluster-related-b', 'related-b-unique', eventAt + 240_000, 1.3);
+  for (let index = 1; index <= 2; index += 1) {
+    recordOpen('cluster-low-activity', `low-mint-${index}`, eventAt + index * 30_000);
+  }
+  for (let index = 1; index <= 3; index += 1) {
+    recordOpen('cluster-too-fresh', `fresh-mint-${index}`, eventAt + index * 40_000);
+  }
+
+  const refreshed = registry.refreshClusters(now, { force: true });
+  assert.strictEqual(refreshed.wallets, 5);
+  assert.strictEqual(refreshed.confirmed, 3);
+  assert.strictEqual(refreshed.relatedLinks, 1);
+  const memberships = Object.fromEntries(store.db.prepare(`
+    SELECT wallet, cluster_id FROM smart_wallet_cluster_memberships ORDER BY wallet
+  `).all().map((row) => [row.wallet, row.cluster_id]));
+  assert.strictEqual(memberships['cluster-independent'], 'cluster-independent');
+  assert.match(memberships['cluster-related-a'], /^AUTO_RELATED_[a-f0-9]{16}$/);
+  assert.strictEqual(
+    memberships['cluster-related-a'], memberships['cluster-related-b'],
+    'synchronized related addresses must share one cluster vote',
+  );
+  assert.strictEqual(memberships['cluster-low-activity'], undefined);
+  assert.strictEqual(memberships['cluster-too-fresh'], undefined);
+  const evaluations = Object.fromEntries(store.db.prepare(`
+    SELECT * FROM smart_wallet_cluster_evaluations ORDER BY wallet
+  `).all().map((row) => [row.wallet, row]));
+  assert.strictEqual(
+    evaluations['cluster-independent'].status, 'CONFIRMED_INDEPENDENT',
+  );
+  assert.strictEqual(evaluations['cluster-independent'].distinct_mints, 3);
+  assert.strictEqual(evaluations['cluster-related-a'].status, 'CONFIRMED_RELATED');
+  assert.strictEqual(evaluations['cluster-related-a'].correlated_wallets, 1);
+  assert.strictEqual(
+    evaluations['cluster-low-activity'].status, 'INSUFFICIENT_ACTIVITY',
+    'twelve hours without three distinct mints must not unlock a vote',
+  );
+  assert.strictEqual(evaluations['cluster-too-fresh'].status, 'OBSERVING');
+  assert(registry.walletSnapshot('cluster-independent', now));
+  assert(registry.walletSnapshot('cluster-related-a', now));
+  assert(registry.walletSnapshot('cluster-related-b', now));
+  assert.strictEqual(registry.walletSnapshot('cluster-low-activity', now), null);
+  assert.strictEqual(registry.walletSnapshot('cluster-too-fresh', now), null);
+  assert.deepStrictEqual(registry.activeClusterCounts(now), { eligible: 2, selectionA: 2 });
+  const dashboard = registry.dashboard(10);
+  assert.strictEqual(dashboard.clusterPolicy.observationMs, 12 * HOUR);
+  assert.strictEqual(dashboard.clusterPolicy.minDistinctMints, 3);
+  assert.strictEqual(dashboard.health.clusterConfirmedIndependent, 1);
+  assert.strictEqual(dashboard.health.clusterConfirmedRelated, 2);
+  assert.strictEqual(dashboard.health.clusterInsufficientActivity, 1);
+  assert.strictEqual(dashboard.health.clusterObserving, 1);
+
+  now += 8 * DAY;
+  registry.refreshClusters(now, { force: true });
+  const stickyMemberships = Object.fromEntries(store.db.prepare(`
+    SELECT wallet, cluster_id FROM smart_wallet_cluster_memberships ORDER BY wallet
+  `).all().map((row) => [row.wallet, row.cluster_id]));
+  assert.strictEqual(
+    stickyMemberships['cluster-related-a'], stickyMemberships['cluster-related-b'],
+    'a confirmed related-address cluster must not split when evidence rolls out',
   );
   registry.stop();
   store.close();

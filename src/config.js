@@ -2523,6 +2523,36 @@ const config = {
     pnlSnapshotCacheMs: integerEnv('FLOW_SMART_WALLET_PNL_CACHE_MS', 1_000, {
       min: 100, max: 60_000,
     }),
+    clusterAutoEnabled: booleanEnv('FLOW_SMART_WALLET_CLUSTER_AUTO_ENABLED', true),
+    clusterObservationMs: integerEnv(
+      'FLOW_SMART_WALLET_CLUSTER_OBSERVATION_MS', 12 * 60 * 60_000,
+      { min: 60 * 60_000 },
+    ),
+    clusterRefreshMs: integerEnv('FLOW_SMART_WALLET_CLUSTER_REFRESH_MS', 5 * 60_000, {
+      min: 60_000,
+    }),
+    clusterLookbackMs: integerEnv(
+      'FLOW_SMART_WALLET_CLUSTER_LOOKBACK_MS', 7 * 24 * 60 * 60_000,
+      { min: 12 * 60 * 60_000 },
+    ),
+    clusterMinDistinctMints: integerEnv('FLOW_SMART_WALLET_CLUSTER_MIN_MINTS', 3, {
+      min: 1, max: 1_000,
+    }),
+    clusterSyncWindowMs: integerEnv('FLOW_SMART_WALLET_CLUSTER_SYNC_WINDOW_MS', 5_000, {
+      min: 100, max: 60_000,
+    }),
+    clusterAmountTolerancePct: numberEnv(
+      'FLOW_SMART_WALLET_CLUSTER_AMOUNT_TOLERANCE_PCT', 15,
+      { min: 0, max: 100 },
+    ),
+    clusterMinCorrelatedMints: integerEnv(
+      'FLOW_SMART_WALLET_CLUSTER_MIN_CORRELATED_MINTS', 2,
+      { min: 1, max: 100 },
+    ),
+    clusterMinCorrelationPct: numberEnv(
+      'FLOW_SMART_WALLET_CLUSTER_MIN_CORRELATION_PCT', 50,
+      { min: 0, max: 100 },
+    ),
     autoVoteRequiresActive: booleanEnv('FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_ACTIVE', true),
     autoVoteRequiresKnownCluster: booleanEnv(
       'FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_KNOWN_CLUSTER', true,

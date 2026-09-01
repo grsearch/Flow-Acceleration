@@ -1225,8 +1225,8 @@
       return text.length > 13 ? `${text.slice(0,6)}…${text.slice(-4)}` : text || '—';
     };
     function recordTone(status) {
-      if (['OPEN','CLOSED','CONFIRMED','ALREADY_EMPTY','QUEUED','COMPLETE','ACTIVE','OK','AGE_OK','AGE_BYPASS','PNL_PROFITABLE','PNL_BYPASS'].includes(status)) return 'good';
-      if (['OPENING','EXITING','PARTIAL','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','PRICE_JUMP','NO_ENTRY','OBSERVING','RIGHT_CENSORED','NO_REFERENCE_PULLBACK','PROBATION','AGE_PROBATION','AGE_PENDING','AGE_UNKNOWN','PNL_PENDING'].includes(status)) return 'warn';
+      if (['OPEN','CLOSED','CONFIRMED','CONFIRMED_INDEPENDENT','ALREADY_EMPTY','QUEUED','COMPLETE','ACTIVE','OK','AGE_OK','AGE_BYPASS','PNL_PROFITABLE','PNL_BYPASS'].includes(status)) return 'good';
+      if (['OPENING','EXITING','PARTIAL','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','CONFIRMED_RELATED','INSUFFICIENT_ACTIVITY','PRICE_JUMP','NO_ENTRY','OBSERVING','RIGHT_CENSORED','NO_REFERENCE_PULLBACK','PROBATION','AGE_PROBATION','AGE_PENDING','AGE_UNKNOWN','PNL_PENDING'].includes(status)) return 'warn';
       if (String(status || '').includes('FAILED') || ['RISK_REJECTED','NO_EXIT','QUARANTINED','TOO_NEW','LOSS_BLOCKED'].includes(status)) return 'bad';
       return 'neutral';
     }
@@ -1471,12 +1471,17 @@
       const rows = Array.isArray(data.wallets) ? data.wallets : [];
       const health = data.health || {};
       const clusters = data.clusterCounts || {};
+      const clusterPolicy = data.clusterPolicy || {};
       const items = [
         ['Registry 总数', number(health.wallets ?? rows.length)],
         ['观察期', number(health.probation)],
         ['已晋级 ACTIVE', number(health.active)],
         ['可用独立集群', number(clusters.eligible)],
         ['S_A 独立集群', number(clusters.selectionA)],
+        ['自动独立已确认', number(health.clusterConfirmedIndependent)],
+        ['关联钱包已归组', number(health.clusterConfirmedRelated)],
+        ['集群观察中', number(health.clusterObserving)],
+        ['交易样本不足', number(health.clusterInsufficientActivity)],
         ['AGE ≥ 30天', number(health.ageEligible)],
         ['AGE < 7天排除', number(health.ageTooNew)],
         ['AGE 7–30天观察', number(health.ageProbation)],
@@ -1505,7 +1510,7 @@
         .join(' · ') || '暂无来源数据';
       const total = Number.isFinite(health.wallets) ? health.wallets : rows.length;
       const displaySummary = rows.length < total ? `当前展示 ${number(rows.length)} / ${number(total)}。` : '';
-      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}监控 ${number(health.monitored)} · 可投票 ${number(health.votingEligible)} · 仅观察 ${number(health.observationOnly)}。收益只按钱包自身真实 OPEN / ADD / REDUCE / CLOSE 账本统计；滚动 24h 至少有一笔完整平仓且已实现收益和资金回报率都必须大于 0。尚未卖完显示 OPEN / PARTIAL，不是 NO_EXIT，也不进入已实现收益。AGE &lt; 7天硬排除，7–30天仅观察，≥30天后才具备年龄资格；自动发现钱包还需完成分级和独立集群确认。隔离 ${number(health.quarantined)} · AGE校验中 ${number(health.ageChecksInFlight)} · 历史模拟待完成 ${number(health.pendingLegacyLabels)} · Registry v${number(data.registryVersion)}`;
+      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}监控 ${number(health.monitored)} · 可投票 ${number(health.votingEligible)} · 仅观察 ${number(health.observationOnly)}。收益只按钱包自身真实 OPEN / ADD / REDUCE / CLOSE 账本统计；滚动 24h 至少有一笔完整平仓且已实现收益和资金回报率都必须大于 0。尚未卖完显示 OPEN / PARTIAL，不是 NO_EXIT，也不进入已实现收益。AGE &lt; 7天硬排除，7–30天仅观察，≥30天后才具备年龄资格。自动发现钱包观察 ${longAge(clusterPolicy.observationMs)} 且至少交易 ${number(clusterPolicy.minDistinctMints)} 个不同 Mint 后确认集群；同 Mint 在 ${age(clusterPolicy.syncWindowMs)} 内、金额差不超过 ${number(clusterPolicy.amountTolerancePct,1)}%，至少重复 ${number(clusterPolicy.minCorrelatedMints)} 个 Mint 且覆盖较少样本钱包的 ${number(clusterPolicy.minCorrelationPct,1)}% 时归为关联地址，同集群只计一票。已确认关联关系不会因短期样本滚出而自动拆分。12小时集群确认不会缩短24小时真实盈利门槛；仍需完成分级后才能投票。隔离 ${number(health.quarantined)} · AGE校验中 ${number(health.ageChecksInFlight)} · 集群刷新 ${dateTime(health.lastClusterRefreshAt)} · 历史模拟待完成 ${number(health.pendingLegacyLabels)} · Registry v${number(data.registryVersion)}`;
 
       const target = document.querySelector('#smart-wallet-registry-rows');
       if (!rows.length) {
@@ -1516,8 +1521,20 @@
         const source = sourceLabels[row.source] || row.source || 'UNKNOWN';
         const cluster = row.cluster_id || row.wallet;
         const voteState = row.voting_eligible ? '可参与共识' : '仅观察';
-        const clusterState = row.cluster_confidence || (row.source === 'CONFIG_SEED'
-          ? '种子钱包默认独立' : '集群待确认，不计独立票');
+        const clusterStatus = row.cluster_evaluation_status || '';
+        const clusterMints = Number(row.cluster_distinct_mints) || 0;
+        const minClusterMints = Number(clusterPolicy.minDistinctMints) || 3;
+        const clusterState = clusterStatus === 'CONFIRMED_INDEPENDENT'
+          ? `自动独立已确认 · ${number(clusterMints)} Mint`
+          : (clusterStatus === 'CONFIRMED_RELATED'
+            ? `关联 ${number((Number(row.cluster_correlated_wallets) || 0) + 1)} 个地址 · 同集群一票`
+            : (clusterStatus === 'OBSERVING'
+              ? `观察至 ${dateTime(row.cluster_eligible_at)} · ${number(clusterMints)}/${number(minClusterMints)} Mint`
+              : (clusterStatus === 'INSUFFICIENT_ACTIVITY'
+                ? `观察完成 · ${number(clusterMints)}/${number(minClusterMints)} Mint`
+                : (clusterStatus === 'CONFIG_SEED'
+                  ? '配置种子钱包'
+                  : (row.cluster_confidence || '集群待确认，不计独立票')))));
         const ageLabels = {
           ELIGIBLE: 'AGE_OK', TOO_NEW: 'TOO_NEW', PROBATION: 'AGE_PROBATION',
           PENDING: 'AGE_PENDING', UNKNOWN: 'AGE_UNKNOWN', BYPASSED: 'AGE_BYPASS',
