@@ -115,6 +115,9 @@ const EXPLICIT_FILTERS = Object.freeze({
   graduation_acceleration_shadow_positions: {
     where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at',
   },
+  smart_wallet_consensus_overlay_rows: {
+    where: 'source_signal_at >= ? AND source_signal_at < ?', anchor: 'source_signal_at',
+  },
 });
 
 // These tables describe the current Smart Wallet registry state rather than
@@ -125,6 +128,7 @@ const FULL_STATE_TABLES = new Set([
   'smart_wallet_registry_meta',
   'smart_wallet_cluster_memberships',
   'smart_wallet_cluster_evaluations',
+  'smart_wallet_consensus_overlay_meta',
 ]);
 
 const GENERIC_TIME_COLUMNS = [

@@ -2716,6 +2716,57 @@ const config = {
     }),
   },
 
+  // Forward-only A/B layer: keep every source Shadow cohort untouched, then
+  // measure the exact same simulated fills only when a qualified Registry
+  // consensus existed before the source signal. It observes persisted rows,
+  // does not duplicate execution state, and can never send a transaction.
+  smartWalletConsensusOverlay: {
+    enabled: booleanEnv('FLOW_SMART_CONSENSUS_OVERLAY_ENABLED', true),
+    gateWindowMs: integerEnv(
+      'FLOW_SMART_CONSENSUS_OVERLAY_WINDOW_MS', 15 * 60_000, { min: 60_000 },
+    ),
+    gateFinalizeDelayMs: integerEnv(
+      'FLOW_SMART_CONSENSUS_OVERLAY_FINALIZE_DELAY_MS', 60_000, { min: 5_000 },
+    ),
+    syncMs: integerEnv('FLOW_SMART_CONSENSUS_OVERLAY_SYNC_MS', 5_000, { min: 1_000 }),
+    maxRowsPerSync: integerEnv(
+      'FLOW_SMART_CONSENSUS_OVERLAY_MAX_ROWS_PER_SYNC', 2_000,
+      { min: 10, max: 20_000 },
+    ),
+    profiles: [
+      {
+        id: 'SWC_G_GE30_R23_F2_G2_XLEG',
+        label: 'G · GE30 R23 F2 G2 XLEG + Smart共识',
+        source: 'MIGRATED_DROP_REBOUND',
+        sourceCohortId: 'POST_GE30_R23_F2_ONLY_G2_XLEG',
+      },
+      {
+        id: 'SWC_G_GD25_35_X8',
+        label: 'G · GD25-35 X8 + Smart共识',
+        source: 'MIGRATED_DROP_REBOUND',
+        sourceCohortId: 'POST_GD25_35_X8',
+      },
+      {
+        id: 'SWC_O_C80_D5_B2_S0_NC',
+        label: 'O · C80 D5 B2 S0 NC + Smart共识',
+        source: 'GRADUATION_ACCELERATION',
+        sourceCohortId: 'O_C80_D5_B2_S0_NC:1SOL',
+      },
+      {
+        id: 'SWC_O90_M5_STAIR120',
+        label: 'O · O90 M5 STAIR120 + Smart共识',
+        source: 'GRADUATION_ACCELERATION',
+        sourceCohortId: 'O90_M5_STAIR120:1SOL',
+      },
+      {
+        id: 'SWC_FEA_BNH_120',
+        label: 'FEA · BNH-120 + Smart共识',
+        source: 'FEATURE_EDGE_BNH',
+        sourceCohortId: 'FEA_BNH_120',
+      },
+    ],
+  },
+
   // Forward-only study of why monitored Smart Wallet first entries avoid rapid
   // collapses. It never follows ADD events and never changes a live decision.
   // Every OPEN creates an unguarded fixed-hold control, a causal 10-second

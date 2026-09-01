@@ -60,6 +60,7 @@ class ResearchServer {
     preEntryRugRisk = null,
     smartWalletRegistry = null,
     smartWalletConsensusFlowRunnerShadow = null,
+    smartWalletConsensusOverlay = null,
     smartResonanceShadow = null,
     smartWalletRugEscapeShadow = null,
     smartWalletFirstOpenRightTailShadow = null,
@@ -100,6 +101,7 @@ class ResearchServer {
     this.preEntryRugRisk = preEntryRugRisk;
     this.smartWalletRegistry = smartWalletRegistry;
     this.smartWalletConsensusFlowRunnerShadow = smartWalletConsensusFlowRunnerShadow;
+    this.smartWalletConsensusOverlay = smartWalletConsensusOverlay;
     this.smartResonanceShadow = smartResonanceShadow;
     this.smartWalletRugEscapeShadow = smartWalletRugEscapeShadow;
     this.smartWalletFirstOpenRightTailShadow = smartWalletFirstOpenRightTailShadow;
@@ -176,6 +178,7 @@ class ResearchServer {
           'same-slot-dump-backrun': enabled('sameSlotDumpBackrunShadow'),
           'smart-resonance': enabled('smartResonanceShadow'),
           'smart-consensus-v2': enabled('smartWalletConsensusFlowRunnerShadow'),
+          'smart-consensus-overlay': enabled('smartWalletConsensusOverlay'),
           'smart-wallet-rug-escape': enabled('smartWalletRugEscapeShadow'),
           'smart-first-open-right-tail': enabled('smartWalletFirstOpenRightTailShadow'),
           'public-flow-lead': enabled('publicFlowLeadShadow'),
@@ -314,6 +317,21 @@ class ResearchServer {
           observerOnly: true,
           sendsTransactions: false,
           wallets: [],
+        }),
+      });
+    });
+
+    this.app.get('/api/smart-consensus-overlay', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        ...(this.smartWalletConsensusOverlay?.dashboard(
+          numeric(request.query.limit, 100),
+        ) || {
+          enabled: false,
+          observerOnly: true,
+          sendsTransactions: false,
+          profiles: [],
+          recent: [],
         }),
       });
     });
@@ -969,6 +987,7 @@ class ResearchServer {
         smartWalletRegistry: this.smartWalletRegistry?.health() || null,
         smartWalletConsensusFlowRunnerShadow:
           this.smartWalletConsensusFlowRunnerShadow?.health() || null,
+        smartWalletConsensusOverlay: this.smartWalletConsensusOverlay?.health() || null,
         smartResonanceShadow: this.smartResonanceShadow?.health() || null,
         smartWalletRugEscapeShadow: this.smartWalletRugEscapeShadow?.health() || null,
         smartWalletFirstOpenRightTailShadow:

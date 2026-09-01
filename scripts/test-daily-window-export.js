@@ -63,6 +63,14 @@ function main() {
       smart_event_id INTEGER PRIMARY KEY, position_id INTEGER,
       accounting_status TEXT NOT NULL, created_at INTEGER NOT NULL
     );
+    CREATE TABLE smart_wallet_consensus_overlay_meta (
+      id INTEGER PRIMARY KEY, model_version TEXT NOT NULL,
+      started_at INTEGER NOT NULL, last_sync_at INTEGER, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE smart_wallet_consensus_overlay_rows (
+      id INTEGER PRIMARY KEY, profile_id TEXT NOT NULL,
+      source_signal_at INTEGER NOT NULL, mint TEXT NOT NULL, gate_status TEXT NOT NULL
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -112,6 +120,12 @@ function main() {
     .run(501, 51, 'PARTIAL', startMs - 20_000);
   db.prepare('INSERT INTO smart_wallet_pnl_processed_events VALUES (?, ?, ?, ?)')
     .run(502, 52, 'CLOSED', startMs - 30_000);
+  db.prepare('INSERT INTO smart_wallet_consensus_overlay_meta VALUES (?, ?, ?, ?, ?)')
+    .run(1, 'SWC_OVERLAY_V1', startMs - 20_000, startMs + 100, startMs + 100);
+  db.prepare('INSERT INTO smart_wallet_consensus_overlay_rows VALUES (?, ?, ?, ?, ?)')
+    .run(60, 'inside-profile', startMs + 60, 'inside-overlay', 'PASS');
+  db.prepare('INSERT INTO smart_wallet_consensus_overlay_rows VALUES (?, ?, ?, ?, ?)')
+    .run(61, 'future-profile', endMs + 60, 'future-overlay', 'NO_CONSENSUS');
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
@@ -175,6 +189,13 @@ function main() {
     exported.prepare('SELECT smart_event_id FROM smart_wallet_pnl_processed_events ORDER BY smart_event_id')
       .all().map((row) => row.smart_event_id),
     [500, 501],
+  );
+  assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_consensus_overlay_meta')
+    .get().count, 1, 'the overlay deployment boundary must be exported in full');
+  assert.deepStrictEqual(
+    exported.prepare('SELECT id FROM smart_wallet_consensus_overlay_rows ORDER BY id')
+      .all().map((row) => row.id),
+    [60],
   );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();

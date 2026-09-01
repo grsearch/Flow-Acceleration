@@ -35,6 +35,10 @@ async function main() {
   assert.ok(dashboard.includes('OPEN 10秒覆盖'));
   assert.ok(dashboard.includes('id="smart-wallet-registry-summary"'));
   assert.ok(dashboard.includes('id="smart-wallet-registry-rows"'));
+  assert.ok(dashboard.includes('id="smart-consensus-overlay-summary"'));
+  assert.ok(dashboard.includes('id="smart-consensus-overlay-profile-rows"'));
+  assert.ok(dashboard.includes('id="smart-consensus-overlay-recent-rows"'));
+  assert.ok(dashboard.includes('原 Shadow 表、原 cohort 和退出收益均不修改'));
   assert.ok(dashboard.includes('<th>链上 AGE</th>'));
   assert.ok(dashboard.includes('<th>24h 真实已实现收益</th>'));
   assert.ok(dashboard.includes('AGE &lt; 7天硬排除'));
@@ -50,6 +54,7 @@ async function main() {
   assert.ok(dashboard.includes('已确认关联关系不会因短期样本滚出而自动拆分'));
   assert.ok(dashboard.includes('自动独立已确认'));
   assert.ok(dashboard.includes("loadDashboard('/api/smart-wallet-registry?limit=100'"));
+  assert.ok(dashboard.includes("loadDashboard('/api/smart-consensus-overlay?limit=100'"));
   assert.ok(dashboard.includes('value="shadow_2w"'));
   assert.ok(dashboard.includes('aria-controls="live-trading"'));
   assert.ok(dashboard.includes('id="live-trading"'));
@@ -317,6 +322,7 @@ async function main() {
       '/api/backtest',
       '/api/smart-wallets',
       '/api/smart-wallet-registry?limit=100',
+      '/api/smart-consensus-overlay?limit=100',
       '/api/signal-repetition',
       '/api/live-trading',
       '/api/primary-signal-shadow',
@@ -375,6 +381,7 @@ async function main() {
     assert.strictEqual(strategyStatus.shadows['smart-like-early'], false);
     assert.strictEqual(strategyStatus.shadows['cya-slot-flow'], false);
     assert.strictEqual(strategyStatus.shadows['smart-resonance'], false);
+    assert.strictEqual(strategyStatus.shadows['smart-consensus-overlay'], true);
     assert.strictEqual(strategyStatus.shadows['holder-growth'], false);
     assert.strictEqual(strategyStatus.shadows['smart-pullback'], false);
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');

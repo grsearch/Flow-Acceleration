@@ -54,6 +54,9 @@ const {
 } = require('./core/GraduationAccelerationShadowSuite');
 const { FeatureEdgeAuditObserver } = require('./core/FeatureEdgeAuditObserver');
 const {
+  SmartWalletConsensusOverlayObserver,
+} = require('./core/SmartWalletConsensusOverlayObserver');
+const {
   PostMigrationSurvivorObserver,
 } = require('./core/PostMigrationSurvivorObserver');
 const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
@@ -320,6 +323,11 @@ function createRuntime(runtimeConfig = config) {
     store,
   });
   featureEdgeAudit.start();
+  const smartWalletConsensusOverlay = new SmartWalletConsensusOverlayObserver({
+    config: runtimeConfig.smartWalletConsensusOverlay,
+    store,
+  });
+  smartWalletConsensusOverlay.start();
   const postMigrationSurvivor = new PostMigrationSurvivorObserver({
     config: runtimeConfig.postMigrationSurvivorObserver,
     store,
@@ -347,6 +355,7 @@ function createRuntime(runtimeConfig = config) {
     preEntryRugRisk,
     smartWalletRegistry,
     smartWalletConsensusFlowRunnerShadow,
+    smartWalletConsensusOverlay,
     smartResonanceShadow,
     smartWalletRugEscapeShadow,
     smartWalletFirstOpenRightTailShadow,
@@ -920,6 +929,7 @@ function createRuntime(runtimeConfig = config) {
         ['graduationHoldAdvance', graduationHoldShadow],
         ['graduationAccelerationAdvance', graduationAccelerationShadow],
         ['featureEdgeAuditAdvance', featureEdgeAudit],
+        ['smartConsensusOverlayAdvance', smartWalletConsensusOverlay],
         ['postMigrationSurvivorAdvance', postMigrationSurvivor],
       ],
     ];
@@ -992,6 +1002,7 @@ function createRuntime(runtimeConfig = config) {
     graduationHoldShadow.stop();
     graduationAccelerationShadow.stop();
     featureEdgeAudit.stop();
+    smartWalletConsensusOverlay.stop();
     postMigrationSurvivor.stop();
     await server.stop();
     store.close();
@@ -1038,6 +1049,7 @@ function createRuntime(runtimeConfig = config) {
       graduationHoldShadow: graduationHoldShadow.health(),
       graduationAccelerationShadow: graduationAccelerationShadow.health(),
       featureEdgeAudit: featureEdgeAudit.health(),
+      smartWalletConsensusOverlay: smartWalletConsensusOverlay.health(),
       postMigrationSurvivor: postMigrationSurvivor.health(),
     };
   }
@@ -1057,7 +1069,7 @@ function createRuntime(runtimeConfig = config) {
     migratedDropReboundShadow,
     rangeScalperShadow, cyaEarlyPyramidShadow,
     migrationContinuityShadow, bondingCurveMomentumShadow, graduationHoldShadow,
-    graduationAccelerationShadow, featureEdgeAudit,
+    graduationAccelerationShadow, featureEdgeAudit, smartWalletConsensusOverlay,
     postMigrationSurvivor,
   };
 }

@@ -360,6 +360,20 @@
           <tbody id="smart-wallet-registry-rows"></tbody>
         </table></div>
       </article>
+      <article class="card signal-quality">
+        <div class="section-title"><h2>Smart Wallet 共识门控 Shadow 对照</h2><p>保留原 Shadow 全样本，同时比较“原信号前15分钟已有合格独立集群共识”的同批真实模拟结果</p></div>
+        <div class="quality-grid" id="smart-consensus-overlay-summary"></div>
+        <p class="registry-note" id="smart-consensus-overlay-note"></p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>原策略 + 共识</th><th>原信号 / 入场 / 完成</th><th>共识通过 / 通过率</th><th>原组平均 / 胜率 / PF</th><th>共识组平均 / 胜率 / PF</th><th>平均 / 胜率改善</th><th>判断</th></tr></thead>
+          <tbody id="smart-consensus-overlay-profile-rows"></tbody>
+        </table></div>
+        <div class="section-title"><h2>最近门控样本</h2><p>PASS 只接受发生在原策略信号之前的 Registry 合格共识；不会反向使用未来信息</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>原信号时间</th><th>策略</th><th>门控</th><th>Mint</th><th>共识时间 / 提前量</th><th>独立集群 / 要求</th><th>原 Shadow 状态 / 净收益</th></tr></thead>
+          <tbody id="smart-consensus-overlay-recent-rows"></tbody>
+        </table></div>
+      </article>
       <div class="section-title wallet-history-title"><h2>种子钱包历史行为统计</h2><p>这里只统计 FLOW_SMART_WALLETS，不代表滚动 Registry 总数</p></div>
       <div class="grid wallet-grid" id="wallet-cards"></div>
     </section>
@@ -1225,8 +1239,8 @@
       return text.length > 13 ? `${text.slice(0,6)}…${text.slice(-4)}` : text || '—';
     };
     function recordTone(status) {
-      if (['OPEN','CLOSED','CONFIRMED','CONFIRMED_INDEPENDENT','ALREADY_EMPTY','QUEUED','COMPLETE','ACTIVE','OK','AGE_OK','AGE_BYPASS','PNL_PROFITABLE','PNL_BYPASS'].includes(status)) return 'good';
-      if (['OPENING','EXITING','PARTIAL','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','CONFIRMED_RELATED','INSUFFICIENT_ACTIVITY','PRICE_JUMP','NO_ENTRY','OBSERVING','RIGHT_CENSORED','NO_REFERENCE_PULLBACK','PROBATION','AGE_PROBATION','AGE_PENDING','AGE_UNKNOWN','PNL_PENDING'].includes(status)) return 'warn';
+      if (['OPEN','CLOSED','CONFIRMED','CONFIRMED_INDEPENDENT','ALREADY_EMPTY','QUEUED','COMPLETE','ACTIVE','OK','PASS','AGE_OK','AGE_BYPASS','PNL_PROFITABLE','PNL_BYPASS','初步改善'].includes(status)) return 'good';
+      if (['OPENING','EXITING','PARTIAL','PENDING_ENTRY','EXIT_PENDING','MATCHED_DISABLED','RULE_REJECTED','CONFIRMATION_UNKNOWN','CONFIRMED_PARTIAL','CONFIRMED_UNVERIFIED','CONFIRMED_RELATED','INSUFFICIENT_ACTIVITY','PRICE_JUMP','NO_ENTRY','NO_CONSENSUS','OBSERVING','RIGHT_CENSORED','NO_REFERENCE_PULLBACK','PROBATION','AGE_PROBATION','AGE_PENDING','AGE_UNKNOWN','PNL_PENDING','样本积累中'].includes(status)) return 'warn';
       if (String(status || '').includes('FAILED') || ['RISK_REJECTED','NO_EXIT','QUARANTINED','TOO_NEW','LOSS_BLOCKED'].includes(status)) return 'bad';
       return 'neutral';
     }
@@ -1548,6 +1562,50 @@
           ? ` · 未平仓 ${number(row.actual_open_positions)}` : '';
         return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)} · ${voteState}</span></td><td>${statusChip(ageStatus)}<br><b>${longAge(row.age_ms)}</b><br><span class="table-note" title="${escapeHtml(ageDetail)}">验证 ${dateTime(row.age_verified_at)}</span></td><td>${statusChip(pnlStatus)}<br><b class="${pnlClass}">${number(row.pnl_24h_realized_sol,4)} SOL</b> · ${pct(row.pnl_24h_return_pct,1)}<br><span class="table-note">完整平仓 ${number(row.pnl_24h_closed_positions)}${openNote}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}</td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(clusterState)}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
       }).join('');
+    }
+
+    function renderSmartConsensusOverlay(data) {
+      const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+      const recent = Array.isArray(data.recent) ? data.recent : [];
+      const passRate = data.classified
+        ? (Number(data.consensusPassed) || 0) / Number(data.classified) * 100 : null;
+      const items = [
+        ['对照策略', number(data.profiles?.length)],
+        ['已分类原信号', number(data.classified)],
+        ['共识通过', number(data.consensusPassed)],
+        ['无共识保留基线', number(data.noConsensus)],
+        ['总通过率', rate(passRate)],
+      ];
+      document.querySelector('#smart-consensus-overlay-summary').innerHTML = items
+        .map(([label,value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
+      document.querySelector('#smart-consensus-overlay-note').innerHTML = `从 ${dateTime(data.startedAt)} 起前向记录，不回填部署前历史。原 Shadow 表、原 cohort 和退出收益均不修改；本层只读取原模拟结果并做条件分组。门控窗口 ${age(data.gatePolicy?.gateWindowMs)}，共识必须先于或等于原信号，且来自已通过 AGE、钱包自身滚动收益与独立集群资格的 Registry 投票。观察器不发送交易。`;
+
+      const profileTarget = document.querySelector('#smart-consensus-overlay-profile-rows');
+      if (!profiles.length) {
+        profileTarget.innerHTML = '<tr><td colspan="7" class="empty">暂无共识门控对照策略</td></tr>';
+      } else {
+        profileTarget.innerHTML = profiles.map(row => {
+          const baseline = row.baseline || {};
+          const consensus = row.consensus || {};
+          const enough = Number(consensus.resolved) >= 20;
+          const improved = Number.isFinite(row.deltaAverageNetReturnPct)
+            && Number.isFinite(row.deltaWinRatePct)
+            && row.deltaAverageNetReturnPct > 0 && row.deltaWinRatePct >= 0;
+          const verdict = enough ? (improved ? '初步改善' : '暂未改善') : '样本积累中';
+          return `<tr><td><b>${escapeHtml(row.label)}</b><br><span class="table-note">${escapeHtml(row.sourceCohortId)}</span></td><td>${number(baseline.signals)} / ${number(baseline.entered)} / ${number(baseline.resolved)}</td><td>${number(consensus.signals)} / ${rate(row.consensusPassRatePct)}</td><td class="${tone(baseline.averageNetReturnPct)}">${pct(baseline.averageNetReturnPct)} / ${rate(baseline.winRatePct)} / ${number(baseline.profitFactor,2)}</td><td class="${tone(consensus.averageNetReturnPct)}">${pct(consensus.averageNetReturnPct)} / ${rate(consensus.winRatePct)} / ${number(consensus.profitFactor,2)}</td><td class="${tone(row.deltaAverageNetReturnPct)}">${pct(row.deltaAverageNetReturnPct)} / ${pct(row.deltaWinRatePct)}</td><td>${statusChip(verdict)}</td></tr>`;
+        }).join('');
+      }
+
+      const recentTarget = document.querySelector('#smart-consensus-overlay-recent-rows');
+      if (!recent.length) {
+        recentTarget.innerHTML = '<tr><td colspan="7" class="empty">部署后的原策略信号尚未出现</td></tr>';
+      } else {
+        recentTarget.innerHTML = recent.slice(0, 30).map(row => {
+          const lead = Number.isFinite(row.consensus_delay_ms)
+            ? age(row.consensus_delay_ms) : '—';
+          return `<tr><td>${dateTime(row.source_signal_at)}</td><td><b>${escapeHtml(row.profile_label)}</b><br><span class="table-note">${escapeHtml(row.source_cohort_id)}</span></td><td>${statusChip(row.gate_status)}</td><td>${mintLink(row.mint)}</td><td>${dateTime(row.consensus_at)}<br><span class="table-note">提前 ${lead}</span></td><td>${number(row.distinct_clusters)} / ${number(row.required_clusters)}<br><span class="table-note">${escapeHtml(row.consensus_strength || '—')}</span></td><td>${statusChip(row.source_status)}<br><b class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}</b></td></tr>`;
+        }).join('');
+      }
     }
 
     function renderWallets(rows) {
@@ -3332,6 +3390,7 @@
         backtest: () => [],
         wallets: requestContext => [
           loadDashboard('/api/smart-wallet-registry?limit=100', renderSmartWalletRegistry, requestContext),
+          loadDashboard('/api/smart-consensus-overlay?limit=100', renderSmartConsensusOverlay, requestContext),
           loadDashboard('/api/smart-wallets', renderWallets, requestContext),
           loadDashboard('/api/signal-repetition', renderSignalQuality, requestContext),
         ],

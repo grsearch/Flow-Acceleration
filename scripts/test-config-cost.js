@@ -60,6 +60,23 @@ assert.strictEqual(config.smartWalletRegistry.clusterSyncWindowMs, 5_000);
 assert.strictEqual(config.smartWalletRegistry.clusterAmountTolerancePct, 15);
 assert.strictEqual(config.smartWalletRegistry.clusterMinCorrelatedMints, 2);
 assert.strictEqual(config.smartWalletRegistry.clusterMinCorrelationPct, 50);
+assert.strictEqual(config.smartWalletConsensusOverlay.enabled, true);
+assert.strictEqual(config.smartWalletConsensusOverlay.gateWindowMs, 15 * 60_000);
+assert.strictEqual(config.smartWalletConsensusOverlay.gateFinalizeDelayMs, 60_000);
+assert.deepStrictEqual(
+  config.smartWalletConsensusOverlay.profiles.map((profile) => [
+    profile.id, profile.source, profile.sourceCohortId,
+  ]),
+  [
+    ['SWC_G_GE30_R23_F2_G2_XLEG', 'MIGRATED_DROP_REBOUND',
+      'POST_GE30_R23_F2_ONLY_G2_XLEG'],
+    ['SWC_G_GD25_35_X8', 'MIGRATED_DROP_REBOUND', 'POST_GD25_35_X8'],
+    ['SWC_O_C80_D5_B2_S0_NC', 'GRADUATION_ACCELERATION',
+      'O_C80_D5_B2_S0_NC:1SOL'],
+    ['SWC_O90_M5_STAIR120', 'GRADUATION_ACCELERATION', 'O90_M5_STAIR120:1SOL'],
+    ['SWC_FEA_BNH_120', 'FEATURE_EDGE_BNH', 'FEA_BNH_120'],
+  ],
+);
 assert.strictEqual(config.liveTrading.enabled, false);
 assert.strictEqual(config.liveTrading.requestedEnabled, false);
 assert.strictEqual(config.liveTrading.safetyLock, true);
