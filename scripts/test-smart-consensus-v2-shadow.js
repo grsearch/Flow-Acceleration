@@ -7,7 +7,7 @@ const {
   SmartWalletConsensusFlowRunnerShadowSuite,
 } = require('../src/core/SmartWalletConsensusFlowRunnerShadowSuite');
 
-function main() {
+async function main() {
   const base = 1_900_000_000_000;
   let now = base;
   let sequence = 0;
@@ -22,6 +22,7 @@ function main() {
   };
   const registryConfig = {
     enabled: true,
+    ageCheckEnabled: false,
     seedWallets: ['smart-a', 'smart-b', 'smart-c'],
     seedClusters: [{ id: 'cluster-ab', wallets: ['smart-a', 'smart-b'] }],
     discoveryEnabled: true,
@@ -290,7 +291,148 @@ function main() {
   assert.strictEqual(dashboard.sendsTransactions, false);
   assert.strictEqual(dashboard.rugPolicy, 'OBSERVE_ONLY_NOT_AN_ENTRY_FILTER');
   store.close();
+  await testWalletAgeGate(costModel);
   console.log('Smart Wallet Consensus Flow Runner V2 tests: PASS');
 }
 
-main();
+async function testWalletAgeGate(costModel) {
+  const DAY = 24 * 60 * 60_000;
+  const now = 1_900_100_000_000;
+  const migrationStore = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  migrationStore.db.exec(`
+    CREATE TABLE smart_wallet_registry (
+      wallet TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      selection_grade TEXT NOT NULL,
+      copy_grade TEXT NOT NULL,
+      holding_grade TEXT NOT NULL,
+      risk_status TEXT NOT NULL,
+      source TEXT NOT NULL,
+      discovered_at INTEGER NOT NULL,
+      effective_from INTEGER NOT NULL,
+      last_seen_at INTEGER,
+      metrics_json TEXT NOT NULL,
+      registry_version INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  const migrationRegistry = new SmartWalletRegistry({
+    config: {
+      enabled: true, ageCheckEnabled: false, labelPositionSol: 1, costModel,
+    },
+    store: migrationStore,
+    now: () => now,
+  });
+  const migratedColumns = new Set(migrationStore.db.prepare(
+    'PRAGMA table_info(smart_wallet_registry)',
+  ).all().map((column) => column.name));
+  for (const column of [
+    'age_status', 'first_chain_activity_at', 'age_verified_at', 'age_source',
+    'age_check_error', 'age_check_after', 'age_scan_before_signature',
+    'age_history_complete',
+  ]) assert(migratedColumns.has(column), `legacy registry must migrate ${column}`);
+  assert(migrationRegistry.discoverWallet({
+    wallet: 'migration-wallet', discoveredAt: now, effectiveFrom: now,
+  }));
+  migrationRegistry.stop();
+  migrationStore.close();
+  const histories = {
+    'wallet-young': [{ signature: 'young-1', slot: 10, blockTime: (now - 2 * DAY) / 1_000 }],
+    'wallet-probation': [{
+      signature: 'probation-1', slot: 9, blockTime: (now - 10 * DAY) / 1_000,
+    }],
+    'wallet-old': [{ signature: 'old-1', slot: 8, blockTime: (now - 40 * DAY) / 1_000 }],
+  };
+  const fetchImpl = async (_url, request) => {
+    const body = JSON.parse(request.body);
+    if (body.method === 'getFirstAvailableBlock') {
+      return { ok: true, json: async () => ({ result: 0 }) };
+    }
+    if (body.method === 'getSignaturesForAddress') {
+      const wallet = body.params[0];
+      if (wallet === 'wallet-unknown') throw new Error('rpc unavailable');
+      return { ok: true, json: async () => ({ result: histories[wallet] || [] }) };
+    }
+    throw new Error(`unexpected RPC method ${body.method}`);
+  };
+  const store = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const registry = new SmartWalletRegistry({
+    config: {
+      enabled: true,
+      seedWallets: [],
+      seedClusters: [],
+      discoveryEnabled: false,
+      discoveryDelayMs: 0,
+      ageCheckEnabled: true,
+      ageRpcUrl: 'https://rpc.test',
+      ageHardRejectMs: 7 * DAY,
+      ageMinVoteMs: 30 * DAY,
+      ageRetryMs: 60_000,
+      ageRpcTimeoutMs: 5_000,
+      ageRpcPageSize: 100,
+      ageRpcPagesPerCheck: 2,
+      ageCheckConcurrency: 1,
+      ageSeedBypass: false,
+      autoVoteRequiresActive: true,
+      autoVoteRequiresKnownCluster: true,
+      labelPositionSol: 1,
+      costModel,
+    },
+    store,
+    now: () => now,
+    fetchImpl,
+  });
+  for (const wallet of ['wallet-young', 'wallet-probation', 'wallet-old', 'wallet-unknown']) {
+    registry.discoverWallet({
+      wallet, source: 'GRADUATED_EARLY_BUYER', discoveredAt: now - 1_000,
+      effectiveFrom: now - 1_000,
+    });
+    registry.setGrades({
+      wallet, selectionGrade: 'S_A', copyGrade: 'C_A', holdingGrade: 'H_A',
+      status: 'ACTIVE', effectiveAt: now - 500,
+    });
+    registry.setCluster({
+      wallet, clusterId: `${wallet}-cluster`, confidence: 'CONFIRMED',
+      validFrom: now - 500,
+    });
+    await registry.verifyWalletAge(wallet, now);
+  }
+  const ageRows = Object.fromEntries(store.db.prepare(`
+    SELECT wallet, age_status FROM smart_wallet_registry ORDER BY wallet
+  `).all().map((row) => [row.wallet, row.age_status]));
+  assert.deepStrictEqual(ageRows, {
+    'wallet-old': 'ELIGIBLE',
+    'wallet-probation': 'PROBATION',
+    'wallet-unknown': 'UNKNOWN',
+    'wallet-young': 'TOO_NEW',
+  });
+  assert.strictEqual(registry.monitoringSnapshot('wallet-young', now), null,
+    'wallets younger than seven days must be excluded from smart-wallet monitoring');
+  assert(registry.monitoringSnapshot('wallet-probation', now));
+  assert.strictEqual(registry.walletSnapshot('wallet-probation', now), null,
+    'wallets aged seven to thirty days must remain observation-only');
+  assert.strictEqual(registry.walletSnapshot('wallet-unknown', now), null,
+    'unknown age must fail closed');
+  assert(registry.walletSnapshot('wallet-old', now),
+    'only a wallet with at least thirty days of verified history may vote');
+  const health = registry.health();
+  assert.strictEqual(health.ageTooNew, 1);
+  assert.strictEqual(health.ageProbation, 1);
+  assert.strictEqual(health.ageUnknown, 1);
+  assert.strictEqual(health.ageEligible, 1);
+  assert.strictEqual(health.votingEligible, 1);
+  registry.stop();
+  store.close();
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

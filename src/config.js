@@ -2483,6 +2483,30 @@ const config = {
     discoveryDelayMs: integerEnv('FLOW_SMART_WALLET_DISCOVERY_DELAY_MS', 24 * 60 * 60_000, {
       min: 0,
     }),
+    ageCheckEnabled: booleanEnv('FLOW_SMART_WALLET_AGE_CHECK_ENABLED', true),
+    ageRpcUrl: process.env.FLOW_SMART_WALLET_AGE_RPC_URL || process.env.FLOW_RPC_URL || '',
+    ageHardRejectMs: integerEnv('FLOW_SMART_WALLET_AGE_HARD_REJECT_MS', 7 * 24 * 60 * 60_000, {
+      min: 0,
+    }),
+    ageMinVoteMs: integerEnv('FLOW_SMART_WALLET_AGE_MIN_VOTE_MS', 30 * 24 * 60 * 60_000, {
+      min: 24 * 60 * 60_000,
+    }),
+    ageRetryMs: integerEnv('FLOW_SMART_WALLET_AGE_RETRY_MS', 60 * 60_000, {
+      min: 60_000,
+    }),
+    ageRpcTimeoutMs: integerEnv('FLOW_SMART_WALLET_AGE_RPC_TIMEOUT_MS', 10_000, {
+      min: 1_000, max: 60_000,
+    }),
+    ageRpcPageSize: integerEnv('FLOW_SMART_WALLET_AGE_RPC_PAGE_SIZE', 1_000, {
+      min: 1, max: 1_000,
+    }),
+    ageRpcPagesPerCheck: integerEnv('FLOW_SMART_WALLET_AGE_RPC_PAGES_PER_CHECK', 2, {
+      min: 1, max: 20,
+    }),
+    ageCheckConcurrency: integerEnv('FLOW_SMART_WALLET_AGE_CHECK_CONCURRENCY', 2, {
+      min: 1, max: 10,
+    }),
+    ageSeedBypass: booleanEnv('FLOW_SMART_WALLET_AGE_SEED_BYPASS', false),
     autoVoteRequiresActive: booleanEnv('FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_ACTIVE', true),
     autoVoteRequiresKnownCluster: booleanEnv(
       'FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_KNOWN_CLUSTER', true,

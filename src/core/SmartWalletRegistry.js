@@ -12,6 +12,11 @@ function finite(value, fallback = null) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function nullableFinite(value) {
+  if (value == null || value === '') return null;
+  return finite(value);
+}
+
 function median(values) {
   const ordered = values.filter(Number.isFinite).sort((left, right) => left - right);
   if (!ordered.length) return null;
@@ -60,13 +65,20 @@ function copyWeight(grade) {
 }
 
 class SmartWalletRegistry {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), fetchImpl = globalThis.fetch }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.fetchImpl = fetchImpl;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.labelPositionSol });
     this.labels = new Map();
     this.labelsByMint = new Map();
+    this.ageChecks = new Map();
+    this.ageAbortControllers = new Set();
+    this.ageHistoryFloor = null;
+    this.ageHistoryFloorCheckedAt = 0;
+    this.gradeRefreshRequested = false;
+    this.stopping = false;
     this.metrics = {
       discovered: 0,
       seeded: 0,
@@ -75,7 +87,11 @@ class SmartWalletRegistry {
       labelsNoEntry: 0,
       labelsNoExit: 0,
       gradeRefreshes: 0,
+      ageChecksStarted: 0,
+      ageChecksCompleted: 0,
+      ageChecksFailed: 0,
       lastGradeRefreshAt: null,
+      lastAgeCheckAt: null,
       lastActionAt: null,
     };
     this._initStorage();
@@ -104,6 +120,14 @@ class SmartWalletRegistry {
         discovered_at INTEGER NOT NULL,
         effective_from INTEGER NOT NULL,
         last_seen_at INTEGER,
+        age_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        first_chain_activity_at INTEGER,
+        age_verified_at INTEGER,
+        age_source TEXT,
+        age_check_error TEXT,
+        age_check_after INTEGER,
+        age_scan_before_signature TEXT,
+        age_history_complete INTEGER NOT NULL DEFAULT 0,
         metrics_json TEXT NOT NULL,
         registry_version INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
@@ -194,14 +218,38 @@ class SmartWalletRegistry {
       CREATE INDEX IF NOT EXISTS idx_swr_labels_status_target
         ON smart_wallet_forward_labels(status, entry_target_at);
     `);
+    const registryColumns = new Set(this.store.db.prepare(
+      'PRAGMA table_info(smart_wallet_registry)',
+    ).all().map((column) => column.name));
+    const ageColumns = [
+      ['age_status', "TEXT NOT NULL DEFAULT 'UNKNOWN'"],
+      ['first_chain_activity_at', 'INTEGER'],
+      ['age_verified_at', 'INTEGER'],
+      ['age_source', 'TEXT'],
+      ['age_check_error', 'TEXT'],
+      ['age_check_after', 'INTEGER'],
+      ['age_scan_before_signature', 'TEXT'],
+      ['age_history_complete', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+    for (const [name, definition] of ageColumns) {
+      if (!registryColumns.has(name)) {
+        this.store.db.exec(`ALTER TABLE smart_wallet_registry ADD COLUMN ${name} ${definition}`);
+      }
+    }
+    this.store.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_swr_age_check
+        ON smart_wallet_registry(age_status, age_check_after);
+    `);
     this.insertRegistry = this.store.db.prepare(`
       INSERT OR IGNORE INTO smart_wallet_registry (
         wallet, status, selection_grade, copy_grade, holding_grade, risk_status,
-        source, discovered_at, effective_from, last_seen_at, metrics_json,
+        source, discovered_at, effective_from, last_seen_at, age_status,
+        age_check_after, metrics_json,
         registry_version, created_at, updated_at
       ) VALUES (
         @wallet, @status, @selectionGrade, @copyGrade, @holdingGrade, @riskStatus,
-        @source, @discoveredAt, @effectiveFrom, NULL, @metricsJson,
+        @source, @discoveredAt, @effectiveFrom, NULL, @ageStatus,
+        @ageCheckAfter, @metricsJson,
         @registryVersion, @createdAt, @updatedAt
       )
     `);
@@ -259,6 +307,7 @@ class SmartWalletRegistry {
 
   start() {
     if (!this.config.enabled) return;
+    this.stopping = false;
     const now = this.now();
     for (const wallet of this.config.seedWallets || []) {
       const created = this.discoverWallet({
@@ -291,11 +340,16 @@ class SmartWalletRegistry {
       || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
       this.refreshGrades(now);
     }
+    this._scheduleAgeChecks(now);
   }
 
   stop() {
+    this.stopping = true;
+    for (const controller of this.ageAbortControllers) controller.abort();
+    this.ageAbortControllers.clear();
     this.labels.clear();
     this.labelsByMint.clear();
+    this.ageChecks.clear();
   }
 
   _meta() {
@@ -314,6 +368,284 @@ class SmartWalletRegistry {
     return Number(this._meta().registry_version) || 1;
   }
 
+  _ageHardRejectMs() {
+    return Math.max(0, finite(this.config.ageHardRejectMs, 7 * DAY_MS));
+  }
+
+  _ageMinVoteMs() {
+    return Math.max(
+      this._ageHardRejectMs(),
+      finite(this.config.ageMinVoteMs, 30 * DAY_MS),
+    );
+  }
+
+  _ageBypassed(row) {
+    return this.config.ageCheckEnabled === false
+      || (row?.source === 'CONFIG_SEED' && this.config.ageSeedBypass === true)
+      || row?.age_status === 'BYPASSED';
+  }
+
+  _ageEligibleRow(row, at = this.now()) {
+    if (this._ageBypassed(row)) return true;
+    const firstActivityAt = nullableFinite(row?.first_chain_activity_at);
+    return row?.age_status === 'ELIGIBLE'
+      && firstActivityAt != null
+      && firstActivityAt <= at - this._ageMinVoteMs();
+  }
+
+  _ageMonitoringAllowed(row) {
+    return this._ageBypassed(row) || row?.age_status !== 'TOO_NEW';
+  }
+
+  _votingEligibleRow(row, at = this.now()) {
+    if (!row || row.effective_from > at || row.risk_status !== 'OK'
+      || !['PROBATION', 'ACTIVE'].includes(row.status)
+      || !this._ageEligibleRow(row, at)) return false;
+    if (row.source === 'CONFIG_SEED') return true;
+    if (this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') return false;
+    if (this.config.autoVoteRequiresKnownCluster !== false
+      && (!row.cluster_id || row.cluster_confidence === 'UNKNOWN')) return false;
+    return true;
+  }
+
+  _ageStatus(firstActivityAt, at = this.now()) {
+    const ageMs = at - finite(firstActivityAt, at);
+    if (ageMs < this._ageHardRejectMs()) return 'TOO_NEW';
+    if (ageMs < this._ageMinVoteMs()) return 'PROBATION';
+    return 'ELIGIBLE';
+  }
+
+  _localAgeEvidence(wallet, cutoffAt) {
+    const row = this.store.db.prepare(`
+      SELECT MIN(observed_at) first_activity_at FROM (
+        SELECT MIN(timestamp_ms) observed_at FROM raw_trades WHERE wallet=?
+        UNION ALL
+        SELECT MIN(signal_at) observed_at FROM smart_wallet_forward_labels WHERE wallet=?
+      )
+    `).get(wallet, wallet);
+    const firstActivityAt = nullableFinite(row?.first_activity_at);
+    return firstActivityAt != null && firstActivityAt <= cutoffAt ? firstActivityAt : null;
+  }
+
+  async _ageRpc(method, params = []) {
+    if (!this.config.ageRpcUrl) throw new Error('AGE_RPC_URL_MISSING');
+    if (typeof this.fetchImpl !== 'function') throw new Error('AGE_FETCH_UNAVAILABLE');
+    const controller = new AbortController();
+    this.ageAbortControllers.add(controller);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.max(1_000, finite(this.config.ageRpcTimeoutMs, 10_000)),
+    );
+    try {
+      const response = await this.fetchImpl(this.config.ageRpcUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+        signal: controller.signal,
+      });
+      if (!response?.ok) throw new Error(`AGE_RPC_HTTP_${response?.status || 'FAILED'}`);
+      const payload = await response.json();
+      if (payload?.error) {
+        throw new Error(`AGE_RPC_${payload.error.code || 'ERROR'}:${payload.error.message || ''}`);
+      }
+      return payload?.result;
+    } finally {
+      clearTimeout(timeout);
+      this.ageAbortControllers.delete(controller);
+    }
+  }
+
+  async _providerHistoryFloorAt(at = this.now()) {
+    if (this.ageHistoryFloorCheckedAt
+      && at - this.ageHistoryFloorCheckedAt < DAY_MS) return this.ageHistoryFloor;
+    const firstSlot = nullableFinite(await this._ageRpc('getFirstAvailableBlock'));
+    let floorAt = null;
+    if (firstSlot != null && firstSlot <= 1) floorAt = 0;
+    else if (firstSlot != null) {
+      const blockTime = nullableFinite(await this._ageRpc('getBlockTime', [firstSlot]));
+      if (blockTime != null) floorAt = blockTime * 1_000;
+    }
+    this.ageHistoryFloor = floorAt;
+    this.ageHistoryFloorCheckedAt = at;
+    return floorAt;
+  }
+
+  async _resolveWalletAge(wallet, at = this.now()) {
+    const current = this.store.db.prepare(
+      'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+    ).get(wallet);
+    if (!current) throw new Error('AGE_WALLET_NOT_FOUND');
+    if (this._ageBypassed(current)) {
+      return { status: 'BYPASSED', source: 'CONFIG_BYPASS', nextCheckAt: null };
+    }
+    const voteCutoffAt = at - this._ageMinVoteMs();
+    const localFirstAt = this._localAgeEvidence(wallet, voteCutoffAt);
+    if (localFirstAt != null) {
+      return {
+        status: 'ELIGIBLE', firstActivityAt: localFirstAt,
+        source: 'LOCAL_HISTORY_LOWER_BOUND', historyComplete: false, nextCheckAt: null,
+      };
+    }
+    const storedFirstAt = nullableFinite(current.first_chain_activity_at);
+    if (current.age_history_complete && storedFirstAt != null) {
+      const status = this._ageStatus(storedFirstAt, at);
+      const nextBoundaryAt = status === 'TOO_NEW'
+        ? storedFirstAt + this._ageHardRejectMs()
+        : (status === 'PROBATION' ? storedFirstAt + this._ageMinVoteMs() : null);
+      return {
+        status, firstActivityAt: storedFirstAt,
+        source: current.age_source || 'SOLANA_RPC', historyComplete: true,
+        nextCheckAt: nextBoundaryAt == null ? null : nextBoundaryAt + 1_000,
+      };
+    }
+
+    const historyFloorAt = await this._providerHistoryFloorAt(at);
+    const pageSize = Math.max(1, Math.min(1_000, finite(this.config.ageRpcPageSize, 1_000)));
+    const maxPages = Math.max(1, finite(this.config.ageRpcPagesPerCheck, 2));
+    let before = current.age_scan_before_signature || null;
+    let firstActivityAt = storedFirstAt;
+    let historyComplete = false;
+    for (let page = 0; page < maxPages; page += 1) {
+      const options = { limit: pageSize };
+      if (before) options.before = before;
+      const signatures = await this._ageRpc('getSignaturesForAddress', [wallet, options]);
+      if (!Array.isArray(signatures)) throw new Error('AGE_RPC_INVALID_SIGNATURE_HISTORY');
+      for (const row of signatures) {
+        const blockTime = nullableFinite(row?.blockTime);
+        const timestampMs = blockTime == null ? null : blockTime * 1_000;
+        if (timestampMs != null) {
+          firstActivityAt = firstActivityAt == null
+            ? timestampMs : Math.min(firstActivityAt, timestampMs);
+        }
+      }
+      if (firstActivityAt != null && firstActivityAt <= voteCutoffAt) {
+        return {
+          status: 'ELIGIBLE', firstActivityAt, source: 'SOLANA_RPC_LOWER_BOUND',
+          historyComplete: false, before: null, nextCheckAt: null,
+        };
+      }
+      if (signatures.length < pageSize) {
+        historyComplete = true;
+        before = null;
+        break;
+      }
+      const nextBefore = signatures[signatures.length - 1]?.signature;
+      if (!nextBefore || nextBefore === before) throw new Error('AGE_RPC_CURSOR_STALLED');
+      before = nextBefore;
+    }
+    if (historyComplete && firstActivityAt != null && historyFloorAt != null
+      && historyFloorAt <= voteCutoffAt) {
+      const status = this._ageStatus(firstActivityAt, at);
+      const nextBoundaryAt = status === 'TOO_NEW'
+        ? firstActivityAt + this._ageHardRejectMs()
+        : (status === 'PROBATION' ? firstActivityAt + this._ageMinVoteMs() : null);
+      return {
+        status, firstActivityAt, source: 'SOLANA_RPC_COMPLETE', historyComplete: true,
+        before: null,
+        nextCheckAt: nextBoundaryAt == null ? null : nextBoundaryAt + 1_000,
+      };
+    }
+    const retryMs = Math.max(60_000, finite(this.config.ageRetryMs, 60 * 60_000));
+    return {
+      status: 'UNKNOWN', firstActivityAt, source: 'SOLANA_RPC_PARTIAL',
+      historyComplete: false, before,
+      error: historyComplete ? 'PROVIDER_HISTORY_TOO_SHALLOW' : 'HISTORY_SCAN_INCOMPLETE',
+      nextCheckAt: at + (historyComplete ? retryMs : Math.min(retryMs, 60_000)),
+    };
+  }
+
+  _recordAgeResult(wallet, result, at = this.now()) {
+    const current = this.store.db.prepare(
+      'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+    ).get(wallet);
+    if (!current || this.stopping) return null;
+    const wasEligible = this._ageEligibleRow(current, at);
+    const nextStatus = result.status || current.age_status || 'UNKNOWN';
+    const firstActivityAt = nullableFinite(
+      result.firstActivityAt ?? current.first_chain_activity_at,
+    );
+    const changed = nextStatus !== current.age_status
+      || firstActivityAt !== nullableFinite(current.first_chain_activity_at)
+      || (result.source || null) !== (current.age_source || null)
+      || Number(Boolean(result.historyComplete)) !== Number(Boolean(current.age_history_complete));
+    const version = changed ? this._nextVersion(at) : current.registry_version;
+    this.store.db.prepare(`
+      UPDATE smart_wallet_registry SET
+        age_status=?, first_chain_activity_at=?, age_verified_at=?, age_source=?,
+        age_check_error=?, age_check_after=?, age_scan_before_signature=?,
+        age_history_complete=?, registry_version=?, updated_at=?
+      WHERE wallet=?
+    `).run(
+      nextStatus,
+      firstActivityAt,
+      result.verifiedAt ?? at,
+      result.source || current.age_source || null,
+      result.error ? String(result.error).slice(0, 240) : null,
+      result.nextCheckAt ?? null,
+      result.before ?? null,
+      result.historyComplete ? 1 : 0,
+      version,
+      at,
+      wallet,
+    );
+    const updated = this.store.db.prepare(
+      'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+    ).get(wallet);
+    if (wasEligible !== this._ageEligibleRow(updated, at)) this.gradeRefreshRequested = true;
+    this.metrics.ageChecksCompleted += 1;
+    this.metrics.lastAgeCheckAt = at;
+    this.metrics.lastActionAt = at;
+    return updated;
+  }
+
+  async verifyWalletAge(wallet, at = this.now()) {
+    if (!wallet || this.stopping) return null;
+    this.metrics.ageChecksStarted += 1;
+    try {
+      const result = await this._resolveWalletAge(wallet, at);
+      return this._recordAgeResult(wallet, result, at);
+    } catch (error) {
+      this.metrics.ageChecksFailed += 1;
+      if (this.stopping) return null;
+      const current = this.store.db.prepare(
+        'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+      ).get(wallet);
+      if (!current) return null;
+      const stableStatus = ['TOO_NEW', 'PROBATION', 'ELIGIBLE', 'BYPASSED']
+        .includes(current.age_status) ? current.age_status : 'UNKNOWN';
+      return this._recordAgeResult(wallet, {
+        status: stableStatus,
+        firstActivityAt: current.first_chain_activity_at,
+        source: current.age_source || 'AGE_CHECK_ERROR',
+        historyComplete: Boolean(current.age_history_complete),
+        before: current.age_scan_before_signature,
+        error: error?.message || String(error),
+        nextCheckAt: at + Math.max(60_000, finite(this.config.ageRetryMs, 60 * 60_000)),
+      }, at);
+    }
+  }
+
+  _scheduleAgeChecks(at = this.now()) {
+    if (this.config.ageCheckEnabled === false || this.stopping) return;
+    const concurrency = Math.max(1, finite(this.config.ageCheckConcurrency, 2));
+    const capacity = Math.max(0, concurrency - this.ageChecks.size);
+    if (!capacity) return;
+    const rows = this.store.db.prepare(`
+      SELECT wallet FROM smart_wallet_registry
+      WHERE age_status NOT IN ('ELIGIBLE','BYPASSED')
+        AND COALESCE(age_check_after, 0)<=?
+      ORDER BY COALESCE(age_check_after, 0), discovered_at, wallet
+      LIMIT ?
+    `).all(at, capacity);
+    for (const row of rows) {
+      if (this.ageChecks.has(row.wallet)) continue;
+      const check = this.verifyWalletAge(row.wallet, at)
+        .catch(() => null)
+        .finally(() => this.ageChecks.delete(row.wallet));
+      this.ageChecks.set(row.wallet, check);
+    }
+  }
+
   discoverWallet({
     wallet, source = 'ROLLING_DISCOVERY', seedMint = null,
     discoveredAt = this.now(), effectiveFrom = null,
@@ -321,6 +653,8 @@ class SmartWalletRegistry {
     if (!this.config.enabled || !wallet) return false;
     const now = this.now();
     const version = this.version();
+    const ageBypassed = this.config.ageCheckEnabled === false
+      || (source === 'CONFIG_SEED' && this.config.ageSeedBypass === true);
     const result = this.insertRegistry.run({
       wallet,
       status: 'PROBATION',
@@ -333,6 +667,8 @@ class SmartWalletRegistry {
       effectiveFrom: effectiveFrom == null
         ? discoveredAt + this.config.discoveryDelayMs
         : effectiveFrom,
+      ageStatus: ageBypassed ? 'BYPASSED' : 'PENDING',
+      ageCheckAfter: ageBypassed ? null : now,
       metricsJson: JSON.stringify({ candidateStreak: 0, candidateGrades: null }),
       registryVersion: version,
       createdAt: now,
@@ -431,6 +767,7 @@ class SmartWalletRegistry {
   walletSnapshot(wallet, at = this.now(), observedSnapshot = null) {
     const snapshot = observedSnapshot || this.monitoringSnapshot(wallet, at);
     if (!snapshot || snapshot.effectiveFrom > at) return null;
+    if (!snapshot.ageEligible) return null;
     if (snapshot.source !== 'CONFIG_SEED') {
       if (this.config.autoVoteRequiresActive !== false && snapshot.status !== 'ACTIVE') return null;
       if (this.config.autoVoteRequiresKnownCluster !== false && !snapshot.clusterKnown) return null;
@@ -444,6 +781,7 @@ class SmartWalletRegistry {
       WHERE wallet=? AND discovered_at<=?
     `).get(wallet, at);
     if (!row || row.status === 'QUARANTINED' || row.risk_status !== 'OK') return null;
+    if (!this._ageMonitoringAllowed(row)) return null;
     const cluster = this.store.db.prepare(`
       SELECT * FROM smart_wallet_cluster_memberships
       WHERE wallet=? AND valid_from<=? AND (valid_to IS NULL OR valid_to>?)
@@ -460,6 +798,10 @@ class SmartWalletRegistry {
       clusterId: cluster?.cluster_id || wallet,
       clusterKnown: Boolean(cluster && cluster.confidence !== 'UNKNOWN'),
       clusterConfidence: cluster?.confidence || 'UNKNOWN',
+      ageStatus: row.age_status || 'UNKNOWN',
+      firstChainActivityAt: nullableFinite(row.first_chain_activity_at),
+      ageVerifiedAt: nullableFinite(row.age_verified_at),
+      ageEligible: this._ageEligibleRow(row, at),
       registryVersion: row.registry_version,
       effectiveFrom: row.effective_from,
       votingEligible: false,
@@ -468,7 +810,7 @@ class SmartWalletRegistry {
 
   activeClusterCounts(at = this.now()) {
     const rows = this.store.db.prepare(`
-      SELECT r.wallet, r.source, r.status, r.selection_grade,
+      SELECT r.*,
         c.cluster_id, c.confidence cluster_confidence
       FROM smart_wallet_registry r
       LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
@@ -479,11 +821,7 @@ class SmartWalletRegistry {
     const eligible = new Set();
     const selectionA = new Set();
     for (const row of rows) {
-      if (row.source !== 'CONFIG_SEED') {
-        if (this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') continue;
-        if (this.config.autoVoteRequiresKnownCluster !== false
-          && (!row.cluster_id || row.cluster_confidence === 'UNKNOWN')) continue;
-      }
+      if (!this._votingEligibleRow(row, at)) continue;
       const clusterId = row.cluster_id || row.wallet;
       eligible.add(clusterId);
       if (row.selection_grade === 'S_A') selectionA.add(clusterId);
@@ -493,10 +831,10 @@ class SmartWalletRegistry {
 
   trackedWallets(at = this.now()) {
     return this.store.db.prepare(`
-      SELECT wallet FROM smart_wallet_registry
+      SELECT * FROM smart_wallet_registry
       WHERE discovered_at<=? AND status IN ('PROBATION','ACTIVE') AND risk_status='OK'
       ORDER BY wallet
-    `).all(at).map((row) => row.wallet);
+    `).all(at).filter((row) => this._ageMonitoringAllowed(row)).map((row) => row.wallet);
   }
 
   votingWallets(at = this.now()) {
@@ -751,9 +1089,11 @@ class SmartWalletRegistry {
         this._removeLabel(label);
       }
     }
+    this._scheduleAgeChecks(now);
     const meta = this._meta();
-    if (!meta.last_grade_refresh_at
+    if (this.gradeRefreshRequested || !meta.last_grade_refresh_at
       || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
+      this.gradeRefreshRequested = false;
       this.refreshGrades(now);
     }
   }
@@ -855,8 +1195,9 @@ class SmartWalletRegistry {
       else if (sample.length >= Math.ceil(this.config.holdingMinSamples / 2)
         && exitReliabilityQualified
         && (medianRunnerUplift > 0 || bigWinnerRate > 0)) holdingGrade = 'H_B';
-      const desiredStatus = selectionGrade !== 'S_C' || copyGrade !== 'C_C'
-        ? 'ACTIVE' : 'PROBATION';
+      const ageEligible = this._ageEligibleRow(current, now);
+      const performanceQualified = selectionGrade !== 'S_C' || copyGrade !== 'C_C';
+      const desiredStatus = performanceQualified && ageEligible ? 'ACTIVE' : 'PROBATION';
       const metrics = {
         sampleSize: sample.length,
         noExitSamples,
@@ -877,6 +1218,8 @@ class SmartWalletRegistry {
         bigWinnerRatePct: bigWinnerRate,
         baselineGraduationRatePct: baselineGradRate * 100,
         baselineBig50RatePct: baselineBig50Rate * 100,
+        ageStatus: current.age_status || 'UNKNOWN',
+        ageEligible,
       };
       const prior = parseJson(current.metrics_json, {});
       const sameCandidate = prior.candidateGrades?.selectionGrade === selectionGrade
@@ -929,20 +1272,29 @@ class SmartWalletRegistry {
       ORDER BY r.status, r.selection_grade, r.copy_grade, r.wallet
       LIMIT ?
     `).all(observedAt, observedAt, capped).map((row) => {
-      const autoActive = this.config.autoVoteRequiresActive === false || row.status === 'ACTIVE';
-      const clusterKnown = Boolean(row.cluster_id && row.cluster_confidence !== 'UNKNOWN');
-      const autoClustered = this.config.autoVoteRequiresKnownCluster === false || clusterKnown;
-      const votingEligible = row.effective_from <= observedAt && row.risk_status === 'OK'
-        && ['PROBATION', 'ACTIVE'].includes(row.status)
-        && (row.source === 'CONFIG_SEED' || (autoActive && autoClustered));
-      return { ...row, voting_eligible: votingEligible ? 1 : 0 };
+      const votingEligible = this._votingEligibleRow(row, observedAt);
+      return {
+        ...row,
+        age_ms: nullableFinite(row.first_chain_activity_at) == null
+          ? null : Math.max(0, observedAt - Number(row.first_chain_activity_at)),
+        age_eligible: this._ageEligibleRow(row, observedAt) ? 1 : 0,
+        voting_eligible: votingEligible ? 1 : 0,
+      };
     });
     return {
       enabled: this.config.enabled,
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
       observerOnly: true,
       sendsTransactions: false,
+      observedAt,
       registryVersion: this.version(),
+      agePolicy: {
+        enabled: this.config.ageCheckEnabled !== false,
+        hardRejectMs: this._ageHardRejectMs(),
+        minVoteMs: this._ageMinVoteMs(),
+        seedBypass: this.config.ageSeedBypass === true,
+        failClosed: true,
+      },
       clusterCounts: this.activeClusterCounts(),
       sourceCounts: Object.fromEntries(this.store.db.prepare(`
         SELECT source, COUNT(*) count
@@ -964,36 +1316,28 @@ class SmartWalletRegistry {
 
   health() {
     const now = this.now();
-    const monitored = this.store.db.prepare(`
-      SELECT COUNT(*) n FROM smart_wallet_registry
-      WHERE discovered_at<=? AND status IN ('PROBATION','ACTIVE') AND risk_status='OK'
-    `).get(now).n;
-    const autoVoteConditions = [];
-    if (this.config.autoVoteRequiresActive !== false) autoVoteConditions.push("r.status='ACTIVE'");
-    if (this.config.autoVoteRequiresKnownCluster !== false) {
-      autoVoteConditions.push(`EXISTS (
-        SELECT 1 FROM smart_wallet_cluster_memberships c
-        WHERE c.wallet=r.wallet AND c.valid_from<=?
-          AND (c.valid_to IS NULL OR c.valid_to>?)
-          AND c.confidence<>'UNKNOWN'
-      )`);
-    }
-    const autoVoteSql = autoVoteConditions.length ? autoVoteConditions.join(' AND ') : '1=1';
-    const votingBind = [now, ...(this.config.autoVoteRequiresKnownCluster !== false
-      ? [now, now] : [])];
-    const votingEligible = this.store.db.prepare(`
-      SELECT COUNT(*) n FROM smart_wallet_registry r
-      WHERE r.effective_from<=? AND r.status IN ('PROBATION','ACTIVE')
-        AND r.risk_status='OK'
-        AND (r.source='CONFIG_SEED' OR (${autoVoteSql}))
-    `).get(...votingBind).n;
+    const registryRows = this.store.db.prepare(`
+      SELECT r.*, c.cluster_id, c.confidence cluster_confidence
+      FROM smart_wallet_registry r
+      LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
+        AND c.valid_from<=? AND (c.valid_to IS NULL OR c.valid_to>?)
+    `).all(now, now);
+    const monitoredRows = registryRows.filter((row) => row.discovered_at <= now
+      && ['PROBATION', 'ACTIVE'].includes(row.status) && row.risk_status === 'OK'
+      && this._ageMonitoringAllowed(row));
+    const votingEligible = registryRows.filter((row) => this._votingEligibleRow(row, now)).length;
+    const ageCounts = registryRows.reduce((counts, row) => {
+      const status = row.age_status || 'UNKNOWN';
+      counts[status] = (counts[status] || 0) + 1;
+      return counts;
+    }, {});
     return {
       enabled: this.config.enabled,
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
       observerOnly: true,
       sendsTransactions: false,
       registryVersion: this.version(),
-      wallets: this.store.db.prepare('SELECT COUNT(*) n FROM smart_wallet_registry').get().n,
+      wallets: registryRows.length,
       active: this.store.db.prepare(`
         SELECT COUNT(*) n FROM smart_wallet_registry WHERE status='ACTIVE'
       `).get().n,
@@ -1004,9 +1348,15 @@ class SmartWalletRegistry {
         SELECT COUNT(*) n FROM smart_wallet_registry WHERE status='QUARANTINED'
       `).get().n,
       pendingLabels: this.labels.size,
-      monitored,
+      ageEligible: ageCounts.ELIGIBLE || 0,
+      ageTooNew: ageCounts.TOO_NEW || 0,
+      ageProbation: ageCounts.PROBATION || 0,
+      ageUnknown: (ageCounts.UNKNOWN || 0) + (ageCounts.PENDING || 0),
+      ageBypassed: ageCounts.BYPASSED || 0,
+      ageChecksInFlight: this.ageChecks.size,
+      monitored: monitoredRows.length,
       votingEligible,
-      observationOnly: monitored - votingEligible,
+      observationOnly: Math.max(0, monitoredRows.length - votingEligible),
       ...this.metrics,
     };
   }
