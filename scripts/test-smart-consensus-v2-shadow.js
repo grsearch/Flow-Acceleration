@@ -38,6 +38,7 @@ function main() {
     labelGraceMs: 1_000,
     copyReturnHorizonMs: 1_000,
     selectionHorizonMs: 2_000,
+    noExitReturnPct: -100,
     maxCrossMarketJumpPct: 500,
     selectionMinSamples: 5,
     copyMinSamples: 5,
@@ -75,6 +76,9 @@ function main() {
       minFlowNetSol: 0.1,
       minFlowBuyers: 3,
       minFlowBuyTx: 3,
+      strictMinFlowNetSol: 1,
+      strictMinFlowNetSharePct: 3,
+      strictMaxFlowConfirmationDelayMs: 500,
       dynamicThresholds: [{ maxEligibleClusters: 10, ordinary: 2, strong: 3 }],
       entryProfiles: [{
         id: 'SCOUT15_FLOW', strength: 'ORDINARY', consensusWindowMs: 5_000,
@@ -85,6 +89,10 @@ function main() {
           maxHoldMs: 120_000, hardStopPct: 20 },
         { id: 'RUNNER', mode: 'CORE_RUNNER', coreActivationPct: 30,
           coreFraction: 0.8, runnerTrailPct: 30, maxHoldMs: 60_000, hardStopPct: 20 },
+        { id: 'PROTECT', mode: 'CORE_RUNNER', coreActivationPct: 30,
+          coreFraction: 0.8, runnerTrailPct: 30, maxHoldMs: 60_000, hardStopPct: 20,
+          scoutProtectActivationPct: 30, scoutProtectTrailPct: 20,
+          scoutProtectFloorPct: 5 },
       ],
       costModel,
     },
@@ -140,17 +148,25 @@ function main() {
   smartOpen(400, 'smart-c', 3);
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
-  `).get().n, 2);
+  `).get().n, 3);
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
     WHERE rug_label_json LIKE '%OBSERVATION_ONLY%'
-  `).get().n, 2, 'RUG output is retained as a label without blocking entry');
+  `).get().n, 3, 'RUG output is retained as a label without blocking entry');
 
   trade(600, 'PUMP_BONDING_CURVE', 'BUY', 'public-scout');
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
     WHERE status='SCOUT_OPEN' AND capital_in_sol=0.15
-  `).get().n, 2);
+  `).get().n, 3);
+
+  trade(700, 'PUMP_BONDING_CURVE', 'BUY', 'public-rise-before-graduation', 2_000);
+  trade(800, 'PUMP_BONDING_CURVE', 'SELL', 'public-pullback-before-graduation', 1_200);
+  trade(900, 'PUMP_BONDING_CURVE', 'BUY', 'public-protect-exit', 1_200);
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE exit_profile_id='PROTECT' AND status='CLOSED' AND exit_reason='SCOUT_PROTECT'
+  `).get().n, 1, 'the protected arm must harvest a pre-graduation scout reversal');
 
   now = base + 1_000;
   const graduated = { mint, graduatedAt: now };
@@ -164,6 +180,19 @@ function main() {
     SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
     WHERE status='OPEN' AND capital_in_sol=1 AND entry_tx_count=2
   `).get().n, 2);
+
+  const weakFlow = {
+    current: { netFlowSol: 0.155, netFlowSharePct: 0.24, buyers: 47, buyTx: 60 },
+    previous: { buyTx: 41 },
+  };
+  assert.strictEqual(suite._flowQualified(
+    weakFlow, { flowGate: 'STRICT' }, { graduatedAt: base + 1_000 }, base + 1_200,
+  ), false, 'high churn with negligible net share must fail the strict flow gate');
+  assert.strictEqual(suite._flowQualified(
+    { current: { netFlowSol: 2, netFlowSharePct: 5, buyers: 4, buyTx: 5 },
+      previous: { buyTx: 2 } },
+    { flowGate: 'STRICT' }, { graduatedAt: base + 1_000 }, base + 1_200,
+  ), true);
 
   trade(2_400, 'PUMP_AMM', 'BUY', 'public-rise', 2_000);
   assert.strictEqual(store.db.prepare(`
@@ -203,7 +232,51 @@ function main() {
   assert(candidate);
   assert.strictEqual(candidate.effective_from, now + 102 + registryConfig.discoveryDelayMs);
   assert.strictEqual(registry.walletSnapshot('candidate-wallet', now + 500), null);
+  assert(registry.monitoringSnapshot('candidate-wallet', now + 500),
+    'a candidate must be monitored immediately so it can earn forward labels');
+  assert.strictEqual(registry.walletSnapshot('candidate-wallet', now + 2_000), null,
+    'an ungraded, unknown-cluster candidate must not receive a consensus vote');
+  registry.setGrades({
+    wallet: 'candidate-wallet', selectionGrade: 'S_B', copyGrade: 'C_C',
+    holdingGrade: 'H_C', status: 'ACTIVE', effectiveAt: now + 1_500,
+  });
+  assert.strictEqual(registry.walletSnapshot('candidate-wallet', now + 2_000), null,
+    'an auto-discovered wallet still needs a known independent cluster');
+  registry.setCluster({
+    wallet: 'candidate-wallet', clusterId: 'candidate-known-cluster',
+    confidence: 'CONFIRMED', validFrom: now + 1_500,
+  });
   assert(registry.walletSnapshot('candidate-wallet', now + 2_000));
+
+  const noExitMint = 'NoExitLabel111111111111111111111111111111';
+  const noExitSignalAt = now + 3_000;
+  store.recordCreate({
+    mint: noExitMint, symbol: 'NX', name: null, uri: null, bondingCurve: null,
+    creator: 'creator-nx', createdAt: noExitSignalAt - 1_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  registry.onSmartWalletEvent({
+    id: 9_001, mint: noExitMint, wallet: 'smart-a', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: noExitSignalAt, market: 'PUMP_BONDING_CURVE', price: 0.001,
+  });
+  registry.observeTrade({
+    mint: noExitMint, wallet: 'public-label-entry', side: 'BUY',
+    timestampMs: noExitSignalAt + 100, market: 'PUMP_BONDING_CURVE',
+    price: 0.001, reservePrice: 0.001, solAmount: 0.5, tokenAmount: 500,
+    virtualTokenReservesRaw: '1000000000000', virtualSolReservesRaw: '1000000000000',
+  });
+  registry.advanceTime(noExitSignalAt + 3_101);
+  const noExitLabel = store.db.prepare(`
+    SELECT status, return_300s_pct FROM smart_wallet_forward_labels WHERE smart_event_id=9001
+  `).get();
+  assert.deepStrictEqual(noExitLabel, { status: 'NO_EXIT', return_300s_pct: -100 },
+    'missing 300-second liquidity must be scored conservatively instead of disappearing');
+  registry.refreshGrades(noExitSignalAt + 3_101);
+  const smartAMetrics = JSON.parse(store.db.prepare(`
+    SELECT metrics_json FROM smart_wallet_registry WHERE wallet='smart-a'
+  `).get().metrics_json);
+  assert.strictEqual(smartAMetrics.noExitSamples, 1,
+    'NO_EXIT labels must participate in rolling wallet grades');
   const registryDashboard = registry.dashboard(2);
   assert.strictEqual(registryDashboard.health.wallets, 4);
   assert.strictEqual(registryDashboard.wallets.length, 2);

@@ -606,8 +606,13 @@ function createRuntime(runtimeConfig = config) {
 
         const trade = store.enrichTrade(event);
         const isLegacySmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
-        const isRegistrySmartWalletTrade = Boolean(trade.wallet
-          && smartWalletRegistry.walletSnapshot(trade.wallet, trade.timestampMs));
+        const registryMonitoringSnapshot = trade.wallet
+          ? smartWalletRegistry.monitoringSnapshot(trade.wallet, trade.timestampMs) : null;
+        const isRegistryMonitoredWalletTrade = Boolean(registryMonitoringSnapshot);
+        const isRegistryVotingWalletTrade = Boolean(registryMonitoringSnapshot
+          && smartWalletRegistry.walletSnapshot(
+            trade.wallet, trade.timestampMs, registryMonitoringSnapshot,
+          ));
         const smartOpenContext = isLegacySmartWalletTrade
           ? engine.recentBuyContext(
             trade.mint,
@@ -661,14 +666,16 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('flowFirst', () => flowFirstShadow.observeTrade(trade));
         labeler.onTrade(trade);
         trader.observeTrade(trade);
-        if (isLegacySmartWalletTrade || isRegistrySmartWalletTrade) {
+        if (isLegacySmartWalletTrade || isRegistryMonitoredWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
           if (smartEvent?.inserted) {
             const normalizedSmartEvent = { ...trade, ...smartEvent, id: smartEvent.id };
-            if (isRegistrySmartWalletTrade) {
+            if (isRegistryMonitoredWalletTrade) {
               observeShadow('smartWalletRegistryEvent', () => (
                 smartWalletRegistry.onSmartWalletEvent(normalizedSmartEvent)
               ));
+            }
+            if (isRegistryVotingWalletTrade) {
               observeShadow('smartConsensusV2Event', () => (
                 smartWalletConsensusFlowRunnerShadow.onSmartWalletEvent(normalizedSmartEvent)
               ));

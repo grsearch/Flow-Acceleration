@@ -2483,6 +2483,10 @@ const config = {
     discoveryDelayMs: integerEnv('FLOW_SMART_WALLET_DISCOVERY_DELAY_MS', 24 * 60 * 60_000, {
       min: 0,
     }),
+    autoVoteRequiresActive: booleanEnv('FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_ACTIVE', true),
+    autoVoteRequiresKnownCluster: booleanEnv(
+      'FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_KNOWN_CLUSTER', true,
+    ),
     gradeRefreshMs: integerEnv('FLOW_SMART_WALLET_GRADE_REFRESH_MS', 24 * 60 * 60_000, {
       min: 60_000,
     }),
@@ -2498,6 +2502,12 @@ const config = {
     }),
     selectionHorizonMs: integerEnv('FLOW_SMART_WALLET_SELECTION_HORIZON_MS', 300_000, {
       min: 30_000,
+    }),
+    noExitReturnPct: numberEnv('FLOW_SMART_WALLET_NO_EXIT_RETURN_PCT', -100, {
+      min: -100, max: 0,
+    }),
+    maxNoExitRatePct: numberEnv('FLOW_SMART_WALLET_MAX_NO_EXIT_RATE_PCT', 20, {
+      min: 0, max: 100,
     }),
     maxCrossMarketJumpPct: numberEnv('FLOW_SMART_WALLET_MAX_CROSS_MARKET_JUMP_PCT', 500, {
       min: 0, max: 10_000,
@@ -2569,6 +2579,15 @@ const config = {
     minFlowNetSol: numberEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_NET_SOL', 0.1, { min: 0 }),
     minFlowBuyers: integerEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_BUYERS', 3, { min: 1 }),
     minFlowBuyTx: integerEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_BUY_TX', 3, { min: 1 }),
+    strictMinFlowNetSol: numberEnv(
+      'FLOW_SMART_CONSENSUS_V2_STRICT_MIN_FLOW_NET_SOL', 1, { min: 0 },
+    ),
+    strictMinFlowNetSharePct: numberEnv(
+      'FLOW_SMART_CONSENSUS_V2_STRICT_MIN_FLOW_NET_SHARE_PCT', 3, { min: 0, max: 100 },
+    ),
+    strictMaxFlowConfirmationDelayMs: integerEnv(
+      'FLOW_SMART_CONSENSUS_V2_STRICT_MAX_FLOW_CONFIRM_DELAY_MS', 30_000, { min: 1_000 },
+    ),
     dynamicThresholds: [
       { maxEligibleClusters: 10, ordinary: 2, strong: 3 },
       { maxEligibleClusters: 25, ordinary: 3, strong: 5 },
@@ -2587,8 +2606,18 @@ const config = {
         minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
       },
       {
+        id: 'POST_FLOW_STRICT', label: '毕业后强公共流确认', strength: 'ORDINARY',
+        consensusWindowMs: 180_000, scoutFraction: 0, flowGate: 'STRICT',
+        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
+      },
+      {
+        id: 'SCOUT15_FLOW_STRICT', label: '毕业前15%试仓 + 强公共流加仓', strength: 'ORDINARY',
+        consensusWindowMs: 180_000, scoutFraction: 0.15, flowGate: 'STRICT',
+        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
+      },
+      {
         id: 'STRONG25_FLOW', label: '强共识毕业前25%试仓 + 毕业后公共流加仓', strength: 'STRONG',
-        consensusWindowMs: 300_000, scoutFraction: 0.25,
+        consensusWindowMs: 300_000, scoutFraction: 0.25, flowGate: 'STRICT',
         minSelectionAClusters: 3, minWeightedScoreRatio: 0.6,
       },
     ],
@@ -2601,6 +2630,14 @@ const config = {
         id: 'CORE80_RUNNER6H', label: '+30%卖80%核心仓，余仓30%回撤退出',
         mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
         runnerTrailPct: 30, maxHoldMs: 6 * 60 * 60_000, hardStopPct: 20,
+      },
+      {
+        id: 'CORE80_RUNNER6H_SP30T20',
+        label: 'Scout峰值保护 + +30%卖80%核心仓，余仓30%回撤退出',
+        mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
+        runnerTrailPct: 30, maxHoldMs: 6 * 60 * 60_000, hardStopPct: 20,
+        scoutProtectActivationPct: 30, scoutProtectTrailPct: 20,
+        scoutProtectFloorPct: 5,
       },
     ],
     costModel: normalizeCostModel({

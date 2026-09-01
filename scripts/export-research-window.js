@@ -27,6 +27,13 @@ const EXPLICIT_FILTERS = Object.freeze({
     anchor: null,
   },
   smart_wallet_events: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
+  smart_wallet_discovery_seeds: {
+    where: `(
+      (created_at >= ? AND created_at < ?)
+      OR wallet IN (SELECT wallet FROM source.smart_wallet_registry)
+    )`,
+    anchor: 'created_at',
+  },
   smart_signal_confirmations: {
     where: 'open_timestamp_ms >= ? AND open_timestamp_ms < ?', anchor: 'open_timestamp_ms',
   },
@@ -91,6 +98,15 @@ const EXPLICIT_FILTERS = Object.freeze({
   },
 });
 
+// These tables describe the current Smart Wallet registry state rather than
+// events inside the requested time window. A partial copy can make active
+// wallets appear missing or make correlated wallets appear independent.
+const FULL_STATE_TABLES = new Set([
+  'smart_wallet_registry',
+  'smart_wallet_registry_meta',
+  'smart_wallet_cluster_memberships',
+]);
+
 const GENERIC_TIME_COLUMNS = [
   'timestamp_ms', 'signal_at', 'reference_at', 'smart_buy_at', 'smart_open_at',
   'rebound_at', 'observed_at', 'target_at', 'resolved_at', 'created_at', 'updated_at',
@@ -124,6 +140,7 @@ function indexCreateSql(name, sourceSql) {
 }
 
 function chooseFilter(table, columns) {
+  if (FULL_STATE_TABLES.has(table)) return { where: '1 = 1', anchor: null, fullTable: true };
   const explicit = EXPLICIT_FILTERS[table];
   if (explicit) return explicit;
   const anchor = GENERIC_TIME_COLUMNS.find((candidate) => columns.includes(candidate));
@@ -259,7 +276,7 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
 
   return {
     formatVersion: 1,
-    mode: 'CONSISTENT_READ_TRANSACTION_24H_WINDOW',
+    mode: 'CONSISTENT_READ_TRANSACTION_WINDOW',
     source,
     destination,
     createdAtMs: Date.now(),

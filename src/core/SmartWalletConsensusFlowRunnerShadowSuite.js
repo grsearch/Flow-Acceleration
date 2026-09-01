@@ -288,6 +288,34 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         GROUP BY entry_profile_id, exit_profile_id, status
         ORDER BY entry_profile_id, exit_profile_id, status
       `).all(),
+      capitalSummary: this.store.db.prepare(`
+        SELECT entry_profile_id, exit_profile_id,
+          COUNT(*) opportunities, COUNT(DISTINCT mint) independent_mints,
+          SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) closed,
+          SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) censored,
+          SUM(CASE WHEN status IN ('CLOSED','EXPIRED','NO_ENTRY') THEN 1 ELSE 0 END) resolved,
+          SUM(position_sol) planned_capital_sol,
+          SUM(capital_in_sol) deployed_capital_sol,
+          SUM(CASE WHEN status IN ('CLOSED','EXPIRED','NO_ENTRY')
+            THEN position_sol ELSE 0 END) resolved_planned_capital_sol,
+          SUM(CASE WHEN net_return_pct IS NOT NULL
+            THEN capital_in_sol ELSE 0 END) realized_deployed_capital_sol,
+          SUM(CASE WHEN net_return_pct IS NOT NULL
+            THEN net_return_pct * capital_in_sol / 100.0 ELSE 0 END) net_pnl_sol,
+          CASE WHEN SUM(CASE WHEN status IN ('CLOSED','EXPIRED','NO_ENTRY')
+            THEN position_sol ELSE 0 END)>0 THEN 100.0 * SUM(CASE
+            WHEN net_return_pct IS NOT NULL THEN net_return_pct * capital_in_sol / 100.0
+            ELSE 0 END) / SUM(CASE WHEN status IN ('CLOSED','EXPIRED','NO_ENTRY')
+              THEN position_sol ELSE 0 END) ELSE NULL END planned_capital_return_pct,
+          CASE WHEN SUM(CASE WHEN net_return_pct IS NOT NULL
+            THEN capital_in_sol ELSE 0 END)>0 THEN 100.0 * SUM(CASE
+            WHEN net_return_pct IS NOT NULL THEN net_return_pct * capital_in_sol / 100.0
+            ELSE 0 END) / SUM(CASE WHEN net_return_pct IS NOT NULL
+              THEN capital_in_sol ELSE 0 END) ELSE NULL END deployed_capital_return_pct
+        FROM smart_wallet_consensus_flow_runner_shadow_positions
+        GROUP BY entry_profile_id, exit_profile_id
+        ORDER BY entry_profile_id, exit_profile_id
+      `).all(),
       recent: this.store.db.prepare(`
         SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
         ORDER BY signal_at DESC, id DESC LIMIT ?
@@ -374,7 +402,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       wallet: trade.wallet || null,
       solAmount: Math.max(0, finite(trade.solAmount, 0)),
       registeredWallet: Boolean(trade.wallet
-        && this.registry.walletSnapshot(trade.wallet, timestampMs)),
+        && this.registry.monitoringSnapshot(trade.wallet, timestampMs)),
     });
     this._prune(state, timestampMs);
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
@@ -396,7 +424,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         && now > position.signalAt + this.config.maxScoutWaitMs) {
         this._requestExit(position, now, 'NO_GRADUATION');
       } else if (['SCOUT_OPEN', 'WAITING_FLOW'].includes(position.status)
-        && position.graduatedAt && now > position.graduatedAt + this.config.maxFlowWaitMs) {
+        && position.graduatedAt
+        && now > position.graduatedAt + this._maxFlowWaitMs(position)) {
         if (position.tokenUnits > 0) this._requestExit(position, now, 'FLOW_CONFIRM_TIMEOUT');
         else this._finishWithoutPosition(position, 'NO_ENTRY', 'FLOW_CONFIRM_TIMEOUT');
       } else if (position.status === 'SCALE_PENDING' && now > position.entryDeadlineAt) {
@@ -475,8 +504,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     const selectionA = votes.filter((row) => row.selectionGrade === 'S_A').length;
     const copyA = votes.filter((row) => row.copyGrade === 'C_A').length;
     const weightedScore = votes.reduce((sum, row) => sum + Math.max(0, row.weight), 0);
-    const requiredA = thresholds.selectionA >= this.config.enforceAGradeAfterClusters
-      ? finite(profile.minSelectionAClusters, 0) : 0;
+    const configuredRequiredA = finite(profile.minSelectionAClusters, 0);
+    const requiredA = thresholds.eligible >= this.config.enforceAGradeAfterClusters
+      && thresholds.selectionA >= configuredRequiredA ? configuredRequiredA : 0;
     if (votes.length < required || selectionA < requiredA
       || weightedScore < required * profile.minWeightedScoreRatio) return null;
     return { votes, thresholds, required, selectionA, copyA, weightedScore };
@@ -555,7 +585,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     if (['SCOUT_OPEN', 'WAITING_FLOW'].includes(position.status)
       && position.graduatedAt && trade.market === 'PUMP_AMM') {
       const features = this._flowFeatures(state, at);
-      if (this._flowQualified(features)) {
+      const profile = this.entryProfiles.get(position.entryProfileId);
+      if (this._flowQualified(features, profile, position, at)) {
         position.flowConfirmedAt = at;
         position.flowFeatures = features;
         position.status = 'SCALE_PENDING';
@@ -578,6 +609,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     const exit = this.exitProfiles.get(position.exitProfileId);
     if (position.status !== 'EXIT_PENDING' && markReturn <= -Math.abs(exit.hardStopPct)) {
       this._requestExit(position, at, 'HARD_STOP');
+    } else if (position.status === 'SCOUT_OPEN'
+      && finite(exit.scoutProtectActivationPct, Infinity) <= position.highestReturnPct) {
+      const protectionFloor = Math.max(
+        finite(exit.scoutProtectFloorPct, 0),
+        position.highestReturnPct - finite(exit.scoutProtectTrailPct, Infinity),
+      );
+      if (markReturn <= protectionFloor) this._requestExit(position, at, 'SCOUT_PROTECT');
     } else if (position.status === 'OPEN') {
       if (exit.mode === 'FIXED_HOLD' && at >= position.entryAt + exit.fixedHoldMs) {
         this._requestExit(position, at, 'FIXED_HOLD');
@@ -627,13 +665,17 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       const sells = sample.filter((row) => row.side === 'SELL');
       const buyFlow = buys.reduce((sum, row) => sum + row.solAmount, 0);
       const sellFlow = sells.reduce((sum, row) => sum + row.solAmount, 0);
+      const grossFlow = buyFlow + sellFlow;
+      const netFlow = buyFlow - sellFlow;
       return {
         buyers: new Set(buys.map((row) => row.wallet).filter(Boolean)).size,
         buyTx: buys.length,
         sellTx: sells.length,
         buyFlowSol: buyFlow,
         sellFlowSol: sellFlow,
-        netFlowSol: buyFlow - sellFlow,
+        grossFlowSol: grossFlow,
+        netFlowSol: netFlow,
+        netFlowSharePct: grossFlow > 0 ? netFlow / grossFlow * 100 : 0,
       };
     };
     return {
@@ -643,11 +685,22 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     };
   }
 
-  _flowQualified(features) {
-    return features.current.netFlowSol >= this.config.minFlowNetSol
+  _flowQualified(features, profile, position, at) {
+    const baseQualified = features.current.netFlowSol >= this.config.minFlowNetSol
       && features.current.buyers >= this.config.minFlowBuyers
       && features.current.buyTx >= this.config.minFlowBuyTx
       && features.current.buyTx > features.previous.buyTx;
+    if (!baseQualified || profile?.flowGate !== 'STRICT') return baseQualified;
+    return features.current.netFlowSol >= this.config.strictMinFlowNetSol
+      && features.current.netFlowSharePct >= this.config.strictMinFlowNetSharePct
+      && at <= position.graduatedAt + this.config.strictMaxFlowConfirmationDelayMs;
+  }
+
+  _maxFlowWaitMs(position) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    return profile?.flowGate === 'STRICT'
+      ? Math.min(this.config.maxFlowWaitMs, this.config.strictMaxFlowConfirmationDelayMs)
+      : this.config.maxFlowWaitMs;
   }
 
   _sellCore(position, trade, price, at, exit) {
@@ -739,8 +792,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       exitMarket: null,
       exitPrice: null,
       exitReason: reason,
-      grossReturnPct: -100,
-      netReturnPct: -100,
+      grossReturnPct: null,
+      netReturnPct: null,
       estimatedCostSol: this._estimatedCostSol(position),
       updatedAt: this.now(),
     });

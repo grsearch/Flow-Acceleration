@@ -37,6 +37,19 @@ function main() {
     CREATE TABLE cya_slot_flow_shadow_positions (
       id INTEGER PRIMARY KEY, signal_at INTEGER NOT NULL, mint TEXT
     );
+    CREATE TABLE smart_wallet_registry (
+      wallet TEXT PRIMARY KEY, created_at INTEGER NOT NULL, status TEXT NOT NULL
+    );
+    CREATE TABLE smart_wallet_registry_meta (
+      id INTEGER PRIMARY KEY, updated_at INTEGER NOT NULL, registry_version INTEGER NOT NULL
+    );
+    CREATE TABLE smart_wallet_discovery_seeds (
+      wallet TEXT NOT NULL, seed_mint TEXT NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY(wallet, seed_mint)
+    );
+    CREATE TABLE smart_wallet_cluster_memberships (
+      wallet TEXT PRIMARY KEY, cluster_id TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -61,12 +74,21 @@ function main() {
     .run(40, startMs + 40, 'cya-slot-flow-inside');
   db.prepare('INSERT INTO cya_slot_flow_shadow_positions VALUES (?, ?, ?)')
     .run(41, endMs + 40, 'cya-slot-flow-future');
+  db.prepare('INSERT INTO smart_wallet_registry VALUES (?, ?, ?)')
+    .run('old-wallet', startMs - 10_000, 'ACTIVE');
+  db.prepare('INSERT INTO smart_wallet_registry_meta VALUES (?, ?, ?)')
+    .run(1, startMs - 10_000, 7);
+  db.prepare('INSERT INTO smart_wallet_discovery_seeds VALUES (?, ?, ?)')
+    .run('old-wallet', 'old-seed', startMs - 10_000);
+  db.prepare('INSERT INTO smart_wallet_cluster_memberships VALUES (?, ?, ?)')
+    .run('old-wallet', 'known-cluster', startMs - 10_000);
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
 
   const result = exportResearchWindow({ sourcePath: source, destinationPath: destination, startMs, endMs, schemaPath: schema });
   assert.strictEqual(result.integrity, 'ok');
+  assert.strictEqual(result.mode, 'CONSISTENT_READ_TRANSACTION_WINDOW');
   assert.strictEqual(result.safety.walCheckpointExecuted, false);
   assert.strictEqual(result.safety.backupApiUsed, false);
   assert.strictEqual(result.safety.sourceWritesExecuted, false);
@@ -103,6 +125,14 @@ function main() {
       .all().map((row) => row.id),
     [40],
   );
+  assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_registry')
+    .get().count, 1, 'registry state must be exported even when created before the window');
+  assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_registry_meta')
+    .get().count, 1);
+  assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_discovery_seeds')
+    .get().count, 1);
+  assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_cluster_memberships')
+    .get().count, 1);
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();
   assert.match(fs.readFileSync(schema, 'utf8'), /CREATE TABLE\s+(?:main\.)?["']?raw_trades/i);

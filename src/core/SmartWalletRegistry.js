@@ -73,6 +73,7 @@ class SmartWalletRegistry {
       labelsCreated: 0,
       labelsCompleted: 0,
       labelsNoEntry: 0,
+      labelsNoExit: 0,
       gradeRefreshes: 0,
       lastGradeRefreshAt: null,
       lastActionAt: null,
@@ -427,10 +428,20 @@ class SmartWalletRegistry {
     return true;
   }
 
-  walletSnapshot(wallet, at = this.now()) {
+  walletSnapshot(wallet, at = this.now(), observedSnapshot = null) {
+    const snapshot = observedSnapshot || this.monitoringSnapshot(wallet, at);
+    if (!snapshot || snapshot.effectiveFrom > at) return null;
+    if (snapshot.source !== 'CONFIG_SEED') {
+      if (this.config.autoVoteRequiresActive !== false && snapshot.status !== 'ACTIVE') return null;
+      if (this.config.autoVoteRequiresKnownCluster !== false && !snapshot.clusterKnown) return null;
+    }
+    return { ...snapshot, votingEligible: true };
+  }
+
+  monitoringSnapshot(wallet, at = this.now()) {
     const row = this.store.db.prepare(`
       SELECT * FROM smart_wallet_registry
-      WHERE wallet=? AND effective_from<=?
+      WHERE wallet=? AND discovered_at<=?
     `).get(wallet, at);
     if (!row || row.status === 'QUARANTINED' || row.risk_status !== 'OK') return null;
     const cluster = this.store.db.prepare(`
@@ -443,27 +454,39 @@ class SmartWalletRegistry {
       selectionGrade: row.selection_grade,
       copyGrade: row.copy_grade,
       holdingGrade: row.holding_grade,
+      source: row.source,
       selectionWeight: gradeWeight(row.selection_grade),
       copyWeight: copyWeight(row.copy_grade),
       clusterId: cluster?.cluster_id || wallet,
+      clusterKnown: Boolean(cluster && cluster.confidence !== 'UNKNOWN'),
       clusterConfidence: cluster?.confidence || 'UNKNOWN',
       registryVersion: row.registry_version,
       effectiveFrom: row.effective_from,
+      votingEligible: false,
     };
   }
 
   activeClusterCounts(at = this.now()) {
     const rows = this.store.db.prepare(`
-      SELECT wallet FROM smart_wallet_registry
-      WHERE effective_from<=? AND status IN ('PROBATION','ACTIVE') AND risk_status='OK'
-    `).all(at);
+      SELECT r.wallet, r.source, r.status, r.selection_grade,
+        c.cluster_id, c.confidence cluster_confidence
+      FROM smart_wallet_registry r
+      LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
+        AND c.valid_from<=? AND (c.valid_to IS NULL OR c.valid_to>?)
+      WHERE r.effective_from<=? AND r.status IN ('PROBATION','ACTIVE')
+        AND r.risk_status='OK'
+    `).all(at, at, at);
     const eligible = new Set();
     const selectionA = new Set();
     for (const row of rows) {
-      const snapshot = this.walletSnapshot(row.wallet, at);
-      if (!snapshot) continue;
-      eligible.add(snapshot.clusterId);
-      if (snapshot.selectionGrade === 'S_A') selectionA.add(snapshot.clusterId);
+      if (row.source !== 'CONFIG_SEED') {
+        if (this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') continue;
+        if (this.config.autoVoteRequiresKnownCluster !== false
+          && (!row.cluster_id || row.cluster_confidence === 'UNKNOWN')) continue;
+      }
+      const clusterId = row.cluster_id || row.wallet;
+      eligible.add(clusterId);
+      if (row.selection_grade === 'S_A') selectionA.add(clusterId);
     }
     return { eligible: eligible.size, selectionA: selectionA.size };
   }
@@ -471,16 +494,22 @@ class SmartWalletRegistry {
   trackedWallets(at = this.now()) {
     return this.store.db.prepare(`
       SELECT wallet FROM smart_wallet_registry
-      WHERE effective_from<=? AND status IN ('PROBATION','ACTIVE') AND risk_status='OK'
+      WHERE discovered_at<=? AND status IN ('PROBATION','ACTIVE') AND risk_status='OK'
       ORDER BY wallet
     `).all(at).map((row) => row.wallet);
+  }
+
+  votingWallets(at = this.now()) {
+    return this.trackedWallets(at).filter((wallet) => Boolean(this.walletSnapshot(wallet, at)));
   }
 
   onSmartWalletEvent(event) {
     if (!this.config.enabled || !event?.wallet || !event?.mint) return null;
     const signalAt = finite(event.timestampMs ?? event.timestamp_ms);
     if (!(signalAt > 0)) return null;
-    const snapshot = this.walletSnapshot(event.wallet, signalAt);
+    // Candidate wallets are labelled from discovery time, but walletSnapshot()
+    // keeps them out of consensus until they are graded and clustered.
+    const snapshot = this.monitoringSnapshot(event.wallet, signalAt);
     if (!snapshot) return null;
     this.store.db.prepare(`
       UPDATE smart_wallet_registry SET last_seen_at=?, updated_at=? WHERE wallet=?
@@ -714,7 +743,10 @@ class SmartWalletRegistry {
       } else if (label.status === 'OPEN'
         && now > label.entryAt + this.config.selectionHorizonMs + this.config.labelGraceMs) {
         label.status = 'NO_EXIT';
+        label.return300sPct = finite(this.config.noExitReturnPct, -100);
         label.rejectionReason = 'NO_COMPARABLE_300S_QUOTE';
+        label.completedAt = now;
+        this.metrics.labelsNoExit += 1;
         this._saveLabel(label);
         this._removeLabel(label);
       }
@@ -730,13 +762,15 @@ class SmartWalletRegistry {
     if (!this.config.enabled) return;
     const cutoff = now - this.config.lookbackMs;
     const rows = this.store.db.prepare(`
-      SELECT wallet, signal_at, return_30s_pct, return_300s_pct,
-        max_favorable_return_pct, graduated_at
+      SELECT wallet, signal_at, return_30s_pct,
+        CASE WHEN status='NO_EXIT' THEN COALESCE(return_300s_pct, ?)
+          ELSE return_300s_pct END return_300s_pct,
+        max_favorable_return_pct, graduated_at, status
       FROM smart_wallet_forward_labels
-      WHERE status='COMPLETE' AND seed_excluded=0 AND signal_at>=?
-        AND return_300s_pct IS NOT NULL
+      WHERE status IN ('COMPLETE','NO_EXIT') AND seed_excluded=0 AND signal_at>=?
+        AND (return_300s_pct IS NOT NULL OR status='NO_EXIT')
       ORDER BY wallet, signal_at
-    `).all(cutoff);
+    `).all(finite(this.config.noExitReturnPct, -100), cutoff);
     const baselineGradRate = rows.length
       ? rows.filter((row) => row.graduated_at != null).length / rows.length : 0;
     const baselineBig50Rate = rows.length
@@ -755,6 +789,10 @@ class SmartWalletRegistry {
       const sample = grouped.get(current.wallet) || [];
       const returns30 = sample.map((row) => finite(row.return_30s_pct)).filter(Number.isFinite);
       const returns300 = sample.map((row) => finite(row.return_300s_pct)).filter(Number.isFinite);
+      const noExitSamples = sample.filter((row) => row.status === 'NO_EXIT').length;
+      const noExitRatePct = sample.length ? noExitSamples / sample.length * 100 : 0;
+      const maxNoExitRatePct = finite(this.config.maxNoExitRatePct, 20);
+      const exitReliabilityQualified = noExitRatePct <= maxNoExitRatePct;
       const activeDays = new Set(sample.map((row) => Math.floor(row.signal_at / DAY_MS))).size;
       const weeks = new Map();
       for (const row of sample) {
@@ -780,19 +818,23 @@ class SmartWalletRegistry {
       const top1Pct = topProfitContribution(returns30);
       let selectionGrade = 'S_C';
       if (sample.length >= this.config.selectionMinSamples
+        && exitReliabilityQualified
         && activeDays >= this.config.minActiveDays
         && graduationLift >= this.config.minGraduationLift
         && big50Lift >= this.config.minBig50Lift) selectionGrade = 'S_A';
       else if (sample.length >= Math.ceil(this.config.selectionMinSamples / 2)
+        && exitReliabilityQualified
         && (graduationLift >= this.config.minSelectionBLift
           || big50Lift >= this.config.minSelectionBLift)) selectionGrade = 'S_B';
       let copyGrade = 'C_C';
       if (returns30.length >= this.config.copyMinSamples
+        && exitReliabilityQualified
         && activeDays >= this.config.minActiveDays
         && avg30 > 0 && median30 > 0 && (pf30 == null || pf30 >= this.config.minCopyPf)
         && positiveWeekPct >= this.config.minPositiveWindowPct
         && (top1Pct == null || top1Pct <= this.config.maxTop1ProfitPct)) copyGrade = 'C_A';
       else if (returns30.length >= Math.ceil(this.config.copyMinSamples / 2)
+        && exitReliabilityQualified
         && avg30 > 0 && (pf30 == null || pf30 >= 1)) copyGrade = 'C_B';
       const runnerUplifts = sample.map((row) => {
         const maxFavorable = finite(row.max_favorable_return_pct);
@@ -807,14 +849,20 @@ class SmartWalletRegistry {
         : 0;
       let holdingGrade = 'H_C';
       if (sample.length >= this.config.holdingMinSamples
+        && exitReliabilityQualified
         && medianRunnerUplift >= this.config.holdingMinRunnerUpliftPct
         && bigWinnerRate >= this.config.holdingMinBigWinnerRatePct) holdingGrade = 'H_A';
       else if (sample.length >= Math.ceil(this.config.holdingMinSamples / 2)
+        && exitReliabilityQualified
         && (medianRunnerUplift > 0 || bigWinnerRate > 0)) holdingGrade = 'H_B';
       const desiredStatus = selectionGrade !== 'S_C' || copyGrade !== 'C_C'
         ? 'ACTIVE' : 'PROBATION';
       const metrics = {
         sampleSize: sample.length,
+        noExitSamples,
+        noExitRatePct,
+        maxNoExitRatePct,
+        exitReliabilityQualified,
         activeDays,
         copy30AveragePct: avg30,
         copy30MedianPct: median30,
@@ -872,6 +920,23 @@ class SmartWalletRegistry {
 
   dashboard(limit = 100) {
     const capped = Math.max(1, Math.min(500, Number(limit) || 100));
+    const observedAt = this.now();
+    const wallets = this.store.db.prepare(`
+      SELECT r.*, c.cluster_id, c.confidence cluster_confidence
+      FROM smart_wallet_registry r
+      LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
+        AND c.valid_from<=? AND (c.valid_to IS NULL OR c.valid_to>?)
+      ORDER BY r.status, r.selection_grade, r.copy_grade, r.wallet
+      LIMIT ?
+    `).all(observedAt, observedAt, capped).map((row) => {
+      const autoActive = this.config.autoVoteRequiresActive === false || row.status === 'ACTIVE';
+      const clusterKnown = Boolean(row.cluster_id && row.cluster_confidence !== 'UNKNOWN');
+      const autoClustered = this.config.autoVoteRequiresKnownCluster === false || clusterKnown;
+      const votingEligible = row.effective_from <= observedAt && row.risk_status === 'OK'
+        && ['PROBATION', 'ACTIVE'].includes(row.status)
+        && (row.source === 'CONFIG_SEED' || (autoActive && autoClustered));
+      return { ...row, voting_eligible: votingEligible ? 1 : 0 };
+    });
     return {
       enabled: this.config.enabled,
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
@@ -885,13 +950,7 @@ class SmartWalletRegistry {
         GROUP BY source
         ORDER BY source
       `).all().map((row) => [row.source, row.count])),
-      wallets: this.store.db.prepare(`
-        SELECT r.*, c.cluster_id, c.confidence cluster_confidence
-        FROM smart_wallet_registry r
-        LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
-        ORDER BY r.status, r.selection_grade, r.copy_grade, r.wallet
-        LIMIT ?
-      `).all(capped),
+      wallets,
       walletLimit: capped,
       recentGradeChanges: this.store.db.prepare(`
         SELECT * FROM smart_wallet_grade_history ORDER BY effective_at DESC, id DESC LIMIT ?
@@ -904,6 +963,30 @@ class SmartWalletRegistry {
   }
 
   health() {
+    const now = this.now();
+    const monitored = this.store.db.prepare(`
+      SELECT COUNT(*) n FROM smart_wallet_registry
+      WHERE discovered_at<=? AND status IN ('PROBATION','ACTIVE') AND risk_status='OK'
+    `).get(now).n;
+    const autoVoteConditions = [];
+    if (this.config.autoVoteRequiresActive !== false) autoVoteConditions.push("r.status='ACTIVE'");
+    if (this.config.autoVoteRequiresKnownCluster !== false) {
+      autoVoteConditions.push(`EXISTS (
+        SELECT 1 FROM smart_wallet_cluster_memberships c
+        WHERE c.wallet=r.wallet AND c.valid_from<=?
+          AND (c.valid_to IS NULL OR c.valid_to>?)
+          AND c.confidence<>'UNKNOWN'
+      )`);
+    }
+    const autoVoteSql = autoVoteConditions.length ? autoVoteConditions.join(' AND ') : '1=1';
+    const votingBind = [now, ...(this.config.autoVoteRequiresKnownCluster !== false
+      ? [now, now] : [])];
+    const votingEligible = this.store.db.prepare(`
+      SELECT COUNT(*) n FROM smart_wallet_registry r
+      WHERE r.effective_from<=? AND r.status IN ('PROBATION','ACTIVE')
+        AND r.risk_status='OK'
+        AND (r.source='CONFIG_SEED' OR (${autoVoteSql}))
+    `).get(...votingBind).n;
     return {
       enabled: this.config.enabled,
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
@@ -921,6 +1004,9 @@ class SmartWalletRegistry {
         SELECT COUNT(*) n FROM smart_wallet_registry WHERE status='QUARANTINED'
       `).get().n,
       pendingLabels: this.labels.size,
+      monitored,
+      votingEligible,
+      observationOnly: monitored - votingEligible,
       ...this.metrics,
     };
   }

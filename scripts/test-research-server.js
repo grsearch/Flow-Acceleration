@@ -35,7 +35,7 @@ async function main() {
   assert.ok(dashboard.includes('OPEN 10秒覆盖'));
   assert.ok(dashboard.includes('id="smart-wallet-registry-summary"'));
   assert.ok(dashboard.includes('id="smart-wallet-registry-rows"'));
-  assert.ok(dashboard.includes('PROBATION 是观察期'));
+  assert.ok(dashboard.includes('自动发现钱包必须完成分级并确认独立集群后才能投票'));
   assert.ok(dashboard.includes("loadDashboard('/api/smart-wallet-registry?limit=100'"));
   assert.ok(dashboard.includes('value="shadow_2w"'));
   assert.ok(dashboard.includes('aria-controls="live-trading"'));

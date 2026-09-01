@@ -352,7 +352,7 @@
         <div class="quality-grid" id="signal-quality"></div>
       </article>
       <article class="card signal-quality">
-        <div class="section-title"><h2>滚动 Smart Wallet Registry</h2><p>配置种子与自动发现钱包的统一观察池；最多展示前 100 个</p></div>
+        <div class="section-title"><h2>滚动 Smart Wallet Registry</h2><p>候选钱包先观察和分级，只有验证通过后才进入共识投票池；最多展示前 100 个</p></div>
         <div class="quality-grid" id="smart-wallet-registry-summary"></div>
         <p class="registry-note" id="smart-wallet-registry-note"></p>
         <div class="table-wrap"><table>
@@ -1496,7 +1496,7 @@
         .join(' · ') || '暂无来源数据';
       const total = Number.isFinite(health.wallets) ? health.wallets : rows.length;
       const displaySummary = rows.length < total ? `当前展示 ${number(rows.length)} / ${number(total)}。` : '';
-      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}PROBATION 是观察期，不等同于 S_A / C_A / H_A 正式等级；是否参与 V2 共识由当前权重配置决定。隔离 ${number(health.quarantined)} · 待完成前向标签 ${number(health.pendingLabels)} · Registry v${number(data.registryVersion)}`;
+      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}监控 ${number(health.monitored)} · 可投票 ${number(health.votingEligible)} · 仅观察 ${number(health.observationOnly)}。自动发现钱包必须完成分级并确认独立集群后才能投票。隔离 ${number(health.quarantined)} · 待完成前向标签 ${number(health.pendingLabels)} · Registry v${number(data.registryVersion)}`;
 
       const target = document.querySelector('#smart-wallet-registry-rows');
       if (!rows.length) {
@@ -1506,7 +1506,10 @@
       target.innerHTML = rows.map(row => {
         const source = sourceLabels[row.source] || row.source || 'UNKNOWN';
         const cluster = row.cluster_id || row.wallet;
-        return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}</td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(row.cluster_confidence || '默认独立')}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
+        const voteState = row.voting_eligible ? '可参与共识' : '仅观察';
+        const clusterState = row.cluster_confidence || (row.source === 'CONFIG_SEED'
+          ? '种子钱包默认独立' : '集群待确认，不计独立票');
+        return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)} · ${voteState}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}</td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(clusterState)}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
       }).join('');
     }
 
