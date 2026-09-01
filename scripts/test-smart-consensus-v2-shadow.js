@@ -23,6 +23,7 @@ async function main() {
   const registryConfig = {
     enabled: true,
     ageCheckEnabled: false,
+    pnlGateEnabled: false,
     seedWallets: ['smart-a', 'smart-b', 'smart-c'],
     seedClusters: [{ id: 'cluster-ab', wallets: ['smart-a', 'smart-b'] }],
     discoveryEnabled: true,
@@ -249,35 +250,56 @@ async function main() {
   });
   assert(registry.walletSnapshot('candidate-wallet', now + 2_000));
 
-  const noExitMint = 'NoExitLabel111111111111111111111111111111';
-  const noExitSignalAt = now + 3_000;
+  const actualPnlMint = 'ActualPnl11111111111111111111111111111111';
+  const actualSignalAt = now + 3_000;
   store.recordCreate({
-    mint: noExitMint, symbol: 'NX', name: null, uri: null, bondingCurve: null,
-    creator: 'creator-nx', createdAt: noExitSignalAt - 1_000,
+    mint: actualPnlMint, symbol: 'PNL', name: null, uri: null, bondingCurve: null,
+    creator: 'creator-pnl', createdAt: actualSignalAt - 1_000,
     initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
   });
   registry.onSmartWalletEvent({
-    id: 9_001, mint: noExitMint, wallet: 'smart-a', side: 'BUY', positionPhase: 'OPEN',
-    timestampMs: noExitSignalAt, market: 'PUMP_BONDING_CURVE', price: 0.001,
+    id: 9_001, mint: actualPnlMint, wallet: 'smart-a', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: actualSignalAt, market: 'PUMP_BONDING_CURVE', price: 0.001,
+    solAmount: 1, tokenAmount: 1_000,
   });
-  registry.observeTrade({
-    mint: noExitMint, wallet: 'public-label-entry', side: 'BUY',
-    timestampMs: noExitSignalAt + 100, market: 'PUMP_BONDING_CURVE',
-    price: 0.001, reservePrice: 0.001, solAmount: 0.5, tokenAmount: 500,
-    virtualTokenReservesRaw: '1000000000000', virtualSolReservesRaw: '1000000000000',
+  registry.onSmartWalletEvent({
+    id: 9_002, mint: actualPnlMint, wallet: 'smart-a', side: 'SELL',
+    positionPhase: 'REDUCE', timestampMs: actualSignalAt + 1_000,
+    market: 'PUMP_BONDING_CURVE', price: 0.00125, solAmount: 0.5, tokenAmount: 400,
   });
-  registry.advanceTime(noExitSignalAt + 3_101);
-  const noExitLabel = store.db.prepare(`
-    SELECT status, return_300s_pct FROM smart_wallet_forward_labels WHERE smart_event_id=9001
-  `).get();
-  assert.deepStrictEqual(noExitLabel, { status: 'NO_EXIT', return_300s_pct: -100 },
-    'missing 300-second liquidity must be scored conservatively instead of disappearing');
-  registry.refreshGrades(noExitSignalAt + 3_101);
+  const partial = store.db.prepare(`
+    SELECT status, token_balance, realized_pnl_sol, realized_return_pct
+    FROM smart_wallet_actual_positions WHERE wallet='smart-a' AND mint=?
+  `).get(actualPnlMint);
+  assert.strictEqual(partial.status, 'PARTIAL',
+    'a real partial sell must stay PARTIAL instead of becoming NO_EXIT');
+  assert.strictEqual(partial.token_balance, 600);
+  assert(Math.abs(partial.realized_pnl_sol - 0.1) < 1e-9);
+  assert.strictEqual(partial.realized_return_pct, null);
+  registry.onSmartWalletEvent({
+    id: 9_003, mint: actualPnlMint, wallet: 'smart-a', side: 'SELL',
+    positionPhase: 'CLOSE', timestampMs: actualSignalAt + 2_000,
+    market: 'PUMP_BONDING_CURVE', price: 0.0015, solAmount: 0.9, tokenAmount: 600,
+  });
+  const actualPosition = store.db.prepare(`
+    SELECT status, total_buy_sol, total_sell_sol, realized_pnl_sol, realized_return_pct
+    FROM smart_wallet_actual_positions WHERE wallet='smart-a' AND mint=?
+  `).get(actualPnlMint);
+  assert.strictEqual(actualPosition.status, 'CLOSED');
+  assert.strictEqual(actualPosition.total_buy_sol, 1);
+  assert(Math.abs(actualPosition.total_sell_sol - 1.4) < 1e-9);
+  assert(Math.abs(actualPosition.realized_pnl_sol - 0.4) < 1e-9);
+  assert(Math.abs(actualPosition.realized_return_pct - 40) < 1e-9);
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM smart_wallet_forward_labels WHERE smart_event_id IN (9001,9002,9003)
+  `).get().n, 0, 'new wallet events must not create 30s/300s follower simulations');
+  registry.refreshGrades(actualSignalAt + 2_000);
   const smartAMetrics = JSON.parse(store.db.prepare(`
     SELECT metrics_json FROM smart_wallet_registry WHERE wallet='smart-a'
   `).get().metrics_json);
-  assert.strictEqual(smartAMetrics.noExitSamples, 1,
-    'NO_EXIT labels must participate in rolling wallet grades');
+  assert(Math.abs(smartAMetrics.actualPnl24h.realizedPnlSol - 0.4) < 1e-9);
+  assert.strictEqual(smartAMetrics.pnlStatus, 'PNL_BYPASS');
+  now = actualSignalAt + 2_000;
   const registryDashboard = registry.dashboard(2);
   assert.strictEqual(registryDashboard.health.wallets, 4);
   assert.strictEqual(registryDashboard.wallets.length, 2);
@@ -292,6 +314,7 @@ async function main() {
   assert.strictEqual(dashboard.rugPolicy, 'OBSERVE_ONLY_NOT_AN_ENTRY_FILTER');
   store.close();
   await testWalletAgeGate(costModel);
+  testActualWalletPnlGate(costModel);
   console.log('Smart Wallet Consensus Flow Runner V2 tests: PASS');
 }
 
@@ -322,7 +345,9 @@ async function testWalletAgeGate(costModel) {
   `);
   const migrationRegistry = new SmartWalletRegistry({
     config: {
-      enabled: true, ageCheckEnabled: false, labelPositionSol: 1, costModel,
+      enabled: true, ageCheckEnabled: false, pnlGateEnabled: false,
+      seedWallets: [], seedClusters: [], lookbackMs: 60 * DAY,
+      labelPositionSol: 1, costModel,
     },
     store: migrationStore,
     now: () => now,
@@ -338,6 +363,25 @@ async function testWalletAgeGate(costModel) {
   assert(migrationRegistry.discoverWallet({
     wallet: 'migration-wallet', discoveredAt: now, effectiveFrom: now,
   }));
+  migrationRegistry.setGrades({
+    wallet: 'migration-wallet', selectionGrade: 'S_A', copyGrade: 'C_A',
+    holdingGrade: 'H_A', status: 'ACTIVE', effectiveAt: now,
+    metrics: { candidateStreak: 2, legacyForwardModel: true },
+  });
+  migrationRegistry.start();
+  const migratedGrade = migrationStore.db.prepare(`
+    SELECT status, selection_grade, copy_grade, holding_grade, metrics_json
+    FROM smart_wallet_registry WHERE wallet='migration-wallet'
+  `).get();
+  assert.deepStrictEqual({
+    status: migratedGrade.status,
+    selectionGrade: migratedGrade.selection_grade,
+    copyGrade: migratedGrade.copy_grade,
+    holdingGrade: migratedGrade.holding_grade,
+  }, {
+    status: 'PROBATION', selectionGrade: 'S_C', copyGrade: 'C_C', holdingGrade: 'H_C',
+  }, 'the first actual-PnL startup must immediately remove stale simulated grades');
+  assert(JSON.parse(migratedGrade.metrics_json).actualPnl30d);
   migrationRegistry.stop();
   migrationStore.close();
   const histories = {
@@ -380,6 +424,7 @@ async function testWalletAgeGate(costModel) {
       ageRpcPagesPerCheck: 2,
       ageCheckConcurrency: 1,
       ageSeedBypass: false,
+      pnlGateEnabled: false,
       autoVoteRequiresActive: true,
       autoVoteRequiresKnownCluster: true,
       labelPositionSol: 1,
@@ -428,6 +473,135 @@ async function testWalletAgeGate(costModel) {
   assert.strictEqual(health.ageUnknown, 1);
   assert.strictEqual(health.ageEligible, 1);
   assert.strictEqual(health.votingEligible, 1);
+  registry.stop();
+  store.close();
+}
+
+function testActualWalletPnlGate(costModel) {
+  const DAY = 24 * 60 * 60_000;
+  let now = 1_900_200_000_000;
+  const store = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const registry = new SmartWalletRegistry({
+    config: {
+      enabled: true,
+      ageCheckEnabled: false,
+      pnlGateEnabled: true,
+      pnlWindowMs: DAY,
+      pnlMinClosedPositions: 1,
+      pnlMinRealizedSol: 0,
+      pnlMinCapitalReturnPct: 0,
+      pnlSnapshotCacheMs: 100,
+      autoVoteRequiresActive: true,
+      autoVoteRequiresKnownCluster: true,
+      labelPositionSol: 1,
+      lookbackMs: 60 * DAY,
+      costModel,
+    },
+    store,
+    now: () => now,
+  });
+  const addWallet = (wallet) => {
+    registry.discoverWallet({
+      wallet, source: 'GRADUATED_EARLY_BUYER', discoveredAt: now - 10_000,
+      effectiveFrom: now - 10_000,
+    });
+    registry.setGrades({
+      wallet, selectionGrade: 'S_A', copyGrade: 'C_A', holdingGrade: 'H_A',
+      status: 'ACTIVE', effectiveAt: now - 9_000,
+    });
+    registry.setCluster({
+      wallet, clusterId: `${wallet}-cluster`, confidence: 'CONFIRMED',
+      validFrom: now - 9_000,
+    });
+  };
+  for (const wallet of ['wallet-profit', 'wallet-loss', 'wallet-partial']) addWallet(wallet);
+  assert.strictEqual(registry.walletSnapshot('wallet-profit', now), null,
+    'a wallet with no complete 24h position must remain PNL_PENDING');
+
+  const event = (id, wallet, mint, side, phase, solAmount, tokenAmount, at) => ({
+    id, wallet, mint, side, positionPhase: phase, solAmount, tokenAmount,
+    timestampMs: at, market: 'PUMP_BONDING_CURVE', price: solAmount / tokenAmount,
+  });
+  registry.onSmartWalletEvent(event(
+    10_001, 'wallet-profit', 'profit-mint', 'BUY', 'OPEN', 1, 1_000, now - 2_000,
+  ));
+  const closeResult = registry.onSmartWalletEvent(event(
+    10_002, 'wallet-profit', 'profit-mint', 'SELL', 'CLOSE', 1.25, 1_000, now - 1_000,
+  ));
+  assert.strictEqual(closeResult.accountingStatus, 'CLOSED');
+  const duplicate = registry.onSmartWalletEvent(event(
+    10_002, 'wallet-profit', 'profit-mint', 'SELL', 'CLOSE', 1.25, 1_000, now - 1_000,
+  ));
+  assert.strictEqual(duplicate.duplicate, true, 'wallet PnL events must be idempotent');
+  const profitSnapshot = registry.walletSnapshot('wallet-profit', now);
+  assert(profitSnapshot, 'positive real 24h closed PnL must unlock voting');
+  assert.strictEqual(profitSnapshot.pnlStatus, 'PNL_PROFITABLE');
+  assert.strictEqual(profitSnapshot.actualPnl24h.realizedPnlSol, 0.25);
+
+  registry.onSmartWalletEvent(event(
+    10_003, 'wallet-loss', 'loss-mint', 'BUY', 'OPEN', 1, 1_000, now - 2_000,
+  ));
+  registry.onSmartWalletEvent(event(
+    10_004, 'wallet-loss', 'loss-mint', 'SELL', 'CLOSE', 0.6, 1_000, now - 1_000,
+  ));
+  const lossMonitoring = registry.monitoringSnapshot('wallet-loss', now);
+  assert.strictEqual(lossMonitoring.pnlStatus, 'LOSS_BLOCKED');
+  assert.strictEqual(registry.walletSnapshot('wallet-loss', now), null,
+    'negative real 24h wallet PnL must block its vote');
+
+  registry.onSmartWalletEvent(event(
+    10_005, 'wallet-partial', 'partial-mint', 'BUY', 'OPEN', 1, 1_000, now - 2_000,
+  ));
+  registry.onSmartWalletEvent(event(
+    10_006, 'wallet-partial', 'partial-mint', 'SELL', 'REDUCE', 0.6, 400, now - 1_000,
+  ));
+  const partialMonitoring = registry.monitoringSnapshot('wallet-partial', now);
+  assert.strictEqual(partialMonitoring.pnlStatus, 'PNL_PENDING');
+  assert.strictEqual(partialMonitoring.actualOpenPositions, 1);
+  assert.strictEqual(partialMonitoring.actualPnl24h.closedPositions, 0,
+    'partial realized profit is not a completed position and must not become NO_EXIT');
+  assert.strictEqual(store.db.prepare(`
+    SELECT status FROM smart_wallet_actual_positions
+    WHERE wallet='wallet-partial' AND mint='partial-mint'
+  `).get().status, 'PARTIAL');
+
+  const gateHealth = registry.health();
+  assert.strictEqual(gateHealth.pnlProfitable, 1);
+  assert.strictEqual(gateHealth.pnlLossBlocked, 1);
+  assert.strictEqual(gateHealth.pnlPending, 1);
+
+  addWallet('wallet-backfill');
+  const backfillBuy = store.recordSmartWalletEvent({
+    wallet: 'wallet-backfill', mint: 'backfill-mint', side: 'BUY',
+    timestampMs: now - 2_000, receivedAtMs: now - 2_000,
+    market: 'PUMP_BONDING_CURVE', solAmount: 1, tokenAmount: 1_000,
+    price: 0.001, signature: 'pnl-backfill-buy', eventIndex: 0,
+  });
+  const backfillSell = store.recordSmartWalletEvent({
+    wallet: 'wallet-backfill', mint: 'backfill-mint', side: 'SELL',
+    timestampMs: now - 1_000, receivedAtMs: now - 1_000,
+    market: 'PUMP_BONDING_CURVE', solAmount: 1.1, tokenAmount: 1_000,
+    price: 0.0011, signature: 'pnl-backfill-sell', eventIndex: 0,
+  });
+  assert(backfillBuy.inserted && backfillSell.inserted);
+  assert.strictEqual(registry._backfillActualWalletEvents(), 2,
+    'startup migration must reconstruct the real ledger from stored smart events');
+  assert.strictEqual(registry._backfillActualWalletEvents(), 0,
+    'real wallet ledger backfill must be idempotent');
+  assert.strictEqual(
+    registry.monitoringSnapshot('wallet-backfill', now).pnlStatus,
+    'PNL_PROFITABLE',
+  );
+  now += DAY + 1_000;
+  assert.strictEqual(registry.walletSnapshot('wallet-profit', now), null,
+    'profit must roll out after the configured 24h window');
+  assert.strictEqual(
+    registry.monitoringSnapshot('wallet-profit', now).pnlStatus,
+    'PNL_PENDING',
+  );
   registry.stop();
   store.close();
 }

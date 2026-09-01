@@ -5,7 +5,6 @@ const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 const { tradePrice } = require('./PreEntryRugRiskTracker');
 
 const DAY_MS = 24 * 60 * 60_000;
-const WEEK_MS = 7 * DAY_MS;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -73,6 +72,7 @@ class SmartWalletRegistry {
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.labelPositionSol });
     this.labels = new Map();
     this.labelsByMint = new Map();
+    this.pnlSnapshotCache = new Map();
     this.ageChecks = new Map();
     this.ageAbortControllers = new Set();
     this.ageHistoryFloor = null;
@@ -86,6 +86,11 @@ class SmartWalletRegistry {
       labelsCompleted: 0,
       labelsNoEntry: 0,
       labelsNoExit: 0,
+      actualEventsProcessed: 0,
+      actualEventsIgnored: 0,
+      actualPositionsOpened: 0,
+      actualPositionsClosed: 0,
+      actualBackfilled: 0,
       gradeRefreshes: 0,
       ageChecksStarted: 0,
       ageChecksCompleted: 0,
@@ -217,6 +222,47 @@ class SmartWalletRegistry {
         ON smart_wallet_forward_labels(mint, status, signal_at DESC);
       CREATE INDEX IF NOT EXISTS idx_swr_labels_status_target
         ON smart_wallet_forward_labels(status, entry_target_at);
+
+      CREATE TABLE IF NOT EXISTS smart_wallet_actual_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        wallet TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        opened_at INTEGER NOT NULL,
+        closed_at INTEGER,
+        total_bought_tokens REAL NOT NULL DEFAULT 0,
+        total_sold_tokens REAL NOT NULL DEFAULT 0,
+        total_buy_sol REAL NOT NULL DEFAULT 0,
+        total_sell_sol REAL NOT NULL DEFAULT 0,
+        token_balance REAL NOT NULL DEFAULT 0,
+        remaining_cost_sol REAL NOT NULL DEFAULT 0,
+        realized_cost_sol REAL NOT NULL DEFAULT 0,
+        realized_pnl_sol REAL NOT NULL DEFAULT 0,
+        realized_return_pct REAL,
+        buy_count INTEGER NOT NULL DEFAULT 0,
+        sell_count INTEGER NOT NULL DEFAULT 0,
+        first_event_id INTEGER NOT NULL,
+        last_event_id INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_swr_actual_active_wallet_mint
+        ON smart_wallet_actual_positions(wallet, mint)
+        WHERE status IN ('OPEN','PARTIAL');
+      CREATE INDEX IF NOT EXISTS idx_swr_actual_wallet_closed
+        ON smart_wallet_actual_positions(wallet, closed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_swr_actual_mint_status
+        ON smart_wallet_actual_positions(mint, status, opened_at DESC);
+
+      CREATE TABLE IF NOT EXISTS smart_wallet_pnl_processed_events (
+        smart_event_id INTEGER PRIMARY KEY,
+        position_id INTEGER,
+        accounting_status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(position_id) REFERENCES smart_wallet_actual_positions(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_swr_pnl_event_position
+        ON smart_wallet_pnl_processed_events(position_id, smart_event_id);
     `);
     const registryColumns = new Set(this.store.db.prepare(
       'PRAGMA table_info(smart_wallet_registry)',
@@ -303,6 +349,327 @@ class SmartWalletRegistry {
         updated_at=@updatedAt
       WHERE id=@id
     `);
+    this.getProcessedActualEvent = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_pnl_processed_events WHERE smart_event_id=?
+    `);
+    this.insertProcessedActualEvent = this.store.db.prepare(`
+      INSERT INTO smart_wallet_pnl_processed_events (
+        smart_event_id, position_id, accounting_status, created_at
+      ) VALUES (@smartEventId, @positionId, @accountingStatus, @createdAt)
+    `);
+    this.getActiveActualPosition = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_actual_positions
+      WHERE wallet=? AND mint=? AND status IN ('OPEN','PARTIAL')
+      ORDER BY opened_at DESC, id DESC LIMIT 1
+    `);
+    this.insertActualPosition = this.store.db.prepare(`
+      INSERT INTO smart_wallet_actual_positions (
+        wallet, mint, status, opened_at, closed_at,
+        total_bought_tokens, total_sold_tokens, total_buy_sol, total_sell_sol,
+        token_balance, remaining_cost_sol, realized_cost_sol, realized_pnl_sol,
+        realized_return_pct, buy_count, sell_count, first_event_id, last_event_id,
+        created_at, updated_at
+      ) VALUES (
+        @wallet, @mint, @status, @openedAt, NULL,
+        @totalBoughtTokens, 0, @totalBuySol, 0,
+        @tokenBalance, @remainingCostSol, 0, 0,
+        NULL, 1, 0, @firstEventId, @lastEventId,
+        @createdAt, @updatedAt
+      )
+    `);
+    this.updateActualPosition = this.store.db.prepare(`
+      UPDATE smart_wallet_actual_positions SET
+        status=@status, closed_at=@closedAt,
+        total_bought_tokens=@totalBoughtTokens,
+        total_sold_tokens=@totalSoldTokens,
+        total_buy_sol=@totalBuySol,
+        total_sell_sol=@totalSellSol,
+        token_balance=@tokenBalance,
+        remaining_cost_sol=@remainingCostSol,
+        realized_cost_sol=@realizedCostSol,
+        realized_pnl_sol=@realizedPnlSol,
+        realized_return_pct=@realizedReturnPct,
+        buy_count=@buyCount, sell_count=@sellCount,
+        last_event_id=@lastEventId, updated_at=@updatedAt
+      WHERE id=@id
+    `);
+    this.processActualWalletEvent = this.store.db.transaction(
+      (event) => this._applyActualWalletEvent(event),
+    );
+  }
+
+  _normalizeActualEvent(event) {
+    const smartEventId = finite(event?.id ?? event?.smartEventId ?? event?.smart_event_id);
+    const timestampMs = finite(event?.timestampMs ?? event?.timestamp_ms);
+    const wallet = event?.wallet ? String(event.wallet) : '';
+    const mint = event?.mint ? String(event.mint) : '';
+    const side = String(event?.side || '').toUpperCase();
+    const phase = String(event?.positionPhase || event?.position_phase || '').toUpperCase();
+    const solAmount = Math.max(0, finite(event?.solAmount ?? event?.sol_amount, 0));
+    let tokenAmount = Math.max(0, finite(event?.tokenAmount ?? event?.token_amount, 0));
+    const price = finite(event?.price, tradePrice(event));
+    if (!(tokenAmount > 0) && solAmount > 0 && price > 0) tokenAmount = solAmount / price;
+    return {
+      smartEventId, timestampMs, wallet, mint, side, phase, solAmount, tokenAmount,
+      tokenBalanceBefore: nullableFinite(
+        event?.tokenBalanceBefore ?? event?.token_balance_before,
+      ),
+      tokenBalanceAfter: nullableFinite(
+        event?.tokenBalanceAfter ?? event?.token_balance_after,
+      ),
+    };
+  }
+
+  _markActualEvent(event, positionId, accountingStatus) {
+    this.insertProcessedActualEvent.run({
+      smartEventId: event.smartEventId,
+      positionId: positionId ?? null,
+      accountingStatus,
+      createdAt: this.now(),
+    });
+    this.metrics.actualEventsProcessed += 1;
+    if (accountingStatus.startsWith('IGNORED_')) this.metrics.actualEventsIgnored += 1;
+    this.metrics.lastActionAt = this.now();
+    return { positionId: positionId ?? null, accountingStatus };
+  }
+
+  _applyActualWalletEvent(rawEvent) {
+    const event = this._normalizeActualEvent(rawEvent);
+    if (!(event.smartEventId > 0)) return null;
+    const processed = this.getProcessedActualEvent.get(event.smartEventId);
+    if (processed) {
+      return {
+        positionId: processed.position_id,
+        accountingStatus: processed.accounting_status,
+        duplicate: true,
+      };
+    }
+    if (!(event.timestampMs > 0) || !event.wallet || !event.mint
+      || !['BUY', 'SELL'].includes(event.side)) {
+      return this._markActualEvent(event, null, 'IGNORED_INVALID_EVENT');
+    }
+    const active = this.getActiveActualPosition.get(event.wallet, event.mint);
+    if (event.side === 'BUY') {
+      if (!(event.solAmount > 0) || !(event.tokenAmount > 0)) {
+        return this._markActualEvent(event, active?.id, 'IGNORED_INVALID_BUY');
+      }
+      if (!active) {
+        // ADD means the visible history started in the middle of a position. Do not
+        // invent its earlier cost basis; wait for the next independently observed OPEN.
+        if (event.phase === 'ADD') {
+          return this._markActualEvent(event, null, 'IGNORED_ORPHAN_ADD');
+        }
+        const createdAt = this.now();
+        const result = this.insertActualPosition.run({
+          wallet: event.wallet,
+          mint: event.mint,
+          status: 'OPEN',
+          openedAt: event.timestampMs,
+          totalBoughtTokens: event.tokenAmount,
+          totalBuySol: event.solAmount,
+          tokenBalance: event.tokenAmount,
+          remainingCostSol: event.solAmount,
+          firstEventId: event.smartEventId,
+          lastEventId: event.smartEventId,
+          createdAt,
+          updatedAt: createdAt,
+        });
+        const positionId = Number(result.lastInsertRowid);
+        this.metrics.actualPositionsOpened += 1;
+        this.pnlSnapshotCache.delete(event.wallet);
+        return this._markActualEvent(event, positionId, 'OPENED');
+      }
+      this.updateActualPosition.run({
+        id: active.id,
+        status: active.status,
+        closedAt: null,
+        totalBoughtTokens: active.total_bought_tokens + event.tokenAmount,
+        totalSoldTokens: active.total_sold_tokens,
+        totalBuySol: active.total_buy_sol + event.solAmount,
+        totalSellSol: active.total_sell_sol,
+        tokenBalance: active.token_balance + event.tokenAmount,
+        remainingCostSol: active.remaining_cost_sol + event.solAmount,
+        realizedCostSol: active.realized_cost_sol,
+        realizedPnlSol: active.realized_pnl_sol,
+        realizedReturnPct: null,
+        buyCount: active.buy_count + 1,
+        sellCount: active.sell_count,
+        lastEventId: event.smartEventId,
+        updatedAt: this.now(),
+      });
+      this.pnlSnapshotCache.delete(event.wallet);
+      return this._markActualEvent(event, active.id, 'ADDED');
+    }
+
+    if (!active) return this._markActualEvent(event, null, 'IGNORED_ORPHAN_SELL');
+    const beforeBalance = Math.max(0, finite(active.token_balance, 0));
+    let soldTokens = event.tokenAmount;
+    if (!(soldTokens > 0) && event.tokenBalanceBefore != null
+      && event.tokenBalanceAfter != null) {
+      soldTokens = Math.max(0, event.tokenBalanceBefore - event.tokenBalanceAfter);
+    }
+    if (!(beforeBalance > 0) || !(soldTokens > 0) || !(event.solAmount >= 0)) {
+      return this._markActualEvent(event, active.id, 'IGNORED_INVALID_SELL');
+    }
+    const dust = Math.max(1e-9, beforeBalance * 0.005);
+    const phaseCloses = event.phase === 'CLOSE'
+      || (event.tokenBalanceAfter != null && event.tokenBalanceAfter <= dust);
+    const closes = phaseCloses || beforeBalance - soldTokens <= dust;
+    const accountedTokens = closes ? beforeBalance : Math.min(beforeBalance, soldTokens);
+    const saleFraction = closes ? 1 : Math.min(1, accountedTokens / soldTokens);
+    const attributedSellSol = event.solAmount * saleFraction;
+    const costFraction = closes ? 1 : accountedTokens / beforeBalance;
+    const allocatedCost = active.remaining_cost_sol * Math.min(1, costFraction);
+    const realizedCostSol = active.realized_cost_sol + allocatedCost;
+    const realizedPnlSol = active.realized_pnl_sol + attributedSellSol - allocatedCost;
+    const totalBuySol = active.total_buy_sol;
+    const status = closes ? 'CLOSED' : 'PARTIAL';
+    const realizedReturnPct = closes && totalBuySol > 0
+      ? realizedPnlSol / totalBuySol * 100 : null;
+    this.updateActualPosition.run({
+      id: active.id,
+      status,
+      closedAt: closes ? event.timestampMs : null,
+      totalBoughtTokens: active.total_bought_tokens,
+      totalSoldTokens: active.total_sold_tokens + accountedTokens,
+      totalBuySol,
+      totalSellSol: active.total_sell_sol + attributedSellSol,
+      tokenBalance: closes ? 0 : Math.max(0, beforeBalance - accountedTokens),
+      remainingCostSol: closes ? 0 : Math.max(0, active.remaining_cost_sol - allocatedCost),
+      realizedCostSol,
+      realizedPnlSol,
+      realizedReturnPct,
+      buyCount: active.buy_count,
+      sellCount: active.sell_count + 1,
+      lastEventId: event.smartEventId,
+      updatedAt: this.now(),
+    });
+    if (closes) {
+      this.metrics.actualPositionsClosed += 1;
+      this.gradeRefreshRequested = true;
+    }
+    this.pnlSnapshotCache.delete(event.wallet);
+    return this._markActualEvent(event, active.id, closes ? 'CLOSED' : 'PARTIAL');
+  }
+
+  _backfillActualWalletEvents() {
+    const rows = this.store.db.prepare(`
+      SELECT event.* FROM smart_wallet_events event
+      JOIN smart_wallet_registry registry ON registry.wallet=event.wallet
+      LEFT JOIN smart_wallet_pnl_processed_events processed
+        ON processed.smart_event_id=event.id
+      WHERE processed.smart_event_id IS NULL
+      ORDER BY event.timestamp_ms, event.id
+    `).all();
+    let processed = 0;
+    for (const row of rows) {
+      if (this.processActualWalletEvent(row)) processed += 1;
+    }
+    this.metrics.actualBackfilled += processed;
+    return processed;
+  }
+
+  _pnlWindowSummary(rows, startAt, endAt) {
+    const sample = rows.filter((row) => row.closed_at >= startAt && row.closed_at <= endAt);
+    const pnlValues = sample.map((row) => finite(row.realized_pnl_sol, 0));
+    const returnValues = sample.map((row) => finite(row.realized_return_pct))
+      .filter(Number.isFinite);
+    const investedSol = sample.reduce((sum, row) => sum + finite(row.total_buy_sol, 0), 0);
+    const realizedPnlSol = pnlValues.reduce((sum, value) => sum + value, 0);
+    const positiveDays = new Map();
+    for (const row of sample) {
+      const day = Math.floor(row.closed_at / DAY_MS);
+      positiveDays.set(day, (positiveDays.get(day) || 0) + finite(row.realized_pnl_sol, 0));
+    }
+    const holdDurations = sample.map((row) => Math.max(0, row.closed_at - row.opened_at));
+    return {
+      closedPositions: sample.length,
+      investedSol,
+      realizedPnlSol,
+      capitalReturnPct: investedSol > 0 ? realizedPnlSol / investedSol * 100 : null,
+      winRatePct: sample.length
+        ? pnlValues.filter((value) => value > 0).length / sample.length * 100 : null,
+      profitFactor: profitFactor(pnlValues),
+      averageReturnPct: average(returnValues),
+      medianReturnPct: median(returnValues),
+      top1ProfitContributionPct: topProfitContribution(pnlValues),
+      activeDays: positiveDays.size,
+      positiveDayPct: positiveDays.size
+        ? [...positiveDays.values()].filter((value) => value > 0).length
+          / positiveDays.size * 100
+        : null,
+      averageHoldMs: average(holdDurations),
+      medianHoldMs: median(holdDurations),
+      big50RatePct: sample.length
+        ? returnValues.filter((value) => value >= 50).length / sample.length * 100 : 0,
+      big100RatePct: sample.length
+        ? returnValues.filter((value) => value >= 100).length / sample.length * 100 : 0,
+    };
+  }
+
+  _actualPnlSnapshot(wallet, at = this.now()) {
+    const cacheMs = Math.max(100, finite(this.config.pnlSnapshotCacheMs, 1_000));
+    const cacheBucket = Math.floor(at / cacheMs);
+    const cached = this.pnlSnapshotCache.get(wallet);
+    if (cached?.bucket === cacheBucket) return cached.snapshot;
+    const maxLookbackMs = Math.max(
+      30 * DAY_MS,
+      finite(this.config.lookbackMs, 60 * DAY_MS),
+      finite(this.config.pnlWindowMs, DAY_MS),
+    );
+    const rows = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_actual_positions
+      WHERE wallet=? AND status='CLOSED' AND closed_at>=? AND closed_at<=?
+      ORDER BY closed_at, id
+    `).all(wallet, at - maxLookbackMs, at);
+    const open = this.store.db.prepare(`
+      SELECT COUNT(*) open_positions,
+        COALESCE(SUM(remaining_cost_sol), 0) open_cost_sol
+      FROM smart_wallet_actual_positions
+      WHERE wallet=? AND status IN ('OPEN','PARTIAL') AND opened_at<=?
+    `).get(wallet, at);
+    const pnlWindowMs = Math.max(DAY_MS, finite(this.config.pnlWindowMs, DAY_MS));
+    const window24h = this._pnlWindowSummary(rows, at - pnlWindowMs, at);
+    const window7d = this._pnlWindowSummary(rows, at - 7 * DAY_MS, at);
+    const window30d = this._pnlWindowSummary(rows, at - 30 * DAY_MS, at);
+    const lookback = this._pnlWindowSummary(rows, at - maxLookbackMs, at);
+    const minClosedPositions = Math.max(1, finite(this.config.pnlMinClosedPositions, 1));
+    const minRealizedSol = Math.max(0, finite(this.config.pnlMinRealizedSol, 0));
+    const minCapitalReturnPct = Math.max(0, finite(this.config.pnlMinCapitalReturnPct, 0));
+    let status = 'PNL_BYPASS';
+    let eligible = true;
+    if (this.config.pnlGateEnabled !== false) {
+      if (window24h.closedPositions < minClosedPositions) {
+        status = 'PNL_PENDING';
+        eligible = false;
+      } else if (window24h.realizedPnlSol > minRealizedSol
+        && window24h.capitalReturnPct > minCapitalReturnPct) {
+        status = 'PNL_PROFITABLE';
+      } else {
+        status = 'LOSS_BLOCKED';
+        eligible = false;
+      }
+    }
+    const snapshot = {
+      status,
+      eligible,
+      minClosedPositions,
+      minRealizedSol,
+      minCapitalReturnPct,
+      windowMs: pnlWindowMs,
+      window24h,
+      window7d,
+      window30d,
+      lookback,
+      openPositions: Number(open?.open_positions) || 0,
+      openCostSol: finite(open?.open_cost_sol, 0),
+    };
+    this.pnlSnapshotCache.set(wallet, { bucket: cacheBucket, snapshot });
+    return snapshot;
+  }
+
+  _pnlEligibleRow(row, at = this.now()) {
+    return Boolean(row?.wallet && this._actualPnlSnapshot(row.wallet, at).eligible);
   }
 
   start() {
@@ -329,6 +696,7 @@ class SmartWalletRegistry {
         });
       }
     }
+    this._backfillActualWalletEvents();
     const active = this.store.db.prepare(`
       SELECT * FROM smart_wallet_forward_labels
       WHERE status IN ('PENDING_ENTRY','OPEN')
@@ -336,10 +704,14 @@ class SmartWalletRegistry {
     `).all();
     for (const row of active) this._hydrateLabel(row);
     const meta = this._meta();
-    if (!meta.last_grade_refresh_at
-      || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
-      this.refreshGrades(now);
-    }
+    const needsActualGradeMigration = Boolean(this.store.db.prepare(`
+      SELECT 1 FROM smart_wallet_registry
+      WHERE metrics_json NOT LIKE '%"actualPnl30d"%'
+      LIMIT 1
+    `).get());
+    if (needsActualGradeMigration) this.refreshGrades(now, { forceModelMigration: true });
+    else if (!meta.last_grade_refresh_at
+      || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) this.refreshGrades(now);
     this._scheduleAgeChecks(now);
   }
 
@@ -349,6 +721,7 @@ class SmartWalletRegistry {
     this.ageAbortControllers.clear();
     this.labels.clear();
     this.labelsByMint.clear();
+    this.pnlSnapshotCache.clear();
     this.ageChecks.clear();
   }
 
@@ -400,7 +773,8 @@ class SmartWalletRegistry {
   _votingEligibleRow(row, at = this.now()) {
     if (!row || row.effective_from > at || row.risk_status !== 'OK'
       || !['PROBATION', 'ACTIVE'].includes(row.status)
-      || !this._ageEligibleRow(row, at)) return false;
+      || !this._ageEligibleRow(row, at)
+      || !this._pnlEligibleRow(row, at)) return false;
     if (row.source === 'CONFIG_SEED') return true;
     if (this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') return false;
     if (this.config.autoVoteRequiresKnownCluster !== false
@@ -768,6 +1142,7 @@ class SmartWalletRegistry {
     const snapshot = observedSnapshot || this.monitoringSnapshot(wallet, at);
     if (!snapshot || snapshot.effectiveFrom > at) return null;
     if (!snapshot.ageEligible) return null;
+    if (!snapshot.pnlEligible) return null;
     if (snapshot.source !== 'CONFIG_SEED') {
       if (this.config.autoVoteRequiresActive !== false && snapshot.status !== 'ACTIVE') return null;
       if (this.config.autoVoteRequiresKnownCluster !== false && !snapshot.clusterKnown) return null;
@@ -786,6 +1161,7 @@ class SmartWalletRegistry {
       SELECT * FROM smart_wallet_cluster_memberships
       WHERE wallet=? AND valid_from<=? AND (valid_to IS NULL OR valid_to>?)
     `).get(wallet, at, at);
+    const pnl = this._actualPnlSnapshot(wallet, at);
     return {
       wallet,
       status: row.status,
@@ -802,6 +1178,13 @@ class SmartWalletRegistry {
       firstChainActivityAt: nullableFinite(row.first_chain_activity_at),
       ageVerifiedAt: nullableFinite(row.age_verified_at),
       ageEligible: this._ageEligibleRow(row, at),
+      pnlStatus: pnl.status,
+      pnlEligible: pnl.eligible,
+      actualPnl24h: pnl.window24h,
+      actualPnl7d: pnl.window7d,
+      actualPnl30d: pnl.window30d,
+      actualOpenPositions: pnl.openPositions,
+      actualOpenCostSol: pnl.openCostSol,
       registryVersion: row.registry_version,
       effectiveFrom: row.effective_from,
       votingEligible: false,
@@ -852,37 +1235,10 @@ class SmartWalletRegistry {
     this.store.db.prepare(`
       UPDATE smart_wallet_registry SET last_seen_at=?, updated_at=? WHERE wallet=?
     `).run(signalAt, this.now(), event.wallet);
-    const phase = String(event.positionPhase || event.position_phase || '').toUpperCase();
-    if (String(event.side || '').toUpperCase() !== 'BUY' || phase !== 'OPEN') return null;
-    const signalPrice = tradePrice(event);
-    if (!(signalPrice > 0) || !event.id || !event.market) return null;
-    const seedExcluded = this.store.db.prepare(`
-      SELECT 1 FROM smart_wallet_discovery_seeds WHERE wallet=? AND seed_mint=?
-    `).get(event.wallet, event.mint) ? 1 : 0;
-    const now = this.now();
-    const result = this.insertLabel.run({
-      smartEventId: Number(event.id),
-      wallet: event.wallet,
-      mint: event.mint,
-      signalAt,
-      signalMarket: event.market,
-      signalPrice,
-      entryTargetAt: signalAt + this.config.labelEntryDelayMs,
-      entryDeadlineAt: signalAt + this.config.labelEntryDelayMs
-        + this.config.labelEntryTimeoutMs,
-      seedExcluded,
-      configuredCostPct: this.costs.deterministicCostPct,
-      createdAt: now,
-      updatedAt: now,
-    });
-    if (!result.changes) return null;
-    const row = this.store.db.prepare(
-      'SELECT * FROM smart_wallet_forward_labels WHERE smart_event_id=?',
-    ).get(Number(event.id));
-    const label = this._hydrateLabel(row);
-    this.metrics.labelsCreated += 1;
-    this.metrics.lastActionAt = now;
-    return label;
+    // Eligibility is based on the wallet's own on-chain BUY/SELL ledger. The old
+    // fixed-size 30s/300s follower simulation remains readable as legacy research,
+    // but no new forward labels are created here.
+    return this.processActualWalletEvent(event);
   }
 
   onGraduated(event) {
@@ -1098,25 +1454,14 @@ class SmartWalletRegistry {
     }
   }
 
-  refreshGrades(now = this.now()) {
+  refreshGrades(now = this.now(), { forceModelMigration = false } = {}) {
     if (!this.config.enabled) return;
     const cutoff = now - this.config.lookbackMs;
     const rows = this.store.db.prepare(`
-      SELECT wallet, signal_at, return_30s_pct,
-        CASE WHEN status='NO_EXIT' THEN COALESCE(return_300s_pct, ?)
-          ELSE return_300s_pct END return_300s_pct,
-        max_favorable_return_pct, graduated_at, status
-      FROM smart_wallet_forward_labels
-      WHERE status IN ('COMPLETE','NO_EXIT') AND seed_excluded=0 AND signal_at>=?
-        AND (return_300s_pct IS NOT NULL OR status='NO_EXIT')
-      ORDER BY wallet, signal_at
-    `).all(finite(this.config.noExitReturnPct, -100), cutoff);
-    const baselineGradRate = rows.length
-      ? rows.filter((row) => row.graduated_at != null).length / rows.length : 0;
-    const baselineBig50Rate = rows.length
-      ? rows.filter((row) => finite(row.max_favorable_return_pct, -Infinity) >= 50).length
-        / rows.length
-      : 0;
+      SELECT * FROM smart_wallet_actual_positions
+      WHERE status='CLOSED' AND closed_at>=? AND closed_at<=?
+      ORDER BY wallet, closed_at, id
+    `).all(cutoff, now);
     const grouped = new Map();
     for (const row of rows) {
       const bucket = grouped.get(row.wallet) || [];
@@ -1126,98 +1471,71 @@ class SmartWalletRegistry {
     const wallets = this.store.db.prepare('SELECT * FROM smart_wallet_registry').all();
     for (const current of wallets) {
       if (current.status === 'QUARANTINED') continue;
-      const sample = grouped.get(current.wallet) || [];
-      const returns30 = sample.map((row) => finite(row.return_30s_pct)).filter(Number.isFinite);
-      const returns300 = sample.map((row) => finite(row.return_300s_pct)).filter(Number.isFinite);
-      const noExitSamples = sample.filter((row) => row.status === 'NO_EXIT').length;
-      const noExitRatePct = sample.length ? noExitSamples / sample.length * 100 : 0;
-      const maxNoExitRatePct = finite(this.config.maxNoExitRatePct, 20);
-      const exitReliabilityQualified = noExitRatePct <= maxNoExitRatePct;
-      const activeDays = new Set(sample.map((row) => Math.floor(row.signal_at / DAY_MS))).size;
-      const weeks = new Map();
-      for (const row of sample) {
-        const key = Math.floor(row.signal_at / WEEK_MS);
-        const bucket = weeks.get(key) || [];
-        bucket.push(finite(row.return_30s_pct));
-        weeks.set(key, bucket);
-      }
-      const positiveWeekPct = weeks.size
-        ? [...weeks.values()].filter((values) => average(values) > 0).length / weeks.size * 100
-        : 0;
-      const graduationRate = sample.length
-        ? sample.filter((row) => row.graduated_at != null).length / sample.length : 0;
-      const big50Rate = sample.length
-        ? sample.filter((row) => finite(row.max_favorable_return_pct, -Infinity) >= 50).length
-          / sample.length
-        : 0;
-      const graduationLift = baselineGradRate > 0 ? graduationRate / baselineGradRate : null;
-      const big50Lift = baselineBig50Rate > 0 ? big50Rate / baselineBig50Rate : null;
-      const avg30 = average(returns30);
-      const median30 = median(returns30);
-      const pf30 = profitFactor(returns30);
-      const top1Pct = topProfitContribution(returns30);
+      const pnl = this._actualPnlSnapshot(current.wallet, now);
+      const sample = (grouped.get(current.wallet) || [])
+        .filter((row) => row.closed_at >= now - 30 * DAY_MS);
+      const returns = sample.map((row) => finite(row.realized_return_pct))
+        .filter(Number.isFinite);
+      const pnlValues = sample.map((row) => finite(row.realized_pnl_sol, 0));
+      const activeDays = pnl.window30d.activeDays;
+      const positiveWindowPct = pnl.window30d.positiveDayPct ?? 0;
+      const averageReturnPct = average(returns);
+      const medianReturnPct = median(returns);
+      const pf = profitFactor(pnlValues);
+      const top1Pct = topProfitContribution(pnlValues);
+      const profitable30d = pnl.window30d.realizedPnlSol > 0
+        && pnl.window30d.capitalReturnPct > 0;
       let selectionGrade = 'S_C';
       if (sample.length >= this.config.selectionMinSamples
-        && exitReliabilityQualified
         && activeDays >= this.config.minActiveDays
-        && graduationLift >= this.config.minGraduationLift
-        && big50Lift >= this.config.minBig50Lift) selectionGrade = 'S_A';
+        && profitable30d
+        && (pf == null || pf >= this.config.minCopyPf)
+        && positiveWindowPct >= this.config.minPositiveWindowPct
+        && (top1Pct == null || top1Pct <= this.config.maxTop1ProfitPct)) {
+        selectionGrade = 'S_A';
+      }
       else if (sample.length >= Math.ceil(this.config.selectionMinSamples / 2)
-        && exitReliabilityQualified
-        && (graduationLift >= this.config.minSelectionBLift
-          || big50Lift >= this.config.minSelectionBLift)) selectionGrade = 'S_B';
+        && profitable30d && (pf == null || pf >= 1)) selectionGrade = 'S_B';
       let copyGrade = 'C_C';
-      if (returns30.length >= this.config.copyMinSamples
-        && exitReliabilityQualified
+      if (returns.length >= this.config.copyMinSamples
         && activeDays >= this.config.minActiveDays
-        && avg30 > 0 && median30 > 0 && (pf30 == null || pf30 >= this.config.minCopyPf)
-        && positiveWeekPct >= this.config.minPositiveWindowPct
+        && profitable30d && averageReturnPct > 0 && medianReturnPct > 0
+        && (pf == null || pf >= this.config.minCopyPf)
+        && positiveWindowPct >= this.config.minPositiveWindowPct
         && (top1Pct == null || top1Pct <= this.config.maxTop1ProfitPct)) copyGrade = 'C_A';
-      else if (returns30.length >= Math.ceil(this.config.copyMinSamples / 2)
-        && exitReliabilityQualified
-        && avg30 > 0 && (pf30 == null || pf30 >= 1)) copyGrade = 'C_B';
-      const runnerUplifts = sample.map((row) => {
-        const maxFavorable = finite(row.max_favorable_return_pct);
-        const return300 = finite(row.return_300s_pct);
-        return Number.isFinite(maxFavorable) && Number.isFinite(return300)
-          ? maxFavorable - return300 : null;
-      }).filter(Number.isFinite);
-      const medianRunnerUplift = median(runnerUplifts);
+      else if (returns.length >= Math.ceil(this.config.copyMinSamples / 2)
+        && profitable30d && averageReturnPct > 0
+        && (pf == null || pf >= 1)) copyGrade = 'C_B';
       const bigWinnerRate = sample.length
-        ? sample.filter((row) => finite(row.max_favorable_return_pct, -Infinity)
+        ? sample.filter((row) => finite(row.realized_return_pct, -Infinity)
           >= this.config.holdingBigWinnerPct).length / sample.length * 100
         : 0;
       let holdingGrade = 'H_C';
       if (sample.length >= this.config.holdingMinSamples
-        && exitReliabilityQualified
-        && medianRunnerUplift >= this.config.holdingMinRunnerUpliftPct
+        && profitable30d
         && bigWinnerRate >= this.config.holdingMinBigWinnerRatePct) holdingGrade = 'H_A';
       else if (sample.length >= Math.ceil(this.config.holdingMinSamples / 2)
-        && exitReliabilityQualified
-        && (medianRunnerUplift > 0 || bigWinnerRate > 0)) holdingGrade = 'H_B';
+        && profitable30d && bigWinnerRate > 0) holdingGrade = 'H_B';
       const ageEligible = this._ageEligibleRow(current, now);
       const performanceQualified = selectionGrade !== 'S_C' || copyGrade !== 'C_C';
-      const desiredStatus = performanceQualified && ageEligible ? 'ACTIVE' : 'PROBATION';
+      const desiredStatus = performanceQualified && ageEligible && pnl.eligible
+        ? 'ACTIVE' : 'PROBATION';
       const metrics = {
         sampleSize: sample.length,
-        noExitSamples,
-        noExitRatePct,
-        maxNoExitRatePct,
-        exitReliabilityQualified,
         activeDays,
-        copy30AveragePct: avg30,
-        copy30MedianPct: median30,
-        copy30ProfitFactor: pf30,
+        actualAverageReturnPct: averageReturnPct,
+        actualMedianReturnPct: medianReturnPct,
+        actualProfitFactor: pf,
         top1ProfitContributionPct: top1Pct,
-        positiveWindowPct: positiveWeekPct,
-        graduationRatePct: graduationRate * 100,
-        graduationLift,
-        big50RatePct: big50Rate * 100,
-        big50Lift,
-        medianRunnerUpliftPct: medianRunnerUplift,
+        positiveWindowPct,
         bigWinnerRatePct: bigWinnerRate,
-        baselineGraduationRatePct: baselineGradRate * 100,
-        baselineBig50RatePct: baselineBig50Rate * 100,
+        pnlStatus: pnl.status,
+        pnlEligible: pnl.eligible,
+        actualPnl24h: pnl.window24h,
+        actualPnl7d: pnl.window7d,
+        actualPnl30d: pnl.window30d,
+        actualOpenPositions: pnl.openPositions,
+        actualOpenCostSol: pnl.openCostSol,
         ageStatus: current.age_status || 'UNKNOWN',
         ageEligible,
       };
@@ -1237,14 +1555,16 @@ class SmartWalletRegistry {
       const changed = current.selection_grade !== selectionGrade
         || current.copy_grade !== copyGrade || current.holding_grade !== holdingGrade
         || current.status !== desiredStatus;
-      if (changed && candidateStreak >= this.config.gradeConfirmationRuns) {
+      if (changed && (forceModelMigration
+        || candidateStreak >= this.config.gradeConfirmationRuns)) {
         this.setGrades({
           wallet: current.wallet,
           selectionGrade,
           copyGrade,
           holdingGrade,
           status: desiredStatus,
-          reason: 'ROLLING_FORWARD_METRICS',
+          reason: forceModelMigration
+            ? 'ACTUAL_WALLET_PNL_MODEL_MIGRATION' : 'ROLLING_ACTUAL_WALLET_PNL',
           metrics: nextMetrics,
           effectiveAt: now,
         });
@@ -1272,12 +1592,22 @@ class SmartWalletRegistry {
       ORDER BY r.status, r.selection_grade, r.copy_grade, r.wallet
       LIMIT ?
     `).all(observedAt, observedAt, capped).map((row) => {
+      const pnl = this._actualPnlSnapshot(row.wallet, observedAt);
       const votingEligible = this._votingEligibleRow(row, observedAt);
       return {
         ...row,
         age_ms: nullableFinite(row.first_chain_activity_at) == null
           ? null : Math.max(0, observedAt - Number(row.first_chain_activity_at)),
         age_eligible: this._ageEligibleRow(row, observedAt) ? 1 : 0,
+        pnl_status: pnl.status,
+        pnl_eligible: pnl.eligible ? 1 : 0,
+        pnl_24h_realized_sol: pnl.window24h.realizedPnlSol,
+        pnl_24h_return_pct: pnl.window24h.capitalReturnPct,
+        pnl_24h_closed_positions: pnl.window24h.closedPositions,
+        pnl_7d_realized_sol: pnl.window7d.realizedPnlSol,
+        pnl_30d_realized_sol: pnl.window30d.realizedPnlSol,
+        actual_open_positions: pnl.openPositions,
+        actual_open_cost_sol: pnl.openCostSol,
         voting_eligible: votingEligible ? 1 : 0,
       };
     });
@@ -1295,6 +1625,17 @@ class SmartWalletRegistry {
         seedBypass: this.config.ageSeedBypass === true,
         failClosed: true,
       },
+      pnlPolicy: {
+        enabled: this.config.pnlGateEnabled !== false,
+        windowMs: Math.max(DAY_MS, finite(this.config.pnlWindowMs, DAY_MS)),
+        minClosedPositions: Math.max(1, finite(this.config.pnlMinClosedPositions, 1)),
+        minRealizedSol: Math.max(0, finite(this.config.pnlMinRealizedSol, 0)),
+        minCapitalReturnPct: Math.max(
+          0, finite(this.config.pnlMinCapitalReturnPct, 0),
+        ),
+        realizedOnly: true,
+        openPositionsAreNoExit: false,
+      },
       clusterCounts: this.activeClusterCounts(),
       sourceCounts: Object.fromEntries(this.store.db.prepare(`
         SELECT source, COUNT(*) count
@@ -1307,6 +1648,15 @@ class SmartWalletRegistry {
       recentGradeChanges: this.store.db.prepare(`
         SELECT * FROM smart_wallet_grade_history ORDER BY effective_at DESC, id DESC LIMIT ?
       `).all(capped),
+      recentActualPositions: this.store.db.prepare(`
+        SELECT * FROM smart_wallet_actual_positions
+        ORDER BY COALESCE(closed_at, opened_at) DESC, id DESC LIMIT ?
+      `).all(capped),
+      legacyForwardLabels: this.store.db.prepare(`
+        SELECT * FROM smart_wallet_forward_labels ORDER BY signal_at DESC, id DESC LIMIT ?
+      `).all(capped),
+      // Compatibility alias for old dashboard clients. These rows are legacy
+      // research only and no longer participate in eligibility or grading.
       recentLabels: this.store.db.prepare(`
         SELECT * FROM smart_wallet_forward_labels ORDER BY signal_at DESC, id DESC LIMIT ?
       `).all(capped),
@@ -1326,6 +1676,11 @@ class SmartWalletRegistry {
       && ['PROBATION', 'ACTIVE'].includes(row.status) && row.risk_status === 'OK'
       && this._ageMonitoringAllowed(row));
     const votingEligible = registryRows.filter((row) => this._votingEligibleRow(row, now)).length;
+    const pnlCounts = registryRows.reduce((counts, row) => {
+      const status = this._actualPnlSnapshot(row.wallet, now).status;
+      counts[status] = (counts[status] || 0) + 1;
+      return counts;
+    }, {});
     const ageCounts = registryRows.reduce((counts, row) => {
       const status = row.age_status || 'UNKNOWN';
       counts[status] = (counts[status] || 0) + 1;
@@ -1348,6 +1703,11 @@ class SmartWalletRegistry {
         SELECT COUNT(*) n FROM smart_wallet_registry WHERE status='QUARANTINED'
       `).get().n,
       pendingLabels: this.labels.size,
+      pendingLegacyLabels: this.labels.size,
+      pnlProfitable: pnlCounts.PNL_PROFITABLE || 0,
+      pnlLossBlocked: pnlCounts.LOSS_BLOCKED || 0,
+      pnlPending: pnlCounts.PNL_PENDING || 0,
+      pnlBypassed: pnlCounts.PNL_BYPASS || 0,
       ageEligible: ageCounts.ELIGIBLE || 0,
       ageTooNew: ageCounts.TOO_NEW || 0,
       ageProbation: ageCounts.PROBATION || 0,

@@ -276,6 +276,8 @@ Dashboard、命令行回测和批量分析默认使用 200ms 买入延迟及 200
 
 Smart Wallet 事件按 Token 余额保存 `OPEN / ADD / REDUCE / CLOSE / SELL` 生命周期。真实 OPEN 会写入 `smart_signal_confirmations`，记录最近 30 秒 Primary 信号、确认延迟与开仓 SOL；这些仍是离线监督标签，不会用未来信息反推更早的 Flow Signal 买点。Dashboard 原来的“Signal 重合率”已改为明确的 OPEN / ADD 时间窗口覆盖率，避免把连续加仓误读成重复信号。
 
+滚动 Smart Wallet Registry 的投票资格使用钱包自己的真实买卖账本，不再使用“跟随钱包后模拟买入并持有30/300秒”的收益。账本按加权平均成本核算 `ADD / REDUCE`，只有完整 `CLOSE` 的仓位进入滚动24小时已实现收益；至少一笔完整平仓、已实现 SOL 收益大于0且资金回报率大于0才可投票。未平仓只显示 `OPEN / PARTIAL`，不会标成 `NO_EXIT`。7天和30天真实已实现收益用于 `S / C / H` 分级；历史 `smart_wallet_forward_labels` 只保留研究兼容，不再新增，也不再影响资格或分级。
+
 入场只接受 `Signal Time + Execution Delay` 之后、入场等待上限以内且毕业之前的 Bonding Curve 成交，绝不会用 PumpSwap 反推买入。持仓时间从实际模拟入场开始计算；出场可使用 Bonding Curve 或毕业后的 PumpSwap 成交。没有入场、毕业前未成交、没有出场、历史数据缺口和数据右删失会分别统计，不再静默丢弃。没有出场的已入场样本默认按 `-100%` 再扣确定性成本。
 
 平台费、双边滑点、价格冲击和固定链上费用构成成功成交的确定性成本。Future Label 只扣除这些确定性成本，不再把随机执行失败混入市场收益标签。买入失败表示没有建仓，只损失失败尝试成本；卖出失败使用 `exit-retry-count`、重试间隔和失败费用沿真实逐笔价格路径重新执行。若正常策略本身为负，买入失败可能在数学上改善每信号收益，因此输出同时提供条件于已执行交易的收益并给出警告，不能把它误读成策略改善。

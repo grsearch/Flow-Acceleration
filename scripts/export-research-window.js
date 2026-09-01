@@ -38,6 +38,25 @@ const EXPLICIT_FILTERS = Object.freeze({
     where: 'open_timestamp_ms >= ? AND open_timestamp_ms < ?', anchor: 'open_timestamp_ms',
   },
   smart_wallet_positions: { where: 'updated_at >= ? AND updated_at < ?', anchor: 'updated_at' },
+  smart_wallet_actual_positions: {
+    where: `(
+      (opened_at >= ? AND opened_at < ?)
+      OR (closed_at >= ? AND closed_at < ?)
+      OR status IN ('OPEN', 'PARTIAL')
+    )`,
+    anchor: 'closed_at',
+    bind: (startMs, endMs) => [startMs, endMs, startMs, endMs],
+  },
+  smart_wallet_pnl_processed_events: {
+    where: `position_id IN (
+      SELECT id FROM source.smart_wallet_actual_positions
+      WHERE (opened_at >= ? AND opened_at < ?)
+        OR (closed_at >= ? AND closed_at < ?)
+        OR status IN ('OPEN', 'PARTIAL')
+    )`,
+    anchor: 'created_at',
+    bind: (startMs, endMs) => [startMs, endMs, startMs, endMs],
+  },
   smart_open_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
   primary_live_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
   live_strategy_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },

@@ -36,7 +36,11 @@ async function main() {
   assert.ok(dashboard.includes('id="smart-wallet-registry-summary"'));
   assert.ok(dashboard.includes('id="smart-wallet-registry-rows"'));
   assert.ok(dashboard.includes('<th>链上 AGE</th>'));
+  assert.ok(dashboard.includes('<th>24h 真实已实现收益</th>'));
   assert.ok(dashboard.includes('AGE &lt; 7天硬排除'));
+  assert.ok(dashboard.includes('滚动 24h 至少有一笔完整平仓'));
+  assert.ok(dashboard.includes('尚未卖完显示 OPEN / PARTIAL，不是 NO_EXIT'));
+  assert.ok(dashboard.includes("'LOSS_BLOCKED'"));
   assert.ok(dashboard.includes("TOO_NEW: 'TOO_NEW'"));
   assert.ok(dashboard.includes('https://gmgn.ai/sol/address/${encodeURIComponent(wallet)}'));
   assert.ok(!dashboard.includes('https://solscan.io/account/${encodeURIComponent(wallet)}'));

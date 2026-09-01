@@ -2507,6 +2507,22 @@ const config = {
       min: 1, max: 10,
     }),
     ageSeedBypass: booleanEnv('FLOW_SMART_WALLET_AGE_SEED_BYPASS', false),
+    pnlGateEnabled: booleanEnv('FLOW_SMART_WALLET_PNL_GATE_ENABLED', true),
+    pnlWindowMs: integerEnv('FLOW_SMART_WALLET_PNL_WINDOW_MS', 24 * 60 * 60_000, {
+      min: 24 * 60 * 60_000,
+    }),
+    pnlMinClosedPositions: integerEnv('FLOW_SMART_WALLET_PNL_MIN_CLOSED', 1, {
+      min: 1, max: 1_000,
+    }),
+    pnlMinRealizedSol: numberEnv('FLOW_SMART_WALLET_PNL_MIN_REALIZED_SOL', 0, {
+      min: 0,
+    }),
+    pnlMinCapitalReturnPct: numberEnv('FLOW_SMART_WALLET_PNL_MIN_RETURN_PCT', 0, {
+      min: 0,
+    }),
+    pnlSnapshotCacheMs: integerEnv('FLOW_SMART_WALLET_PNL_CACHE_MS', 1_000, {
+      min: 100, max: 60_000,
+    }),
     autoVoteRequiresActive: booleanEnv('FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_ACTIVE', true),
     autoVoteRequiresKnownCluster: booleanEnv(
       'FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_KNOWN_CLUSTER', true,

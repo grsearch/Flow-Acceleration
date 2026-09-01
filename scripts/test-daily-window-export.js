@@ -50,6 +50,15 @@ function main() {
     CREATE TABLE smart_wallet_cluster_memberships (
       wallet TEXT PRIMARY KEY, cluster_id TEXT NOT NULL, created_at INTEGER NOT NULL
     );
+    CREATE TABLE smart_wallet_actual_positions (
+      id INTEGER PRIMARY KEY, wallet TEXT NOT NULL, mint TEXT NOT NULL,
+      status TEXT NOT NULL, opened_at INTEGER NOT NULL, closed_at INTEGER,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE smart_wallet_pnl_processed_events (
+      smart_event_id INTEGER PRIMARY KEY, position_id INTEGER,
+      accounting_status TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -82,6 +91,21 @@ function main() {
     .run('old-wallet', 'old-seed', startMs - 10_000);
   db.prepare('INSERT INTO smart_wallet_cluster_memberships VALUES (?, ?, ?)')
     .run('old-wallet', 'known-cluster', startMs - 10_000);
+  db.prepare('INSERT INTO smart_wallet_actual_positions VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(50, 'old-wallet', 'cross-day-close', 'CLOSED', startMs - 10_000, startMs + 50,
+      startMs - 10_000);
+  db.prepare('INSERT INTO smart_wallet_actual_positions VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(51, 'old-wallet', 'still-open', 'PARTIAL', startMs - 20_000, null,
+      startMs - 20_000);
+  db.prepare('INSERT INTO smart_wallet_actual_positions VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(52, 'old-wallet', 'old-close', 'CLOSED', startMs - 30_000, startMs - 20_000,
+      startMs - 30_000);
+  db.prepare('INSERT INTO smart_wallet_pnl_processed_events VALUES (?, ?, ?, ?)')
+    .run(500, 50, 'CLOSED', startMs - 10_000);
+  db.prepare('INSERT INTO smart_wallet_pnl_processed_events VALUES (?, ?, ?, ?)')
+    .run(501, 51, 'PARTIAL', startMs - 20_000);
+  db.prepare('INSERT INTO smart_wallet_pnl_processed_events VALUES (?, ?, ?, ?)')
+    .run(502, 52, 'CLOSED', startMs - 30_000);
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
@@ -133,6 +157,17 @@ function main() {
     .get().count, 1);
   assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_cluster_memberships')
     .get().count, 1);
+  assert.deepStrictEqual(
+    exported.prepare('SELECT id FROM smart_wallet_actual_positions ORDER BY id')
+      .all().map((row) => row.id),
+    [50, 51],
+    'the daily export must retain cross-day closes and current OPEN/PARTIAL positions',
+  );
+  assert.deepStrictEqual(
+    exported.prepare('SELECT smart_event_id FROM smart_wallet_pnl_processed_events ORDER BY smart_event_id')
+      .all().map((row) => row.smart_event_id),
+    [500, 501],
+  );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();
   assert.match(fs.readFileSync(schema, 'utf8'), /CREATE TABLE\s+(?:main\.)?["']?raw_trades/i);
