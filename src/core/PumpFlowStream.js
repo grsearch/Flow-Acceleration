@@ -52,14 +52,17 @@ class RegionConnection {
     this.onUnavailable = onUnavailable;
 
     this.client = null;
-    this.pumpStream = null;
-    this.ammStream = null;
+    this.stream = null;
     this.running = false;
     this.connected = false;
     this.ammMints = new Set();
     this.unavailableNotified = false;
     this.lastMessageAt = null;
     this.connectedAt = null;
+    this.subscriptionVersion = 0;
+    this.appliedSubscriptionVersion = 0;
+    this.subscriptionWritePromise = null;
+    this.lastSubscriptionWriteAt = null;
   }
 
   async start() {
@@ -75,9 +78,14 @@ class RegionConnection {
 
   async setAmmMints(mints) {
     this.ammMints = new Set(mints);
-    if (!this.connected || !this.client) return;
+    this.subscriptionVersion += 1;
+    this.onState(this.label, {
+      requestedAmmMintCount: this.ammMints.size,
+      requestedSubscriptionVersion: this.subscriptionVersion,
+    });
+    if (!this.connected || !this.stream) return;
     try {
-      await this._replaceAmmSubscription();
+      await this._queueSubscriptionUpdate();
     } catch (error) {
       this._notifyUnavailable(error, 'update_subscription');
     }
@@ -104,20 +112,23 @@ class RegionConnection {
         'grpc.http2.max_pings_without_data': 0,
       });
       if (typeof this.client.connect === 'function') await this.client.connect();
-      this.pumpStream = await this._openStream('pump');
-      await this._sendPumpSubscription();
-      if (this.ammMints.size > 0) {
-        this.ammStream = await this._openStream('amm');
-        await this._sendAmmSubscription();
-      }
+      this.stream = await this.client.subscribe();
+      this.stream.on('data', (message) => this._handleMessage(message));
+      this.stream.on('error', (error) => this._handleEnd(error));
+      this.stream.on('end', () => this._handleEnd(new Error('stream ended')));
+      this.stream.on('close', () => this._handleEnd(new Error('stream closed')));
       this.connected = true;
+      this.subscriptionVersion += 1;
+      await this._queueSubscriptionUpdate();
       this.connectedAt = Date.now();
       this.unavailableNotified = false;
       this.onState(this.label, {
         state: 'connected',
         connectedAt: this.connectedAt,
         ammMintCount: this.ammMints.size,
-        subscriptionMode: 'isolated-pump-and-amm',
+        requestedAmmMintCount: this.ammMints.size,
+        appliedAmmMintCount: this.ammMints.size,
+        subscriptionMode: 'single-stream-atomic-filters',
       });
       return true;
     } catch (error) {
@@ -126,18 +137,8 @@ class RegionConnection {
     }
   }
 
-  async _openStream(channel) {
-    const stream = await this.client.subscribe();
-    stream.on('data', (message) => this._handleMessage(message, channel));
-    stream.on('error', (error) => this._handleEnd(error, channel));
-    stream.on('end', () => this._handleEnd(new Error(`${channel} stream ended`), channel));
-    stream.on('close', () => this._handleEnd(new Error(`${channel} stream closed`), channel));
-    return stream;
-  }
-
-  async _sendPumpSubscription() {
-    if (!this.pumpStream) return;
-    await this._writeSubscription(this.pumpStream, {
+  _subscriptionTransactions(ammMints) {
+    const transactions = {
       pumpBondingCurve: transactionFilter({
         vote: false,
         failed: false,
@@ -145,22 +146,41 @@ class RegionConnection {
         accountExclude: [],
         accountRequired: [],
       }),
-    });
-  }
-
-  async _sendAmmSubscription() {
-    if (!this.ammStream || this.ammMints.size === 0) return;
-    const ammMints = [...this.ammMints];
-    await this._writeSubscription(this.ammStream, {
-      pumpAmmLabels: transactionFilter({
+    };
+    if (ammMints.length > 0) {
+      transactions.pumpAmmLabels = transactionFilter({
         vote: false,
         failed: false,
         accountInclude: ammMints,
         accountExclude: [],
         accountRequired: [this.programs.amm],
-      }),
-    });
-    this.onState(this.label, { ammMintCount: ammMints.length });
+      });
+    }
+    return transactions;
+  }
+
+  async _queueSubscriptionUpdate() {
+    if (this.subscriptionWritePromise) return this.subscriptionWritePromise;
+    this.subscriptionWritePromise = this._drainSubscriptionUpdates()
+      .finally(() => { this.subscriptionWritePromise = null; });
+    return this.subscriptionWritePromise;
+  }
+
+  async _drainSubscriptionUpdates() {
+    while (this.connected && this.stream) {
+      const version = this.subscriptionVersion;
+      const ammMints = [...this.ammMints];
+      await this._writeSubscription(this.stream, this._subscriptionTransactions(ammMints));
+      this.appliedSubscriptionVersion = version;
+      this.lastSubscriptionWriteAt = Date.now();
+      this.onState(this.label, {
+        ammMintCount: ammMints.length,
+        appliedAmmMintCount: ammMints.length,
+        appliedSubscriptionVersion: version,
+        lastSubscriptionWriteAt: this.lastSubscriptionWriteAt,
+      });
+      if (version === this.subscriptionVersion) return;
+    }
   }
 
   async _writeSubscription(stream, transactions) {
@@ -182,31 +202,20 @@ class RegionConnection {
     });
   }
 
-  async _replaceAmmSubscription() {
-    if (this.ammMints.size === 0) {
-      if (this.ammStream) {
-        this._destroyStream(this.ammStream);
-        this.ammStream = null;
-      }
-      this.onState(this.label, { ammMintCount: 0 });
-      return;
-    }
-    if (!this.ammStream) this.ammStream = await this._openStream('amm');
-    await this._sendAmmSubscription();
-  }
-
-  _handleMessage(message, channel) {
+  _handleMessage(message) {
     if (!message?.transaction) return;
     this.lastMessageAt = Date.now();
-    this.onState(this.label, {
-      lastMessageAt: this.lastMessageAt,
-      [channel === 'pump' ? 'lastPumpMessageAt' : 'lastAmmMessageAt']: this.lastMessageAt,
-    });
+    const filters = Array.isArray(message.filters) ? message.filters : [];
+    const patch = { lastMessageAt: this.lastMessageAt };
+    if (filters.includes('pumpBondingCurve')) patch.lastPumpMessageAt = this.lastMessageAt;
+    if (filters.includes('pumpAmmLabels')) patch.lastAmmMessageAt = this.lastMessageAt;
+    if (!filters.length) patch.lastUnclassifiedMessageAt = this.lastMessageAt;
+    this.onState(this.label, patch);
     this.onTransaction(message.transaction, this.label, this.lastMessageAt);
   }
 
-  _handleEnd(error, channel) {
-    this._notifyUnavailable(error, `${channel || 'unknown'}_stream`);
+  _handleEnd(error) {
+    this._notifyUnavailable(error, 'stream');
   }
 
   _notifyUnavailable(error, phase) {
@@ -219,10 +228,9 @@ class RegionConnection {
 
   async _close() {
     this.connected = false;
-    this._destroyStream(this.pumpStream);
-    this._destroyStream(this.ammStream);
-    this.pumpStream = null;
-    this.ammStream = null;
+    this._destroyStream(this.stream);
+    this.stream = null;
+    this.subscriptionWritePromise = null;
     if (this.client) {
       try {
         if (typeof this.client.close === 'function') this.client.close();
@@ -317,14 +325,24 @@ class PumpFlowStream extends EventEmitter {
     const activeEndpoint = this.activeEndpointIndex >= 0
       ? this.config.stream.endpoints[this.activeEndpointIndex]
       : null;
+    const activeLabel = this.activeEndpointIndex >= 0
+      ? this._labelFor(this.activeEndpointIndex) : null;
+    const activeState = activeLabel ? (this.states.get(activeLabel) || {}) : {};
     return {
       ...this.metrics,
       mode: 'active-passive',
-      subscriptionMode: 'isolated-pump-and-amm',
+      subscriptionMode: 'single-stream-atomic-filters',
       activeEndpoint,
-      activeLabel: this.activeEndpointIndex >= 0 ? this._labelFor(this.activeEndpointIndex) : null,
+      activeLabel,
       dedupSize: this.seenSignatures.size,
       ammMintCount: this.ammMints.size,
+      requestedAmmMintCount: activeState.requestedAmmMintCount ?? this.ammMints.size,
+      appliedAmmMintCount: activeState.appliedAmmMintCount ?? null,
+      requestedSubscriptionVersion: activeState.requestedSubscriptionVersion ?? null,
+      appliedSubscriptionVersion: activeState.appliedSubscriptionVersion ?? null,
+      lastSubscriptionWriteAt: activeState.lastSubscriptionWriteAt ?? null,
+      lastPumpMessageAt: activeState.lastPumpMessageAt ?? null,
+      lastAmmMessageAt: activeState.lastAmmMessageAt ?? null,
       regions: this.config.stream.endpoints.map((_endpoint, index) => {
         const label = this._labelFor(index);
         return { label, ...(this.states.get(label) || {}) };

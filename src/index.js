@@ -692,13 +692,6 @@ function createRuntime(runtimeConfig = config) {
 
         const trade = store.enrichTrade(event);
         const isLegacySmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
-        const registryMonitoringSnapshot = trade.wallet
-          ? smartWalletRegistry.monitoringSnapshot(trade.wallet, trade.timestampMs) : null;
-        const isRegistryMonitoredWalletTrade = Boolean(registryMonitoringSnapshot);
-        const isRegistryVotingWalletTrade = Boolean(registryMonitoringSnapshot
-          && smartWalletRegistry.walletSnapshot(
-            trade.wallet, trade.timestampMs, registryMonitoringSnapshot,
-          ));
         const smartOpenContext = isLegacySmartWalletTrade
           ? engine.recentBuyContext(
             trade.mint,
@@ -712,6 +705,14 @@ function createRuntime(runtimeConfig = config) {
         // in-memory state here; all SQLite writes are deferred to maintenance.
         observeShadow('sameSlotDumpBackrun', () => sameSlotDumpBackrunShadow.observeTrade(trade));
         observeShadow('preEntryRugRisk', () => preEntryRugRisk.observeTrade(trade));
+        // Live signal sources and open-position management must run before
+        // observer-only Smart Wallet research. Registry lookups and research
+        // writes must never delay or suppress entry/exit decisions.
+        observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
+        observeShadow('graduationAcceleration', () => (
+          graduationAccelerationShadow.observeTrade(trade)
+        ));
+        trader.observeTrade(trade);
         observeShadow('smartWalletRegistry', () => smartWalletRegistry.observeTrade(trade));
         observeShadow('smartConsensusV2', () => (
           smartWalletConsensusFlowRunnerShadow.observeTrade(trade)
@@ -729,7 +730,6 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('cyaSlotFlow', () => cyaSlotFlowShadow.observeTrade(trade));
         observeShadow('cyaOrganicBurst', () => cyaOrganicBurstShadow.observeTrade(trade));
         observeShadow('earlyPureBuyBurst', () => earlyPureBuyBurstShadow.observeTrade(trade));
-        observeShadow('migratedDropRebound', () => migratedDropReboundShadow.observeTrade(trade));
         observeShadow('migrationContinuity', () => migrationContinuityShadow.observeTrade(trade));
         observeShadow('rangeScalper', () => rangeScalperShadow.observeTrade(trade));
         observeShadow('cyaEarlyPyramid', () => cyaEarlyPyramidShadow.observeTrade(trade));
@@ -741,9 +741,6 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('holderGrowth', () => holderGrowthShadow.observeTrade(trade));
         observeShadow('qualityLeader', () => qualityLeaderShadow.observeTrade(trade));
         observeShadow('bigWinner', () => bigWinnerShadow.observeTrade(trade));
-        observeShadow('graduationAcceleration', () => (
-          graduationAccelerationShadow.observeTrade(trade)
-        ));
         observeShadow('featureEdgeAudit', () => featureEdgeAudit.observeTrade(trade));
         observeShadow('postMigrationSurvivor', () => postMigrationSurvivor.observeTrade(trade));
         observeShadow('launchPullback', () => launchPullbackShadow.observeTrade(trade));
@@ -751,7 +748,13 @@ function createRuntime(runtimeConfig = config) {
         engine.handleTrade(trade, store.getToken(trade.mint));
         observeShadow('flowFirst', () => flowFirstShadow.observeTrade(trade));
         labeler.onTrade(trade);
-        trader.observeTrade(trade);
+        const registryMonitoringSnapshot = trade.wallet
+          ? smartWalletRegistry.monitoringSnapshot(trade.wallet, trade.timestampMs) : null;
+        const isRegistryMonitoredWalletTrade = Boolean(registryMonitoringSnapshot);
+        const isRegistryVotingWalletTrade = Boolean(registryMonitoringSnapshot
+          && smartWalletRegistry.walletSnapshot(
+            trade.wallet, trade.timestampMs, registryMonitoringSnapshot,
+          ));
         if (isLegacySmartWalletTrade || isRegistryMonitoredWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
           if (smartEvent?.inserted) {

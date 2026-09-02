@@ -142,49 +142,81 @@ async function testStaleFailover() {
   await stream.stop();
 }
 
-async function testAmmUpdatesDoNotRewritePumpStream() {
-  const pumpStream = { channel: 'pump' };
-  let ammStreamDestroyed = false;
+async function testAmmUpdatesAtomicallyPreservePumpFilter() {
+  const states = [];
   const connection = new RegionConnection({
     endpoint: LAX,
     token: 'token',
     label: 'FLOW-1',
     programs: { pump: 'pump-program', amm: 'amm-program' },
     onTransaction: () => {},
-    onState: () => {},
+    onState: (_label, patch) => states.push(patch),
     onError: () => {},
     onUnavailable: () => {},
   });
   connection.client = {};
   connection.connected = true;
-  connection.pumpStream = pumpStream;
-  connection._openStream = async (channel) => ({
-    channel,
-    removeAllListeners() {},
-    destroy() { ammStreamDestroyed = true; },
+  connection.stream = { channel: 'unified' };
+  connection._subscriptionTransactions = (mints) => ({
+    pumpBondingCurve: { accountInclude: ['pump-program'] },
+    ...(mints.length ? { pumpAmmLabels: { accountInclude: [...mints] } } : {}),
   });
-  let ammWrites = 0;
-  connection._sendAmmSubscription = async () => { ammWrites += 1; };
+  const writes = [];
+  let releaseFirstWrite;
+  const firstWriteGate = new Promise((resolve) => { releaseFirstWrite = resolve; });
+  connection._writeSubscription = async (stream, transactions) => {
+    writes.push({ stream, transactions });
+    if (writes.length === 1) await firstWriteGate;
+  };
 
-  await connection.setAmmMints(['mint-a']);
-  assert.strictEqual(connection.pumpStream, pumpStream);
-  assert.strictEqual(connection.ammStream.channel, 'amm');
-  assert.strictEqual(ammWrites, 1);
+  const first = connection.setAmmMints(['mint-a']);
+  await waitFor(() => writes.length === 1, 'first unified subscription was not written');
+  const second = connection.setAmmMints(['mint-a', 'mint-b']);
+  releaseFirstWrite();
+  await Promise.all([first, second]);
 
-  await connection.setAmmMints(['mint-a', 'mint-b']);
-  assert.strictEqual(connection.pumpStream, pumpStream);
-  assert.strictEqual(ammWrites, 2);
+  assert.strictEqual(writes.length, 2);
+  assert.strictEqual(writes[0].stream, connection.stream);
+  assert.ok(writes.every((write) => write.transactions.pumpBondingCurve));
+  assert.deepStrictEqual(
+    writes[1].transactions.pumpAmmLabels.accountInclude,
+    ['mint-a', 'mint-b'],
+  );
+  assert.strictEqual(connection.appliedSubscriptionVersion, connection.subscriptionVersion);
+  assert.strictEqual(states.at(-1).appliedAmmMintCount, 2);
 
   await connection.setAmmMints([]);
-  assert.strictEqual(connection.pumpStream, pumpStream);
-  assert.strictEqual(connection.ammStream, null);
-  assert.strictEqual(ammStreamDestroyed, true);
+  assert.strictEqual(writes.length, 3);
+  assert.ok(writes[2].transactions.pumpBondingCurve);
+  assert.strictEqual(writes[2].transactions.pumpAmmLabels, undefined);
+  assert.strictEqual(states.at(-1).appliedAmmMintCount, 0);
+}
+
+function testUnifiedFilterHealthTimestamps() {
+  const states = [];
+  let transactions = 0;
+  const connection = new RegionConnection({
+    endpoint: LAX,
+    token: 'token',
+    label: 'FLOW-1',
+    programs: { pump: 'pump-program', amm: 'amm-program' },
+    onTransaction: () => { transactions += 1; },
+    onState: (_label, patch) => states.push(patch),
+    onError: () => {},
+    onUnavailable: () => {},
+  });
+  connection._handleMessage({ transaction: {}, filters: ['pumpBondingCurve'] });
+  connection._handleMessage({ transaction: {}, filters: ['pumpAmmLabels'] });
+  assert.strictEqual(transactions, 2);
+  assert.ok(Number.isFinite(states[0].lastPumpMessageAt));
+  assert.ok(Number.isFinite(states[1].lastAmmMessageAt));
 }
 
 async function main() {
   await testDisconnectFailover();
   await testStaleFailover();
-  await testAmmUpdatesDoNotRewritePumpStream();
+  await testAmmUpdatesAtomicallyPreservePumpFilter();
+  testUnifiedFilterHealthTimestamps();
   console.log('test-flow-stream-failover: ok');
 }
 
