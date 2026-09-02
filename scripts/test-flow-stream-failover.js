@@ -142,6 +142,34 @@ async function testStaleFailover() {
   await stream.stop();
 }
 
+function testEventLoopStallDefersOnlyOneStaleCheck() {
+  const stream = new PumpFlowStream({
+    config: testConfig({ staleTimeoutMs: 20, staleCheckMs: 5 }),
+    tokenForEndpoint: () => 'token',
+  });
+  let staleCalls = 0;
+  stream.running = true;
+  stream.connection = {
+    connected: true,
+    connectedAt: 1_000,
+    lastMessageAt: 1_000,
+    markStale(staleForMs) {
+      staleCalls += 1;
+      assert.strictEqual(staleForMs, 50);
+    },
+  };
+  stream.lastWatchdogCheckAt = 1_005;
+
+  stream._checkStale(1_045);
+  assert.strictEqual(staleCalls, 0, 'a delayed event-loop tick must allow buffered data one cycle');
+  assert.strictEqual(stream.health().watchdogEventLoopDeferrals, 1);
+  assert.strictEqual(stream.health().lastWatchdogLagMs, 35);
+
+  stream._checkStale(1_050);
+  assert.strictEqual(staleCalls, 1, 'a truly stale stream must fail over on the next regular tick');
+  assert.strictEqual(stream.health().watchdogChecks, 2);
+}
+
 async function testAmmUpdatesAtomicallyPreservePumpFilter() {
   const states = [];
   const connection = new RegionConnection({
@@ -215,6 +243,7 @@ function testUnifiedFilterHealthTimestamps() {
 async function main() {
   await testDisconnectFailover();
   await testStaleFailover();
+  testEventLoopStallDefersOnlyOneStaleCheck();
   await testAmmUpdatesAtomicallyPreservePumpFilter();
   testUnifiedFilterHealthTimestamps();
   console.log('test-flow-stream-failover: ok');

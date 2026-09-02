@@ -259,6 +259,7 @@ class PumpFlowStream extends EventEmitter {
     this.failoverAttempts = 0;
     this.failoverTimer = null;
     this.watchdogTimer = null;
+    this.lastWatchdogCheckAt = null;
     this.states = new Map();
     this.seenSignatures = new Map();
     this.ammMints = new Set();
@@ -270,6 +271,11 @@ class PumpFlowStream extends EventEmitter {
       failovers: 0,
       staleFailovers: 0,
       lastTransactionAt: null,
+      watchdogChecks: 0,
+      watchdogEventLoopDeferrals: 0,
+      lastWatchdogCheckAt: null,
+      lastWatchdogLagMs: 0,
+      lastWatchdogDeferredAt: null,
     };
   }
 
@@ -297,6 +303,7 @@ class PumpFlowStream extends EventEmitter {
     this.updateTimer = null;
     this.failoverTimer = null;
     this.watchdogTimer = null;
+    this.lastWatchdogCheckAt = null;
     const connection = this.connection;
     this.connection = null;
     if (connection) await connection.stop();
@@ -343,6 +350,8 @@ class PumpFlowStream extends EventEmitter {
       lastSubscriptionWriteAt: activeState.lastSubscriptionWriteAt ?? null,
       lastPumpMessageAt: activeState.lastPumpMessageAt ?? null,
       lastAmmMessageAt: activeState.lastAmmMessageAt ?? null,
+      staleTimeoutMs: this.config.stream.staleTimeoutMs,
+      staleCheckMs: this.config.stream.staleCheckMs,
       regions: this.config.stream.endpoints.map((_endpoint, index) => {
         const label = this._labelFor(index);
         return { label, ...(this.states.get(label) || {}) };
@@ -429,15 +438,44 @@ class PumpFlowStream extends EventEmitter {
     const staleTimeoutMs = this.config.stream.staleTimeoutMs;
     const staleCheckMs = this.config.stream.staleCheckMs;
     if (!Number.isFinite(staleTimeoutMs) || staleTimeoutMs <= 0) return;
-    this.watchdogTimer = setInterval(() => {
-      const connection = this.connection;
-      if (!this.running || !connection?.connected) return;
-      const lastActivityAt = connection.lastMessageAt || connection.connectedAt;
-      if (!lastActivityAt) return;
-      const staleForMs = Date.now() - lastActivityAt;
-      if (staleForMs >= staleTimeoutMs) connection.markStale(staleForMs);
-    }, staleCheckMs);
+    this.lastWatchdogCheckAt = Date.now();
+    this.watchdogTimer = setInterval(() => this._checkStale(), staleCheckMs);
     if (this.watchdogTimer.unref) this.watchdogTimer.unref();
+  }
+
+  _checkStale(now = Date.now()) {
+    const staleTimeoutMs = this.config.stream.staleTimeoutMs;
+    const staleCheckMs = this.config.stream.staleCheckMs;
+    const previousCheckAt = this.lastWatchdogCheckAt;
+    this.lastWatchdogCheckAt = now;
+    const watchdogLagMs = Number.isFinite(previousCheckAt)
+      ? Math.max(0, now - previousCheckAt - staleCheckMs) : 0;
+    this.metrics.watchdogChecks += 1;
+    this.metrics.lastWatchdogCheckAt = now;
+    this.metrics.lastWatchdogLagMs = watchdogLagMs;
+
+    const connection = this.connection;
+    if (!this.running || !connection?.connected) return;
+    const lastActivityAt = connection.lastMessageAt || connection.connectedAt;
+    if (!lastActivityAt) return;
+    const staleForMs = now - lastActivityAt;
+    if (staleForMs < staleTimeoutMs) return;
+
+    // A long synchronous observer or dashboard query can block both gRPC data
+    // callbacks and this timer. Do not close a healthy stream on the first
+    // watchdog tick after such a pause; give the event loop one poll cycle to
+    // deliver already-buffered transactions. A genuinely stale stream still
+    // fails over on the next regular check.
+    const eventLoopDeferralThresholdMs = Math.max(
+      staleCheckMs * 2,
+      Math.floor(staleTimeoutMs / 2),
+    );
+    if (watchdogLagMs >= eventLoopDeferralThresholdMs) {
+      this.metrics.watchdogEventLoopDeferrals += 1;
+      this.metrics.lastWatchdogDeferredAt = now;
+      return;
+    }
+    connection.markStale(staleForMs);
   }
 
   _labelFor(index) {

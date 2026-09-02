@@ -872,7 +872,7 @@ Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 07:00 运行，�
 
 安装程序会删除旧版本遗留的 `cos-auto-upload-export.sh`、`export-last10h.sh` 或 `export-last24h-cos.sh` cron 项，防止旧任务每6小时重复上传过期文件；其它 cron 项不会受影响。导出、上传和验证均有独立超时与失败保护，最近一次状态写入 `data/exports/last-run.env`（`EXPORTING`、`UPLOADING`、`VERIFYING`、`DONE` 或 `FAILED`），COSCLI 卡住时不会无限占用下一次任务。
 
-部分服务器曾由 OpenClaw 临时创建 `flow-daily-export.service/timer`，其中某些旧 service 与主采集服务绑定并带有自动重启，可能在主服务重启时反复导出。标准安装器只会在 `flow-acceleration-backup.timer` 已通过校验并成功启用后，立即停止并禁用旧 service 与 timer。正式备份 service 不依赖 `flow-acceleration.service` 的生命周期，主服务重启不会再次触发导出；配置不完整时旧调度保持不变，避免迁移过程造成备份空窗。
+部分服务器曾由 OpenClaw 临时创建 `flow-daily-export.service/timer`，其中某些旧 service 与主采集服务绑定并带有自动重启，可能在主服务重启时反复导出。标准安装器只会在 `flow-acceleration-backup.timer` 已通过校验并成功启用后，立即停止、禁用并屏蔽旧 service 与 timer，防止依赖关系或人工命令再次启动仍指向旧目录的任务。正式备份 service 不依赖 `flow-acceleration.service` 的生命周期，主服务重启不会再次触发导出；配置不完整时旧调度保持不变，避免迁移过程造成备份空窗。
 
 ## 前向组合 Shadow（2026-08-17）
 

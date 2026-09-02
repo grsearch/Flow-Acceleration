@@ -956,6 +956,7 @@ class ResearchServer {
       const engine = this.engine.stats();
       const stream = this.stream.health();
       const database = this.store.healthSnapshot();
+      const migratedRebound = this.migratedDropReboundShadow?.health() || {};
       const streaming = stream.regions.some((region) => region.state === 'connected');
       const databaseReady = databaseOperational(database.writeStatus);
       response.set('Cache-Control', 'no-store');
@@ -970,6 +971,33 @@ class ResearchServer {
         databaseWriteStatus: database.writeStatus,
         databaseQueuedTradeLagMs: database.queuedTradeLagMs,
         runtime: this.runtimeIdentity,
+        stream: {
+          activeLabel: stream.activeLabel,
+          subscriptionMode: stream.subscriptionMode,
+          transactionsReceived: stream.transactionsReceived,
+          lastTransactionAt: stream.lastTransactionAt,
+          requestedAmmMintCount: stream.requestedAmmMintCount,
+          appliedAmmMintCount: stream.appliedAmmMintCount,
+          requestedSubscriptionVersion: stream.requestedSubscriptionVersion,
+          appliedSubscriptionVersion: stream.appliedSubscriptionVersion,
+          errors: stream.errors,
+          failovers: stream.failovers,
+          staleFailovers: stream.staleFailovers,
+          watchdogEventLoopDeferrals: stream.watchdogEventLoopDeferrals,
+          lastWatchdogLagMs: stream.lastWatchdogLagMs,
+        },
+        migratedDropRebound: {
+          trackedMints: migratedRebound.trackedMints,
+          pendingMigrationMints: migratedRebound.pendingMigrationMints,
+          migratedObservationMints: migratedRebound.migratedObservationMints,
+          graduationEventsObserved: migratedRebound.graduationEventsObserved,
+          migrationEventsObserved: migratedRebound.migrationEventsObserved,
+          firstAmmMigrationRecoveries: migratedRebound.firstAmmMigrationRecoveries,
+          ammTradesObserved: migratedRebound.ammTradesObserved,
+          postMigrationEligibleTrades: migratedRebound.postMigrationEligibleTrades,
+          signals: migratedRebound.signals,
+          lastAmmTradeObservedAt: migratedRebound.lastAmmTradeObservedAt,
+        },
       });
     });
 

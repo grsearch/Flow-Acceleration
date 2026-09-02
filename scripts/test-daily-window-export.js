@@ -274,6 +274,9 @@ function main() {
   assert.match(installer, /systemctl disable --now "\$LEGACY_TIMER"/);
   assert.match(installer, /systemctl disable --now "\$LEGACY_SERVICE"/);
   assert.match(installer, /systemctl stop "\$LEGACY_TIMER" "\$LEGACY_SERVICE"/);
+  assert.match(installer, /systemctl mask --now --force "\$LEGACY_TIMER" "\$LEGACY_SERVICE"/);
+  assert.match(installer, /systemctl is-enabled "\$LEGACY_TIMER"/);
+  assert.match(installer, /systemctl is-enabled "\$LEGACY_SERVICE"/);
   assert.ok(
     installer.indexOf('if [[ -z "$CONFIG_SOURCE" ]]')
       < installer.indexOf('systemctl enable --now "$CANONICAL_TIMER"'),

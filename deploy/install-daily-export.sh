@@ -211,15 +211,23 @@ fi
 # OpenClaw temporarily used flow-daily-export.* on some servers. Some copies of
 # that legacy oneshot were coupled to flow-acceleration.service and configured
 # to restart, so restarting the collector could repeatedly launch a new export.
-# Once the canonical timer is valid, stop and disable both legacy units. The
-# canonical exporter owns the same flock and can be started again explicitly.
+# Once the canonical timer is valid, stop, disable, and mask both legacy units.
+# Masking replaces stale unit files with /dev/null links, so a dependency or a
+# future manual command cannot resurrect an exporter that points at an obsolete
+# checkout or deleted database. The canonical exporter owns the same flock and
+# can be started again explicitly.
 if systemctl cat "$LEGACY_TIMER" >/dev/null 2>&1 \
   || systemctl cat "$LEGACY_SERVICE" >/dev/null 2>&1; then
   systemctl disable --now "$LEGACY_TIMER" >/dev/null 2>&1 || true
   systemctl disable --now "$LEGACY_SERVICE" >/dev/null 2>&1 || true
   systemctl stop "$LEGACY_TIMER" "$LEGACY_SERVICE" >/dev/null 2>&1 || true
   systemctl reset-failed "$LEGACY_TIMER" "$LEGACY_SERVICE" >/dev/null 2>&1 || true
-  echo "Stopped and disabled legacy export units $LEGACY_TIMER and $LEGACY_SERVICE."
+  systemctl mask --now --force "$LEGACY_TIMER" "$LEGACY_SERVICE"
+  [[ "$(systemctl is-enabled "$LEGACY_TIMER" 2>/dev/null || true)" == "masked" ]] \
+    || { echo "Failed to mask legacy unit $LEGACY_TIMER" >&2; exit 1; }
+  [[ "$(systemctl is-enabled "$LEGACY_SERVICE" 2>/dev/null || true)" == "masked" ]] \
+    || { echo "Failed to mask legacy unit $LEGACY_SERVICE" >&2; exit 1; }
+  echo "Stopped, disabled, and masked legacy export units $LEGACY_TIMER and $LEGACY_SERVICE."
 fi
 
 echo "Daily export timer installed."
