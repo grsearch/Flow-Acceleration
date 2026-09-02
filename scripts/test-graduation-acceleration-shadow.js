@@ -432,6 +432,62 @@ function testCurve80PersistenceRemainsShadowOnly() {
 
 testCurve80PersistenceRemainsShadowOnly();
 
+function testCurve80P500LiveSignalWaitsForPersistence() {
+  const store = makeStore();
+  const now = 3_500_000;
+  const settings = config();
+  settings.capacitySols = [1];
+  settings.entryProfiles = [{
+    id: 'O_C80_P500_STAIR240',
+    liveStrategyId: 'graduation_accel_o_c80_p500_stair240_live',
+    label: 'persistence live',
+    mode: 'CURVE_MILESTONE_PERSISTENCE',
+    thresholdPct: 80,
+    recentWindowMs: 5_000,
+    minCurveDeltaPct: 5,
+    minBuyers: 2,
+    maxSellTx: 0,
+    requireNoCreatorSell: true,
+    persistenceMs: 500,
+    maxPersistenceSellTx: 0,
+    maxPersistencePullbackPct: 5,
+    coreExitPct: 0,
+    capacityAwareExit: true,
+    runnerExitMode: 'TIERED_TRAILING',
+    runnerMaxHoldMs: 240_000,
+  }];
+  const liveSignals = [];
+  const suite = new GraduationAccelerationShadowSuite({
+    config: settings,
+    store,
+    now: () => now,
+    onLiveSignal: (event) => liveSignals.push(event),
+  });
+  suite.start();
+  const mint = 'curve80-p500-live';
+  suite.onCreate({ mint, symbol: 'P500', creator: 'creator-p500', createdAt: now });
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 100, curvePct: 20, wallet: 'p500-buyer-0',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 1_000, curvePct: 80, wallet: 'p500-buyer-1',
+  }));
+  assert.strictEqual(liveSignals.length, 0,
+    'threshold touch must not emit before the 500ms persistence check');
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 1_500, curvePct: 82, wallet: 'p500-buyer-2',
+  }));
+  assert.strictEqual(liveSignals.length, 1);
+  assert.strictEqual(
+    liveSignals[0].strategyId,
+    'graduation_accel_o_c80_p500_stair240_live',
+  );
+  assert.ok(liveSignals[0].features.persistenceMs >= 500);
+  store.close();
+}
+
+testCurve80P500LiveSignalWaitsForPersistence();
+
 function testEarlyCurveAndPostMigrationHandoffRemainShadowOnly() {
   {
     const store = makeStore();

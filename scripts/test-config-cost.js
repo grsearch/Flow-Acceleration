@@ -336,10 +336,12 @@ assert.deepStrictEqual(
     .map((strategy) => strategy.code),
   [
     'POST-GE30-R23-F2-G2-XLEG',
+    'GRT-R23-F3-V2-XLEG',
     'POST-GD25-35-X8',
     'O90-M5-STAIR120',
     'QL-STRICT-GUARD',
     'O-C80-D5-B2-S0-NC',
+    'O-C80-P500-STAIR240',
   ],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
@@ -989,9 +991,17 @@ assert.deepStrictEqual(
     .find((profile) => profile.id === 'GE30_R23_F3_EXEC').positionSols,
   [0.05, 0.1, 0.25, 0.5, 1],
 );
-assert.ok(config.graduationAccelerationShadow.entryProfiles
-  .filter((profile) => profile.id.startsWith('O_C80_P'))
-  .every((profile) => !profile.liveStrategyId && profile.capacityAwareExit === true));
+const persistenceGraduationProfiles = config.graduationAccelerationShadow.entryProfiles
+  .filter((profile) => profile.id.startsWith('O_C80_P'));
+assert.ok(persistenceGraduationProfiles.every((profile) => profile.capacityAwareExit === true));
+assert.deepStrictEqual(
+  persistenceGraduationProfiles.filter((profile) => profile.liveStrategyId)
+    .map((profile) => [profile.id, profile.liveStrategyId]),
+  [[
+    'O_C80_P500_STAIR240',
+    'graduation_accel_o_c80_p500_stair240_live',
+  ]],
+);
 assert.ok(config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('O90_') || profile.id === 'O_C80_D5_B2_S0_NC')
   .every((profile) => profile.capacityAwareExit === true));

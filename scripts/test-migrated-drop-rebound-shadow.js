@@ -1040,6 +1040,26 @@ function testLiveSignalCapacityGate() {
     'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live');
   assert.strictEqual(emitted[0].features.sourceShadowCohortId,
     'POST_GE30_D25_32_R24_F1_EXEC1_V2_R2_H15_0_1SOL');
+
+  const grtProfile = {
+    id: 'GRT_R23_F3_V2',
+    liveExitStrategies: {
+      GRT_F3_XLEG_V2: 'migrated_grt_r23_f3_v2_xleg_live',
+    },
+  };
+  suite._emitOpenedLiveSignal({
+    ...position,
+    episodeId: 'grt-f3-v2-episode',
+    cohortId: 'POST_GRT_R23_F3_V2_GRT_F3_XLEG_V2',
+    exitProfileId: 'GRT_F3_XLEG_V2',
+    positionSol: 1,
+  }, grtProfile, tradeRow, 1);
+  assert.strictEqual(emitted.length, 2);
+  assert.strictEqual(emitted[1].strategyId, 'migrated_grt_r23_f3_v2_xleg_live');
+  assert.strictEqual(
+    emitted[1].features.sourceShadowCohortId,
+    'POST_GRT_R23_F3_V2_GRT_F3_XLEG_V2',
+  );
 }
 
 testLiveSignalCapacityGate();

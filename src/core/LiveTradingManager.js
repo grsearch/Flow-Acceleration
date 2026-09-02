@@ -228,8 +228,11 @@ class LiveTradingManager {
         position.graduatedAt = Number(token?.graduated_at) || null;
         const lastSell = this.store.latestLiveOrderForPositionSide(position.id, 'SELL');
         const partialSell = this.store.confirmedPartialLiveOrderForPosition(position.id);
-        position.coreExited = Boolean(partialSell);
-        position.coreExitAttempted = Boolean(lastSell);
+        const zeroCoreGraduationRunner = position.strategy.exitMode === 'GRADUATION_CORE_RUNNER'
+          && Number(position.strategy.coreExitPct) <= 0
+          && row.exit_reason === 'GRADUATION_CORE_0_BYPASS';
+        position.coreExited = Boolean(partialSell) || zeroCoreGraduationRunner;
+        position.coreExitAttempted = Boolean(lastSell) || zeroCoreGraduationRunner;
         if (position.coreExited) position.highestPrice = Number(row.highest_price) || 0;
       }
       this._addPosition(position);
@@ -580,6 +583,10 @@ class LiveTradingManager {
           }
         }
         if (!position.coreExited) {
+          if (Number(strategy.coreExitPct) <= 0) {
+            this._activateZeroCoreGraduationRunner(position, observedTrade.price);
+            return;
+          }
           this._requestCoreExit(position);
           return;
         }
@@ -1773,6 +1780,7 @@ class LiveTradingManager {
       || position.coreExited || position.coreExitAttempted
       || !['GRADUATION_CORE_RUNNER', 'PBR_CORE_RUNNER', 'CORE_RUNNER']
         .includes(strategy?.exitMode)
+      || !(Number(strategy?.coreExitPct) > 0)
       || this.coreExitPending.has(position.id)) return;
     position.coreExitAttempted = true;
     this.coreExitPending.add(position.id);
@@ -1783,6 +1791,24 @@ class LiveTradingManager {
       .catch((error) => this._rememberError(error))
       .finally(() => this.coreExitPending.delete(position.id));
     this._track(promise);
+  }
+
+  _activateZeroCoreGraduationRunner(position, price) {
+    const strategy = position?.strategy || this.strategies.get(position?.strategyId);
+    if (!position || position.status !== 'OPEN' || position.coreExited
+      || strategy?.exitMode !== 'GRADUATION_CORE_RUNNER'
+      || Number(strategy.coreExitPct) > 0 || !(position.graduatedAt > 0)
+      || !(Number(price) > 0)) return false;
+    position.coreExited = true;
+    position.coreExitAttempted = true;
+    position.highestPrice = Number(price);
+    position.lastObservedPrice = Number(price);
+    this.store.updateLivePosition(position.id, {
+      highestPrice: position.highestPrice,
+      exitReason: 'GRADUATION_CORE_0_BYPASS',
+      exitError: null,
+    });
+    return true;
   }
 
   async _takeGraduationCore(position) {

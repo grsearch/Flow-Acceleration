@@ -402,6 +402,12 @@ async function main() {
     const ge30V2Exec01 = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live'
     ));
+    const grtF3V2 = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'migrated_grt_r23_f3_v2_xleg_live'
+    ));
+    const oC80P500 = liveTrading.runtime.strategies.find((strategy) => (
+      strategy.id === 'graduation_accel_o_c80_p500_stair240_live'
+    ));
     const retiredV3 = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'post_gd20_35_r1_5_5_age60_xleg_v3'
     ));
@@ -412,6 +418,14 @@ async function main() {
     assert.strictEqual(continuity.code, 'M-C5-E120');
     assert.strictEqual(ge30V2Exec01.entryEnabled, false);
     assert.strictEqual(ge30V2Exec01.code, 'G-V2-EXEC01-R2-H15');
+    assert.strictEqual(grtF3V2.entryEnabled, true);
+    assert.strictEqual(grtF3V2.positionSizeSol, 0.1);
+    assert.strictEqual(grtF3V2.maxEntriesPerMint, 3);
+    assert.strictEqual(grtF3V2.exitMode, 'LEGACY');
+    assert.strictEqual(oC80P500.entryEnabled, true);
+    assert.strictEqual(oC80P500.positionSizeSol, 0.1);
+    assert.strictEqual(oC80P500.coreExitPct, 0);
+    assert.strictEqual(oC80P500.maxPostGraduationHoldMs, 240_000);
     assert.strictEqual(graduationAccel.entryEnabled, true);
     assert.strictEqual(graduationAccel.code, 'O-C80-D5-B2-S0-NC');
     assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
@@ -637,6 +651,12 @@ async function main() {
       ],
     );
     assert.deepStrictEqual(
+      migratedRebound.runtime.entryProfiles.find(
+        (profile) => profile.id === 'GRT_R23_F3_V2',
+      ).liveExitStrategies,
+      { GRT_F3_XLEG_V2: 'migrated_grt_r23_f3_v2_xleg_live' },
+    );
+    assert.deepStrictEqual(
       migratedRebound.runtime.entryProfiles
         .filter((profile) => profile.id.startsWith('GD25_35_RUG_GUARD'))
         .map((profile) => [profile.id, profile.requireHealthyRugRisk]),
@@ -847,6 +867,12 @@ async function main() {
         ['O90_M5_X120', 90, 25, 'FIXED_HOLD', 120_000],
         ['O90_M5_STAIR120', 90, 25, 'TIERED_TRAILING', 120_000],
       ],
+    );
+    assert.strictEqual(
+      graduationAcceleration.runtime.entryProfiles.find(
+        (profile) => profile.id === 'O_C80_P500_STAIR240',
+      ).liveStrategyId,
+      'graduation_accel_o_c80_p500_stair240_live',
     );
     assert.deepStrictEqual(
       graduationAcceleration.runtime.entryProfiles

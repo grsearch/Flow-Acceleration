@@ -886,6 +886,58 @@ const config = {
         sourceShadowCohortId: 'POST_GE30_R23_F2_ONLY_G2_XLEG',
       },
       {
+        id: 'migrated_grt_r23_f3_v2_xleg_live',
+        code: 'GRT-R23-F3-V2-XLEG',
+        label: 'Lifecycle Drop/Rebound G · GRT前三次机会前向 XLEG',
+        ruleVersion: 'migrated_grt_r23_f3_v2_xleg_live_v1',
+        signalSource: 'MIGRATED_GRT_R23_F3_V2_XLEG',
+        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_ENABLED', true),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_AMM',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        entryQuoteRefreshRetryCount: integerEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_QUOTE_REFRESH_RETRY_COUNT',
+          1,
+          { min: 0, max: 1 },
+        ),
+        entryQuoteRefreshMaxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_QUOTE_REFRESH_MAX_SIGNAL_AGE_MS',
+          2_500,
+          { min: 100, max: 10_000 },
+        ),
+        maxEntriesPerMint: 3,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 100 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'LEGACY',
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: 6_000,
+        maxHoldMs: 15_000,
+        sourceShadowCohortId: 'POST_GRT_R23_F3_V2_GRT_F3_XLEG_V2',
+      },
+      {
         id: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
         code: 'G-V2-EXEC01-R2-H15',
         label: 'Lifecycle Drop/Rebound G · V2可执行0.1 SOL / R2-H15（停止新开仓）',
@@ -1355,6 +1407,57 @@ const config = {
           { activationPct: 300, drawdownPct: 30 },
         ],
         sourceShadowCohortId: 'O_C80_D5_B2_S0_NC:1SOL',
+      },
+      {
+        id: 'graduation_accel_o_c80_p500_stair240_live',
+        code: 'O-C80-P500-STAIR240',
+        label: 'Graduation Acceleration O · Curve80持续500ms / 全仓阶梯尾仓240秒',
+        ruleVersion: 'graduation_accel_o_c80_p500_stair240_live_v1',
+        signalSource: 'GRADUATION_ACCEL_O_C80_P500_STAIR240',
+        enabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_ENABLED',
+          true,
+        ),
+        entryEnabled: booleanEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_ENTRY_ENABLED',
+          true,
+        ),
+        market: 'PUMP_BONDING_CURVE',
+        positionSizeSol: livePositionEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_POSITION_SOL',
+          0.1,
+        ),
+        maxSignalAgeMs: integerEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_MAX_SIGNAL_AGE_MS',
+          1_500,
+          { min: 100 },
+        ),
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_MAX_ENTRY_JUMP_PCT',
+          15,
+          { min: 0, max: 1_000 },
+        ),
+        maxEntrySelfImpactPct: numberEnv(
+          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_MAX_ENTRY_SELF_IMPACT_PCT',
+          10,
+          { min: 0, max: 100 },
+        ),
+        exitMode: 'GRADUATION_CORE_RUNNER',
+        hardStopPct: 30,
+        coreExitPct: 0,
+        maxPreGraduationHoldMs: 5 * 60_000,
+        maxPostGraduationHoldMs: 240_000,
+        maxHoldMs: 5 * 60_000,
+        trailingTiers: [
+          { activationPct: 20, drawdownPct: 10 },
+          { activationPct: 40, drawdownPct: 15 },
+          { activationPct: 80, drawdownPct: 20 },
+          { activationPct: 150, drawdownPct: 25 },
+          { activationPct: 300, drawdownPct: 30 },
+        ],
+        sourceShadowCohortId: 'O_C80_P500_STAIR240:1SOL',
       },
       {
         id: 'graduation_accel_o_c80_ho500_x60_recovery_live',
@@ -5439,6 +5542,9 @@ const config = {
         maxLifecycleAgeMs: 30_000,
         maxSignalsPerMint: 3,
         exitProfileIds: ['GRT_F3_XLEG_V2'],
+        liveExitStrategies: {
+          GRT_F3_XLEG_V2: 'migrated_grt_r23_f3_v2_xleg_live',
+        },
       },
       {
         id: 'GRT_R23_F2_ONLY_V2',
@@ -7199,6 +7305,9 @@ const config = {
         ['O_C80_P1000_STAIR240', 1_000, 'TIERED_TRAILING', 240_000],
       ].map(([id, persistenceMs, runnerExitMode, runnerMaxHoldMs]) => ({
         id,
+        liveStrategyId: id === 'O_C80_P500_STAIR240'
+          ? 'graduation_accel_o_c80_p500_stair240_live'
+          : null,
         label: `${id} · Curve80持续确认 / 1 SOL可执行退出`,
         mode: 'CURVE_MILESTONE_PERSISTENCE',
         thresholdPct: 80,

@@ -30,6 +30,67 @@ function runtimeConfig(strategies) {
   };
 }
 
+async function testZeroCoreGraduationRunnerRestores() {
+  let now = 9_000_000;
+  const store = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 100,
+  }, { configuredTradingCostPct: 0 });
+  const strategy = {
+    id: 'graduation_accel_o_c80_p500_stair240_live', enabled: true, entryEnabled: true,
+    signalSource: 'GRADUATION_ACCEL_O_C80_P500_STAIR240', ruleVersion: 'p500-restore-test',
+    market: 'PUMP_BONDING_CURVE', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+    maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+    maxEntrySelfImpactPct: 10, exitMode: 'GRADUATION_CORE_RUNNER',
+    hardStopPct: 30, coreExitPct: 0,
+    maxPreGraduationHoldMs: 300_000, maxPostGraduationHoldMs: 240_000,
+    maxHoldMs: 300_000,
+    trailingTiers: [
+      { activationPct: 20, drawdownPct: 10 },
+      { activationPct: 40, drawdownPct: 15 },
+    ],
+  };
+  let manager = new LiveTradingManager({
+    config: runtimeConfig([strategy]), store, now: () => now,
+  });
+  manager.start();
+  const mint = 'p500-restart-mint';
+  store.recordCreate({
+    mint, symbol: 'P5R', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategy.id, episodeId: 'p500-restart:1', mint,
+    symbol: 'P5R', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+  });
+  await waitForQueue();
+  const graduatedAt = now + 1_000;
+  store.recordComplete({ mint, completedAt: graduatedAt, timestampMs: graduatedAt });
+  manager.onGraduated(store.getToken(mint));
+  now = graduatedAt + 200;
+  manager.observeTrade({ mint, market: 'PUMP_AMM', price: 1.2, timestampMs: now });
+  await waitForQueue();
+  await manager.stop();
+
+  manager = new LiveTradingManager({
+    config: runtimeConfig([strategy]), store, now: () => now,
+  });
+  manager.start();
+  now += 100;
+  manager.observeTrade({ mint, market: 'PUMP_AMM', price: 1.6, timestampMs: now });
+  now += 100;
+  manager.observeTrade({ mint, market: 'PUMP_AMM', price: 1.34, timestampMs: now });
+  await waitForQueue();
+  const dashboard = store.liveTradingDashboard({ strategyId: strategy.id });
+  assert.strictEqual(dashboard.positions[0].status, 'CLOSED');
+  assert.strictEqual(dashboard.positions[0].exit_reason, 'RUNNER_STAIR_T40_D15');
+  assert.ok(!dashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'));
+  await manager.stop();
+  store.close();
+}
+
 async function main() {
   let now = 1_000_000;
   const store = new ResearchStore({
@@ -140,6 +201,31 @@ async function main() {
         { activationPct: 100, drawdownPct: 25 },
       ],
       maxHoldMs: 120_000,
+    },
+    {
+      id: 'migrated_grt_r23_f3_v2_xleg_live', enabled: true, entryEnabled: true,
+      signalSource: 'MIGRATED_GRT_R23_F3_V2_XLEG', ruleVersion: 'grt-f3-live-test',
+      market: 'PUMP_AMM', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 3, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+      maxEntrySelfImpactPct: 10, exitMode: 'LEGACY',
+      trailingActivationPct: 8, trailingStopPct: 3,
+      fastTakeProfitPct: 18, fastTakeProfitWindowMs: 5_000,
+      lossCheckAtMs: 6_000, maxHoldMs: 15_000,
+    },
+    {
+      id: 'graduation_accel_o_c80_p500_stair240_live', enabled: true, entryEnabled: true,
+      signalSource: 'GRADUATION_ACCEL_O_C80_P500_STAIR240', ruleVersion: 'p500-live-test',
+      market: 'PUMP_BONDING_CURVE', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+      maxEntrySelfImpactPct: 10, exitMode: 'GRADUATION_CORE_RUNNER',
+      hardStopPct: 30, coreExitPct: 0,
+      maxPreGraduationHoldMs: 300_000, maxPostGraduationHoldMs: 240_000,
+      maxHoldMs: 300_000,
+      trailingTiers: [
+        { activationPct: 20, drawdownPct: 10 },
+        { activationPct: 40, drawdownPct: 15 },
+        { activationPct: 80, drawdownPct: 20 },
+      ],
     },
   ];
   const manager = new LiveTradingManager({
@@ -483,6 +569,66 @@ async function main() {
   assert.strictEqual(cobFDashboard.positions[0].status, 'CLOSED');
   assert.strictEqual(cobFDashboard.positions[0].exit_reason, 'CORE_RUNNER_TRAIL_D20');
 
+  const grtMint = 'grt-f3-v2-live-mint';
+  store.recordCreate({
+    mint: grtMint, symbol: 'GRT', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  store.recordComplete({ mint: grtMint, completedAt: now - 5_000, timestampMs: now - 5_000 });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[9].id, episodeId: 'grt-f3:1', mint: grtMint,
+    symbol: 'GRT', price: 1, market: 'PUMP_AMM',
+    timestampMs: now, receivedAtMs: now,
+    features: { entryProfileId: 'GRT_R23_F3_V2', exitProfileId: 'GRT_F3_XLEG_V2' },
+  });
+  await waitForQueue();
+  let grtDashboard = store.liveTradingDashboard({ strategyId: strategies[9].id });
+  assert.strictEqual(grtDashboard.positions[0].position_sol, 0.1);
+  now += 100;
+  manager.observeTrade({ mint: grtMint, market: 'PUMP_AMM', price: 1.2, timestampMs: now });
+  await waitForQueue();
+  grtDashboard = store.liveTradingDashboard({ strategyId: strategies[9].id });
+  assert.strictEqual(grtDashboard.positions[0].status, 'CLOSED');
+  assert.strictEqual(grtDashboard.positions[0].exit_reason, 'FAST_TAKE_PROFIT');
+
+  const p500Mint = 'o-c80-p500-live-mint';
+  store.recordCreate({
+    mint: p500Mint, symbol: 'P500', name: null, uri: null, bondingCurve: null,
+    creator: null, createdAt: now - 20_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[10].id, episodeId: 'p500:1', mint: p500Mint,
+    symbol: 'P500', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+    features: { entryProfileId: 'O_C80_P500_STAIR240', persistenceMs: 500 },
+  });
+  await waitForQueue();
+  let p500Dashboard = store.liveTradingDashboard({ strategyId: strategies[10].id });
+  assert.strictEqual(p500Dashboard.positions[0].position_sol, 0.1);
+  const p500GraduatedAt = now + 1_000;
+  store.recordComplete({
+    mint: p500Mint, completedAt: p500GraduatedAt, timestampMs: p500GraduatedAt,
+  });
+  manager.onGraduated(store.getToken(p500Mint));
+  now = p500GraduatedAt + 200;
+  manager.observeTrade({ mint: p500Mint, market: 'PUMP_AMM', price: 1.2, timestampMs: now });
+  await waitForQueue();
+  p500Dashboard = store.liveTradingDashboard({ strategyId: strategies[10].id });
+  assert.strictEqual(p500Dashboard.positions[0].status, 'OPEN');
+  assert.strictEqual(p500Dashboard.positions[0].exit_reason, 'GRADUATION_CORE_0_BYPASS');
+  assert.ok(!p500Dashboard.orders.some((order) => order.status === 'CONFIRMED_PARTIAL'),
+    '0% core must enter the runner without submitting an empty partial sell');
+  now += 100;
+  manager.observeTrade({ mint: p500Mint, market: 'PUMP_AMM', price: 1.6, timestampMs: now });
+  now += 100;
+  manager.observeTrade({ mint: p500Mint, market: 'PUMP_AMM', price: 1.34, timestampMs: now });
+  await waitForQueue();
+  p500Dashboard = store.liveTradingDashboard({ strategyId: strategies[10].id });
+  assert.strictEqual(p500Dashboard.positions[0].status, 'CLOSED');
+  assert.strictEqual(p500Dashboard.positions[0].exit_reason, 'RUNNER_STAIR_T40_D15');
+
   const taxonomyStrategyId = 'entry_failure_taxonomy_test';
   const migrated = store.createLivePosition({
     strategyId: taxonomyStrategyId, mint: 'taxonomy-migrated', mode: 'LIVE',
@@ -523,6 +669,7 @@ async function main() {
 
   await manager.stop();
   store.close();
+  await testZeroCoreGraduationRunnerRestores();
   console.log('test-live-shadow-promotion: ok');
 }
 
