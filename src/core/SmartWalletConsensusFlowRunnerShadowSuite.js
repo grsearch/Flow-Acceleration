@@ -323,13 +323,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     };
   }
 
-  onSmartWalletEvent(event, { replay = false } = {}) {
+  onSmartWalletEvent(event, { replay = false, walletSnapshot = null } = {}) {
     if (!this.config.enabled || replay || !event?.mint || !event?.wallet
       || String(event.side || '').toUpperCase() !== 'BUY'
       || String(event.positionPhase || event.position_phase || '').toUpperCase() !== 'OPEN') return [];
     const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
     const price = tradePrice(event);
-    const snapshot = this.registry.walletSnapshot(event.wallet, timestampMs);
+    const snapshot = walletSnapshot || this.registry.walletSnapshot(event.wallet, timestampMs);
     if (!(timestampMs > 0) || !(price > 0) || !snapshot) return [];
     this.metrics.observedSmartOpens += 1;
     const state = this._state(event.mint);

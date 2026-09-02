@@ -2640,6 +2640,10 @@ const config = {
       'FLOW_SMART_WALLET_GRADE_DIRTY_REFRESH_MIN_MS', 5 * 60_000,
       { min: 60_000, max: 24 * 60 * 60_000 },
     ),
+    clusterCountCacheMs: integerEnv(
+      'FLOW_SMART_WALLET_CLUSTER_COUNT_CACHE_MS', 5_000,
+      { min: 100, max: 60_000 },
+    ),
     historyBackfillEnabled: booleanEnv(
       'FLOW_SMART_WALLET_HISTORY_BACKFILL_ENABLED', true,
     ),

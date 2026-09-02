@@ -751,22 +751,27 @@ function createRuntime(runtimeConfig = config) {
         const registryMonitoringSnapshot = trade.wallet
           ? smartWalletRegistry.monitoringSnapshot(trade.wallet, trade.timestampMs) : null;
         const isRegistryMonitoredWalletTrade = Boolean(registryMonitoringSnapshot);
-        const isRegistryVotingWalletTrade = Boolean(registryMonitoringSnapshot
-          && smartWalletRegistry.walletSnapshot(
+        const registryVotingSnapshot = registryMonitoringSnapshot
+          ? smartWalletRegistry.walletSnapshot(
             trade.wallet, trade.timestampMs, registryMonitoringSnapshot,
-          ));
+          ) : null;
+        const isRegistryVotingWalletTrade = Boolean(registryVotingSnapshot);
         if (isLegacySmartWalletTrade || isRegistryMonitoredWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
           if (smartEvent?.inserted) {
             const normalizedSmartEvent = { ...trade, ...smartEvent, id: smartEvent.id };
             if (isRegistryMonitoredWalletTrade) {
               observeShadow('smartWalletRegistryEvent', () => (
-                smartWalletRegistry.onSmartWalletEvent(normalizedSmartEvent)
+                smartWalletRegistry.onSmartWalletEvent(
+                  normalizedSmartEvent, registryMonitoringSnapshot,
+                )
               ));
             }
             if (isRegistryVotingWalletTrade) {
               observeShadow('smartConsensusV2Event', () => (
-                smartWalletConsensusFlowRunnerShadow.onSmartWalletEvent(normalizedSmartEvent)
+                smartWalletConsensusFlowRunnerShadow.onSmartWalletEvent(
+                  normalizedSmartEvent, { walletSnapshot: registryVotingSnapshot },
+                )
               ));
             }
             if (isLegacySmartWalletTrade) {

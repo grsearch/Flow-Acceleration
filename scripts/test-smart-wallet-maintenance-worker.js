@@ -88,6 +88,21 @@ async function main() {
     assert.strictEqual(row.wallet, 'maintenance-worker-wallet');
     assert.ok(JSON.parse(row.metrics_json).candidateGrades,
       'the background grade refresh must persist its result');
+
+    const exactPnlSnapshot = registry._actualPnlSnapshot;
+    registry._actualPnlSnapshot = () => {
+      throw new Error('production cluster counts must not scan 60d PnL on the main thread');
+    };
+    assert.deepStrictEqual(registry.activeClusterCounts(now), {
+      eligible: 0,
+      selectionA: 0,
+    });
+    assert.deepStrictEqual(registry.activeClusterCounts(now + 1), {
+      eligible: 0,
+      selectionA: 0,
+    });
+    registry._actualPnlSnapshot = exactPnlSnapshot;
+    assert.strictEqual(registry.maintenanceHealth().clusterCountCached, true);
   } finally {
     registry.stop();
     store.close();

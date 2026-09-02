@@ -96,6 +96,7 @@ class SmartWalletRegistry {
     this.maintenancePendingTypes = new Set();
     this.maintenanceWorker = null;
     this.maintenanceWorkerTimer = null;
+    this.activeClusterCountsCache = null;
     this.stopping = false;
     this.metrics = {
       discovered: 0,
@@ -1202,6 +1203,10 @@ class SmartWalletRegistry {
     );
   }
 
+  _clusterCountCacheMs() {
+    return Math.max(100, finite(this.config.clusterCountCacheMs, 5_000));
+  }
+
   _queueMaintenance(type, at = this.now(), options = {}) {
     if (!this.config.enabled || this.stopping || this.maintenancePendingTypes.has(type)) {
       return false;
@@ -1261,6 +1266,7 @@ class SmartWalletRegistry {
       if (message?.ok) {
         this.metrics.maintenanceRunsCompleted += 1;
         if (task.type === 'CLUSTERS') {
+          this.activeClusterCountsCache = null;
           this.lastClusterRefreshAt = task.at;
           this.metrics.clusterRefreshes += 1;
           this.metrics.clusterConfirmations += finite(
@@ -1270,6 +1276,7 @@ class SmartWalletRegistry {
           this.metrics.clusterRelatedLinks = finite(message.value?.relatedLinks, 0);
         } else if (task.type === 'GRADES') {
           this.pnlSnapshotCache.clear();
+          this.activeClusterCountsCache = null;
           this.metrics.gradeRefreshes += 1;
           this.metrics.lastGradeRefreshAt = task.at;
         }
@@ -1388,6 +1395,7 @@ class SmartWalletRegistry {
     this.labels.clear();
     this.labelsByMint.clear();
     this.pnlSnapshotCache.clear();
+    this.activeClusterCountsCache = null;
     this.ageChecks.clear();
     this.historyBackfills.clear();
   }
@@ -1634,7 +1642,10 @@ class SmartWalletRegistry {
     const updated = this.store.db.prepare(
       'SELECT * FROM smart_wallet_registry WHERE wallet=?',
     ).get(wallet);
-    if (wasEligible !== this._ageEligibleRow(updated, at)) this.gradeRefreshRequested = true;
+    if (wasEligible !== this._ageEligibleRow(updated, at)) {
+      this.gradeRefreshRequested = true;
+      this.activeClusterCountsCache = null;
+    }
     this.metrics.ageChecksCompleted += 1;
     this.metrics.lastAgeCheckAt = at;
     this.metrics.lastActionAt = at;
@@ -1721,6 +1732,7 @@ class SmartWalletRegistry {
       this.insertSeed.run({ wallet, seedMint, source, discoveredAt, createdAt: now });
     }
     if (result.changes) {
+      this.activeClusterCountsCache = null;
       this.metrics.discovered += 1;
       this.metrics.lastActionAt = now;
       this._enqueueHistoryBackfills(now);
@@ -2041,6 +2053,7 @@ class SmartWalletRegistry {
       createdAt: existing?.created_at || now,
       updatedAt: now,
     });
+    this.activeClusterCountsCache = null;
     return true;
   }
 
@@ -2074,6 +2087,7 @@ class SmartWalletRegistry {
       current.selection_grade, selectionGrade, current.copy_grade, copyGrade,
       current.holding_grade, holdingGrade, reason, JSON.stringify(metrics || {}), version, now,
     );
+    this.activeClusterCountsCache = null;
     return true;
   }
 
@@ -2085,6 +2099,7 @@ class SmartWalletRegistry {
       UPDATE smart_wallet_registry SET status='QUARANTINED', risk_status=?,
         registry_version=?, updated_at=? WHERE wallet=?
     `).run(reason, version, at, wallet);
+    this.activeClusterCountsCache = null;
     return true;
   }
 
@@ -2149,7 +2164,7 @@ class SmartWalletRegistry {
     };
   }
 
-  activeClusterCounts(at = this.now()) {
+  _activeClusterCountsExact(at = this.now()) {
     const rows = this.store.db.prepare(`
       SELECT r.*,
         c.cluster_id, c.confidence cluster_confidence
@@ -2170,6 +2185,60 @@ class SmartWalletRegistry {
     return { eligible: eligible.size, selectionA: selectionA.size };
   }
 
+  _votingEligibleFromGradeSnapshot(row, at = this.now()) {
+    if (!row || row.effective_from > at || row.risk_status !== 'OK'
+      || !['PROBATION', 'ACTIVE'].includes(row.status)
+      || !this._ageEligibleRow(row, at)) return false;
+    const metrics = parseJson(row.metrics_json, {});
+    const pnlEligible = this.config.pnlGateEnabled === false
+      || metrics.pnlEligible === true
+      || (metrics.pnlEligible == null && row.status === 'ACTIVE');
+    if (!pnlEligible) return false;
+    if (row.source === 'CONFIG_SEED') return true;
+    const longTermElite = metrics.longTermElite === true;
+    if (!longTermElite
+      && this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') return false;
+    if (this.config.autoVoteRequiresKnownCluster !== false
+      && (!row.cluster_id || row.cluster_confidence === 'UNKNOWN')) return false;
+    return true;
+  }
+
+  _activeClusterCountsFromGradeSnapshots(at = this.now()) {
+    const rows = this.store.db.prepare(`
+      SELECT r.wallet, r.status, r.selection_grade, r.risk_status, r.source,
+        r.effective_from, r.age_status, r.first_chain_activity_at, r.metrics_json,
+        c.cluster_id, c.confidence cluster_confidence
+      FROM smart_wallet_registry r
+      LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
+        AND c.valid_from<=? AND (c.valid_to IS NULL OR c.valid_to>?)
+      WHERE r.effective_from<=? AND r.status IN ('PROBATION','ACTIVE')
+        AND r.risk_status='OK'
+    `).all(at, at, at);
+    const eligible = new Set();
+    const selectionA = new Set();
+    for (const row of rows) {
+      if (!this._votingEligibleFromGradeSnapshot(row, at)) continue;
+      const clusterId = row.cluster_id || row.wallet;
+      eligible.add(clusterId);
+      if (row.selection_grade === 'S_A') selectionA.add(clusterId);
+    }
+    return { eligible: eligible.size, selectionA: selectionA.size };
+  }
+
+  activeClusterCounts(at = this.now()) {
+    // Test/in-memory stores retain exact synchronous behavior. Production uses
+    // the last completed background grade snapshot for the pool-size threshold;
+    // each wallet's actual vote is still checked against current realized PnL.
+    if (!this._maintenanceWorkerEnabled()) return this._activeClusterCountsExact(at);
+    const cacheBucket = Math.floor(at / this._clusterCountCacheMs());
+    if (this.activeClusterCountsCache?.bucket === cacheBucket) {
+      return { ...this.activeClusterCountsCache.value };
+    }
+    const value = this._activeClusterCountsFromGradeSnapshots(at);
+    this.activeClusterCountsCache = { bucket: cacheBucket, value };
+    return { ...value };
+  }
+
   trackedWallets(at = this.now()) {
     return this.store.db.prepare(`
       SELECT * FROM smart_wallet_registry
@@ -2182,13 +2251,13 @@ class SmartWalletRegistry {
     return this.trackedWallets(at).filter((wallet) => Boolean(this.walletSnapshot(wallet, at)));
   }
 
-  onSmartWalletEvent(event) {
+  onSmartWalletEvent(event, observedSnapshot = null) {
     if (!this.config.enabled || !event?.wallet || !event?.mint) return null;
     const signalAt = finite(event.timestampMs ?? event.timestamp_ms);
     if (!(signalAt > 0)) return null;
     // Candidate wallets are labelled from discovery time, but walletSnapshot()
     // keeps them out of consensus until they are graded and clustered.
-    const snapshot = this.monitoringSnapshot(event.wallet, signalAt);
+    const snapshot = observedSnapshot || this.monitoringSnapshot(event.wallet, signalAt);
     if (!snapshot) return null;
     this.store.db.prepare(`
       UPDATE smart_wallet_registry SET last_seen_at=?, updated_at=? WHERE wallet=?
@@ -2703,6 +2772,10 @@ class SmartWalletRegistry {
       queued: this.maintenanceQueue.map((task) => task.type),
       pendingTypes: [...this.maintenancePendingTypes],
       gradeRefreshRequested: this.gradeRefreshRequested,
+      clusterCountMode: this._maintenanceWorkerEnabled()
+        ? 'BACKGROUND_GRADE_SNAPSHOT' : 'EXACT_INLINE',
+      clusterCountCacheMs: this._clusterCountCacheMs(),
+      clusterCountCached: Boolean(this.activeClusterCountsCache),
       lastClusterRefreshAt: this.lastClusterRefreshAt || null,
       lastGradeMaintenanceRequestedAt: this.lastGradeMaintenanceRequestedAt || null,
       maintenanceRunsStarted: this.metrics.maintenanceRunsStarted,
@@ -2764,6 +2837,9 @@ class SmartWalletRegistry {
       maintenanceInFlight: this.maintenanceWorker?.task?.type || null,
       maintenanceQueued: this.maintenanceQueue.map((task) => task.type),
       maintenancePendingTypes: [...this.maintenancePendingTypes],
+      clusterCountMode: this._maintenanceWorkerEnabled()
+        ? 'BACKGROUND_GRADE_SNAPSHOT' : 'EXACT_INLINE',
+      clusterCountCacheMs: this._clusterCountCacheMs(),
       registryVersion: this.version(),
       wallets: registryRows.length,
       active: this.store.db.prepare(`
