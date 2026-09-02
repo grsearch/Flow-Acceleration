@@ -228,6 +228,21 @@ function run() {
   assert(rows.filter((row) => row.lifecycle_stage === 'POST_MIGRATION')
     .every((row) => row.entry_market === 'PUMP_AMM' && row.cohort_id.startsWith('POST_')));
 
+  // Health must distinguish an idle two-minute tracking window from a broken
+  // AMM feed or a missing graduation mapping after restart.
+  suite.observeTrade(trade(
+    'MissingGraduationDiagnostic111111111111111111111',
+    base + 9_201,
+    1,
+  ));
+  const diagnosticHealth = suite.health();
+  assert(diagnosticHealth.startupRecoveredMints >= 1);
+  assert(diagnosticHealth.ammTradesObserved > 0);
+  assert(diagnosticHealth.postMigrationEligibleTrades > 0);
+  assert.strictEqual(diagnosticHealth.missingGraduatedAtAmmTrades, 1);
+  assert.strictEqual(diagnosticHealth.lastMissingGraduatedAtAmmTradeAt, base + 9_201);
+  assert(diagnosticHealth.lastAmmTradeObservedAt >= base + 9_201);
+
   // Curve events after graduation do not seed either lifecycle detector.
   const signalsBeforeStrayCurve = suite.health().signals;
   suite.observeTrade(trade(postMint, base + 10_000, 1, 'PUMP_BONDING_CURVE'));

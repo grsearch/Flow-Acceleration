@@ -203,6 +203,10 @@ function main() {
   const backupScript = fs.readFileSync(path.join(__dirname, 'export-last24h-cos.sh'), 'utf8');
   const timer = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'flow-acceleration-backup.timer'), 'utf8');
   const service = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'flow-acceleration-backup.service'), 'utf8');
+  const collectorService = fs.readFileSync(
+    path.join(__dirname, '..', 'deploy', 'flow-acceleration.service'),
+    'utf8',
+  );
   const credentialTemplate = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'backup-cos.env.example'), 'utf8');
   const installer = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'install-daily-export.sh'), 'utf8');
   const mainInstaller = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'install.sh'), 'utf8');
@@ -254,6 +258,10 @@ function main() {
   assert.doesNotMatch(service, /(?:Requires|PartOf|BindsTo)=flow-acceleration\.service/);
   assert.doesNotMatch(service, /^After=.*flow-acceleration\.service/m);
   assert.doesNotMatch(service, /^Restart=/m);
+  const [collectorUnit, collectorRuntime] = collectorService.split('[Service]');
+  assert.match(collectorUnit, /StartLimitIntervalSec=60/);
+  assert.match(collectorUnit, /StartLimitBurst=10/);
+  assert.doesNotMatch(collectorRuntime, /StartLimitIntervalSec|StartLimitBurst/);
   assert.match(installer, /remove_legacy_cron/);
   assert.match(installer, /cos-auto-upload-export\\\.sh/);
   assert.match(installer, /has_complete_cos_config/);

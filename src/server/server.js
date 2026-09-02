@@ -22,6 +22,10 @@ function boolean(value, fallback = false) {
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
 
+function databaseOperational(status) {
+  return !['LOCKED', 'DEGRADED', 'DATA_LOSS'].includes(String(status || ''));
+}
+
 function loadRetentionMaintenance(dbPath) {
   if (!dbPath || dbPath === ':memory:') return null;
   const reportPath = path.join(
@@ -53,7 +57,8 @@ function loadRetentionMaintenance(dbPath) {
 
 class ResearchServer {
   constructor({
-    config, store, engine, stream, labeler, trader = null, signalShadow = null,
+    config, runtimeIdentity = null, store, engine, stream, labeler,
+    trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     flowSmartConfirmShadow = null,
     smartLikeEarlyShadow = null,
@@ -87,6 +92,7 @@ class ResearchServer {
     postMigrationSurvivor = null,
   }) {
     this.config = config;
+    this.runtimeIdentity = runtimeIdentity;
     this.store = store;
     this.engine = engine;
     this.stream = stream;
@@ -949,31 +955,42 @@ class ResearchServer {
       const now = Date.now();
       const engine = this.engine.stats();
       const stream = this.stream.health();
+      const database = this.store.healthSnapshot();
+      const streaming = stream.regions.some((region) => region.state === 'connected');
+      const databaseReady = databaseOperational(database.writeStatus);
       response.set('Cache-Control', 'no-store');
       response.json({
-        status: stream.regions.some((region) => region.state === 'connected')
-          ? 'streaming'
-          : 'waiting',
-        ready: true,
+        // Keep the liveness status tied to the stream so an external watchdog
+        // cannot create a restart loop for a database lock. Readiness and the
+        // detailed API expose the degraded database state separately.
+        status: streaming ? 'streaming' : 'waiting',
+        ready: databaseReady,
         uptimeMs: now - this.startedAt,
         dataLatencyMs: engine.lastTradeAt ? Math.max(0, now - engine.lastTradeAt) : null,
+        databaseWriteStatus: database.writeStatus,
+        databaseQueuedTradeLagMs: database.queuedTradeLagMs,
+        runtime: this.runtimeIdentity,
       });
     });
 
     this.app.get('/api/health', (_request, response) => {
       const now = Date.now();
       const engine = this.engine.stats();
+      const stream = this.stream.health();
+      const database = this.store.healthSnapshot();
+      const streaming = stream.regions.some((region) => region.state === 'connected');
       response.json({
-        status: this.stream.health().regions.some((region) => region.state === 'connected')
-          ? 'streaming'
+        status: streaming
+          ? (databaseOperational(database.writeStatus) ? 'streaming' : 'degraded')
           : 'waiting',
         uptimeMs: now - this.startedAt,
         dataLatencyMs: engine.lastTradeAt ? Math.max(0, now - engine.lastTradeAt) : null,
+        runtime: this.runtimeIdentity,
         engine,
         labels: this.labeler.stats(),
-        stream: this.stream.health(),
+        stream,
         database: {
-          ...this.store.healthSnapshot(),
+          ...database,
           retentionMaintenance: this.retentionMaintenance,
         },
         trading: this.trader?.health() || null,

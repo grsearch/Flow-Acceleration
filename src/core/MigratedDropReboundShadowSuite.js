@@ -206,6 +206,20 @@ class MigratedDropReboundShadowSuite {
     this.liveSignalsEmitted = new Set();
     this.lastFastFlowSweepAt = 0;
     this.metrics = {
+      graduationEventsObserved: 0,
+      lastGraduationEventAt: null,
+      startupRecoveredMints: 0,
+      startupReplayTrades: 0,
+      liveTradesObserved: 0,
+      replayTradesObserved: 0,
+      curveTradesObserved: 0,
+      ammTradesObserved: 0,
+      lastTradeObservedAt: null,
+      lastAmmTradeObservedAt: null,
+      postMigrationEligibleTrades: 0,
+      lastPostMigrationEligibleTradeAt: null,
+      missingGraduatedAtAmmTrades: 0,
+      lastMissingGraduatedAtAmmTradeAt: null,
       candidates: 0,
       signals: 0,
       replaySignalsSuppressed: 0,
@@ -241,7 +255,7 @@ class MigratedDropReboundShadowSuite {
     for (const token of this.store.allTokens()) {
       const graduatedAt = finite(token.graduated_at);
       if (graduatedAt && now - graduatedAt <= this._observationAgeMs()) {
-        this.onGraduated(token);
+        this.onGraduated(token, { source: 'startup' });
       }
     }
     for (const row of this.store.activeMigratedDropReboundShadowPositions()) {
@@ -254,8 +268,9 @@ class MigratedDropReboundShadowSuite {
         mint: position.mint,
         symbol: position.symbol,
         graduated_at: row.migrated_at,
-      });
+      }, { source: 'startup' });
     }
+    this.metrics.startupRecoveredMints = this.tracked.size;
 
     const replayHorizonMs = Math.max(
       1_000,
@@ -269,6 +284,7 @@ class MigratedDropReboundShadowSuite {
       ...this.store.recentCurveTrades(now - replayHorizonMs),
       ...this.store.recentAmmTrades(now - replayHorizonMs),
     ].sort((left, right) => left.timestampMs - right.timestampMs);
+    this.metrics.startupReplayTrades = replayTrades.length;
     for (const trade of replayTrades) {
       this.observeTrade(trade, { replay: true });
     }
@@ -277,13 +293,17 @@ class MigratedDropReboundShadowSuite {
 
   stop() {}
 
-  onGraduated(token) {
+  onGraduated(token, { source = 'event' } = {}) {
     if (!this.config.enabled || !token?.mint) return;
     const graduatedAt = finite(
       token.graduated_at ?? token.graduatedAt ?? token.migratedAt
         ?? token.completedAt ?? token.timestampMs,
     );
     if (!(graduatedAt > 0)) return;
+    if (source === 'event') {
+      this.metrics.graduationEventsObserved += 1;
+      this.metrics.lastGraduationEventAt = this.now();
+    }
     const current = this.tracked.get(token.mint);
     this.tracked.set(token.mint, {
       mint: token.mint,
@@ -314,15 +334,38 @@ class MigratedDropReboundShadowSuite {
     if (!this.config.enabled || !['PUMP_BONDING_CURVE', 'PUMP_AMM'].includes(trade?.market)
       || !trade?.mint
       || !(price > 0) || !(timestampMs > 0)) return;
-    if (!this._acceptAmmPrice(trade, price)) return;
+    if (replay) this.metrics.replayTradesObserved += 1;
+    else this.metrics.liveTradesObserved += 1;
+    this.metrics.lastTradeObservedAt = Math.max(
+      finite(this.metrics.lastTradeObservedAt, 0),
+      timestampMs,
+    );
+    if (trade.market === 'PUMP_AMM') {
+      this.metrics.ammTradesObserved += 1;
+      this.metrics.lastAmmTradeObservedAt = Math.max(
+        finite(this.metrics.lastAmmTradeObservedAt, 0),
+        timestampMs,
+      );
+    } else {
+      this.metrics.curveTradesObserved += 1;
+    }
     const token = this.store.getToken(trade.mint);
     const graduatedAt = finite(token?.graduated_at ?? this.tracked.get(trade.mint)?.graduatedAt);
+    if (trade.market === 'PUMP_AMM' && !(graduatedAt > 0)) {
+      this.metrics.missingGraduatedAtAmmTrades += 1;
+      this.metrics.lastMissingGraduatedAtAmmTradeAt = timestampMs;
+    }
+    if (!this._acceptAmmPrice(trade, price)) return;
     const lifecycleStage = trade.market === 'PUMP_BONDING_CURVE'
       && (!(graduatedAt > 0) || timestampMs < graduatedAt)
       ? 'PRE_MIGRATION'
       : trade.market === 'PUMP_AMM' && graduatedAt > 0 && timestampMs >= graduatedAt
         ? 'POST_MIGRATION'
         : null;
+    if (lifecycleStage === 'POST_MIGRATION') {
+      this.metrics.postMigrationEligibleTrades += 1;
+      this.metrics.lastPostMigrationEligibleTradeAt = timestampMs;
+    }
     if (lifecycleStage === 'POST_MIGRATION' && this._needsFastFlowTrade(trade.mint)) {
       this._recordFastFlowTrade(trade);
     }
@@ -331,7 +374,9 @@ class MigratedDropReboundShadowSuite {
     // research suite cannot abort the shared runtime trade pipeline.
     if (!lifecycleStage || !this.lifecycleStageIds.has(lifecycleStage)) return;
     if (lifecycleStage === 'POST_MIGRATION') {
-      if (!this.tracked.has(trade.mint)) this.onGraduated(token);
+      if (!this.tracked.has(trade.mint)) {
+        this.onGraduated(token, { source: replay ? 'replay' : 'trade' });
+      }
       if (timestampMs - graduatedAt > this._observationAgeMs()
         && !this._hasActiveMint(trade.mint)) return;
     }

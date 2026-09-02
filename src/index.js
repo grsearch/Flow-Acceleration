@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
 const { config, validateConfig, streamTokenFor } = require('./config');
 const { PumpEventParser } = require('./core/PumpEventParser');
 const PumpFlowStream = require('./core/PumpFlowStream');
@@ -67,6 +70,30 @@ const { launchStartupDashboard } = require('./server/startup-dashboard');
 
 function createRuntime(runtimeConfig = config) {
   const runtimeStartedAt = Date.now();
+  const runtimeCwd = fs.realpathSync.native(process.cwd());
+  let gitCommit = null;
+  try {
+    gitCommit = execFileSync('git', ['-C', runtimeCwd, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    }).trim() || null;
+  } catch (_) {}
+  const runtimeIdentity = {
+    pid: process.pid,
+    cwd: runtimeCwd,
+    sourcePath: fs.realpathSync.native(__filename),
+    dbPath: runtimeConfig.storage.dbPath === ':memory:'
+      ? ':memory:'
+      : path.resolve(runtimeConfig.storage.dbPath),
+    gitCommit,
+    startedAt: runtimeStartedAt,
+  };
+  console.log(
+    `[Startup] identity pid=${runtimeIdentity.pid} cwd=${runtimeIdentity.cwd} `
+    + `source=${runtimeIdentity.sourcePath} db=${runtimeIdentity.dbPath} `
+    + `commit=${runtimeIdentity.gitCommit || 'unknown'}`,
+  );
   console.log('[Startup] creating research store');
   const store = new ResearchStore(runtimeConfig.storage, runtimeConfig.labels);
   const startupReplayCacheMs = Math.max(
@@ -342,6 +369,7 @@ function createRuntime(runtimeConfig = config) {
   console.log(`[Startup] all strategy state restored in ${Date.now() - runtimeStartedAt}ms`);
   const server = new ResearchServer({
     config: runtimeConfig,
+    runtimeIdentity,
     store,
     engine,
     stream,
@@ -384,12 +412,17 @@ function createRuntime(runtimeConfig = config) {
     postMigrationSurvivor,
   });
   const runtimeMetrics = {
+    identity: runtimeIdentity,
     parsedEvents: 0,
     parseErrors: 0,
     ignoredEvents: 0,
     shadowModuleErrors: {},
+    maintenanceErrors: {},
+    lastMaintenanceErrorAt: null,
+    lastMaintenanceError: null,
   };
   const slowTaskLastLoggedAt = new Map();
+  const maintenanceErrorLastLoggedAt = new Map();
   const runTimed = (name, callback, thresholdMs = 100) => {
     const startedAt = process.hrtime.bigint();
     try {
@@ -411,6 +444,22 @@ function createRuntime(runtimeConfig = config) {
     } catch (error) {
       runtimeMetrics.shadowModuleErrors[name] = (runtimeMetrics.shadowModuleErrors[name] || 0) + 1;
       console.error(`[Shadow:${name}] isolated failure:`, error.message);
+      return undefined;
+    }
+  };
+  const runMaintenance = (name, callback) => {
+    try {
+      return runTimed(`maintenance:${name}`, callback);
+    } catch (error) {
+      const now = Date.now();
+      runtimeMetrics.maintenanceErrors[name]
+        = (runtimeMetrics.maintenanceErrors[name] || 0) + 1;
+      runtimeMetrics.lastMaintenanceErrorAt = now;
+      runtimeMetrics.lastMaintenanceError = `${name}: ${error.message}`;
+      if (now - (maintenanceErrorLastLoggedAt.get(name) || 0) >= 30_000) {
+        maintenanceErrorLastLoggedAt.set(name, now);
+        console.error(`[Maintenance:${name}] isolated failure:`, error.message);
+      }
       return undefined;
     }
   };
@@ -941,19 +990,19 @@ function createRuntime(runtimeConfig = config) {
       const groupIndex = maintenanceTick % shadowMaintenanceGroups.length;
       maintenanceTick += 1;
       if (groupIndex === 0) {
-        runTimed('maintenance:engineCleanup', () => engine.cleanup(now));
-        runTimed('maintenance:labelAdvance', () => labeler.advanceTime(now));
+        runMaintenance('engineCleanup', () => engine.cleanup(now));
+        runMaintenance('labelAdvance', () => labeler.advanceTime(now));
       }
       const group = shadowMaintenanceGroups[groupIndex];
       for (const [name, target] of group) {
         observeShadow(name, () => target.advanceTime(now));
       }
       if (groupIndex === 0) {
-        runTimed('maintenance:traderAdvance', () => trader.advanceTime(now));
+        runMaintenance('traderAdvance', () => trader.advanceTime(now));
       }
       if (now - lastSubscriptionRefreshAt >= 5_000) {
         lastSubscriptionRefreshAt = now;
-        runTimed('maintenance:refreshAmmSubscriptions', () => refreshAmmSubscriptions(now));
+        runMaintenance('refreshAmmSubscriptions', () => refreshAmmSubscriptions(now));
       }
     }, 250);
 

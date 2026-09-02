@@ -52,6 +52,12 @@ function finiteOrNull(value) {
   return Number.isFinite(value) ? value : null;
 }
 
+function isSqliteContention(error) {
+  return error?.code === 'SQLITE_BUSY'
+    || error?.code === 'SQLITE_LOCKED'
+    || /database (?:is )?locked/i.test(String(error?.message || ''));
+}
+
 function receivedTimestampMs(value, eventTimestampMs) {
   let timestamp = Number(value);
   if (!Number.isFinite(timestamp)) return eventTimestampMs;
@@ -97,11 +103,15 @@ class ResearchStore {
     this.config = storageConfig;
     this.labelsConfig = labelsConfig;
     ensureParent(storageConfig.dbPath);
-    console.log(`[Startup:DB] opening ${storageConfig.dbPath}`);
+    const resolvedDbPath = storageConfig.dbPath === ':memory:'
+      ? ':memory:'
+      : path.resolve(storageConfig.dbPath);
+    console.log(`[Startup:DB] opening ${resolvedDbPath}`);
     this.db = new Database(storageConfig.dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
-    this.db.pragma('busy_timeout = 5000');
+    this.busyTimeoutMs = Math.max(50, Number(storageConfig.busyTimeoutMs) || 5_000);
+    this.db.pragma(`busy_timeout = ${this.busyTimeoutMs}`);
     console.log(`[Startup:DB] connection ready in ${Date.now() - startupStartedAt}ms; initializing schema`);
     const schemaStartedAt = Date.now();
     this._initSchema();
@@ -129,6 +139,18 @@ class ResearchStore {
       `[Startup:DB] token registry ready (${this.tokens.size} tokens); total ${Date.now() - startupStartedAt}ms`,
     );
     this.rawBuffer = [];
+    this.pendingSignalReturnUpdates = new Map();
+    this.pendingTokenWrites = new Map();
+    this.writeRetryMinMs = Math.max(50, Number(storageConfig.writeRetryMinMs) || 250);
+    this.writeRetryMaxMs = Math.max(
+      this.writeRetryMinMs,
+      Number(storageConfig.writeRetryMaxMs) || 30_000,
+    );
+    this.maxPendingTrades = Math.max(
+      Number(storageConfig.flushMax) || 1_000,
+      Number(storageConfig.maxPendingTrades) || 250_000,
+    );
+    this.nextWriteRetryAt = 0;
     this.returnUpdateStatements = new Map();
     this.launchQualityUpdateStatements = new Map();
     this.dashboardStatsCache = new Map();
@@ -149,14 +171,33 @@ class ResearchStore {
       tradesQueued: 0,
       tradesWritten: 0,
       writeErrors: 0,
+      sqliteBusyErrors: 0,
+      consecutiveWriteErrors: 0,
+      labelWriteDeferrals: 0,
+      labelWritesRecovered: 0,
+      tokenWriteDeferrals: 0,
+      tokenWritesRecovered: 0,
+      tradesDroppedBackpressure: 0,
+      lastBackpressureDropAt: null,
       timestampCorrections: 0,
       lastFlushAt: null,
       lastFlushMs: null,
+      lastWriteSuccessAt: null,
+      lastWriteErrorAt: null,
+      lastWriteErrorCode: null,
+      lastWriteError: null,
+      lastQueuedTradeAt: null,
+      lastPersistedTradeAt: Number(this.db.prepare(`
+        SELECT timestamp_ms FROM raw_trades ORDER BY id DESC LIMIT 1
+      `).get()?.timestamp_ms) || null,
+      firstPendingWriteAt: null,
       lastArchiveAt: null,
     };
 
     this.flushTimer = setInterval(() => {
       try {
+        this.flushDeferredTokenWrites();
+        this.flushDeferredSignalReturnUpdates();
         this.flushRawTrades();
       } catch (error) {
         console.error('[Database] raw trade flush failed:', error.message);
@@ -398,10 +439,39 @@ class ResearchStore {
         refreshes: 1,
       };
     }
+    const now = Date.now();
+    const pendingWrites = this.rawBuffer.length;
+    const pendingLabelWrites = this.pendingSignalReturnUpdates.size;
+    const pendingTokenWrites = this.pendingTokenWrites.size;
+    const writeBackoffMs = Math.max(0, this.nextWriteRetryAt - now);
+    const queuedTradeLagMs = Number.isFinite(this.metrics.lastQueuedTradeAt)
+      && Number.isFinite(this.metrics.lastPersistedTradeAt)
+      ? Math.max(0, this.metrics.lastQueuedTradeAt - this.metrics.lastPersistedTradeAt)
+      : null;
+    const persistedTradeAgeMs = Number.isFinite(this.metrics.lastPersistedTradeAt)
+      ? Math.max(0, now - this.metrics.lastPersistedTradeAt)
+      : null;
+    const recentBackpressureDrop = Number.isFinite(this.metrics.lastBackpressureDropAt)
+      && now - this.metrics.lastBackpressureDropAt < 5 * 60_000;
+    const writeStatus = recentBackpressureDrop
+      ? 'DATA_LOSS'
+      : this.metrics.consecutiveWriteErrors > 0
+      ? (this.metrics.lastWriteErrorCode === 'SQLITE_BUSY'
+        || this.metrics.lastWriteErrorCode === 'SQLITE_LOCKED'
+        ? 'LOCKED' : 'DEGRADED')
+      : pendingWrites > 0 || pendingLabelWrites > 0 || pendingTokenWrites > 0
+        ? 'BACKLOG'
+        : 'HEALTHY';
     return {
       ...(this.databaseHealthSnapshot || {}),
       ...this.metrics,
-      pendingWrites: this.rawBuffer.length,
+      pendingWrites,
+      pendingLabelWrites,
+      pendingTokenWrites,
+      writeStatus,
+      writeBackoffMs,
+      queuedTradeLagMs,
+      persistedTradeAgeMs,
       dbPath: path.resolve(this.config.dbPath),
       statsSnapshot: {
         ...this.databaseHealthState,
@@ -4496,48 +4566,180 @@ class ResearchStore {
 
   recordCreate(event) {
     const row = { ...event, updatedAt: Date.now() };
-    this.stmts.upsertCreate.run(row);
-    const token = this.stmts.getToken.get(event.mint);
-    if (token) this.tokens.set(event.mint, token);
-    return token;
+    const fallback = this._mergeMemoryToken(event.mint, {
+      symbol: event.symbol || null,
+      name: event.name || null,
+      uri: event.uri || null,
+      bonding_curve: event.bondingCurve || null,
+      creator: event.creator || null,
+      created_at: event.createdAt || null,
+      initial_real_token_reserves_raw: event.initialRealTokenReservesRaw || null,
+      token_total_supply_raw: event.tokenTotalSupplyRaw || null,
+      updated_at: row.updatedAt,
+    });
+    if (this.pendingTokenWrites.has(event.mint) || Date.now() < this.nextWriteRetryAt) {
+      this._deferTokenWrite(event.mint, { create: row });
+      return fallback;
+    }
+    try {
+      this.stmts.upsertCreate.run(row);
+      const token = this.stmts.getToken.get(event.mint) || fallback;
+      this.tokens.set(event.mint, token);
+      this._noteWriteSuccess();
+      return token;
+    } catch (error) {
+      this._noteWriteFailure(error);
+      if (isSqliteContention(error)) {
+        this._deferTokenWrite(event.mint, { create: row });
+        return fallback;
+      }
+      throw error;
+    }
   }
 
   ensureToken(mint, bondingCurve = null) {
     let token = this.tokens.get(mint);
     if (token) return token;
-    this.stmts.ensureToken.run({ mint, bondingCurve, updatedAt: Date.now() });
-    token = this.stmts.getToken.get(mint);
-    if (token) this.tokens.set(mint, token);
-    return token;
+    const row = { mint, bondingCurve, updatedAt: Date.now() };
+    const fallback = this._mergeMemoryToken(mint, {
+      bonding_curve: bondingCurve || null,
+      updated_at: row.updatedAt,
+    });
+    if (Date.now() < this.nextWriteRetryAt) {
+      this._deferTokenWrite(mint, { ensure: row });
+      return fallback;
+    }
+    try {
+      this.stmts.ensureToken.run(row);
+      token = this.stmts.getToken.get(mint) || fallback;
+      this.tokens.set(mint, token);
+      this._noteWriteSuccess();
+      return token;
+    } catch (error) {
+      this._noteWriteFailure(error);
+      if (isSqliteContention(error)) {
+        this._deferTokenWrite(mint, { ensure: row });
+        return fallback;
+      }
+      throw error;
+    }
   }
 
   recordComplete(event) {
     this.ensureToken(event.mint, event.bondingCurve);
     const now = Date.now();
-    this.stmts.markComplete.run({
+    const row = {
       mint: event.mint,
       bondingCurve: event.bondingCurve || null,
       graduatedAt: event.completedAt || event.timestampMs || now,
       updatedAt: now,
+    };
+    const current = this.tokens.get(event.mint);
+    const fallback = this._mergeMemoryToken(event.mint, {
+      bonding_curve: current?.bonding_curve || row.bondingCurve,
+      graduated_at: current?.graduated_at || row.graduatedAt,
+      updated_at: now,
     });
-    const token = this.stmts.getToken.get(event.mint);
-    if (token) this.tokens.set(event.mint, token);
-    return token;
+    if (this.pendingTokenWrites.has(event.mint) || Date.now() < this.nextWriteRetryAt) {
+      this._deferTokenWrite(event.mint, { complete: row });
+      return fallback;
+    }
+    try {
+      this.stmts.markComplete.run(row);
+      const token = this.stmts.getToken.get(event.mint) || fallback;
+      this.tokens.set(event.mint, token);
+      this._noteWriteSuccess();
+      return token;
+    } catch (error) {
+      this._noteWriteFailure(error);
+      if (isSqliteContention(error)) {
+        this._deferTokenWrite(event.mint, { complete: row });
+        return fallback;
+      }
+      throw error;
+    }
   }
 
   recordMigration(event) {
     this.ensureToken(event.mint, event.bondingCurve);
     const now = Date.now();
-    this.stmts.markMigration.run({
+    const row = {
       mint: event.mint,
       bondingCurve: event.bondingCurve || null,
       pool: event.pool || null,
       migratedAt: event.migratedAt || event.timestampMs || now,
       updatedAt: now,
+    };
+    const current = this.tokens.get(event.mint);
+    const fallback = this._mergeMemoryToken(event.mint, {
+      bonding_curve: current?.bonding_curve || row.bondingCurve,
+      graduated_at: current?.graduated_at || row.migratedAt,
+      migration_pool: row.pool,
+      updated_at: now,
     });
-    const token = this.stmts.getToken.get(event.mint);
-    if (token) this.tokens.set(event.mint, token);
-    return token;
+    if (this.pendingTokenWrites.has(event.mint) || Date.now() < this.nextWriteRetryAt) {
+      this._deferTokenWrite(event.mint, { migration: row });
+      return fallback;
+    }
+    try {
+      this.stmts.markMigration.run(row);
+      const token = this.stmts.getToken.get(event.mint) || fallback;
+      this.tokens.set(event.mint, token);
+      this._noteWriteSuccess();
+      return token;
+    } catch (error) {
+      this._noteWriteFailure(error);
+      if (isSqliteContention(error)) {
+        this._deferTokenWrite(event.mint, { migration: row });
+        return fallback;
+      }
+      throw error;
+    }
+  }
+
+  _mergeMemoryToken(mint, patch) {
+    const current = this.tokens.get(mint) || { mint };
+    const merged = { ...current };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value != null || merged[key] == null) merged[key] = value;
+    }
+    this.tokens.set(mint, merged);
+    return merged;
+  }
+
+  _deferTokenWrite(mint, patch) {
+    const current = this.pendingTokenWrites.get(mint) || {};
+    this.pendingTokenWrites.set(mint, { ...current, ...patch });
+    this.metrics.tokenWriteDeferrals += 1;
+  }
+
+  flushDeferredTokenWrites({ force = false } = {}) {
+    if (this.pendingTokenWrites.size === 0) return 0;
+    if (!force && Date.now() < this.nextWriteRetryAt) return 0;
+    let recovered = 0;
+    for (const [mint, pending] of this.pendingTokenWrites) {
+      try {
+        if (pending.create) this.stmts.upsertCreate.run(pending.create);
+        else this.stmts.ensureToken.run(pending.ensure || {
+          mint,
+          bondingCurve: this.tokens.get(mint)?.bonding_curve || null,
+          updatedAt: Date.now(),
+        });
+        if (pending.complete) this.stmts.markComplete.run(pending.complete);
+        if (pending.migration) this.stmts.markMigration.run(pending.migration);
+        const token = this.stmts.getToken.get(mint);
+        if (token) this.tokens.set(mint, token);
+        this.pendingTokenWrites.delete(mint);
+        recovered += 1;
+        this.metrics.tokenWritesRecovered += 1;
+        this._noteWriteSuccess();
+      } catch (error) {
+        this._noteWriteFailure(error);
+        if (isSqliteContention(error)) break;
+        throw error;
+      }
+    }
+    return recovered;
   }
 
   enrichTrade(trade) {
@@ -4589,27 +4791,78 @@ class ResearchStore {
       realSolReservesRaw: trade.realSolReservesRaw || null,
       realTokenReservesRaw: trade.realTokenReservesRaw || null,
     });
+    if (this.rawBuffer.length > this.maxPendingTrades) {
+      const overflow = this.rawBuffer.length - this.maxPendingTrades;
+      this.rawBuffer.splice(0, overflow);
+      this.metrics.tradesDroppedBackpressure += overflow;
+      this.metrics.lastBackpressureDropAt = Date.now();
+    }
     this.metrics.tradesQueued += 1;
+    this.metrics.lastQueuedTradeAt = Math.max(
+      Number(this.metrics.lastQueuedTradeAt) || 0,
+      Number(trade.timestampMs) || 0,
+    ) || null;
+    if (!this.metrics.firstPendingWriteAt) this.metrics.firstPendingWriteAt = Date.now();
     if (this.rawBuffer.length >= this.config.flushMax) this.flushRawTrades();
   }
 
-  flushRawTrades() {
+  flushRawTrades({ force = false } = {}) {
     if (this.rawBuffer.length === 0) return 0;
-    const trades = this.rawBuffer.splice(0, this.rawBuffer.length);
+    if (!force && Date.now() < this.nextWriteRetryAt) return 0;
+    const batchSize = Math.min(
+      this.rawBuffer.length,
+      Math.max(1_000, Number(this.config.flushMax) || 1_000),
+    );
+    const trades = this.rawBuffer.splice(0, batchSize);
     const started = Date.now();
     try {
       this._writeTrades(trades);
       this.metrics.lastFlushAt = Date.now();
       this.metrics.lastFlushMs = this.metrics.lastFlushAt - started;
+      this._noteWriteSuccess({
+        persistedTradeAt: trades.reduce(
+          (latest, trade) => Math.max(latest, Number(trade.timestampMs) || 0),
+          0,
+        ),
+      });
       for (const trade of trades) {
         const token = this.stmts.getToken.get(trade.mint);
         if (token) this.tokens.set(trade.mint, token);
       }
+      if (this.rawBuffer.length === 0) this.metrics.firstPendingWriteAt = null;
       return trades.length;
     } catch (error) {
-      this.metrics.writeErrors += 1;
       this.rawBuffer.unshift(...trades);
+      this._noteWriteFailure(error);
+      if (isSqliteContention(error)) return 0;
       throw error;
+    }
+  }
+
+  _noteWriteFailure(error) {
+    const now = Date.now();
+    this.metrics.writeErrors += 1;
+    this.metrics.consecutiveWriteErrors += 1;
+    const contention = isSqliteContention(error);
+    if (contention) this.metrics.sqliteBusyErrors += 1;
+    this.metrics.lastWriteErrorAt = now;
+    this.metrics.lastWriteErrorCode = error?.code || (contention ? 'SQLITE_BUSY' : null);
+    this.metrics.lastWriteError = String(error?.message || error);
+    const exponent = Math.min(8, Math.max(0, this.metrics.consecutiveWriteErrors - 1));
+    const retryMs = Math.min(this.writeRetryMaxMs, this.writeRetryMinMs * (2 ** exponent));
+    this.nextWriteRetryAt = now + retryMs;
+  }
+
+  _noteWriteSuccess({ persistedTradeAt = null } = {}) {
+    const now = Date.now();
+    this.metrics.consecutiveWriteErrors = 0;
+    this.metrics.lastWriteSuccessAt = now;
+    this.nextWriteRetryAt = 0;
+    if (Number.isFinite(persistedTradeAt) && persistedTradeAt > 0) {
+      this.metrics.lastPersistedTradeAt = Math.max(
+        Number(this.metrics.lastPersistedTradeAt) || 0,
+        persistedTradeAt,
+      );
     }
   }
 
@@ -4668,7 +4921,28 @@ class ResearchStore {
       'missing_horizons_json', 'horizon_observation_lags_json',
     ]);
     const keys = Object.keys(patch).filter((key) => allowed.has(key));
-    if (keys.length === 0) return;
+    if (keys.length === 0) return true;
+    const normalizedPatch = Object.fromEntries(keys.map((key) => [key, patch[key]]));
+    if (this.pendingSignalReturnUpdates.has(signalId) || Date.now() < this.nextWriteRetryAt) {
+      this._deferSignalReturnUpdate(signalId, normalizedPatch);
+      return false;
+    }
+    try {
+      this._runSignalReturnUpdate(signalId, normalizedPatch);
+      this._noteWriteSuccess();
+      return true;
+    } catch (error) {
+      this._noteWriteFailure(error);
+      if (isSqliteContention(error)) {
+        this._deferSignalReturnUpdate(signalId, normalizedPatch);
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  _runSignalReturnUpdate(signalId, patch) {
+    const keys = Object.keys(patch);
     keys.sort();
     const cacheKey = keys.join(',');
     let statement = this.returnUpdateStatements.get(cacheKey);
@@ -4682,6 +4956,32 @@ class ResearchStore {
       this.returnUpdateStatements.set(cacheKey, statement);
     }
     statement.run({ ...patch, signalId, updatedAt: Date.now() });
+  }
+
+  _deferSignalReturnUpdate(signalId, patch) {
+    const current = this.pendingSignalReturnUpdates.get(signalId) || {};
+    this.pendingSignalReturnUpdates.set(signalId, { ...current, ...patch });
+    this.metrics.labelWriteDeferrals += 1;
+  }
+
+  flushDeferredSignalReturnUpdates({ force = false } = {}) {
+    if (this.pendingSignalReturnUpdates.size === 0) return 0;
+    if (!force && Date.now() < this.nextWriteRetryAt) return 0;
+    let recovered = 0;
+    for (const [signalId, patch] of this.pendingSignalReturnUpdates) {
+      try {
+        this._runSignalReturnUpdate(signalId, patch);
+        this.pendingSignalReturnUpdates.delete(signalId);
+        recovered += 1;
+        this.metrics.labelWritesRecovered += 1;
+        this._noteWriteSuccess();
+      } catch (error) {
+        this._noteWriteFailure(error);
+        if (isSqliteContention(error)) break;
+        throw error;
+      }
+    }
+    return recovered;
   }
 
   restorePendingSignals(now = Date.now()) {
@@ -9181,12 +9481,23 @@ class ResearchStore {
       if (active?.worker) void active.worker.terminate().catch(() => {});
     }
     this.dashboardQueryWorkers.clear();
-    this.flushRawTrades();
-    this.db.close();
+    try {
+      this.flushDeferredTokenWrites({ force: true });
+      this.flushDeferredSignalReturnUpdates({ force: true });
+      while (this.rawBuffer.length > 0) {
+        const written = this.flushRawTrades({ force: true });
+        if (written === 0) break;
+      }
+    } catch (error) {
+      console.error('[Database] final flush failed:', error.message);
+    } finally {
+      this.db.close();
+    }
   }
 }
 
 module.exports = {
   ResearchStore,
   curveProgress,
+  isSqliteContention,
 };

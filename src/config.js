@@ -7719,6 +7719,22 @@ const config = {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 48, { min: 24 }),
     archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
+    busyTimeoutMs: integerEnv('FLOW_DB_BUSY_TIMEOUT_MS', 5_000, {
+      min: 50,
+      max: 30_000,
+    }),
+    writeRetryMinMs: integerEnv('FLOW_DB_WRITE_RETRY_MIN_MS', 250, {
+      min: 50,
+      max: 10_000,
+    }),
+    writeRetryMaxMs: integerEnv('FLOW_DB_WRITE_RETRY_MAX_MS', 30_000, {
+      min: 1_000,
+      max: 5 * 60_000,
+    }),
+    maxPendingTrades: integerEnv('FLOW_DB_MAX_PENDING_TRADES', 250_000, {
+      min: 10_000,
+      max: 5_000_000,
+    }),
     flushMs: integerEnv('FLOW_DB_FLUSH_MS', 250, { min: 25 }),
     flushMax: integerEnv('FLOW_DB_FLUSH_MAX', 1_000, { min: 10 }),
     healthRefreshMs: integerEnv('FLOW_DB_HEALTH_REFRESH_MS', 15 * 60_000, {
