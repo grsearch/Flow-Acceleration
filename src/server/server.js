@@ -998,6 +998,7 @@ class ResearchServer {
           signals: migratedRebound.signals,
           lastAmmTradeObservedAt: migratedRebound.lastAmmTradeObservedAt,
         },
+        smartWalletMaintenance: this.smartWalletRegistry?.maintenanceHealth() || null,
       });
     });
 

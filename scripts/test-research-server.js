@@ -373,6 +373,10 @@ async function main() {
     )).json();
     assert.strictEqual(lightweightHealth.ready, true);
     assert.ok(['waiting', 'streaming'].includes(lightweightHealth.status));
+    assert.strictEqual(lightweightHealth.smartWalletMaintenance.enabled, true);
+    assert.strictEqual(lightweightHealth.smartWalletMaintenance.workerEnabled, false,
+      'in-memory test databases should keep deterministic inline maintenance');
+    assert.strictEqual(lightweightHealth.smartWalletMaintenance.inFlight, null);
     const liveTrading = await (await fetch(
       `http://127.0.0.1:${port}/api/live-trading`,
     )).json();

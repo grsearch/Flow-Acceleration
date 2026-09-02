@@ -2626,6 +2626,20 @@ const config = {
     pnlSnapshotCacheMs: integerEnv('FLOW_SMART_WALLET_PNL_CACHE_MS', 1_000, {
       min: 100, max: 60_000,
     }),
+    // Full cluster/grade maintenance grows with the historical wallet ledger.
+    // Keep it off the realtime Node event loop so HTTP and stream callbacks do
+    // not pause while SQLite performs multi-day scans.
+    maintenanceWorkerEnabled: booleanEnv(
+      'FLOW_SMART_WALLET_MAINTENANCE_WORKER_ENABLED', true,
+    ),
+    maintenanceWorkerTimeoutMs: integerEnv(
+      'FLOW_SMART_WALLET_MAINTENANCE_WORKER_TIMEOUT_MS', 10 * 60_000,
+      { min: 60_000, max: 60 * 60_000 },
+    ),
+    gradeDirtyRefreshMinMs: integerEnv(
+      'FLOW_SMART_WALLET_GRADE_DIRTY_REFRESH_MIN_MS', 5 * 60_000,
+      { min: 60_000, max: 24 * 60 * 60_000 },
+    ),
     historyBackfillEnabled: booleanEnv(
       'FLOW_SMART_WALLET_HISTORY_BACKFILL_ENABLED', true,
     ),

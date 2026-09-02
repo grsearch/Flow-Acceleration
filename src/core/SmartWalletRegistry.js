@@ -1,6 +1,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const path = require('path');
+const { Worker } = require('worker_threads');
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 const { tradePrice } = require('./PreEntryRugRiskTracker');
@@ -67,13 +69,15 @@ function copyWeight(grade) {
 class SmartWalletRegistry {
   constructor({
     config, store, now = () => Date.now(), fetchImpl = globalThis.fetch,
-    transactionParser = null,
+    transactionParser = null, maintenanceWorkerFactory = null,
   }) {
     this.config = config;
     this.store = store;
     this.now = now;
     this.fetchImpl = fetchImpl;
     this.transactionParser = transactionParser;
+    this.maintenanceWorkerFactory = maintenanceWorkerFactory
+      || ((workerPath, options) => new Worker(workerPath, options));
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.labelPositionSol });
     this.labels = new Map();
     this.labelsByMint = new Map();
@@ -87,6 +91,11 @@ class SmartWalletRegistry {
     this.ageHistoryFloorCheckedAt = 0;
     this.gradeRefreshRequested = false;
     this.lastClusterRefreshAt = 0;
+    this.lastGradeMaintenanceRequestedAt = 0;
+    this.maintenanceQueue = [];
+    this.maintenancePendingTypes = new Set();
+    this.maintenanceWorker = null;
+    this.maintenanceWorkerTimer = null;
     this.stopping = false;
     this.metrics = {
       discovered: 0,
@@ -114,6 +123,15 @@ class SmartWalletRegistry {
       historyTransactionsSeen: 0,
       historyTradeEventsParsed: 0,
       historyEventsInserted: 0,
+      maintenanceRunsStarted: 0,
+      maintenanceRunsCompleted: 0,
+      maintenanceRunsFailed: 0,
+      maintenanceTimeouts: 0,
+      lastMaintenanceType: null,
+      lastMaintenanceStartedAt: null,
+      lastMaintenanceCompletedAt: null,
+      lastMaintenanceDurationMs: null,
+      lastMaintenanceError: null,
       lastGradeRefreshAt: null,
       lastAgeCheckAt: null,
       lastActionAt: null,
@@ -1164,6 +1182,146 @@ class SmartWalletRegistry {
     return Boolean(row?.wallet && this._actualPnlSnapshot(row.wallet, at).eligible);
   }
 
+  _maintenanceWorkerEnabled() {
+    return this.config.maintenanceWorkerEnabled !== false
+      && this.store.config?.dbPath
+      && this.store.config.dbPath !== ':memory:';
+  }
+
+  _maintenanceWorkerTimeoutMs() {
+    return Math.max(
+      60_000,
+      finite(this.config.maintenanceWorkerTimeoutMs, 10 * 60_000),
+    );
+  }
+
+  _gradeDirtyRefreshMinMs() {
+    return Math.max(
+      60_000,
+      finite(this.config.gradeDirtyRefreshMinMs, 5 * 60_000),
+    );
+  }
+
+  _queueMaintenance(type, at = this.now(), options = {}) {
+    if (!this.config.enabled || this.stopping || this.maintenancePendingTypes.has(type)) {
+      return false;
+    }
+    if (!this._maintenanceWorkerEnabled()) {
+      if (type === 'CLUSTERS') this.refreshClusters(at, { force: true });
+      else if (type === 'GRADES') this.refreshGrades(at, options);
+      return true;
+    }
+    const task = { type, at, options };
+    this.maintenancePendingTypes.add(type);
+    if (type === 'GRADES') this.maintenanceQueue.unshift(task);
+    else this.maintenanceQueue.push(task);
+    this._drainMaintenanceQueue();
+    return true;
+  }
+
+  _drainMaintenanceQueue() {
+    if (this.stopping || this.maintenanceWorker || !this.maintenanceQueue.length) return;
+    const task = this.maintenanceQueue.shift();
+    const startedAt = this.now();
+    let worker;
+    try {
+      worker = this.maintenanceWorkerFactory(
+        path.join(__dirname, 'SmartWalletRegistryMaintenanceWorker.js'),
+        {
+          workerData: {
+            dbPath: path.resolve(this.store.config.dbPath),
+            config: JSON.parse(JSON.stringify(this.config)),
+            task,
+          },
+        },
+      );
+    } catch (error) {
+      this.maintenancePendingTypes.delete(task.type);
+      this.metrics.maintenanceRunsFailed += 1;
+      this.metrics.lastMaintenanceError = `${task.type}: ${error.message}`;
+      if (task.type === 'GRADES') this.gradeRefreshRequested = true;
+      setImmediate(() => this._drainMaintenanceQueue());
+      return;
+    }
+    this.maintenanceWorker = { worker, task, startedAt };
+    this.metrics.maintenanceRunsStarted += 1;
+    this.metrics.lastMaintenanceType = task.type;
+    this.metrics.lastMaintenanceStartedAt = startedAt;
+    this.metrics.lastMaintenanceError = null;
+    let settled = false;
+    const finish = ({ message = null, error = null, timedOut = false } = {}) => {
+      if (settled) return;
+      settled = true;
+      if (this.maintenanceWorkerTimer) clearTimeout(this.maintenanceWorkerTimer);
+      this.maintenanceWorkerTimer = null;
+      if (timedOut) void Promise.resolve(worker.terminate()).catch(() => null);
+      const completedAt = this.now();
+      this.metrics.lastMaintenanceCompletedAt = completedAt;
+      this.metrics.lastMaintenanceDurationMs = Math.max(0, completedAt - startedAt);
+      if (message?.ok) {
+        this.metrics.maintenanceRunsCompleted += 1;
+        if (task.type === 'CLUSTERS') {
+          this.lastClusterRefreshAt = task.at;
+          this.metrics.clusterRefreshes += 1;
+          this.metrics.clusterConfirmations += finite(
+            message.value?.confirmationsChanged,
+            0,
+          );
+          this.metrics.clusterRelatedLinks = finite(message.value?.relatedLinks, 0);
+        } else if (task.type === 'GRADES') {
+          this.pnlSnapshotCache.clear();
+          this.metrics.gradeRefreshes += 1;
+          this.metrics.lastGradeRefreshAt = task.at;
+        }
+        this.metrics.lastActionAt = task.at;
+      } else {
+        this.metrics.maintenanceRunsFailed += 1;
+        if (timedOut) this.metrics.maintenanceTimeouts += 1;
+        this.metrics.lastMaintenanceError = `${task.type}: ${error
+          || message?.error || 'maintenance worker failed'}`;
+        if (task.type === 'GRADES') this.gradeRefreshRequested = true;
+      }
+      this.maintenancePendingTypes.delete(task.type);
+      if (this.maintenanceWorker?.worker === worker) this.maintenanceWorker = null;
+      setImmediate(() => this._drainMaintenanceQueue());
+    };
+    worker.once('message', (message) => finish({ message }));
+    worker.once('error', (error) => finish({ error: error.message }));
+    worker.once('exit', (code) => {
+      if (!settled) finish({ error: `worker exited before reporting a result (code ${code})` });
+    });
+    this.maintenanceWorkerTimer = setTimeout(() => finish({
+      error: `worker exceeded ${this._maintenanceWorkerTimeoutMs()}ms`,
+      timedOut: true,
+    }), this._maintenanceWorkerTimeoutMs());
+    if (this.maintenanceWorkerTimer.unref) this.maintenanceWorkerTimer.unref();
+  }
+
+  _scheduleClusterMaintenance(at = this.now(), { force = false } = {}) {
+    if (!this.config.enabled || this.config.clusterAutoEnabled === false) return false;
+    if (!force && this.lastClusterRefreshAt
+      && at - this.lastClusterRefreshAt < this._clusterRefreshMs()) return false;
+    return this._queueMaintenance('CLUSTERS', at, { force: true });
+  }
+
+  _scheduleGradeMaintenance(at = this.now(), {
+    force = false, forceModelMigration = false,
+  } = {}) {
+    const meta = this._meta();
+    const scheduledDue = !meta.last_grade_refresh_at
+      || at - meta.last_grade_refresh_at >= this.config.gradeRefreshMs;
+    const dirtyDue = this.gradeRefreshRequested
+      && (!this.lastGradeMaintenanceRequestedAt
+        || at - this.lastGradeMaintenanceRequestedAt >= this._gradeDirtyRefreshMinMs());
+    if (!force && !scheduledDue && !dirtyDue) return false;
+    const queued = this._queueMaintenance('GRADES', at, { forceModelMigration });
+    if (queued) {
+      this.gradeRefreshRequested = false;
+      this.lastGradeMaintenanceRequestedAt = at;
+    }
+    return queued;
+  }
+
   start() {
     if (!this.config.enabled) return;
     this.stopping = false;
@@ -1190,7 +1348,6 @@ class SmartWalletRegistry {
     }
     this._backfillActualWalletEvents();
     this._initializeHistoryBackfills(now);
-    this.refreshClusters(now, { force: true });
     const active = this.store.db.prepare(`
       SELECT * FROM smart_wallet_forward_labels
       WHERE status IN ('PENDING_ENTRY','OPEN')
@@ -1203,15 +1360,27 @@ class SmartWalletRegistry {
       WHERE metrics_json NOT LIKE '%"actualPnl30d"%'
       LIMIT 1
     `).get());
-    if (needsActualGradeMigration) this.refreshGrades(now, { forceModelMigration: true });
-    else if (!meta.last_grade_refresh_at
-      || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) this.refreshGrades(now);
+    if (needsActualGradeMigration) {
+      this._scheduleGradeMaintenance(now, { force: true, forceModelMigration: true });
+    } else if (!meta.last_grade_refresh_at
+      || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
+      this._scheduleGradeMaintenance(now, { force: true });
+    }
+    this._scheduleClusterMaintenance(now, { force: true });
     this._scheduleAgeChecks(now);
     this._scheduleHistoryBackfills(now, { force: true });
   }
 
   stop() {
     this.stopping = true;
+    if (this.maintenanceWorkerTimer) clearTimeout(this.maintenanceWorkerTimer);
+    this.maintenanceWorkerTimer = null;
+    if (this.maintenanceWorker) {
+      void Promise.resolve(this.maintenanceWorker.worker.terminate()).catch(() => null);
+    }
+    this.maintenanceWorker = null;
+    this.maintenanceQueue.length = 0;
+    this.maintenancePendingTypes.clear();
     for (const controller of this.ageAbortControllers) controller.abort();
     for (const controller of this.historyAbortControllers) controller.abort();
     this.ageAbortControllers.clear();
@@ -2236,13 +2405,8 @@ class SmartWalletRegistry {
     }
     this._scheduleAgeChecks(now);
     this._scheduleHistoryBackfills(now);
-    this.refreshClusters(now);
-    const meta = this._meta();
-    if (this.gradeRefreshRequested || !meta.last_grade_refresh_at
-      || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
-      this.gradeRefreshRequested = false;
-      this.refreshGrades(now);
-    }
+    this._scheduleClusterMaintenance(now);
+    this._scheduleGradeMaintenance(now);
   }
 
   refreshGrades(now = this.now(), { forceModelMigration = false } = {}) {
@@ -2531,6 +2695,28 @@ class SmartWalletRegistry {
     };
   }
 
+  maintenanceHealth() {
+    return {
+      enabled: this.config.enabled,
+      workerEnabled: this._maintenanceWorkerEnabled(),
+      inFlight: this.maintenanceWorker?.task?.type || null,
+      queued: this.maintenanceQueue.map((task) => task.type),
+      pendingTypes: [...this.maintenancePendingTypes],
+      gradeRefreshRequested: this.gradeRefreshRequested,
+      lastClusterRefreshAt: this.lastClusterRefreshAt || null,
+      lastGradeMaintenanceRequestedAt: this.lastGradeMaintenanceRequestedAt || null,
+      maintenanceRunsStarted: this.metrics.maintenanceRunsStarted,
+      maintenanceRunsCompleted: this.metrics.maintenanceRunsCompleted,
+      maintenanceRunsFailed: this.metrics.maintenanceRunsFailed,
+      maintenanceTimeouts: this.metrics.maintenanceTimeouts,
+      lastMaintenanceType: this.metrics.lastMaintenanceType,
+      lastMaintenanceStartedAt: this.metrics.lastMaintenanceStartedAt,
+      lastMaintenanceCompletedAt: this.metrics.lastMaintenanceCompletedAt,
+      lastMaintenanceDurationMs: this.metrics.lastMaintenanceDurationMs,
+      lastMaintenanceError: this.metrics.lastMaintenanceError,
+    };
+  }
+
   health() {
     const now = this.now();
     const registryRows = this.store.db.prepare(`
@@ -2574,6 +2760,10 @@ class SmartWalletRegistry {
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
       observerOnly: true,
       sendsTransactions: false,
+      maintenanceWorkerEnabled: this._maintenanceWorkerEnabled(),
+      maintenanceInFlight: this.maintenanceWorker?.task?.type || null,
+      maintenanceQueued: this.maintenanceQueue.map((task) => task.type),
+      maintenancePendingTypes: [...this.maintenancePendingTypes],
       registryVersion: this.version(),
       wallets: registryRows.length,
       active: this.store.db.prepare(`
