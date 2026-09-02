@@ -225,6 +225,8 @@ class MigratedDropReboundShadowSuite {
       firstAmmMigrationRecoveries: 0,
       lastFirstAmmMigrationRecoveryAt: null,
       lastCompletionToFirstAmmMs: null,
+      pendingMigrationExpired: 0,
+      lastPendingMigrationExpiredAt: null,
       completionToMigrationSamples: 0,
       lastCompletionToMigrationMs: null,
       maxCompletionToMigrationMs: null,
@@ -276,7 +278,9 @@ class MigratedDropReboundShadowSuite {
     const now = this.now();
     for (const token of this.store.allTokens()) {
       const lifecycleAt = migrationAt(token) || completionAt(token);
-      if (lifecycleAt && now - lifecycleAt <= this._observationAgeMs()) {
+      const retentionMs = migrationAt(token) > 0
+        ? this._observationAgeMs() : this._pendingMigrationTrackingMs();
+      if (lifecycleAt && now - lifecycleAt <= retentionMs) {
         this.onGraduated(token, { source: 'startup' });
       }
     }
@@ -367,8 +371,14 @@ class MigratedDropReboundShadowSuite {
   trackedMints(now = this.now()) {
     for (const [mint, token] of this.tracked) {
       const lifecycleAt = token.migratedAt || token.completedAt;
-      if (lifecycleAt && now - lifecycleAt <= this._observationAgeMs()) continue;
+      const retentionMs = token.migratedAt
+        ? this._observationAgeMs() : this._pendingMigrationTrackingMs();
+      if (lifecycleAt && now - lifecycleAt <= retentionMs) continue;
       if (this._hasActiveMint(mint)) continue;
+      if (!token.migratedAt && token.completedAt) {
+        this.metrics.pendingMigrationExpired += 1;
+        this.metrics.lastPendingMigrationExpiredAt = now;
+      }
       this.tracked.delete(mint);
       for (const detector of this.detectors.values()) detector.states.delete(mint);
       for (const profile of this.entryProfiles.values()) {
@@ -502,12 +512,18 @@ class MigratedDropReboundShadowSuite {
   }
 
   health() {
+    const pendingMigrationMints = [...this.tracked.values()]
+      .filter((token) => token.completedAt && !token.migratedAt).length;
+    const migratedObservationMints = [...this.tracked.values()]
+      .filter((token) => token.migratedAt).length;
     return {
       enabled: this.config.enabled,
       mode: 'SHADOW_G',
       sendsTransactions: false,
       gfrEnabled: this.config.gfrEnabled !== false && this.fastConfirmationProfiles.length > 0,
       trackedMints: this.tracked.size,
+      pendingMigrationMints,
+      migratedObservationMints,
       detectorStates: Object.fromEntries(this.lifecycleStages.map((stage) => [
         stage.id,
         [...this.detectors.values()]
@@ -532,6 +548,7 @@ class MigratedDropReboundShadowSuite {
         scope: 'PRE_MIGRATION_BONDING_CURVE_AND_POST_MIGRATION_PUMP_AMM',
         trackingAgeMs: this.config.trackingAgeMs,
         observationAgeMs: this._observationAgeMs(),
+        pendingMigrationTrackingMs: this._pendingMigrationTrackingMs(),
         entryDelayMs: this.config.entryDelayMs,
         entryTimeoutMs: this.config.entryTimeoutMs,
         maxEntryPriceJumpPct: this.config.maxEntryPriceJumpPct,
@@ -578,6 +595,13 @@ class MigratedDropReboundShadowSuite {
     return Math.max(
       finite(this.config.trackingAgeMs, 0),
       finite(this.config.observationAgeMs, 0),
+    );
+  }
+
+  _pendingMigrationTrackingMs() {
+    return Math.max(
+      this._observationAgeMs(),
+      finite(this.config.pendingMigrationTrackingMs, 2 * 60 * 60_000),
     );
   }
 

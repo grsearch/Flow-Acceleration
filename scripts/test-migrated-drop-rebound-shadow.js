@@ -130,6 +130,76 @@ function testFirstAmmMigrationRecoveryAndExactUpgrade() {
   store.close();
 }
 
+function testDelayedMigrationSubscriptionRetention() {
+  const store = new ResearchStore({
+    dbPath: ':memory:',
+    rawRetentionHours: 168,
+    archiveDir: './data/archive',
+    flushMs: 60_000,
+    flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const base = 1_810_000_000_000;
+  let now = base + 80 * 60_000;
+  const mint = 'DelayedMigration11111111111111111111111111111';
+  recordCreate(store, mint, base - 10_000);
+  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  const suite = new MigratedDropReboundShadowSuite({
+    config: {
+      enabled: true,
+      lifecycleStages: [{ id: 'POST_MIGRATION', market: 'PUMP_AMM' }],
+      entryProfiles: [],
+      exitProfiles: [],
+      positionSizeSol: 0.1,
+      entryTimeoutMs: 2_000,
+      trackingAgeMs: 120_000,
+      observationAgeMs: 30 * 60_000,
+      pendingMigrationTrackingMs: 2 * 60 * 60_000,
+      stateRetentionMs: 30_000,
+      costModel: { positionSizeSol: 0.1 },
+    },
+    store,
+    now: () => now,
+  });
+  suite.start();
+
+  assert.ok(suite.trackedMints(now).includes(mint),
+    'a completed Mint must remain subscribed 80 minutes while migration is pending');
+  assert.strictEqual(suite.health().pendingMigrationMints, 1);
+  assert.strictEqual(suite.health().migratedObservationMints, 0);
+  assert.strictEqual(suite.health().strategy.pendingMigrationTrackingMs, 2 * 60 * 60_000);
+
+  const recovered = store.recoverMigrationFromFirstAmmTrade(trade(
+    mint,
+    now + 50,
+    1,
+    'PUMP_AMM',
+    {
+      chainTimestampMs: now,
+      pool: 'delayed-first-amm-pool',
+      signature: 'delayed-first-amm-signature',
+    },
+  ));
+  assert.ok(recovered, 'the delayed first AMM trade must recover migration');
+  suite.onGraduated(recovered, { source: 'first_amm' });
+  assert.strictEqual(suite.health().pendingMigrationMints, 0);
+  assert.strictEqual(suite.health().migratedObservationMints, 1);
+  assert.strictEqual(suite.health().lastCompletionToFirstAmmMs, 80 * 60_000);
+  assert.ok(suite.trackedMints(now + 29 * 60_000).includes(mint));
+  assert.ok(!suite.trackedMints(now + 31 * 60_000).includes(mint),
+    'post-migration observation must retain its original 30 minute bound');
+
+  const expiredMint = 'ExpiredPendingMigration1111111111111111111111111';
+  recordCreate(store, expiredMint, base - 10_000);
+  store.recordComplete({ mint: expiredMint, completedAt: base, timestampMs: base });
+  suite.onGraduated(store.getToken(expiredMint), { source: 'complete' });
+  suite.trackedMints(base + 2 * 60 * 60_000 + 1);
+  assert.strictEqual(suite.health().pendingMigrationExpired, 1);
+  assert.ok(!suite.tracked.has(expiredMint));
+  store.close();
+}
+
+testDelayedMigrationSubscriptionRetention();
+
 function run() {
   const base = 1_800_000_000_000;
   let now = base;

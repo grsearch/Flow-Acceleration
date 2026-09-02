@@ -5350,6 +5350,14 @@ const config = {
       30 * 60_000,
       { min: 120_000, max: 60 * 60_000 },
     ),
+    // Completion and PumpSwap migration are separate events. Keep completed
+    // Mints subscribed long enough to observe a delayed migration/first AMM
+    // trade, without extending any profile's post-migration entry age gate.
+    pendingMigrationTrackingMs: integerEnv(
+      'FLOW_MIGRATED_REBOUND_PENDING_MIGRATION_MS',
+      2 * 60 * 60_000,
+      { min: 30 * 60_000, max: 6 * 60 * 60_000 },
+    ),
     positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
     entryDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
