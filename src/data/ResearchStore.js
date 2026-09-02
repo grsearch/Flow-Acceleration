@@ -682,6 +682,7 @@ class ResearchStore {
         creator TEXT,
         created_at INTEGER,
         graduated_at INTEGER,
+        migrated_at INTEGER,
         migration_pool TEXT,
         initial_real_token_reserves_raw TEXT,
         token_total_supply_raw TEXT,
@@ -2244,6 +2245,15 @@ class ResearchStore {
         ON graduation_acceleration_shadow_positions(mint, signal_at DESC);
     `);
 
+    const flowTokenColumns = new Set(
+      this.db.prepare('PRAGMA table_info(flow_tokens)').all().map((column) => column.name),
+    );
+    if (!flowTokenColumns.has('migrated_at')) {
+      this.db.exec('ALTER TABLE flow_tokens ADD COLUMN migrated_at INTEGER');
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_flow_tokens_migrated
+      ON flow_tokens(migrated_at)`);
+
     const graduationAccelerationColumns = new Set(
       this.db.prepare('PRAGMA table_info(graduation_acceleration_shadow_positions)')
         .all().map((column) => column.name),
@@ -2888,7 +2898,10 @@ class ResearchStore {
       `),
       markComplete: this.db.prepare(`
         UPDATE flow_tokens SET
-          graduated_at = COALESCE(graduated_at, @graduatedAt),
+          graduated_at = CASE
+            WHEN graduated_at IS NULL THEN @graduatedAt
+            ELSE MIN(graduated_at, @graduatedAt)
+          END,
           bonding_curve = COALESCE(bonding_curve, @bondingCurve),
           updated_at = @updatedAt
         WHERE mint = @mint
@@ -2896,6 +2909,7 @@ class ResearchStore {
       markMigration: this.db.prepare(`
         UPDATE flow_tokens SET
           graduated_at = COALESCE(graduated_at, @migratedAt),
+          migrated_at = COALESCE(migrated_at, @migratedAt),
           migration_pool = COALESCE(@pool, migration_pool),
           bonding_curve = COALESCE(bonding_curve, @bondingCurve),
           updated_at = @updatedAt
@@ -4637,7 +4651,9 @@ class ResearchStore {
     const current = this.tokens.get(event.mint);
     const fallback = this._mergeMemoryToken(event.mint, {
       bonding_curve: current?.bonding_curve || row.bondingCurve,
-      graduated_at: current?.graduated_at || row.graduatedAt,
+      graduated_at: current?.graduated_at
+        ? Math.min(Number(current.graduated_at), row.graduatedAt)
+        : row.graduatedAt,
       updated_at: now,
     });
     if (this.pendingTokenWrites.has(event.mint) || Date.now() < this.nextWriteRetryAt) {
@@ -4674,6 +4690,7 @@ class ResearchStore {
     const fallback = this._mergeMemoryToken(event.mint, {
       bonding_curve: current?.bonding_curve || row.bondingCurve,
       graduated_at: current?.graduated_at || row.migratedAt,
+      migrated_at: current?.migrated_at || row.migratedAt,
       migration_pool: row.pool,
       updated_at: now,
     });

@@ -19,6 +19,14 @@ function finite(value, fallback = null) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function completionAt(token) {
+  return finite(token?.graduated_at ?? token?.graduatedAt ?? token?.completedAt);
+}
+
+function migrationAt(token) {
+  return finite(token?.migrated_at ?? token?.migratedAt);
+}
+
 function shadowPrice(trade) {
   const reservePrice = finite(trade?.reservePrice);
   return reservePrice > 0 ? reservePrice : finite(trade?.price);
@@ -106,6 +114,10 @@ function rowPosition(row) {
     confirmationJson: value('confirmation_json', 'confirmationJson'),
     positionSol: finite(value('position_sol', 'positionSol'), 1),
     configuredCostPct: finite(value('configured_cost_pct', 'configuredCostPct'), 0),
+    migratedAt: value('migrated_at', 'migratedAt'),
+    migrationAgeMs: value('migration_age_ms', 'migrationAgeMs'),
+    dropPct: value('drop_pct', 'dropPct'),
+    reboundPct: value('rebound_pct', 'reboundPct'),
     reboundAt: value('rebound_at', 'reboundAt'),
     reboundPrice: value('rebound_price', 'reboundPrice'),
     entryTargetAt: value('entry_target_at', 'entryTargetAt'),
@@ -208,6 +220,11 @@ class MigratedDropReboundShadowSuite {
     this.metrics = {
       graduationEventsObserved: 0,
       lastGraduationEventAt: null,
+      migrationEventsObserved: 0,
+      lastMigrationEventAt: null,
+      completionToMigrationSamples: 0,
+      lastCompletionToMigrationMs: null,
+      maxCompletionToMigrationMs: null,
       startupRecoveredMints: 0,
       startupReplayTrades: 0,
       liveTradesObserved: 0,
@@ -220,6 +237,8 @@ class MigratedDropReboundShadowSuite {
       lastPostMigrationEligibleTradeAt: null,
       missingGraduatedAtAmmTrades: 0,
       lastMissingGraduatedAtAmmTradeAt: null,
+      missingMigratedAtAmmTrades: 0,
+      lastMissingMigratedAtAmmTradeAt: null,
       candidates: 0,
       signals: 0,
       replaySignalsSuppressed: 0,
@@ -253,8 +272,8 @@ class MigratedDropReboundShadowSuite {
     if (!this.config.enabled) return;
     const now = this.now();
     for (const token of this.store.allTokens()) {
-      const graduatedAt = finite(token.graduated_at);
-      if (graduatedAt && now - graduatedAt <= this._observationAgeMs()) {
+      const lifecycleAt = migrationAt(token) || completionAt(token);
+      if (lifecycleAt && now - lifecycleAt <= this._observationAgeMs()) {
         this.onGraduated(token, { source: 'startup' });
       }
     }
@@ -267,7 +286,7 @@ class MigratedDropReboundShadowSuite {
       this.onGraduated(token || {
         mint: position.mint,
         symbol: position.symbol,
-        graduated_at: row.migrated_at,
+        migrated_at: row.migrated_at,
       }, { source: 'startup' });
     }
     this.metrics.startupRecoveredMints = this.tracked.size;
@@ -295,26 +314,43 @@ class MigratedDropReboundShadowSuite {
 
   onGraduated(token, { source = 'event' } = {}) {
     if (!this.config.enabled || !token?.mint) return;
-    const graduatedAt = finite(
-      token.graduated_at ?? token.graduatedAt ?? token.migratedAt
-        ?? token.completedAt ?? token.timestampMs,
-    );
-    if (!(graduatedAt > 0)) return;
-    if (source === 'event') {
+    const completedAt = completionAt(token);
+    const migratedAt = migrationAt(token);
+    if (!(completedAt > 0) && !(migratedAt > 0)) return;
+    if (source === 'complete' || source === 'event') {
       this.metrics.graduationEventsObserved += 1;
       this.metrics.lastGraduationEventAt = this.now();
+    }
+    if (source === 'migration') {
+      this.metrics.migrationEventsObserved += 1;
+      this.metrics.lastMigrationEventAt = this.now();
+      if (completedAt > 0 && migratedAt >= completedAt) {
+        const delayMs = migratedAt - completedAt;
+        this.metrics.completionToMigrationSamples += 1;
+        this.metrics.lastCompletionToMigrationMs = delayMs;
+        this.metrics.maxCompletionToMigrationMs = Math.max(
+          finite(this.metrics.maxCompletionToMigrationMs, 0),
+          delayMs,
+        );
+      }
     }
     const current = this.tracked.get(token.mint);
     this.tracked.set(token.mint, {
       mint: token.mint,
       symbol: token.symbol || current?.symbol || null,
-      graduatedAt: Math.min(graduatedAt, current?.graduatedAt || graduatedAt),
+      completedAt: completedAt > 0
+        ? Math.min(completedAt, current?.completedAt || completedAt)
+        : current?.completedAt || null,
+      migratedAt: migratedAt > 0
+        ? Math.min(migratedAt, current?.migratedAt || migratedAt)
+        : current?.migratedAt || null,
     });
   }
 
   trackedMints(now = this.now()) {
     for (const [mint, token] of this.tracked) {
-      if (now - token.graduatedAt <= this._observationAgeMs()) continue;
+      const lifecycleAt = token.migratedAt || token.completedAt;
+      if (lifecycleAt && now - lifecycleAt <= this._observationAgeMs()) continue;
       if (this._hasActiveMint(mint)) continue;
       this.tracked.delete(mint);
       for (const detector of this.detectors.values()) detector.states.delete(mint);
@@ -350,16 +386,22 @@ class MigratedDropReboundShadowSuite {
       this.metrics.curveTradesObserved += 1;
     }
     const token = this.store.getToken(trade.mint);
-    const graduatedAt = finite(token?.graduated_at ?? this.tracked.get(trade.mint)?.graduatedAt);
+    const tracked = this.tracked.get(trade.mint);
+    const graduatedAt = completionAt(token) || finite(tracked?.completedAt);
+    const migratedAt = migrationAt(token) || finite(tracked?.migratedAt);
     if (trade.market === 'PUMP_AMM' && !(graduatedAt > 0)) {
       this.metrics.missingGraduatedAtAmmTrades += 1;
       this.metrics.lastMissingGraduatedAtAmmTradeAt = timestampMs;
+    }
+    if (trade.market === 'PUMP_AMM' && !(migratedAt > 0)) {
+      this.metrics.missingMigratedAtAmmTrades += 1;
+      this.metrics.lastMissingMigratedAtAmmTradeAt = timestampMs;
     }
     if (!this._acceptAmmPrice(trade, price)) return;
     const lifecycleStage = trade.market === 'PUMP_BONDING_CURVE'
       && (!(graduatedAt > 0) || timestampMs < graduatedAt)
       ? 'PRE_MIGRATION'
-      : trade.market === 'PUMP_AMM' && graduatedAt > 0 && timestampMs >= graduatedAt
+      : trade.market === 'PUMP_AMM' && migratedAt > 0 && timestampMs >= migratedAt
         ? 'POST_MIGRATION'
         : null;
     if (lifecycleStage === 'POST_MIGRATION') {
@@ -377,11 +419,11 @@ class MigratedDropReboundShadowSuite {
       if (!this.tracked.has(trade.mint)) {
         this.onGraduated(token, { source: replay ? 'replay' : 'trade' });
       }
-      if (timestampMs - graduatedAt > this._observationAgeMs()
+      if (timestampMs - migratedAt > this._observationAgeMs()
         && !this._hasActiveMint(trade.mint)) return;
     }
     const anchorAt = lifecycleStage === 'POST_MIGRATION'
-      ? graduatedAt
+      ? migratedAt
       : finite(token?.created_at, timestampMs);
     for (const profile of this.entryProfiles.values()) {
       if (profile.newEntriesEnabled === false) continue;
@@ -1016,8 +1058,9 @@ class MigratedDropReboundShadowSuite {
           lifecycleStage: position.lifecycleStage,
           lifecycleAgeMs: position.lifecycleStage === 'POST_MIGRATION'
             ? trade.timestampMs - finite(
-              this.store.getToken(position.mint)?.graduated_at
-                ?? this.tracked.get(position.mint)?.graduatedAt,
+              migrationAt(this.store.getToken(position.mint))
+                ?? this.tracked.get(position.mint)?.migratedAt
+                ?? position.migratedAt,
               trade.timestampMs,
             )
             : null,
@@ -1402,7 +1445,7 @@ class MigratedDropReboundShadowSuite {
   _eligibleEntryTrade(position, trade) {
     if (position.lifecycleStage === 'POST_MIGRATION') return trade.market === 'PUMP_AMM';
     if (trade.market !== 'PUMP_BONDING_CURVE') return false;
-    const graduatedAt = finite(this.store.getToken(position.mint)?.graduated_at);
+    const graduatedAt = completionAt(this.store.getToken(position.mint));
     return !(graduatedAt > 0) || trade.timestampMs < graduatedAt;
   }
 
@@ -1410,12 +1453,14 @@ class MigratedDropReboundShadowSuite {
     if (position.lifecycleStage === 'POST_MIGRATION') {
       return trade.market === 'PUMP_AMM';
     }
-    const graduatedAt = finite(this.store.getToken(position.mint)?.graduated_at);
+    const token = this.store.getToken(position.mint);
+    const graduatedAt = completionAt(token);
+    const migratedAt = migrationAt(token) || finite(position.migratedAt);
     if (trade.market === 'PUMP_BONDING_CURVE') {
       return !(graduatedAt > 0) || trade.timestampMs < graduatedAt;
     }
     if (trade.market !== 'PUMP_AMM') return false;
-    if (!(graduatedAt > 0) || trade.timestampMs < graduatedAt) return false;
+    if (!(migratedAt > 0) || trade.timestampMs < migratedAt) return false;
     const ratio = price / position.entryPrice;
     return ratio >= 0.05 && ratio <= 20;
   }

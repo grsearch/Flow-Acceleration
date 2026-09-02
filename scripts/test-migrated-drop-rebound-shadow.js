@@ -43,6 +43,16 @@ function recordCreate(store, mint, createdAt) {
   });
 }
 
+function recordMigration(store, mint, migratedAt, completedAt = migratedAt) {
+  store.recordComplete({ mint, completedAt, timestampMs: completedAt });
+  return store.recordMigration({
+    mint,
+    migratedAt,
+    timestampMs: migratedAt,
+    pool: `${mint}:pool`,
+  });
+}
+
 function run() {
   const base = 1_800_000_000_000;
   let now = base;
@@ -169,9 +179,17 @@ function run() {
   assert(rows.every((row) => row.entry_market === 'PUMP_BONDING_CURVE'));
   assert(rows.every((row) => row.cohort_id.startsWith('PRE_')));
 
-  // A position opened before graduation remains observable and may exit on PumpSwap.
+  // A position opened before curve completion remains observable, but PumpSwap
+  // exits only become executable after the actual migration event.
   store.recordComplete({ mint: preMint, completedAt: base + 1_000, timestampMs: base + 1_000 });
-  suite.onGraduated(store.getToken(preMint));
+  suite.onGraduated(store.getToken(preMint), { source: 'complete' });
+  store.recordMigration({
+    mint: preMint,
+    migratedAt: base + 1_500,
+    timestampMs: base + 1_500,
+    pool: `${preMint}:pool`,
+  });
+  suite.onGraduated(store.getToken(preMint), { source: 'migration' });
   suite.stop();
   suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
@@ -203,8 +221,42 @@ function run() {
   // POST_MIGRATION: PumpSwap trades use a separate detector and cohort namespace.
   const postMint = 'PostMigrationRebound11111111111111111111111';
   recordCreate(store, postMint, base);
-  store.recordComplete({ mint: postMint, completedAt: base + 5_000, timestampMs: base + 5_000 });
-  suite.onGraduated(store.getToken(postMint));
+  store.recordComplete({
+    mint: postMint,
+    completedAt: base + 1_000,
+    timestampMs: base + 1_000,
+  });
+  suite.onGraduated(store.getToken(postMint), { source: 'complete' });
+  const signalsBeforeActualMigration = suite.health().signals;
+  suite.observeTrade(trade(postMint, base + 1_100, 1));
+  suite.observeTrade(trade(postMint, base + 1_400, 0.8));
+  suite.observeTrade(trade(postMint, base + 1_700, 0.82));
+  assert.strictEqual(suite.health().signals, signalsBeforeActualMigration);
+  assert.strictEqual(suite.health().missingMigratedAtAmmTrades, 3);
+  store.recordMigration({
+    mint: postMint,
+    migratedAt: base + 5_000,
+    timestampMs: base + 5_000,
+    pool: `${postMint}:pool`,
+  });
+  suite.onGraduated(store.getToken(postMint), { source: 'migration' });
+  assert.strictEqual(store.getToken(postMint).graduated_at, base + 1_000);
+  assert.strictEqual(store.getToken(postMint).migrated_at, base + 5_000);
+  assert.strictEqual(suite.health().lastCompletionToMigrationMs, 4_000);
+  const outOfOrderMint = 'OutOfOrderMigration1111111111111111111111111';
+  recordCreate(store, outOfOrderMint, base);
+  store.recordMigration({
+    mint: outOfOrderMint,
+    migratedAt: base + 20_000,
+    timestampMs: base + 20_000,
+  });
+  store.recordComplete({
+    mint: outOfOrderMint,
+    completedAt: base + 15_000,
+    timestampMs: base + 15_000,
+  });
+  assert.strictEqual(store.getToken(outOfOrderMint).graduated_at, base + 15_000);
+  assert.strictEqual(store.getToken(outOfOrderMint).migrated_at, base + 20_000);
   suite.observeTrade(trade(postMint, base + 5_100, 1));
   suite.observeTrade(trade(postMint, base + 5_400, 0.8));
   suite.observeTrade(trade(postMint, base + 5_700, 0.82));
@@ -253,8 +305,8 @@ function run() {
   // A drop beyond the maximum is cancelled and cannot re-arm inside the episode.
   const deepMint = 'DeepDrop1111111111111111111111111111111111';
   recordCreate(store, deepMint, base);
-  store.recordComplete({ mint: deepMint, completedAt: base + 12_000, timestampMs: base + 12_000 });
-  suite.onGraduated(store.getToken(deepMint));
+  recordMigration(store, deepMint, base + 12_000);
+  suite.onGraduated(store.getToken(deepMint), { source: 'migration' });
   suite.observeTrade(trade(deepMint, base + 12_100, 1));
   suite.observeTrade(trade(deepMint, base + 12_150, 0.8));
   suite.observeTrade(trade(deepMint, base + 12_200, 0.64));
@@ -265,12 +317,8 @@ function run() {
   // A single malformed PumpSwap quote is ignored and cannot manufacture a signal.
   const guardedMint = 'GuardedAmmPrice111111111111111111111111111';
   recordCreate(store, guardedMint, base);
-  store.recordComplete({
-    mint: guardedMint,
-    completedAt: base + 13_000,
-    timestampMs: base + 13_000,
-  });
-  suite.onGraduated(store.getToken(guardedMint));
+  recordMigration(store, guardedMint, base + 13_000);
+  suite.onGraduated(store.getToken(guardedMint), { source: 'migration' });
   suite.observeTrade(trade(guardedMint, base + 13_100, 1));
   const signalsBeforeOutlier = suite.health().signals;
   suite.observeTrade(trade(guardedMint, base + 13_200, 0.0001));
@@ -340,10 +388,10 @@ function testEarlyOpportunityProfiles() {
   };
   const mint = 'EarlyOpportunity1111111111111111111111111111';
   recordCreate(store, mint, base);
-  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  recordMigration(store, mint, base);
   let suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
-  suite.onGraduated(store.getToken(mint));
+  suite.onGraduated(store.getToken(mint), { source: 'migration' });
   const cycle = (start) => {
     suite.observeTrade(trade(mint, base + start, 1));
     suite.observeTrade(trade(mint, base + start + 100, 0.8));
@@ -366,7 +414,7 @@ function testEarlyOpportunityProfiles() {
   suite.stop();
   suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
-  suite.onGraduated(store.getToken(mint));
+  suite.onGraduated(store.getToken(mint), { source: 'migration' });
   cycle(9_000);
   assert.strictEqual(
     store.db.prepare("SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE entry_profile_id='GE30_R23_F1'").get().n,
@@ -379,8 +427,8 @@ function testEarlyOpportunityProfiles() {
 
   const lateMint = 'LateOpportunity11111111111111111111111111111';
   recordCreate(store, lateMint, base);
-  store.recordComplete({ mint: lateMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(lateMint));
+  recordMigration(store, lateMint, base);
+  suite.onGraduated(store.getToken(lateMint), { source: 'migration' });
   suite.observeTrade(trade(lateMint, base + 31_000, 1));
   suite.observeTrade(trade(lateMint, base + 31_100, 0.8));
   suite.observeTrade(trade(lateMint, base + 31_200, 0.82));
@@ -426,8 +474,8 @@ function optimizationStore() {
 
 function seedPostMigrationSignal({ suite, store, mint, base }) {
   recordCreate(store, mint, base);
-  store.recordComplete({ mint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(mint));
+  recordMigration(store, mint, base);
+  suite.onGraduated(store.getToken(mint), { source: 'migration' });
   suite.observeTrade(trade(mint, base + 100, 1));
   suite.observeTrade(trade(mint, base + 200, 0.7));
   suite.observeTrade(trade(mint, base + 300, 0.7203));
@@ -541,10 +589,10 @@ function testV2ProfileSpecificJumpAndRunner() {
   }];
   const rejectedMint = 'V2JumpRejected111111111111111111111111111111';
   recordCreate(store, rejectedMint, base);
-  store.recordComplete({ mint: rejectedMint, completedAt: base, timestampMs: base });
+  recordMigration(store, rejectedMint, base);
   let suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
-  suite.onGraduated(store.getToken(rejectedMint));
+  suite.onGraduated(store.getToken(rejectedMint), { source: 'migration' });
   suite.observeTrade(trade(rejectedMint, base + 100, 1));
   suite.observeTrade(trade(rejectedMint, base + 200, 0.7));
   suite.observeTrade(trade(rejectedMint, base + 300, 0.721));
@@ -557,8 +605,8 @@ function testV2ProfileSpecificJumpAndRunner() {
 
   const runnerMint = 'V2Runner11111111111111111111111111111111111';
   recordCreate(store, runnerMint, base + 100_000);
-  store.recordComplete({ mint: runnerMint, completedAt: base + 100_000, timestampMs: base + 100_000 });
-  suite.onGraduated(store.getToken(runnerMint));
+  recordMigration(store, runnerMint, base + 100_000);
+  suite.onGraduated(store.getToken(runnerMint), { source: 'migration' });
   suite.observeTrade(trade(runnerMint, base + 100_100, 1));
   suite.observeTrade(trade(runnerMint, base + 100_200, 0.7));
   suite.observeTrade(trade(runnerMint, base + 100_300, 0.721));
@@ -594,10 +642,10 @@ function testCapacityAwareEntryFill() {
   }];
   const mint = 'CapacityFill111111111111111111111111111111111';
   recordCreate(store, mint, base);
-  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  recordMigration(store, mint, base);
   const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
-  suite.onGraduated(store.getToken(mint));
+  suite.onGraduated(store.getToken(mint), { source: 'migration' });
   suite.observeTrade(trade(mint, base + 100, 1));
   suite.observeTrade(trade(mint, base + 200, 0.7));
   suite.observeTrade(trade(mint, base + 300, 0.7203));
@@ -662,10 +710,10 @@ function testSecondOpportunityOnlyAndBeijingWindows() {
   }];
   const mint = 'SecondOpportunity11111111111111111111111111111';
   recordCreate(store, mint, base);
-  store.recordComplete({ mint, completedAt: base, timestampMs: base });
+  recordMigration(store, mint, base);
   const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
-  suite.onGraduated(store.getToken(mint));
+  suite.onGraduated(store.getToken(mint), { source: 'migration' });
   suite.observeTrade(trade(mint, base + 100, 1));
   suite.observeTrade(trade(mint, base + 200, 0.7));
   suite.observeTrade(trade(mint, base + 300, 0.7203));
@@ -770,8 +818,8 @@ function testFastReboundCapacityProfile() {
 
   const slowMint = 'SlowReboundGQ11111111111111111111111111111111';
   recordCreate(store, slowMint, base);
-  store.recordComplete({ mint: slowMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(slowMint));
+  recordMigration(store, slowMint, base);
+  suite.onGraduated(store.getToken(slowMint), { source: 'migration' });
   suite.observeTrade(trade(slowMint, base + 100, 1));
   suite.observeTrade(trade(slowMint, base + 200, 0.7));
   suite.observeTrade(trade(slowMint, base + 500, 0.7203));
@@ -782,8 +830,8 @@ function testFastReboundCapacityProfile() {
 
   const fastMint = 'FastReboundGQ11111111111111111111111111111111';
   recordCreate(store, fastMint, base);
-  store.recordComplete({ mint: fastMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(fastMint));
+  recordMigration(store, fastMint, base);
+  suite.onGraduated(store.getToken(fastMint), { source: 'migration' });
   suite.observeTrade(trade(fastMint, base + 1_100, 1));
   suite.observeTrade(trade(fastMint, base + 1_200, 0.7));
   suite.observeTrade(trade(fastMint, base + 1_350, 0.7203));
@@ -879,8 +927,8 @@ function testFastReversalContinuationConfirmation() {
 
   const fastMint = 'FastContinuation111111111111111111111111111111';
   recordCreate(store, fastMint, base);
-  store.recordComplete({ mint: fastMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(fastMint));
+  recordMigration(store, fastMint, base);
+  suite.onGraduated(store.getToken(fastMint), { source: 'migration' });
   suite.observeTrade(fastFlowTrade(fastMint, base + 100, 0.000001, {
     wallet: 'peak-buyer', solAmount: 0.2,
   }));
@@ -920,8 +968,8 @@ function testFastReversalContinuationConfirmation() {
 
   const slowMint = 'SlowContinuation111111111111111111111111111111';
   recordCreate(store, slowMint, base);
-  store.recordComplete({ mint: slowMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(slowMint));
+  recordMigration(store, slowMint, base);
+  suite.onGraduated(store.getToken(slowMint), { source: 'migration' });
   suite.observeTrade(fastFlowTrade(slowMint, base + 1_100, 0.000001, {
     wallet: 'peak', solAmount: 0.2,
   }));
@@ -951,8 +999,8 @@ function testFastReversalContinuationConfirmation() {
 
   const boundedMint = 'BoundedFastFlow1111111111111111111111111111111';
   recordCreate(store, boundedMint, base);
-  store.recordComplete({ mint: boundedMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(boundedMint));
+  recordMigration(store, boundedMint, base);
+  suite.onGraduated(store.getToken(boundedMint), { source: 'migration' });
   suite.observeTrade(fastFlowTrade(boundedMint, base + 4_800, 0.000001, {
     wallet: 'bounded-peak',
     solAmount: 0.01,
@@ -1106,8 +1154,8 @@ function testDirectDumpNextBuySequentialOpportunities() {
   const suite = new MigratedDropReboundShadowSuite({ config, store, now: () => now });
   suite.start();
   recordCreate(store, mint, base);
-  store.recordComplete({ mint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(mint));
+  recordMigration(store, mint, base);
+  suite.onGraduated(store.getToken(mint), { source: 'migration' });
 
   const observe = (offset, price, overrides = {}) => {
     now = base + offset;
@@ -1174,15 +1222,15 @@ function testDirectDumpNextBuySequentialOpportunities() {
   // Observation continues to 30 minutes, while entry remains hard-limited to 30 seconds.
   const observedMint = 'DirectDumpObservation111111111111111111111111111';
   recordCreate(store, observedMint, base);
-  store.recordComplete({ mint: observedMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(observedMint));
+  recordMigration(store, observedMint, base);
+  suite.onGraduated(store.getToken(observedMint), { source: 'migration' });
   assert.ok(suite.trackedMints(base + (10 * 60_000)).includes(observedMint));
   assert.ok(!suite.trackedMints(base + (31 * 60_000)).includes(observedMint));
 
   const lateMint = 'DirectDumpLate11111111111111111111111111111111';
   recordCreate(store, lateMint, base);
-  store.recordComplete({ mint: lateMint, completedAt: base, timestampMs: base });
-  suite.onGraduated(store.getToken(lateMint));
+  recordMigration(store, lateMint, base);
+  suite.onGraduated(store.getToken(lateMint), { source: 'migration' });
   const lateTrade = (offset, price, overrides = {}) => {
     now = base + offset;
     suite.observeTrade(trade(lateMint, now, price, 'PUMP_AMM', overrides));

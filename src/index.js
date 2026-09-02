@@ -574,7 +574,7 @@ function createRuntime(runtimeConfig = config) {
           const token = store.recordComplete(event);
           engine.handleComplete(event);
           observeShadow('migratedDropReboundGraduate', () => (
-            migratedDropReboundShadow.onGraduated(token || event)
+            migratedDropReboundShadow.onGraduated(token || event, { source: 'complete' })
           ));
           observeShadow('migrationContinuityGraduate', () => (
             migrationContinuityShadow.onGraduated(token || event)
@@ -613,7 +613,7 @@ function createRuntime(runtimeConfig = config) {
           const token = store.recordMigration(event);
           engine.handleComplete({ ...event, completedAt: event.migratedAt });
           observeShadow('migratedDropReboundGraduate', () => (
-            migratedDropReboundShadow.onGraduated(token || event)
+            migratedDropReboundShadow.onGraduated(token || event, { source: 'migration' })
           ));
           observeShadow('migrationContinuityGraduate', () => (
             migrationContinuityShadow.onGraduated(token || event)

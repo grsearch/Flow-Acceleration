@@ -53,6 +53,8 @@ function main() {
     flushMax: 10,
   }, { configuredTradingCostPct: 0 });
   let locker;
+  let deferredGraduatedAt;
+  let deferredMigratedAt;
   try {
     store.ensureToken('write-resilience-mint');
     const saved = store.recordSignal(signal(Date.now()));
@@ -88,6 +90,18 @@ function main() {
         timestampMs: graduatedAt,
       });
       assert.strictEqual(token.graduated_at, graduatedAt);
+      const migratedAt = graduatedAt + 90_000;
+      const migratedToken = store.recordMigration({
+        mint: 'deferred-graduation-mint',
+        bondingCurve: 'deferred-curve',
+        pool: 'deferred-pool',
+        migratedAt,
+        timestampMs: migratedAt,
+      });
+      assert.strictEqual(migratedToken.graduated_at, graduatedAt);
+      assert.strictEqual(migratedToken.migrated_at, migratedAt);
+      deferredGraduatedAt = graduatedAt;
+      deferredMigratedAt = migratedAt;
     });
     let health = store.healthSnapshot();
     assert.strictEqual(health.writeStatus, 'LOCKED');
@@ -125,9 +139,13 @@ function main() {
     assert.strictEqual(restored.return_1s, 10);
     assert.strictEqual(restored.net_return_1s, 10);
     assert.strictEqual(store.db.prepare('SELECT COUNT(*) AS n FROM raw_trades').get().n, 1);
-    assert.ok(store.db.prepare(`
-      SELECT graduated_at FROM flow_tokens WHERE mint='deferred-graduation-mint'
-    `).get().graduated_at > 0);
+    const deferredToken = store.db.prepare(`
+      SELECT graduated_at, migrated_at, migration_pool
+      FROM flow_tokens WHERE mint='deferred-graduation-mint'
+    `).get();
+    assert.strictEqual(deferredToken.graduated_at, deferredGraduatedAt);
+    assert.strictEqual(deferredToken.migrated_at, deferredMigratedAt);
+    assert.strictEqual(deferredToken.migration_pool, 'deferred-pool');
     health = store.healthSnapshot();
     assert.strictEqual(health.writeStatus, 'HEALTHY');
     assert.strictEqual(health.pendingWrites, 0);
