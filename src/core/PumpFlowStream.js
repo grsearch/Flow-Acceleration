@@ -52,7 +52,8 @@ class RegionConnection {
     this.onUnavailable = onUnavailable;
 
     this.client = null;
-    this.stream = null;
+    this.pumpStream = null;
+    this.ammStream = null;
     this.running = false;
     this.connected = false;
     this.ammMints = new Set();
@@ -74,9 +75,9 @@ class RegionConnection {
 
   async setAmmMints(mints) {
     this.ammMints = new Set(mints);
-    if (!this.connected || !this.stream) return;
+    if (!this.connected || !this.client) return;
     try {
-      await this._sendSubscription();
+      await this._replaceAmmSubscription();
     } catch (error) {
       this._notifyUnavailable(error, 'update_subscription');
     }
@@ -103,12 +104,12 @@ class RegionConnection {
         'grpc.http2.max_pings_without_data': 0,
       });
       if (typeof this.client.connect === 'function') await this.client.connect();
-      this.stream = await this.client.subscribe();
-      this.stream.on('data', (message) => this._handleMessage(message));
-      this.stream.on('error', (error) => this._handleEnd(error));
-      this.stream.on('end', () => this._handleEnd(new Error('stream ended')));
-      this.stream.on('close', () => this._handleEnd(new Error('stream closed')));
-      await this._sendSubscription();
+      this.pumpStream = await this._openStream('pump');
+      await this._sendPumpSubscription();
+      if (this.ammMints.size > 0) {
+        this.ammStream = await this._openStream('amm');
+        await this._sendAmmSubscription();
+      }
       this.connected = true;
       this.connectedAt = Date.now();
       this.unavailableNotified = false;
@@ -116,6 +117,7 @@ class RegionConnection {
         state: 'connected',
         connectedAt: this.connectedAt,
         ammMintCount: this.ammMints.size,
+        subscriptionMode: 'isolated-pump-and-amm',
       });
       return true;
     } catch (error) {
@@ -124,9 +126,18 @@ class RegionConnection {
     }
   }
 
-  async _sendSubscription() {
-    if (!this.stream) return;
-    const transactions = {
+  async _openStream(channel) {
+    const stream = await this.client.subscribe();
+    stream.on('data', (message) => this._handleMessage(message, channel));
+    stream.on('error', (error) => this._handleEnd(error, channel));
+    stream.on('end', () => this._handleEnd(new Error(`${channel} stream ended`), channel));
+    stream.on('close', () => this._handleEnd(new Error(`${channel} stream closed`), channel));
+    return stream;
+  }
+
+  async _sendPumpSubscription() {
+    if (!this.pumpStream) return;
+    await this._writeSubscription(this.pumpStream, {
       pumpBondingCurve: transactionFilter({
         vote: false,
         failed: false,
@@ -134,19 +145,25 @@ class RegionConnection {
         accountExclude: [],
         accountRequired: [],
       }),
-    };
+    });
+  }
 
+  async _sendAmmSubscription() {
+    if (!this.ammStream || this.ammMints.size === 0) return;
     const ammMints = [...this.ammMints];
-    if (ammMints.length > 0) {
-      transactions.pumpAmmLabels = transactionFilter({
+    await this._writeSubscription(this.ammStream, {
+      pumpAmmLabels: transactionFilter({
         vote: false,
         failed: false,
         accountInclude: ammMints,
         accountExclude: [],
         accountRequired: [this.programs.amm],
-      });
-    }
+      }),
+    });
+    this.onState(this.label, { ammMintCount: ammMints.length });
+  }
 
+  async _writeSubscription(stream, transactions) {
     const { CommitmentLevel } = loadYellowstone();
     const request = subscribeRequest({
       transactions,
@@ -161,20 +178,35 @@ class RegionConnection {
     });
 
     await new Promise((resolve, reject) => {
-      this.stream.write(request, (error) => (error ? reject(error) : resolve()));
+      stream.write(request, (error) => (error ? reject(error) : resolve()));
     });
-    this.onState(this.label, { ammMintCount: ammMints.length });
   }
 
-  _handleMessage(message) {
+  async _replaceAmmSubscription() {
+    if (this.ammMints.size === 0) {
+      if (this.ammStream) {
+        this._destroyStream(this.ammStream);
+        this.ammStream = null;
+      }
+      this.onState(this.label, { ammMintCount: 0 });
+      return;
+    }
+    if (!this.ammStream) this.ammStream = await this._openStream('amm');
+    await this._sendAmmSubscription();
+  }
+
+  _handleMessage(message, channel) {
     if (!message?.transaction) return;
     this.lastMessageAt = Date.now();
-    this.onState(this.label, { lastMessageAt: this.lastMessageAt });
+    this.onState(this.label, {
+      lastMessageAt: this.lastMessageAt,
+      [channel === 'pump' ? 'lastPumpMessageAt' : 'lastAmmMessageAt']: this.lastMessageAt,
+    });
     this.onTransaction(message.transaction, this.label, this.lastMessageAt);
   }
 
-  _handleEnd(error) {
-    this._notifyUnavailable(error, 'stream');
+  _handleEnd(error, channel) {
+    this._notifyUnavailable(error, `${channel || 'unknown'}_stream`);
   }
 
   _notifyUnavailable(error, phase) {
@@ -187,11 +219,10 @@ class RegionConnection {
 
   async _close() {
     this.connected = false;
-    if (this.stream) {
-      try { this.stream.removeAllListeners(); } catch (_) {}
-      try { this.stream.destroy(); } catch (_) {}
-      this.stream = null;
-    }
+    this._destroyStream(this.pumpStream);
+    this._destroyStream(this.ammStream);
+    this.pumpStream = null;
+    this.ammStream = null;
     if (this.client) {
       try {
         if (typeof this.client.close === 'function') this.client.close();
@@ -199,6 +230,12 @@ class RegionConnection {
       } catch (_) {}
       this.client = null;
     }
+  }
+
+  _destroyStream(stream) {
+    if (!stream) return;
+    try { stream.removeAllListeners(); } catch (_) {}
+    try { stream.destroy(); } catch (_) {}
   }
 }
 
@@ -283,6 +320,7 @@ class PumpFlowStream extends EventEmitter {
     return {
       ...this.metrics,
       mode: 'active-passive',
+      subscriptionMode: 'isolated-pump-and-amm',
       activeEndpoint,
       activeLabel: this.activeEndpointIndex >= 0 ? this._labelFor(this.activeEndpointIndex) : null,
       dedupSize: this.seenSignatures.size,
@@ -431,3 +469,4 @@ class PumpFlowStream extends EventEmitter {
 }
 
 module.exports = PumpFlowStream;
+module.exports.RegionConnection = RegionConnection;

@@ -6,6 +6,11 @@ const { Worker } = require('worker_threads');
 const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 
+const MIGRATION_SOURCE = Object.freeze({
+  CHAIN_EVENT: 'CHAIN_EVENT',
+  FIRST_AMM_OBSERVED: 'FIRST_AMM_OBSERVED',
+});
+
 const LAUNCH_QUALITY_COLUMNS = Object.freeze({
   status: 'status',
   completedAt: 'completed_at',
@@ -683,6 +688,8 @@ class ResearchStore {
         created_at INTEGER,
         graduated_at INTEGER,
         migrated_at INTEGER,
+        migration_source TEXT,
+        migration_signature TEXT,
         migration_pool TEXT,
         initial_real_token_reserves_raw TEXT,
         token_total_supply_raw TEXT,
@@ -2251,6 +2258,12 @@ class ResearchStore {
     if (!flowTokenColumns.has('migrated_at')) {
       this.db.exec('ALTER TABLE flow_tokens ADD COLUMN migrated_at INTEGER');
     }
+    if (!flowTokenColumns.has('migration_source')) {
+      this.db.exec('ALTER TABLE flow_tokens ADD COLUMN migration_source TEXT');
+    }
+    if (!flowTokenColumns.has('migration_signature')) {
+      this.db.exec('ALTER TABLE flow_tokens ADD COLUMN migration_signature TEXT');
+    }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_flow_tokens_migrated
       ON flow_tokens(migrated_at)`);
 
@@ -2909,8 +2922,36 @@ class ResearchStore {
       markMigration: this.db.prepare(`
         UPDATE flow_tokens SET
           graduated_at = COALESCE(graduated_at, @migratedAt),
-          migrated_at = COALESCE(migrated_at, @migratedAt),
-          migration_pool = COALESCE(@pool, migration_pool),
+          migrated_at = CASE
+            WHEN migrated_at IS NULL THEN @migratedAt
+            WHEN @migrationSource = 'CHAIN_EVENT'
+              AND COALESCE(migration_source, '') <> 'CHAIN_EVENT' THEN @migratedAt
+            WHEN migration_source = @migrationSource THEN MIN(migrated_at, @migratedAt)
+            ELSE migrated_at
+          END,
+          migration_source = CASE
+            WHEN migrated_at IS NULL THEN @migrationSource
+            WHEN @migrationSource = 'CHAIN_EVENT'
+              AND COALESCE(migration_source, '') <> 'CHAIN_EVENT' THEN @migrationSource
+            ELSE COALESCE(migration_source, @migrationSource)
+          END,
+          migration_signature = CASE
+            WHEN migrated_at IS NULL THEN @migrationSignature
+            WHEN @migrationSource = 'CHAIN_EVENT'
+              AND COALESCE(migration_source, '') <> 'CHAIN_EVENT' THEN @migrationSignature
+            WHEN migration_source = @migrationSource AND @migratedAt < migrated_at
+              THEN @migrationSignature
+            ELSE COALESCE(migration_signature, @migrationSignature)
+          END,
+          migration_pool = CASE
+            WHEN @pool IS NULL THEN migration_pool
+            WHEN migrated_at IS NULL THEN @pool
+            WHEN @migrationSource = 'CHAIN_EVENT'
+              AND COALESCE(migration_source, '') <> 'CHAIN_EVENT' THEN @pool
+            WHEN migration_source = @migrationSource AND @migratedAt < migrated_at
+              THEN @pool
+            ELSE COALESCE(migration_pool, @pool)
+          END,
           bonding_curve = COALESCE(bonding_curve, @bondingCurve),
           updated_at = @updatedAt
         WHERE mint = @mint
@@ -4679,19 +4720,37 @@ class ResearchStore {
   recordMigration(event) {
     this.ensureToken(event.mint, event.bondingCurve);
     const now = Date.now();
+    const migrationSource = event.migrationSource === MIGRATION_SOURCE.FIRST_AMM_OBSERVED
+      ? MIGRATION_SOURCE.FIRST_AMM_OBSERVED
+      : MIGRATION_SOURCE.CHAIN_EVENT;
     const row = {
       mint: event.mint,
       bondingCurve: event.bondingCurve || null,
       pool: event.pool || null,
       migratedAt: event.migratedAt || event.timestampMs || now,
+      migrationSource,
+      migrationSignature: event.signature || null,
       updatedAt: now,
     };
     const current = this.tokens.get(event.mint);
+    const currentMigratedAt = Number(current?.migrated_at);
+    const incomingIsExact = migrationSource === MIGRATION_SOURCE.CHAIN_EVENT;
+    const currentIsExact = current?.migration_source === MIGRATION_SOURCE.CHAIN_EVENT;
+    const replaceMigration = !(currentMigratedAt > 0) || (incomingIsExact && !currentIsExact);
+    const sameSourceEarlier = !replaceMigration
+      && current?.migration_source === migrationSource
+      && row.migratedAt < currentMigratedAt;
     const fallback = this._mergeMemoryToken(event.mint, {
       bonding_curve: current?.bonding_curve || row.bondingCurve,
       graduated_at: current?.graduated_at || row.migratedAt,
-      migrated_at: current?.migrated_at || row.migratedAt,
-      migration_pool: row.pool,
+      migrated_at: replaceMigration || sameSourceEarlier ? row.migratedAt : current?.migrated_at,
+      migration_source: replaceMigration ? migrationSource : current?.migration_source || migrationSource,
+      migration_signature: replaceMigration || sameSourceEarlier
+        ? row.migrationSignature
+        : current?.migration_signature || row.migrationSignature,
+      migration_pool: replaceMigration
+        ? row.pool || current?.migration_pool
+        : current?.migration_pool || row.pool,
       updated_at: now,
     });
     if (this.pendingTokenWrites.has(event.mint) || Date.now() < this.nextWriteRetryAt) {
@@ -4712,6 +4771,26 @@ class ResearchStore {
       }
       throw error;
     }
+  }
+
+  recoverMigrationFromFirstAmmTrade(trade) {
+    if (trade?.market !== 'PUMP_AMM' || !trade.mint) return null;
+    if (!(Number(trade.solAmount) > 0) || !(Number(trade.tokenAmount) > 0)
+      || !(Number(trade.price) > 0)) return null;
+    const current = this.getToken(trade.mint);
+    const completedAt = Number(current?.graduated_at);
+    if (!(completedAt > 0) || Number(current?.migrated_at) > 0) return null;
+    const observedAt = Number(trade.chainTimestampMs || trade.timestampMs);
+    if (!(observedAt > 0)) return null;
+    return this.recordMigration({
+      mint: trade.mint,
+      bondingCurve: trade.bondingCurve || current?.bonding_curve || null,
+      pool: trade.pool || null,
+      migratedAt: Math.max(completedAt, observedAt),
+      timestampMs: trade.timestampMs || observedAt,
+      signature: trade.signature || null,
+      migrationSource: MIGRATION_SOURCE.FIRST_AMM_OBSERVED,
+    });
   }
 
   _mergeMemoryToken(mint, patch) {
@@ -9515,6 +9594,7 @@ class ResearchStore {
 
 module.exports = {
   ResearchStore,
+  MIGRATION_SOURCE,
   curveProgress,
   isSqliteContention,
 };

@@ -222,6 +222,9 @@ class MigratedDropReboundShadowSuite {
       lastGraduationEventAt: null,
       migrationEventsObserved: 0,
       lastMigrationEventAt: null,
+      firstAmmMigrationRecoveries: 0,
+      lastFirstAmmMigrationRecoveryAt: null,
+      lastCompletionToFirstAmmMs: null,
       completionToMigrationSamples: 0,
       lastCompletionToMigrationMs: null,
       maxCompletionToMigrationMs: null,
@@ -334,7 +337,18 @@ class MigratedDropReboundShadowSuite {
         );
       }
     }
+    if (source === 'first_amm') {
+      this.metrics.firstAmmMigrationRecoveries += 1;
+      this.metrics.lastFirstAmmMigrationRecoveryAt = this.now();
+      if (completedAt > 0 && migratedAt >= completedAt) {
+        this.metrics.lastCompletionToFirstAmmMs = migratedAt - completedAt;
+      }
+    }
     const current = this.tracked.get(token.mint);
+    const migrationSource = token.migration_source || token.migrationSource
+      || (source === 'migration' ? 'CHAIN_EVENT'
+        : source === 'first_amm' ? 'FIRST_AMM_OBSERVED' : current?.migrationSource);
+    const exactMigration = migrationSource === 'CHAIN_EVENT';
     this.tracked.set(token.mint, {
       mint: token.mint,
       symbol: token.symbol || current?.symbol || null,
@@ -342,8 +356,11 @@ class MigratedDropReboundShadowSuite {
         ? Math.min(completedAt, current?.completedAt || completedAt)
         : current?.completedAt || null,
       migratedAt: migratedAt > 0
-        ? Math.min(migratedAt, current?.migratedAt || migratedAt)
+        ? exactMigration
+          ? migratedAt
+          : Math.min(migratedAt, current?.migratedAt || migratedAt)
         : current?.migratedAt || null,
+      migrationSource: migrationSource || current?.migrationSource || null,
     });
   }
 

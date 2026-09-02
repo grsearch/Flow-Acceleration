@@ -548,6 +548,58 @@ function createRuntime(runtimeConfig = config) {
     observeShadow('primarySignalEvent', () => signalShadow.onSignal(saved));
   });
 
+  const dispatchMigration = (event, { source = 'migration', token = null } = {}) => {
+    const migratedToken = token || store.recordMigration(event);
+    const migratedAt = Number(migratedToken?.migrated_at || event.migratedAt || event.timestampMs);
+    const lifecycleEvent = { ...event, migratedAt };
+    engine.handleComplete({ ...lifecycleEvent, completedAt: migratedAt });
+    observeShadow('migratedDropReboundGraduate', () => (
+      migratedDropReboundShadow.onGraduated(migratedToken || lifecycleEvent, { source })
+    ));
+    observeShadow('migrationContinuityGraduate', () => (
+      migrationContinuityShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('featureEdgeAuditGraduate', () => (
+      featureEdgeAudit.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('rangeScalperGraduate', () => (
+      rangeScalperShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    trader.onGraduated(migratedToken || lifecycleEvent);
+    observeShadow('graduationHoldGraduate', () => (
+      graduationHoldShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('holderGrowthGraduate', () => (
+      holderGrowthShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('qualityLeaderGraduate', () => (
+      qualityLeaderShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('bigWinnerGraduate', () => (
+      bigWinnerShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('graduationAccelerationGraduate', () => (
+      graduationAccelerationShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('migrationSecondLegGraduate', () => (
+      migrationSecondLegObserver.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('postMigrationSurvivorGraduate', () => (
+      postMigrationSurvivor.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('sameSlotDumpBackrunGraduate', () => (
+      sameSlotDumpBackrunShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('smartWalletRegistryGraduate', () => (
+      smartWalletRegistry.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    observeShadow('smartConsensusV2Graduate', () => (
+      smartWalletConsensusFlowRunnerShadow.onGraduated(migratedToken || lifecycleEvent)
+    ));
+    refreshAmmSubscriptions(migratedAt || Date.now());
+    return migratedToken;
+  };
+
   stream.on('transaction', (transaction, context) => {
     let events;
     try {
@@ -610,42 +662,7 @@ function createRuntime(runtimeConfig = config) {
           continue;
         }
         if (event.type === 'migration') {
-          const token = store.recordMigration(event);
-          engine.handleComplete({ ...event, completedAt: event.migratedAt });
-          observeShadow('migratedDropReboundGraduate', () => (
-            migratedDropReboundShadow.onGraduated(token || event, { source: 'migration' })
-          ));
-          observeShadow('migrationContinuityGraduate', () => (
-            migrationContinuityShadow.onGraduated(token || event)
-          ));
-          observeShadow('featureEdgeAuditGraduate', () => (
-            featureEdgeAudit.onGraduated(token || event)
-          ));
-          observeShadow('rangeScalperGraduate', () => rangeScalperShadow.onGraduated(token || event));
-          trader.onGraduated(token || event);
-          observeShadow('graduationHoldGraduate', () => graduationHoldShadow.onGraduated(token || event));
-          observeShadow('holderGrowthGraduate', () => holderGrowthShadow.onGraduated(token || event));
-          observeShadow('qualityLeaderGraduate', () => qualityLeaderShadow.onGraduated(token || event));
-          observeShadow('bigWinnerGraduate', () => bigWinnerShadow.onGraduated(token || event));
-          observeShadow('graduationAccelerationGraduate', () => (
-            graduationAccelerationShadow.onGraduated(token || event)
-          ));
-          observeShadow('migrationSecondLegGraduate', () => (
-            migrationSecondLegObserver.onGraduated(token || event)
-          ));
-          observeShadow('postMigrationSurvivorGraduate', () => (
-            postMigrationSurvivor.onGraduated(token || event)
-          ));
-          observeShadow('sameSlotDumpBackrunGraduate', () => (
-            sameSlotDumpBackrunShadow.onGraduated(token || event)
-          ));
-          observeShadow('smartWalletRegistryGraduate', () => (
-            smartWalletRegistry.onGraduated(token || event)
-          ));
-          observeShadow('smartConsensusV2Graduate', () => (
-            smartWalletConsensusFlowRunnerShadow.onGraduated(token || event)
-          ));
-          refreshAmmSubscriptions(event.migratedAt || event.timestampMs || Date.now());
+          dispatchMigration(event, { source: 'migration' });
           continue;
         }
         if (event.type !== 'trade' && event.type !== 'ammTrade') {
@@ -655,6 +672,16 @@ function createRuntime(runtimeConfig = config) {
 
         if (event.type === 'ammTrade') {
           event.mint = store.resolveAmmMint(event.pool, event.mint);
+          const recoveredToken = store.recoverMigrationFromFirstAmmTrade(event);
+          if (recoveredToken) {
+            dispatchMigration({
+              ...event,
+              type: 'migration',
+              migratedAt: recoveredToken.migrated_at,
+              migrationSource: recoveredToken.migration_source,
+              pool: recoveredToken.migration_pool || event.pool,
+            }, { source: 'first_amm', token: recoveredToken });
+          }
         }
         if (!event.mint || !Number.isFinite(event.solAmount) || event.solAmount <= 0
           || !Number.isFinite(event.tokenAmount) || event.tokenAmount <= 0

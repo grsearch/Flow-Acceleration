@@ -73,6 +73,24 @@ const complete = parser.parseTransaction({
 assert.strictEqual(complete.type, 'complete');
 assert.strictEqual(complete.mint, trade.mint);
 
+// Mainnet MigrateV2 transaction 29QtMC...HXYdq (slot 443670052). The current
+// event carries an appended field, so the parser must decode the documented
+// prefix without requiring an exact payload length.
+const migrationData = Buffer.from(
+  'velduVyU6pTt/dS9z5GV1V2An/vwmiJT/SBGCX4TfaaTo5fq0YvldWkHDee3AXTVxLJ+nZKGupl2VTP3pCF1Plei8OeAmcKvAAgBqSy8AAAQ9tHJEwAAAMHh5AAAAAAAfkJSvdx/4k9PAlKvxW0ZVMqCKS9XHqufppaP6fo0D/GH9ZdqAAAAADoqx/A4CO6gYDJzNiY5gv65nicLfkcophw1WpEPpSpyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+  'base64',
+);
+const migration = parser.parseTransaction({
+  slot: 443670052,
+  transaction: { signature: Buffer.alloc(64, 3) },
+  meta: { err: null, logMessages: logData(PUMP, migrationData) },
+}, 1788343687000)[0];
+assert.strictEqual(migration.type, 'migration');
+assert.strictEqual(migration.mint, '84z3jaJh5KbcpL2o3WjUoTLMVyRQS72dPKAfUxd3pump');
+assert.strictEqual(migration.pool, '4v4UyAGCyLDqE6Us2PSrZbJjmZPBqEhjkJSQYYYKV12R');
+assert.strictEqual(migration.migratedAt, 1788343687000);
+assert.strictEqual(migration.solAmount, 84.990359056);
+
 const ammBuyData = Buffer.concat([
   DISCRIMINATORS.ammBuy, i64(1_800_000_020), u64(50_000_000), u64(2_000_000_000),
   u64(0), u64(0), u64(500_000_000_000), u64(50_000_000_000), u64(1_000_000_000),

@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const PumpFlowStream = require('../src/core/PumpFlowStream');
+const { RegionConnection } = PumpFlowStream;
 
 const LAX = 'https://laserstream-mainnet-lax.helius-rpc.com';
 const SLC = 'https://laserstream-mainnet-slc.helius-rpc.com';
@@ -141,9 +142,49 @@ async function testStaleFailover() {
   await stream.stop();
 }
 
+async function testAmmUpdatesDoNotRewritePumpStream() {
+  const pumpStream = { channel: 'pump' };
+  let ammStreamDestroyed = false;
+  const connection = new RegionConnection({
+    endpoint: LAX,
+    token: 'token',
+    label: 'FLOW-1',
+    programs: { pump: 'pump-program', amm: 'amm-program' },
+    onTransaction: () => {},
+    onState: () => {},
+    onError: () => {},
+    onUnavailable: () => {},
+  });
+  connection.client = {};
+  connection.connected = true;
+  connection.pumpStream = pumpStream;
+  connection._openStream = async (channel) => ({
+    channel,
+    removeAllListeners() {},
+    destroy() { ammStreamDestroyed = true; },
+  });
+  let ammWrites = 0;
+  connection._sendAmmSubscription = async () => { ammWrites += 1; };
+
+  await connection.setAmmMints(['mint-a']);
+  assert.strictEqual(connection.pumpStream, pumpStream);
+  assert.strictEqual(connection.ammStream.channel, 'amm');
+  assert.strictEqual(ammWrites, 1);
+
+  await connection.setAmmMints(['mint-a', 'mint-b']);
+  assert.strictEqual(connection.pumpStream, pumpStream);
+  assert.strictEqual(ammWrites, 2);
+
+  await connection.setAmmMints([]);
+  assert.strictEqual(connection.pumpStream, pumpStream);
+  assert.strictEqual(connection.ammStream, null);
+  assert.strictEqual(ammStreamDestroyed, true);
+}
+
 async function main() {
   await testDisconnectFailover();
   await testStaleFailover();
+  await testAmmUpdatesDoNotRewritePumpStream();
   console.log('test-flow-stream-failover: ok');
 }
 

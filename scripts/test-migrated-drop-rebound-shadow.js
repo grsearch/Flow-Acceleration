@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { ResearchStore } = require('../src/data/ResearchStore');
+const { ResearchStore, MIGRATION_SOURCE } = require('../src/data/ResearchStore');
 const {
   MigratedDropReboundShadowSuite,
   ammBuyAveragePrice,
@@ -51,6 +51,83 @@ function recordMigration(store, mint, migratedAt, completedAt = migratedAt) {
     timestampMs: migratedAt,
     pool: `${mint}:pool`,
   });
+}
+
+function testFirstAmmMigrationRecoveryAndExactUpgrade() {
+  const store = new ResearchStore({
+    dbPath: ':memory:',
+    rawRetentionHours: 168,
+    archiveDir: './data/archive',
+    flushMs: 60_000,
+    flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const mint = 'FirstAmmRecovery1111111111111111111111111111';
+  const completedAt = 1_799_999_999_000;
+  const firstAmmAt = completedAt + 6_000;
+  recordCreate(store, mint, completedAt - 10_000);
+  store.recordComplete({ mint, completedAt, timestampMs: completedAt });
+  assert.strictEqual(store.recoverMigrationFromFirstAmmTrade({
+    ...trade(mint, firstAmmAt - 1, 1),
+    price: null,
+  }), null);
+
+  const recovered = store.recoverMigrationFromFirstAmmTrade(trade(
+    mint,
+    firstAmmAt + 50,
+    1,
+    'PUMP_AMM',
+    {
+      chainTimestampMs: firstAmmAt,
+      pool: 'first-amm-pool',
+      signature: 'first-amm-signature',
+    },
+  ));
+  assert.ok(recovered);
+  assert.strictEqual(recovered.migrated_at, firstAmmAt);
+  assert.strictEqual(recovered.migration_source, MIGRATION_SOURCE.FIRST_AMM_OBSERVED);
+  assert.strictEqual(recovered.migration_signature, 'first-amm-signature');
+  assert.strictEqual(recovered.migration_pool, 'first-amm-pool');
+  const suite = new MigratedDropReboundShadowSuite({
+    config: {
+      enabled: true,
+      lifecycleStages: [{ id: 'POST_MIGRATION', market: 'PUMP_AMM' }],
+      entryProfiles: [],
+      exitProfiles: [],
+      positionSizeSol: 0.1,
+      entryTimeoutMs: 2_000,
+      trackingAgeMs: 30_000,
+      stateRetentionMs: 30_000,
+      costModel: { positionSizeSol: 0.1 },
+    },
+    store,
+    now: () => firstAmmAt + 50,
+  });
+  suite.onGraduated(recovered, { source: 'first_amm' });
+  assert.strictEqual(suite.health().firstAmmMigrationRecoveries, 1);
+  assert.strictEqual(suite.health().lastCompletionToFirstAmmMs, 6_000);
+
+  const exactAt = completedAt + 250;
+  const exact = store.recordMigration({
+    mint,
+    migratedAt: exactAt,
+    timestampMs: exactAt,
+    pool: 'exact-chain-pool',
+    signature: 'exact-chain-signature',
+  });
+  assert.strictEqual(exact.migrated_at, exactAt);
+  assert.strictEqual(exact.migration_source, MIGRATION_SOURCE.CHAIN_EVENT);
+  assert.strictEqual(exact.migration_signature, 'exact-chain-signature');
+  assert.strictEqual(exact.migration_pool, 'exact-chain-pool');
+  suite.onGraduated(exact, { source: 'migration' });
+  assert.strictEqual(suite.health().migrationEventsObserved, 1);
+  assert.strictEqual(suite.tracked.get(mint).migratedAt, exactAt);
+  assert.strictEqual(suite.tracked.get(mint).migrationSource, MIGRATION_SOURCE.CHAIN_EVENT);
+  assert.strictEqual(store.recoverMigrationFromFirstAmmTrade(trade(
+    mint,
+    firstAmmAt + 1_000,
+    1,
+  )), null);
+  store.close();
 }
 
 function run() {
@@ -352,6 +429,7 @@ function run() {
   console.log('Lifecycle drop/rebound Shadow G tests: PASS');
 }
 
+testFirstAmmMigrationRecoveryAndExactUpgrade();
 run();
 
 function testEarlyOpportunityProfiles() {

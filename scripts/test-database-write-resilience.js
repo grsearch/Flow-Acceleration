@@ -140,11 +140,12 @@ function main() {
     assert.strictEqual(restored.net_return_1s, 10);
     assert.strictEqual(store.db.prepare('SELECT COUNT(*) AS n FROM raw_trades').get().n, 1);
     const deferredToken = store.db.prepare(`
-      SELECT graduated_at, migrated_at, migration_pool
+      SELECT graduated_at, migrated_at, migration_source, migration_pool
       FROM flow_tokens WHERE mint='deferred-graduation-mint'
     `).get();
     assert.strictEqual(deferredToken.graduated_at, deferredGraduatedAt);
     assert.strictEqual(deferredToken.migrated_at, deferredMigratedAt);
+    assert.strictEqual(deferredToken.migration_source, 'CHAIN_EVENT');
     assert.strictEqual(deferredToken.migration_pool, 'deferred-pool');
     health = store.healthSnapshot();
     assert.strictEqual(health.writeStatus, 'HEALTHY');
