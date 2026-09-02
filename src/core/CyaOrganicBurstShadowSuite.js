@@ -2,6 +2,14 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
+const {
+  capturePoolQuote,
+  parsePoolQuote,
+  quoteTrade,
+  quotePrice,
+  cacheIsUsableForExit,
+  exitCensorReason,
+} = require('./ShadowPoolQuote');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
@@ -12,6 +20,7 @@ const STATUS = Object.freeze({
   EXIT_PENDING: 'EXIT_PENDING',
   CLOSED: 'CLOSED',
   NO_EXIT: 'NO_EXIT',
+  RIGHT_CENSORED: 'RIGHT_CENSORED',
 });
 
 function finite(value, fallback = null) {
@@ -54,6 +63,9 @@ function camelRow(row) {
     lowestPrice: finite(row.lowest_price),
     lastPrice: finite(row.last_price),
     lastMarket: row.last_market,
+    lastPoolQuote: parsePoolQuote(row.last_pool_quote_json),
+    lastPoolQuoteAt: finite(row.last_pool_quote_at),
+    lastPoolQuoteMarket: row.last_pool_quote_market,
     maxFavorableReturnPct: finite(row.max_favorable_return_pct, 0),
     maxAdverseReturnPct: finite(row.max_adverse_return_pct, 0),
     coreExitTargetAt: finite(row.core_exit_target_at, 0),
@@ -112,11 +124,14 @@ class CyaOrganicBurstShadowSuite {
       opened: 0,
       closed: 0,
       noExit: 0,
+      rightCensored: 0,
       structureInvalidations: 0,
       flowFadeExits: 0,
       trailingExits: 0,
       coreExits: 0,
       runnerExits: 0,
+      cachedReserveExits: 0,
+      cachedReserveCoreExits: 0,
       liveSignals: 0,
       liveSignalErrors: 0,
       lastLiveSignalError: null,
@@ -176,6 +191,9 @@ class CyaOrganicBurstShadowSuite {
         last_observed_at INTEGER,
         last_market TEXT,
         last_price REAL,
+        last_pool_quote_json TEXT,
+        last_pool_quote_at INTEGER,
+        last_pool_quote_market TEXT,
         recent_return_2s_pct REAL,
         max_favorable_return_pct REAL,
         max_adverse_return_pct REAL,
@@ -222,6 +240,8 @@ class CyaOrganicBurstShadowSuite {
       ['core_exit_market_price', 'REAL'], ['core_exit_impact_pct', 'REAL'],
       ['core_proceeds_sol', 'REAL'], ['core_weight_pct', 'REAL'],
       ['runner_stop_price', 'REAL'], ['runner_tier', 'TEXT'],
+      ['last_pool_quote_json', 'TEXT'], ['last_pool_quote_at', 'INTEGER'],
+      ['last_pool_quote_market', 'TEXT'],
     ];
     for (const [name, definition] of additions) {
       if (!columns.has(name)) {
@@ -268,6 +288,9 @@ class CyaOrganicBurstShadowSuite {
         lowest_price=COALESCE(@lowestPrice,lowest_price),
         last_observed_at=COALESCE(@lastObservedAt,last_observed_at),
         last_market=COALESCE(@lastMarket,last_market), last_price=COALESCE(@lastPrice,last_price),
+        last_pool_quote_json=COALESCE(@lastPoolQuoteJson,last_pool_quote_json),
+        last_pool_quote_at=COALESCE(@lastPoolQuoteAt,last_pool_quote_at),
+        last_pool_quote_market=COALESCE(@lastPoolQuoteMarket,last_pool_quote_market),
         recent_return_2s_pct=COALESCE(@recentReturn2sPct,recent_return_2s_pct),
         max_favorable_return_pct=COALESCE(@maxFavorableReturnPct,max_favorable_return_pct),
         max_adverse_return_pct=COALESCE(@maxAdverseReturnPct,max_adverse_return_pct),
@@ -424,7 +447,29 @@ class CyaOrganicBurstShadowSuite {
       this.metrics.noEntry += 1;
     }
     for (const position of [...this.positions.values()]) {
+      if (position.status === STATUS.EXIT_PENDING
+        && now >= position.exitTargetAt
+        && this._closeFromCachedQuote(position, now)) {
+        continue;
+      }
       if (position.status === STATUS.EXIT_PENDING && now > position.exitDeadlineAt) {
+        const censorReason = exitCensorReason({
+          mint: position.mint,
+          entryMarket: position.entryMarket,
+          exitTargetAt: position.exitTargetAt,
+          store: this.store,
+        });
+        if (censorReason) {
+          this._patch(position.id, {
+            status: STATUS.RIGHT_CENSORED,
+            exitReason: censorReason,
+            estimatedCostSol: this._estimatedCostSol(position),
+          });
+          this.positions.delete(position.id);
+          this._unindex(position);
+          this.metrics.rightCensored += 1;
+          continue;
+        }
         this.markNoExit.run({
           id: position.id,
           exitReason: position.exitReason || 'NO_EXIT_PRICE',
@@ -437,13 +482,18 @@ class CyaOrganicBurstShadowSuite {
       } else if (position.status === STATUS.OPEN) {
         const exit = this.exitProfiles.get(position.exitProfileId);
         if (!exit) continue;
-        if (position.coreExitTargetAt > 0 && now > position.coreExitDeadlineAt) {
+        if (position.coreExitTargetAt > 0
+          && now >= position.coreExitTargetAt
+          && this._fillCoreFromCachedQuote(position, now, exit)) {
+          // The core fill may activate the runner, but the position remains open.
+        } else if (position.coreExitTargetAt > 0 && now > position.coreExitDeadlineAt) {
           position.coreExitTargetAt = 0;
           position.coreExitDeadlineAt = 0;
           this._patch(position.id, { coreExitTargetAt: 0, coreExitDeadlineAt: 0 });
         }
         if (now - position.entryAt >= exit.maxHoldMs) {
           this._requestExit(position, position.entryAt + exit.maxHoldMs, 'MAX_HOLD');
+          this._closeFromCachedQuote(position, now);
         }
       }
     }
@@ -697,6 +747,7 @@ class CyaOrganicBurstShadowSuite {
         continue;
       }
       if (!this._comparable(position, trade, marketPrice)) continue;
+      this._rememberPoolQuote(position, trade, marketPrice);
       if (position.status === STATUS.EXIT_PENDING) {
         if (trade.timestampMs >= position.exitTargetAt && trade.timestampMs <= position.exitDeadlineAt) {
           this._close(position, trade, marketPrice);
@@ -916,6 +967,7 @@ class CyaOrganicBurstShadowSuite {
       maxFavorableReturnPct: Math.max(0, returnPct(marketPrice, execution.price)),
       maxAdverseReturnPct: Math.min(0, returnPct(marketPrice, execution.price)),
     });
+    this._rememberPoolQuote(position, trade, marketPrice, { persist: false });
     this._patch(position.id, {
       status: STATUS.OPEN,
       entryAt: position.entryAt,
@@ -932,6 +984,10 @@ class CyaOrganicBurstShadowSuite {
       lastObservedAt: trade.timestampMs,
       lastMarket: trade.market,
       lastPrice: marketPrice,
+      lastPoolQuoteJson: position.lastPoolQuote
+        ? JSON.stringify(position.lastPoolQuote) : null,
+      lastPoolQuoteAt: position.lastPoolQuoteAt,
+      lastPoolQuoteMarket: position.lastPoolQuoteMarket,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
@@ -958,6 +1014,66 @@ class CyaOrganicBurstShadowSuite {
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
     });
+  }
+
+  _rememberPoolQuote(position, trade, marketPrice, { persist = true } = {}) {
+    if (!position || trade?.market !== position.entryMarket) return false;
+    const quote = capturePoolQuote(trade, marketPrice);
+    if (!quote) return false;
+    position.lastPoolQuote = quote;
+    position.lastPoolQuoteAt = quote.timestampMs;
+    position.lastPoolQuoteMarket = quote.market;
+    if (persist) {
+      this._patch(position.id, {
+        lastPoolQuoteJson: JSON.stringify(quote),
+        lastPoolQuoteAt: quote.timestampMs,
+        lastPoolQuoteMarket: quote.market,
+      });
+    }
+    return true;
+  }
+
+  _cachedQuoteTrade(position, now) {
+    if (!cacheIsUsableForExit({
+      quote: position.lastPoolQuote,
+      mint: position.mint,
+      entryMarket: position.entryMarket,
+      exitTargetAt: position.exitTargetAt,
+      now,
+      store: this.store,
+    })) return null;
+    return quoteTrade(position.lastPoolQuote, position.mint);
+  }
+
+  _closeFromCachedQuote(position, now) {
+    if (position.status !== STATUS.EXIT_PENDING || now < position.exitTargetAt) return false;
+    const trade = this._cachedQuoteTrade(position, now);
+    const marketPrice = quotePrice(position.lastPoolQuote);
+    if (!trade || !(marketPrice > 0)) return false;
+    const closed = this._close(position, {
+      ...trade,
+      timestampMs: Math.max(position.exitTargetAt, trade.timestampMs),
+    }, marketPrice);
+    if (closed) this.metrics.cachedReserveExits += 1;
+    return closed;
+  }
+
+  _fillCoreFromCachedQuote(position, now, exit) {
+    if (position.status !== STATUS.OPEN || position.coreExitAt
+      || !(position.coreExitTargetAt > 0) || now < position.coreExitTargetAt) return false;
+    const originalTarget = position.exitTargetAt;
+    position.exitTargetAt = position.coreExitTargetAt;
+    const trade = this._cachedQuoteTrade(position, now);
+    position.exitTargetAt = originalTarget;
+    const marketPrice = quotePrice(position.lastPoolQuote);
+    if (!trade || !(marketPrice > 0)) return false;
+    this._fillCore(position, {
+      ...trade,
+      timestampMs: Math.max(position.coreExitTargetAt, trade.timestampMs),
+    }, marketPrice, exit);
+    const filled = Boolean(position.coreExitAt);
+    if (filled) this.metrics.cachedReserveCoreExits += 1;
+    return filled;
   }
 
   _requestExit(position, triggerAt, reason) {
@@ -994,7 +1110,7 @@ class CyaOrganicBurstShadowSuite {
     const execution = executableSell(trade, remainingUnits, marketPrice, {
       rugMarkReturnPct: markReturnPct,
     });
-    if (execution.price == null) return;
+    if (execution.price == null) return false;
     const runnerProceedsSol = execution.proceedsSol ?? remainingUnits * execution.price;
     const proceedsSol = (position.coreProceedsSol || 0) + runnerProceedsSol;
     const grossReturnPct = (proceedsSol / position.totalInvestedSol - 1) * 100;
@@ -1017,6 +1133,7 @@ class CyaOrganicBurstShadowSuite {
     this._unindex(position);
     this.metrics.closed += 1;
     this.metrics.lastActionAt = this.now();
+    return true;
   }
 
   _patch(id, values) {
@@ -1024,7 +1141,8 @@ class CyaOrganicBurstShadowSuite {
       'status', 'rejectionReason', 'entryAt', 'entryMarket', 'entryPrice',
       'entryMarketPrice', 'entryJumpPct', 'entryImpactPct', 'averageEntryPrice',
       'totalInvestedSol', 'tokenUnits', 'highestPrice', 'lowestPrice',
-      'lastObservedAt', 'lastMarket', 'lastPrice', 'recentReturn2sPct',
+      'lastObservedAt', 'lastMarket', 'lastPrice', 'lastPoolQuoteJson',
+      'lastPoolQuoteAt', 'lastPoolQuoteMarket', 'recentReturn2sPct',
       'maxFavorableReturnPct', 'maxAdverseReturnPct', 'exitTriggerAt',
       'coreExitTargetAt', 'coreExitDeadlineAt', 'coreExitAt', 'coreExitPrice',
       'coreExitMarketPrice', 'coreExitImpactPct', 'coreProceedsSol',
@@ -1069,6 +1187,7 @@ class CyaOrganicBurstShadowSuite {
         SUM(status='CLOSED' AND net_return_pct IS NOT NULL
           AND entry_market=exit_market) resolved,
         SUM(status='NO_EXIT') no_exit,
+        SUM(status='RIGHT_CENSORED') right_censored,
         SUM(status='CLOSED' AND net_return_pct IS NOT NULL
           AND entry_market=exit_market) priced_exits,
         SUM(status='CLOSED' AND (net_return_pct IS NULL

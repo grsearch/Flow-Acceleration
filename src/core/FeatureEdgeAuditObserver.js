@@ -244,7 +244,7 @@ class FeatureEdgeAuditObserver {
       ORDER BY b.signal_at_ms DESC LIMIT ?
     `);
     this.db.prepare(`
-      UPDATE ${BNH_TABLE} SET status='NO_EXIT',
+      UPDATE ${BNH_TABLE} SET status='RIGHT_CENSORED',
         missing_exit_reason='PROCESS_RESTART_NO_RESTORE'
       WHERE status='OPEN'
     `).run();

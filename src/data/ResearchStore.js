@@ -2985,7 +2985,7 @@ class ResearchStore {
         ORDER BY s.timestamp_ms
       `),
       labelSamples: this.db.prepare(`
-        SELECT timestamp_ms, price
+        SELECT timestamp_ms, price, market
         FROM raw_trades
         WHERE mint = ? AND timestamp_ms >= ? AND timestamp_ms <= ? AND price > 0
         ORDER BY timestamp_ms, id

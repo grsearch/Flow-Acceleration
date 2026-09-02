@@ -262,6 +262,34 @@ async function main() {
   `).get().realized_pnl_sol, 250);
   rpcRegistry.stop();
   rpcStore.close();
+
+  const timeoutStore = makeStore();
+  const timeoutConfig = config(['timeout-wallet']);
+  timeoutConfig.historyRpcUrl = '';
+  timeoutConfig.historyPageSize = 1_000;
+  const timeoutError = new Error('This operation was aborted');
+  timeoutError.name = 'AbortError';
+  const timeoutRegistry = new SmartWalletRegistry({
+    config: timeoutConfig,
+    store: timeoutStore,
+    now: () => now,
+    fetchImpl: async () => { throw timeoutError; },
+    transactionParser: fakeParser,
+  });
+  timeoutRegistry.start();
+  timeoutRegistry.config.historyRpcUrl = 'https://example.invalid/rpc';
+  const timeoutClaim = timeoutRegistry._claimHistoryBackfill(now);
+  await timeoutRegistry._runHistoryBackfill(timeoutClaim);
+  const timeoutRow = timeoutStore.db.prepare(`
+    SELECT status, request_page_size, last_error
+    FROM smart_wallet_history_backfills WHERE wallet='timeout-wallet'
+  `).get();
+  assert.strictEqual(timeoutRow.status, 'FAILED');
+  assert.strictEqual(timeoutRow.request_page_size, 500,
+    'timed-out historical pages must retry with a smaller payload');
+  assert.match(timeoutRow.last_error, /aborted/i);
+  timeoutRegistry.stop();
+  timeoutStore.close();
   console.log('Smart Wallet historical backfill and 60d elite tests: PASS');
 }
 

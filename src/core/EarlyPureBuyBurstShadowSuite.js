@@ -2,6 +2,14 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
+const {
+  capturePoolQuote,
+  parsePoolQuote,
+  quoteTrade,
+  quotePrice,
+  cacheIsUsableForExit,
+  exitCensorReason,
+} = require('./ShadowPoolQuote');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const MARKET = 'PUMP_BONDING_CURVE';
@@ -58,6 +66,8 @@ class EarlyPureBuyBurstShadowSuite {
     this.counters = {
       trades: 0, excludedSmartTrades: 0, candidates: 0, signals: 0,
       blockedByRugGuard: 0, opened: 0, closed: 0, noEntry: 0, noExit: 0,
+      rightCensored: 0,
+      cachedReserveExits: 0,
       lastActionAt: null,
     };
     this._initStorage();
@@ -107,6 +117,9 @@ class EarlyPureBuyBurstShadowSuite {
         lowest_price REAL,
         max_favorable_return_pct REAL,
         max_adverse_return_pct REAL,
+        last_pool_quote_json TEXT,
+        last_pool_quote_at INTEGER,
+        last_pool_quote_market TEXT,
         exit_target_at INTEGER,
         exit_deadline_at INTEGER,
         exit_at INTEGER,
@@ -130,6 +143,20 @@ class EarlyPureBuyBurstShadowSuite {
       CREATE INDEX IF NOT EXISTS idx_early_pure_buy_profiles
         ON early_pure_buy_burst_shadow_positions(entry_profile_id, exit_profile_id);
     `);
+    const columns = new Set(this.store.db.prepare(
+      'PRAGMA table_info(early_pure_buy_burst_shadow_positions)',
+    ).all().map((row) => row.name));
+    for (const [name, definition] of [
+      ['last_pool_quote_json', 'TEXT'],
+      ['last_pool_quote_at', 'INTEGER'],
+      ['last_pool_quote_market', 'TEXT'],
+    ]) {
+      if (!columns.has(name)) {
+        this.store.db.exec(
+          `ALTER TABLE early_pure_buy_burst_shadow_positions ADD COLUMN ${name} ${definition}`,
+        );
+      }
+    }
     this.insertPosition = this.store.db.prepare(`
       INSERT OR IGNORE INTO early_pure_buy_burst_shadow_positions (
         cohort_id, entry_profile_id, exit_profile_id, mint, symbol, status,
@@ -163,6 +190,9 @@ class EarlyPureBuyBurstShadowSuite {
         highest_price=@highestPrice, lowest_price=@lowestPrice,
         max_favorable_return_pct=@maxFavorableReturnPct,
         max_adverse_return_pct=@maxAdverseReturnPct,
+        last_pool_quote_json=@lastPoolQuoteJson,
+        last_pool_quote_at=@lastPoolQuoteAt,
+        last_pool_quote_market=@lastPoolQuoteMarket,
         exit_target_at=@exitTargetAt, exit_deadline_at=@exitDeadlineAt,
         exit_at=@exitAt, exit_market=@exitMarket, exit_price=@exitPrice,
         exit_market_price=@exitMarketPrice, exit_impact_pct=@exitImpactPct,
@@ -186,6 +216,7 @@ class EarlyPureBuyBurstShadowSuite {
     for (const [key, value] of Object.entries(row)) {
       position[key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
     }
+    position.lastPoolQuote = parsePoolQuote(row.last_pool_quote_json);
     return position;
   }
 
@@ -203,6 +234,10 @@ class EarlyPureBuyBurstShadowSuite {
       lowestPrice: position.lowestPrice ?? null,
       maxFavorableReturnPct: position.maxFavorableReturnPct ?? null,
       maxAdverseReturnPct: position.maxAdverseReturnPct ?? null,
+      lastPoolQuoteJson: position.lastPoolQuote
+        ? JSON.stringify(position.lastPoolQuote) : null,
+      lastPoolQuoteAt: position.lastPoolQuoteAt ?? null,
+      lastPoolQuoteMarket: position.lastPoolQuoteMarket ?? null,
       exitTargetAt: position.exitTargetAt ?? null,
       exitDeadlineAt: position.exitDeadlineAt ?? null,
       exitAt: position.exitAt ?? null, exitMarket: position.exitMarket ?? null,
@@ -425,9 +460,13 @@ class EarlyPureBuyBurstShadowSuite {
       position.tokenUnits = quote.tokenUnits; position.highestPrice = marketPrice;
       position.lowestPrice = marketPrice; position.maxFavorableReturnPct = 0;
       position.maxAdverseReturnPct = 0;
+      this._rememberPoolQuote(position, trade, marketPrice);
       this.counters.opened += 1;
       this._save(position);
       return;
+    }
+    if (position.status !== 'PENDING_ENTRY') {
+      this._rememberPoolQuote(position, trade, marketPrice);
     }
     if (position.status === 'OPEN') {
       position.highestPrice = Math.max(number(position.highestPrice, marketPrice), marketPrice);
@@ -445,31 +484,68 @@ class EarlyPureBuyBurstShadowSuite {
       this._save(position);
     }
     if (position.status === 'EXIT_PENDING' && timestampMs >= position.exitTargetAt) {
-      const exit = executableSell(trade, position.tokenUnits, marketPrice, {
-        rugMarkReturnPct: (marketPrice / position.entryPrice - 1) * 100,
-      });
-      if (!exit.available) return;
-      const grossReturnPct = (exit.proceedsSol / position.positionSol - 1) * 100;
-      position.status = 'CLOSED'; position.exitAt = timestampMs;
-      position.exitMarket = MARKET; position.exitPrice = exit.price;
-      position.exitMarketPrice = marketPrice; position.exitImpactPct = exit.impactPct;
-      position.exitReason = `FIXED_${this.exitProfiles.get(position.exitProfileId).maxHoldMs}MS`;
-      position.grossReturnPct = grossReturnPct;
-      position.netReturnPct = grossReturnPct - this.costs.deterministicCostPct;
-      position.estimatedCostSol = this.costs.totalFixedCostSol
-        + position.positionSol * (this.costs.deterministicCostPct - this.costs.fixedCostPct) / 100;
-      position.holdMs = timestampMs - position.entryAt;
-      this.counters.closed += 1;
-      this._untrackPosition(position);
-      this._save(position);
+      this._close(position, trade, marketPrice);
     }
+  }
+
+  _rememberPoolQuote(position, trade, marketPrice) {
+    if (!position || trade?.market !== position.entryMarket) return false;
+    const quote = capturePoolQuote(trade, marketPrice);
+    if (!quote) return false;
+    position.lastPoolQuote = quote;
+    position.lastPoolQuoteAt = quote.timestampMs;
+    position.lastPoolQuoteMarket = quote.market;
+    return true;
+  }
+
+  _close(position, trade, marketPrice) {
+    const exit = executableSell(trade, position.tokenUnits, marketPrice, {
+      rugMarkReturnPct: (marketPrice / position.entryPrice - 1) * 100,
+    });
+    if (!exit.available || !Number.isFinite(exit.proceedsSol)) return false;
+    const grossReturnPct = (exit.proceedsSol / position.positionSol - 1) * 100;
+    position.status = 'CLOSED'; position.exitAt = trade.timestampMs;
+    position.exitMarket = trade.market; position.exitPrice = exit.price;
+    position.exitMarketPrice = marketPrice; position.exitImpactPct = exit.impactPct;
+    position.exitReason = `FIXED_${this.exitProfiles.get(position.exitProfileId).maxHoldMs}MS`;
+    position.grossReturnPct = grossReturnPct;
+    position.netReturnPct = grossReturnPct - this.costs.deterministicCostPct;
+    position.estimatedCostSol = this.costs.totalFixedCostSol
+      + position.positionSol * (this.costs.deterministicCostPct - this.costs.fixedCostPct) / 100;
+    position.holdMs = trade.timestampMs - position.entryAt;
+    this.counters.closed += 1;
+    this._untrackPosition(position);
+    this._save(position);
+    return true;
+  }
+
+  _closeFromCachedQuote(position, now) {
+    if (position.status !== 'EXIT_PENDING' || now < position.exitTargetAt) return false;
+    if (!cacheIsUsableForExit({
+      quote: position.lastPoolQuote,
+      mint: position.mint,
+      entryMarket: position.entryMarket,
+      exitTargetAt: position.exitTargetAt,
+      now,
+      store: this.store,
+    })) return false;
+    const trade = quoteTrade(position.lastPoolQuote, position.mint);
+    const marketPrice = quotePrice(position.lastPoolQuote);
+    if (!trade || !(marketPrice > 0)) return false;
+    const closed = this._close(position, {
+      ...trade,
+      timestampMs: Math.max(position.exitTargetAt, trade.timestampMs),
+    }, marketPrice);
+    if (closed) this.counters.cachedReserveExits += 1;
+    return closed;
   }
 
   _finish(position, status, reason) {
     position.status = status; position.rejectionReason = reason;
-    if (status === 'NO_EXIT') position.exitReason = reason;
+    if (status === 'NO_EXIT' || status === 'RIGHT_CENSORED') position.exitReason = reason;
     this._untrackPosition(position);
     if (status === 'NO_EXIT') this.counters.noExit += 1;
+    else if (status === 'RIGHT_CENSORED') this.counters.rightCensored += 1;
     else this.counters.noEntry += 1;
     this._save(position);
   }
@@ -507,8 +583,23 @@ class EarlyPureBuyBurstShadowSuite {
         position.exitTargetAt = position.entryAt + maxHoldMs + this.config.exitDelayMs;
         position.exitDeadlineAt = position.exitTargetAt + this.config.exitTimeoutMs;
         this._save(position);
+        this._closeFromCachedQuote(position, now);
+      } else if (position.status === 'EXIT_PENDING'
+        && now >= position.exitTargetAt
+        && this._closeFromCachedQuote(position, now)) {
+        continue;
       } else if (position.status === 'EXIT_PENDING' && now > position.exitDeadlineAt) {
-        this._finish(position, 'NO_EXIT', 'EXIT_QUOTE_UNAVAILABLE');
+        const censorReason = exitCensorReason({
+          mint: position.mint,
+          entryMarket: position.entryMarket,
+          exitTargetAt: position.exitTargetAt,
+          store: this.store,
+        });
+        this._finish(
+          position,
+          censorReason ? 'RIGHT_CENSORED' : 'NO_EXIT',
+          censorReason || 'EXIT_QUOTE_UNAVAILABLE',
+        );
       }
     }
     const cutoff = now - this.config.stateRetentionMs;
@@ -537,6 +628,7 @@ class EarlyPureBuyBurstShadowSuite {
         SUM(CASE WHEN status='OPEN' OR status='EXIT_PENDING' THEN 1 ELSE 0 END) active,
         SUM(CASE WHEN status='NO_ENTRY' THEN 1 ELSE 0 END) no_entry,
         SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) no_exit
+        , SUM(CASE WHEN status='RIGHT_CENSORED' THEN 1 ELSE 0 END) right_censored
       FROM early_pure_buy_burst_shadow_positions
       GROUP BY entry_profile_id, exit_profile_id ORDER BY entry_profile_id, exit_profile_id
     `).all().map((row) => {

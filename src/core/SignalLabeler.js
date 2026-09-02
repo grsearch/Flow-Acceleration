@@ -43,6 +43,7 @@ class SignalLabeler {
       completedSignals: 0,
       censoredSignals: 0,
       labelUpdates: 0,
+      crossMarketSamplesSkipped: 0,
     };
   }
 
@@ -63,6 +64,11 @@ class SignalLabeler {
           row.timestamp_ms + this._maxHorizonMs() + this._maxObservationLagMs(),
         );
         for (const sample of this.store.labelSamples(row.mint, row.timestamp_ms, endMs)) {
+          if (sample.market && state.market && sample.market !== state.market) {
+            state.crossMarketSeen = true;
+            this.metrics.crossMarketSamplesSkipped += 1;
+            continue;
+          }
           const value = returnPct(sample.price, state.p0);
           if (!Number.isFinite(value)) continue;
           state.samples.push({ elapsedMs: sample.timestamp_ms - state.timestampMs, value });
@@ -87,6 +93,8 @@ class SignalLabeler {
       mint: signal.mint,
       timestampMs: signal.timestampMs,
       p0: signal.price,
+      market: signal.market || 'PUMP_BONDING_CURVE',
+      crossMarketSeen: false,
       costModel,
       configuredCostPct: costBreakdown(costModel).deterministicCostPct,
       samples: [{ elapsedMs: 0, value: 0 }],
@@ -126,6 +134,11 @@ class SignalLabeler {
 
     for (const state of [...states.values()]) {
       if (trade.timestampMs < state.timestampMs) continue;
+      if (trade.market && state.market && trade.market !== state.market) {
+        state.crossMarketSeen = true;
+        this.metrics.crossMarketSamplesSkipped += 1;
+        continue;
+      }
       const elapsedMs = trade.timestampMs - state.timestampMs;
       const value = returnPct(trade.price, state.p0);
       if (!Number.isFinite(value)) continue;
@@ -242,7 +255,11 @@ class SignalLabeler {
     return {
       finalized_at: finalizedAt,
       label_status: censored ? 'RIGHT_CENSORED' : 'COMPLETE',
-      censor_reason: censored ? 'NO_TRADE_WITHIN_MAX_OBSERVATION_LAG' : null,
+      censor_reason: censored
+        ? (state.crossMarketSeen
+          ? 'MARKET_TRANSITION_BEFORE_HORIZON'
+          : 'NO_TRADE_WITHIN_MAX_OBSERVATION_LAG')
+        : null,
       missing_horizons_json: JSON.stringify(missing),
       horizon_observation_lags_json: this._observationLagsJson(state),
     };

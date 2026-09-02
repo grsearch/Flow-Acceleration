@@ -178,38 +178,43 @@ function testEntryPathsAndExecutableExits() {
   store.close();
 }
 
-function testMissingExitIsCensored() {
+function testIdlePoolUsesPersistedReserveQuote() {
   const base = 1_851_000_000_000;
-  const { store, suite, send, setNow } = setup(base);
+  const { store, send } = setup(base);
   const mint = 'EarlyPureBuyNoExit1111111111111111111111111';
   seedBaseline(send, mint);
   send({ mint, offset: 250, sol: 0.1, wallet: `${mint}-fill` });
 
-  setNow(base + 5_250);
-  suite.advanceTime(base + 5_250);
-  setNow(base + 6_451);
-  suite.advanceTime(base + 6_451);
+  // Simulate a process restart after the entry, with no later Mint trade.
+  // The persisted reserve state is the current pool state until a trade changes it.
+  const recovered = new EarlyPureBuyBurstShadowSuite({
+    config: config(),
+    store,
+    now: () => base + 6_451,
+  });
+  recovered.start();
 
   const row = store.db.prepare(`
     SELECT status, exit_reason, gross_return_pct, net_return_pct
     FROM early_pure_buy_burst_shadow_positions
     WHERE entry_profile_id='EB_A' AND exit_profile_id='FIX5'
   `).get();
-  assert.strictEqual(row.status, 'NO_EXIT');
-  assert.strictEqual(row.exit_reason, 'EXIT_QUOTE_UNAVAILABLE');
-  assert.strictEqual(row.gross_return_pct, null);
-  assert.strictEqual(row.net_return_pct, null);
-  const cohort = suite.dashboard().cohorts.find(
+  assert.strictEqual(row.status, 'CLOSED');
+  assert.strictEqual(row.exit_reason, 'FIXED_5000MS');
+  assert.ok(Number.isFinite(row.gross_return_pct));
+  assert.ok(Number.isFinite(row.net_return_pct));
+  const cohort = recovered.dashboard().cohorts.find(
     (item) => item.entry_profile_id === 'EB_A' && item.exit_profile_id === 'FIX5',
   );
-  assert.strictEqual(cohort.no_exit, 1);
-  assert.strictEqual(cohort.completed, 0, 'NO_EXIT must not enter win-rate or return statistics');
+  assert.strictEqual(cohort.no_exit, 0);
+  assert.strictEqual(cohort.completed, 1,
+    'an unchanged pool remains executable even when no new trade arrives at the exit time');
   store.close();
 }
 
 function main() {
   testEntryPathsAndExecutableExits();
-  testMissingExitIsCensored();
+  testIdlePoolUsesPersistedReserveQuote();
   console.log('Early pure-buy burst shadow test passed.');
 }
 

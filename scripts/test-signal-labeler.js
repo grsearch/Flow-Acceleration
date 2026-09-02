@@ -96,4 +96,30 @@ assert.strictEqual(censoredUpdates[0].censor_reason, 'NO_TRADE_WITHIN_MAX_OBSERV
 assert.deepStrictEqual(JSON.parse(censoredUpdates[0].missing_horizons_json), [1, 5]);
 assert.strictEqual(censoredLabeler.stats().censoredSignals, 1);
 
+const crossMarketUpdates = [];
+const crossMarketLabeler = new SignalLabeler({
+  store: { updateSignalReturn: (_signalId, patch) => crossMarketUpdates.push(patch) },
+  config: { horizonsSeconds: [1], excursionSeconds: [], configuredTradingCostPct: 1 },
+});
+crossMarketLabeler.addSignal({
+  signalId: 11,
+  mint: 'migrated',
+  timestampMs: 5_000_000,
+  price: 0.000001,
+  market: 'PUMP_BONDING_CURVE',
+});
+crossMarketLabeler.onTrade({
+  mint: 'migrated',
+  timestampMs: 5_001_000,
+  price: 0.001,
+  market: 'PUMP_AMM',
+});
+crossMarketLabeler.advanceTime(5_004_000);
+const crossMarketPatch = crossMarketUpdates.at(-1);
+assert.strictEqual(crossMarketPatch.return_1s, undefined,
+  'PumpSwap prices must never label a bonding-curve signal');
+assert.strictEqual(crossMarketPatch.label_status, 'RIGHT_CENSORED');
+assert.strictEqual(crossMarketPatch.censor_reason, 'MARKET_TRANSITION_BEFORE_HORIZON');
+assert.strictEqual(crossMarketLabeler.stats().crossMarketSamplesSkipped, 1);
+
 console.log('test-signal-labeler: ok');

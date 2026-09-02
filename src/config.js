@@ -2552,7 +2552,7 @@ const config = {
       'FLOW_SMART_WALLET_HISTORY_MAX_PAGES_PER_WALLET', 500, { min: 1, max: 10_000 },
     ),
     historyRpcTimeoutMs: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_RPC_TIMEOUT_MS', 30_000, { min: 1_000, max: 120_000 },
+      'FLOW_SMART_WALLET_HISTORY_RPC_TIMEOUT_MS', 60_000, { min: 1_000, max: 120_000 },
     ),
     historyRetryMs: integerEnv(
       'FLOW_SMART_WALLET_HISTORY_RETRY_MS', 60 * 60_000, { min: 60_000 },

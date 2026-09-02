@@ -311,6 +311,7 @@ class SmartWalletRegistry {
         window_start_at INTEGER NOT NULL,
         window_end_at INTEGER NOT NULL,
         pagination_token TEXT,
+        request_page_size INTEGER,
         pages_fetched INTEGER NOT NULL DEFAULT 0,
         credits_spent INTEGER NOT NULL DEFAULT 0,
         transactions_seen INTEGER NOT NULL DEFAULT 0,
@@ -337,6 +338,14 @@ class SmartWalletRegistry {
         updated_at INTEGER NOT NULL
       );
     `);
+    const historyColumns = new Set(this.store.db.prepare(
+      'PRAGMA table_info(smart_wallet_history_backfills)',
+    ).all().map((column) => column.name));
+    if (!historyColumns.has('request_page_size')) {
+      this.store.db.exec(
+        'ALTER TABLE smart_wallet_history_backfills ADD COLUMN request_page_size INTEGER',
+      );
+    }
     const registryColumns = new Set(this.store.db.prepare(
       'PRAGMA table_info(smart_wallet_registry)',
     ).all().map((column) => column.name));
@@ -821,7 +830,7 @@ class SmartWalletRegistry {
     this.store.db.prepare(`
       UPDATE smart_wallet_history_backfills SET status='RUNNING',
         first_started_at=COALESCE(first_started_at, ?), last_started_at=?,
-        next_attempt_at=NULL, last_error=NULL, updated_at=? WHERE wallet=?
+        next_attempt_at=NULL, updated_at=? WHERE wallet=?
     `).run(at, at, at, row.wallet);
     if (row.cohort === 'DAILY' && firstStart) {
       this.store.db.prepare(`
@@ -856,7 +865,10 @@ class SmartWalletRegistry {
       encoding: 'json',
       maxSupportedTransactionVersion: 0,
       sortOrder: 'asc',
-      limit: Math.max(1, Math.min(1_000, finite(this.config.historyPageSize, 1_000))),
+      limit: Math.max(1, Math.min(1_000,
+        row.request_page_size == null
+          ? finite(this.config.historyPageSize, 1_000)
+          : finite(row.request_page_size, finite(this.config.historyPageSize, 1_000)))),
       filters,
     };
     if (row.pagination_token) options.paginationToken = row.pagination_token;
@@ -976,11 +988,20 @@ class SmartWalletRegistry {
     } catch (error) {
       if (this.stopping && error?.name === 'AbortError') return;
       const now = this.now();
+      const message = String(error?.message || error).slice(0, 500);
+      const timeoutLike = error?.name === 'AbortError' || /abort|timeout/i.test(message);
+      const currentPageSize = Math.max(1, Math.min(1_000,
+        row.request_page_size == null
+          ? finite(this.config.historyPageSize, 1_000)
+          : finite(row.request_page_size, finite(this.config.historyPageSize, 1_000))));
+      const nextPageSize = timeoutLike ? Math.max(100, Math.floor(currentPageSize / 2)) : null;
       this.store.db.prepare(`
         UPDATE smart_wallet_history_backfills SET status='FAILED', last_error=?,
+          request_page_size=COALESCE(?,request_page_size),
           next_attempt_at=?, updated_at=? WHERE wallet=?
       `).run(
-        String(error?.message || error).slice(0, 500),
+        message,
+        nextPageSize,
         now + Math.max(60_000, finite(this.config.historyRetryMs, 60 * 60_000)),
         now,
         row.wallet,
