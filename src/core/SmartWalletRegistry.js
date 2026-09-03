@@ -1448,7 +1448,721 @@ class SmartWalletRegistry {
           h.last_error history_last_error,
           p.closed_positions pnl_24h_closed_positions,
           p.invested_sol pnl_24h_invested_sol,
-          p.realized_sol pnl_24mp_ms, event.id
+          p.realized_sol pnl_24h_realized_sol,
+          p.winners pnl_24h_winners
+        FROM smart_wallet_registry r
+        LEFT JOIN smart_wallet_cluster_memberships c ON c.wallet=r.wallet
+          AND c.valid_from<=? AND (c.valid_to IS NULL OR c.valid_to>?)
+        LEFT JOIN smart_wallet_history_backfills h ON h.wallet=r.wallet
+        LEFT JOIN (
+          SELECT wallet, COUNT(*) closed_positions,
+            COALESCE(SUM(total_buy_sol), 0) invested_sol,
+            COALESCE(SUM(realized_pnl_sol), 0) realized_sol,
+            SUM(CASE WHEN realized_pnl_sol>0 THEN 1 ELSE 0 END) winners
+          FROM smart_wallet_actual_positions
+          WHERE status='CLOSED' AND closed_at>=? AND closed_at<=?
+          GROUP BY wallet
+        ) p ON p.wallet=r.wallet
+      `).all(
+        at,
+        at,
+        at - Math.max(DAY_MS, finite(this.config.pnlWindowMs, DAY_MS)),
+        at,
+      );
+      const all = new Map();
+      const monitoring = new Map();
+      const voting = new Map();
+      const eligibleClusters = new Set();
+      const selectionAClusters = new Set();
+      const pnlCounts = {};
+      const ageCounts = {};
+      const statusCounts = {};
+      for (const row of rows) {
+        const snapshot = Object.freeze(this._snapshotFromGradeRow(row, at, at, expiresAt));
+        all.set(row.wallet, snapshot);
+        statusCounts[row.status] = (statusCounts[row.status] || 0) + 1;
+        pnlCounts[snapshot.pnlStatus] = (pnlCounts[snapshot.pnlStatus] || 0) + 1;
+        ageCounts[snapshot.ageStatus] = (ageCounts[snapshot.ageStatus] || 0) + 1;
+        if (row.discovered_at <= at && ['PROBATION', 'ACTIVE'].includes(row.status)
+          && row.risk_status === 'OK' && this._ageEventMonitoringAllowed(row)) {
+          monitoring.set(row.wallet, snapshot);
+        }
+        if (!snapshot.votingEligible) continue;
+        voting.set(row.wallet, snapshot);
+        eligibleClusters.add(snapshot.clusterId);
+        if (snapshot.selectionGrade === 'S_A') selectionAClusters.add(snapshot.clusterId);
+      }
+      const registryVersion = rows.reduce(
+        (maximum, row) => Math.max(maximum, finite(row.registry_version, 0)),
+        Math.max(finite(current.registryVersion, 0), this.version()),
+      );
+      this.walletEligibilitySnapshot = {
+        generatedAt: at,
+        expiresAt,
+        registryVersion,
+        all,
+        monitoring,
+        voting,
+        clusterCounts: {
+          eligible: eligibleClusters.size,
+          selectionA: selectionAClusters.size,
+        },
+        pnlCounts,
+        ageCounts,
+        statusCounts,
+      };
+      this.walletEligibilitySnapshotDirty = false;
+      this.metrics.eligibilitySnapshotRefreshes += 1;
+      this.metrics.lastEligibilitySnapshotAt = at;
+      this.metrics.lastEligibilitySnapshotDurationMs = Math.max(0, this.now() - startedAt);
+      this.metrics.lastEligibilitySnapshotError = null;
+      return true;
+    } catch (error) {
+      this.metrics.lastEligibilitySnapshotError = error.message;
+      return false;
+    }
+  }
+
+  _cachedWalletEligibility(wallet, { voting = false } = {}) {
+    if (!wallet) return null;
+    this.metrics.eligibilitySnapshotReads += 1;
+    const cache = this.walletEligibilitySnapshot;
+    if (this.now() > cache.expiresAt) this.metrics.eligibilitySnapshotStaleReads += 1;
+    const snapshot = (voting ? cache.voting : cache.monitoring).get(wallet) || null;
+    if (snapshot) this.metrics.eligibilitySnapshotHits += 1;
+    else this.metrics.eligibilitySnapshotMisses += 1;
+    return snapshot;
+  }
+
+  cachedMonitoringSnapshot(wallet, at = this.now()) {
+    const snapshot = this._cachedWalletEligibility(wallet);
+    return snapshot && snapshot.effectiveFrom <= at ? snapshot : null;
+  }
+
+  cachedWalletSnapshot(wallet, at = this.now()) {
+    const snapshot = this._cachedWalletEligibility(wallet, { voting: true });
+    return snapshot && snapshot.effectiveFrom <= at ? snapshot : null;
+  }
+
+  _queueMaintenance(type, at = this.now(), options = {}) {
+    if (!this.config.enabled || this.stopping || this.maintenancePendingTypes.has(type)) {
+      return false;
+    }
+    if (!this._maintenanceWorkerEnabled()) {
+      if (type === 'CLUSTERS') this.refreshClusters(at, { force: true });
+      else if (type === 'GRADES') this.refreshGrades(at, options);
+      return true;
+    }
+    const task = { type, at, options };
+    this.maintenancePendingTypes.add(type);
+    if (type === 'GRADES') this.maintenanceQueue.unshift(task);
+    else this.maintenanceQueue.push(task);
+    this._drainMaintenanceQueue();
+    return true;
+  }
+
+  _drainMaintenanceQueue() {
+    if (this.stopping || this.maintenanceWorker || !this.maintenanceQueue.length) return;
+    const task = this.maintenanceQueue.shift();
+    const startedAt = this.now();
+    let worker;
+    try {
+      worker = this.maintenanceWorkerFactory(
+        path.join(__dirname, 'SmartWalletRegistryMaintenanceWorker.js'),
+        {
+          workerData: {
+            dbPath: path.resolve(this.store.config.dbPath),
+            config: JSON.parse(JSON.stringify(this.config)),
+            task,
+          },
+        },
+      );
+    } catch (error) {
+      this.maintenancePendingTypes.delete(task.type);
+      this.metrics.maintenanceRunsFailed += 1;
+      this.metrics.lastMaintenanceError = `${task.type}: ${error.message}`;
+      if (task.type === 'GRADES') this.gradeRefreshRequested = true;
+      setImmediate(() => this._drainMaintenanceQueue());
+      return;
+    }
+    this.maintenanceWorker = { worker, task, startedAt };
+    this.metrics.maintenanceRunsStarted += 1;
+    this.metrics.lastMaintenanceType = task.type;
+    this.metrics.lastMaintenanceStartedAt = startedAt;
+    this.metrics.lastMaintenanceError = null;
+    let settled = false;
+    const finish = ({ message = null, error = null, timedOut = false } = {}) => {
+      if (settled) return;
+      settled = true;
+      if (this.maintenanceWorkerTimer) clearTimeout(this.maintenanceWorkerTimer);
+      this.maintenanceWorkerTimer = null;
+      if (timedOut) void Promise.resolve(worker.terminate()).catch(() => null);
+      const completedAt = this.now();
+      this.metrics.lastMaintenanceCompletedAt = completedAt;
+      this.metrics.lastMaintenanceDurationMs = Math.max(0, completedAt - startedAt);
+      if (message?.ok) {
+        this.metrics.maintenanceRunsCompleted += 1;
+        if (task.type === 'CLUSTERS') {
+          this.activeClusterCountsCache = null;
+          this.lastClusterRefreshAt = task.at;
+          this.metrics.clusterRefreshes += 1;
+          this.metrics.clusterConfirmations += finite(
+            message.value?.confirmationsChanged,
+            0,
+          );
+          this.metrics.clusterRelatedLinks = finite(message.value?.relatedLinks, 0);
+        } else if (task.type === 'GRADES') {
+          this.pnlSnapshotCache.clear();
+          this.activeClusterCountsCache = null;
+          this.metrics.gradeRefreshes += 1;
+          this.metrics.lastGradeRefreshAt = task.at;
+        }
+        this.walletEligibilitySnapshotDirty = true;
+        this._refreshWalletEligibilitySnapshot(completedAt, { force: true });
+        this.metrics.lastActionAt = task.at;
+      } else {
+        this.metrics.maintenanceRunsFailed += 1;
+        if (timedOut) this.metrics.maintenanceTimeouts += 1;
+        this.metrics.lastMaintenanceError = `${task.type}: ${error
+          || message?.error || 'maintenance worker failed'}`;
+        if (task.type === 'GRADES') this.gradeRefreshRequested = true;
+      }
+      this.maintenancePendingTypes.delete(task.type);
+      if (this.maintenanceWorker?.worker === worker) this.maintenanceWorker = null;
+      setImmediate(() => this._drainMaintenanceQueue());
+    };
+    worker.once('message', (message) => finish({ message }));
+    worker.once('error', (error) => finish({ error: error.message }));
+    worker.once('exit', (code) => {
+      if (!settled) finish({ error: `worker exited before reporting a result (code ${code})` });
+    });
+    this.maintenanceWorkerTimer = setTimeout(() => finish({
+      error: `worker exceeded ${this._maintenanceWorkerTimeoutMs()}ms`,
+      timedOut: true,
+    }), this._maintenanceWorkerTimeoutMs());
+    if (this.maintenanceWorkerTimer.unref) this.maintenanceWorkerTimer.unref();
+  }
+
+  _scheduleClusterMaintenance(at = this.now(), { force = false } = {}) {
+    if (!this.config.enabled || this.config.clusterAutoEnabled === false) return false;
+    if (!force && this.lastClusterRefreshAt
+      && at - this.lastClusterRefreshAt < this._clusterRefreshMs()) return false;
+    return this._queueMaintenance('CLUSTERS', at, { force: true });
+  }
+
+  _scheduleGradeMaintenance(at = this.now(), {
+    force = false, forceModelMigration = false,
+  } = {}) {
+    const meta = this._meta();
+    const scheduledDue = !meta.last_grade_refresh_at
+      || at - meta.last_grade_refresh_at >= this.config.gradeRefreshMs;
+    const dirtyDue = this.gradeRefreshRequested
+      && (!this.lastGradeMaintenanceRequestedAt
+        || at - this.lastGradeMaintenanceRequestedAt >= this._gradeDirtyRefreshMinMs());
+    if (!force && !scheduledDue && !dirtyDue) return false;
+    const queued = this._queueMaintenance('GRADES', at, { forceModelMigration });
+    if (queued) {
+      this.gradeRefreshRequested = false;
+      this.lastGradeMaintenanceRequestedAt = at;
+    }
+    return queued;
+  }
+
+  start() {
+    if (!this.config.enabled) return;
+    this.stopping = false;
+    const now = this.now();
+    for (const wallet of this.config.seedWallets || []) {
+      const created = this.discoverWallet({
+        wallet,
+        source: 'CONFIG_SEED',
+        discoveredAt: now,
+        effectiveFrom: now,
+      });
+      if (created) this.metrics.seeded += 1;
+    }
+    for (const cluster of this.config.seedClusters || []) {
+      for (const wallet of cluster.wallets || []) {
+        this.setCluster({
+          wallet,
+          clusterId: cluster.id,
+          confidence: 'CONFIRMED',
+          reason: { source: 'CONFIG_SEED' },
+          validFrom: now,
+        });
+      }
+    }
+    this._refreshWalletEligibilitySnapshot(now, { force: true });
+    this.actualEventBackfillPending = true;
+    this._advanceActualEventBackfill(now, { force: true });
+    this._initializeHistoryBackfills(now);
+    const active = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_forward_labels
+      WHERE status IN ('PENDING_ENTRY','OPEN')
+      ORDER BY signal_at, id
+    `).all();
+    for (const row of active) this._hydrateLabel(row);
+    const meta = this._meta();
+    const needsActualGradeMigration = Boolean(this.store.db.prepare(`
+      SELECT 1 FROM smart_wallet_registry
+      WHERE metrics_json NOT LIKE '%"actualPnl30d"%'
+      LIMIT 1
+    `).get());
+    if (needsActualGradeMigration) {
+      this._scheduleGradeMaintenance(now, { force: true, forceModelMigration: true });
+    } else if (!meta.last_grade_refresh_at
+      || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
+      this._scheduleGradeMaintenance(now, { force: true });
+    }
+    this._scheduleClusterMaintenance(now, { force: true });
+    this._scheduleAgeChecks(now);
+    this._scheduleHistoryBackfills(now, { force: true });
+  }
+
+  stop() {
+    this.stopping = true;
+    if (this.maintenanceWorkerTimer) clearTimeout(this.maintenanceWorkerTimer);
+    this.maintenanceWorkerTimer = null;
+    if (this.maintenanceWorker) {
+      void Promise.resolve(this.maintenanceWorker.worker.terminate()).catch(() => null);
+    }
+    this.maintenanceWorker = null;
+    this.maintenanceQueue.length = 0;
+    this.maintenancePendingTypes.clear();
+    for (const controller of this.ageAbortControllers) controller.abort();
+    for (const controller of this.historyAbortControllers) controller.abort();
+    this.ageAbortControllers.clear();
+    this.historyAbortControllers.clear();
+    this.labels.clear();
+    this.labelsByMint.clear();
+    this.pnlSnapshotCache.clear();
+    this.activeClusterCountsCache = null;
+    this.walletEligibilitySnapshot = {
+      generatedAt: 0,
+      expiresAt: 0,
+      registryVersion: 0,
+      all: new Map(),
+      monitoring: new Map(),
+      voting: new Map(),
+      clusterCounts: { eligible: 0, selectionA: 0 },
+      pnlCounts: {},
+      ageCounts: {},
+      statusCounts: {},
+    };
+    this.walletEligibilitySnapshotDirty = true;
+    this.lastSeenWrites.clear();
+    this.actualEventBackfillPending = false;
+    this.lastActualEventBackfillAt = 0;
+    this.ageChecks.clear();
+    this.historyBackfills.clear();
+  }
+
+  _meta() {
+    return this.store.db.prepare('SELECT * FROM smart_wallet_registry_meta WHERE id=1').get();
+  }
+
+  _nextVersion(now = this.now()) {
+    this.store.db.prepare(`
+      UPDATE smart_wallet_registry_meta
+      SET registry_version=registry_version+1, updated_at=? WHERE id=1
+    `).run(now);
+    return this._meta().registry_version;
+  }
+
+  version() {
+    return Number(this._meta().registry_version) || 1;
+  }
+
+  _ageHardRejectMs() {
+    return Math.max(0, finite(this.config.ageHardRejectMs, 7 * DAY_MS));
+  }
+
+  _ageMinVoteMs() {
+    return Math.max(
+      this._ageHardRejectMs(),
+      finite(this.config.ageMinVoteMs, 30 * DAY_MS),
+    );
+  }
+
+  _ageBypassed(row) {
+    return this.config.ageCheckEnabled === false
+      || (row?.source === 'CONFIG_SEED' && this.config.ageSeedBypass === true)
+      || row?.age_status === 'BYPASSED';
+  }
+
+  _ageEligibleRow(row, at = this.now()) {
+    if (this._ageBypassed(row)) return true;
+    const firstActivityAt = nullableFinite(row?.first_chain_activity_at);
+    return row?.age_status === 'ELIGIBLE'
+      && firstActivityAt != null
+      && firstActivityAt <= at - this._ageMinVoteMs();
+  }
+
+  _ageMonitoringAllowed(row) {
+    return this._ageBypassed(row) || row?.age_status !== 'TOO_NEW';
+  }
+
+  _ageEventMonitoringAllowed(row) {
+    if (!this._ageMonitoringAllowed(row)) return false;
+    if (this.config.eventMonitoringRequiresResolvedAge === false) return true;
+    return this._ageBypassed(row) || ['PROBATION', 'ELIGIBLE'].includes(row?.age_status);
+  }
+
+  _votingEligibleRow(row, at = this.now()) {
+    const pnl = row?.wallet ? this._actualPnlSnapshot(row.wallet, at) : null;
+    if (!row || row.effective_from > at || row.risk_status !== 'OK'
+      || !['PROBATION', 'ACTIVE'].includes(row.status)
+      || !this._ageEligibleRow(row, at)
+      || !pnl?.eligible) return false;
+    if (row.source === 'CONFIG_SEED') return true;
+    if (!pnl.eliteQualified
+      && this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') return false;
+    if (this.config.autoVoteRequiresKnownCluster !== false
+      && (!row.cluster_id || row.cluster_confidence === 'UNKNOWN')) return false;
+    return true;
+  }
+
+  _ageStatus(firstActivityAt, at = this.now()) {
+    const ageMs = at - finite(firstActivityAt, at);
+    if (ageMs < this._ageHardRejectMs()) return 'TOO_NEW';
+    if (ageMs < this._ageMinVoteMs()) return 'PROBATION';
+    return 'ELIGIBLE';
+  }
+
+  _localAgeEvidence(wallet, cutoffAt) {
+    const row = this.store.db.prepare(`
+      SELECT MIN(observed_at) first_activity_at FROM (
+        SELECT MIN(timestamp_ms) observed_at FROM raw_trades WHERE wallet=?
+        UNION ALL
+        SELECT MIN(signal_at) observed_at FROM smart_wallet_forward_labels WHERE wallet=?
+      )
+    `).get(wallet, wallet);
+    const firstActivityAt = nullableFinite(row?.first_activity_at);
+    return firstActivityAt != null && firstActivityAt <= cutoffAt ? firstActivityAt : null;
+  }
+
+  async _ageRpc(method, params = []) {
+    if (!this.config.ageRpcUrl) throw new Error('AGE_RPC_URL_MISSING');
+    if (typeof this.fetchImpl !== 'function') throw new Error('AGE_FETCH_UNAVAILABLE');
+    const controller = new AbortController();
+    this.ageAbortControllers.add(controller);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.max(1_000, finite(this.config.ageRpcTimeoutMs, 10_000)),
+    );
+    try {
+      const response = await this.fetchImpl(this.config.ageRpcUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+        signal: controller.signal,
+      });
+      if (!response?.ok) throw new Error(`AGE_RPC_HTTP_${response?.status || 'FAILED'}`);
+      const payload = await response.json();
+      if (payload?.error) {
+        throw new Error(`AGE_RPC_${payload.error.code || 'ERROR'}:${payload.error.message || ''}`);
+      }
+      return payload?.result;
+    } finally {
+      clearTimeout(timeout);
+      this.ageAbortControllers.delete(controller);
+    }
+  }
+
+  async _providerHistoryFloorAt(at = this.now()) {
+    if (this.ageHistoryFloorCheckedAt
+      && at - this.ageHistoryFloorCheckedAt < DAY_MS) return this.ageHistoryFloor;
+    const firstSlot = nullableFinite(await this._ageRpc('getFirstAvailableBlock'));
+    let floorAt = null;
+    if (firstSlot != null && firstSlot <= 1) floorAt = 0;
+    else if (firstSlot != null) {
+      const blockTime = nullableFinite(await this._ageRpc('getBlockTime', [firstSlot]));
+      if (blockTime != null) floorAt = blockTime * 1_000;
+    }
+    this.ageHistoryFloor = floorAt;
+    this.ageHistoryFloorCheckedAt = at;
+    return floorAt;
+  }
+
+  async _resolveWalletAge(wallet, at = this.now()) {
+    const current = this.store.db.prepare(
+      'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+    ).get(wallet);
+    if (!current) throw new Error('AGE_WALLET_NOT_FOUND');
+    if (this._ageBypassed(current)) {
+      return { status: 'BYPASSED', source: 'CONFIG_BYPASS', nextCheckAt: null };
+    }
+    const voteCutoffAt = at - this._ageMinVoteMs();
+    const localFirstAt = this._localAgeEvidence(wallet, voteCutoffAt);
+    if (localFirstAt != null) {
+      return {
+        status: 'ELIGIBLE', firstActivityAt: localFirstAt,
+        source: 'LOCAL_HISTORY_LOWER_BOUND', historyComplete: false, nextCheckAt: null,
+      };
+    }
+    const storedFirstAt = nullableFinite(current.first_chain_activity_at);
+    if (current.age_history_complete && storedFirstAt != null) {
+      const status = this._ageStatus(storedFirstAt, at);
+      const nextBoundaryAt = status === 'TOO_NEW'
+        ? storedFirstAt + this._ageHardRejectMs()
+        : (status === 'PROBATION' ? storedFirstAt + this._ageMinVoteMs() : null);
+      return {
+        status, firstActivityAt: storedFirstAt,
+        source: current.age_source || 'SOLANA_RPC', historyComplete: true,
+        nextCheckAt: nextBoundaryAt == null ? null : nextBoundaryAt + 1_000,
+      };
+    }
+
+    const historyFloorAt = await this._providerHistoryFloorAt(at);
+    const pageSize = Math.max(1, Math.min(1_000, finite(this.config.ageRpcPageSize, 1_000)));
+    const maxPages = Math.max(1, finite(this.config.ageRpcPagesPerCheck, 2));
+    let before = current.age_scan_before_signature || null;
+    let firstActivityAt = storedFirstAt;
+    let historyComplete = false;
+    for (let page = 0; page < maxPages; page += 1) {
+      const options = { limit: pageSize };
+      if (before) options.before = before;
+      const signatures = await this._ageRpc('getSignaturesForAddress', [wallet, options]);
+      if (!Array.isArray(signatures)) throw new Error('AGE_RPC_INVALID_SIGNATURE_HISTORY');
+      for (const row of signatures) {
+        const blockTime = nullableFinite(row?.blockTime);
+        const timestampMs = blockTime == null ? null : blockTime * 1_000;
+        if (timestampMs != null) {
+          firstActivityAt = firstActivityAt == null
+            ? timestampMs : Math.min(firstActivityAt, timestampMs);
+        }
+      }
+      if (firstActivityAt != null && firstActivityAt <= voteCutoffAt) {
+        return {
+          status: 'ELIGIBLE', firstActivityAt, source: 'SOLANA_RPC_LOWER_BOUND',
+          historyComplete: false, before: null, nextCheckAt: null,
+        };
+      }
+      if (signatures.length < pageSize) {
+        historyComplete = true;
+        before = null;
+        break;
+      }
+      const nextBefore = signatures[signatures.length - 1]?.signature;
+      if (!nextBefore || nextBefore === before) throw new Error('AGE_RPC_CURSOR_STALLED');
+      before = nextBefore;
+    }
+    if (historyComplete && firstActivityAt != null && historyFloorAt != null
+      && historyFloorAt <= voteCutoffAt) {
+      const status = this._ageStatus(firstActivityAt, at);
+      const nextBoundaryAt = status === 'TOO_NEW'
+        ? firstActivityAt + this._ageHardRejectMs()
+        : (status === 'PROBATION' ? firstActivityAt + this._ageMinVoteMs() : null);
+      return {
+        status, firstActivityAt, source: 'SOLANA_RPC_COMPLETE', historyComplete: true,
+        before: null,
+        nextCheckAt: nextBoundaryAt == null ? null : nextBoundaryAt + 1_000,
+      };
+    }
+    const retryMs = Math.max(60 * 60_000, finite(this.config.ageRetryMs, DAY_MS));
+    return {
+      status: 'UNKNOWN', firstActivityAt, source: 'SOLANA_RPC_PARTIAL',
+      historyComplete: false, before,
+      error: historyComplete ? 'PROVIDER_HISTORY_TOO_SHALLOW' : 'HISTORY_SCAN_INCOMPLETE',
+      nextCheckAt: at + retryMs,
+    };
+  }
+
+  _recordAgeResult(wallet, result, at = this.now()) {
+    const current = this.store.db.prepare(
+      'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+    ).get(wallet);
+    if (!current || this.stopping) return null;
+    const wasEligible = this._ageEligibleRow(current, at);
+    const nextStatus = result.status || current.age_status || 'UNKNOWN';
+    const firstActivityAt = nullableFinite(
+      result.firstActivityAt ?? current.first_chain_activity_at,
+    );
+    const changed = nextStatus !== current.age_status
+      || firstActivityAt !== nullableFinite(current.first_chain_activity_at)
+      || (result.source || null) !== (current.age_source || null)
+      || Number(Boolean(result.historyComplete)) !== Number(Boolean(current.age_history_complete));
+    const version = changed ? this._nextVersion(at) : current.registry_version;
+    this.store.db.prepare(`
+      UPDATE smart_wallet_registry SET
+        age_status=?, first_chain_activity_at=?, age_verified_at=?, age_source=?,
+        age_check_error=?, age_check_after=?, age_scan_before_signature=?,
+        age_history_complete=?, registry_version=?, updated_at=?
+      WHERE wallet=?
+    `).run(
+      nextStatus,
+      firstActivityAt,
+      result.verifiedAt ?? at,
+      result.source || current.age_source || null,
+      result.error ? String(result.error).slice(0, 240) : null,
+      result.nextCheckAt ?? null,
+      result.before ?? null,
+      result.historyComplete ? 1 : 0,
+      version,
+      at,
+      wallet,
+    );
+    const updated = this.store.db.prepare(
+      'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+    ).get(wallet);
+    if (wasEligible !== this._ageEligibleRow(updated, at)) {
+      this.gradeRefreshRequested = true;
+      this.activeClusterCountsCache = null;
+    }
+    this.walletEligibilitySnapshotDirty = true;
+    this.metrics.ageChecksCompleted += 1;
+    this.metrics.lastAgeCheckAt = at;
+    this.metrics.lastActionAt = at;
+    return updated;
+  }
+
+  async verifyWalletAge(wallet, at = this.now()) {
+    if (!wallet || this.stopping) return null;
+    this.metrics.ageChecksStarted += 1;
+    try {
+      const result = await this._resolveWalletAge(wallet, at);
+      return this._recordAgeResult(wallet, result, at);
+    } catch (error) {
+      this.metrics.ageChecksFailed += 1;
+      if (this.stopping) return null;
+      const current = this.store.db.prepare(
+        'SELECT * FROM smart_wallet_registry WHERE wallet=?',
+      ).get(wallet);
+      if (!current) return null;
+      const stableStatus = ['TOO_NEW', 'PROBATION', 'ELIGIBLE', 'BYPASSED']
+        .includes(current.age_status) ? current.age_status : 'UNKNOWN';
+      return this._recordAgeResult(wallet, {
+        status: stableStatus,
+        firstActivityAt: current.first_chain_activity_at,
+        source: current.age_source || 'AGE_CHECK_ERROR',
+        historyComplete: Boolean(current.age_history_complete),
+        before: current.age_scan_before_signature,
+        error: error?.message || String(error),
+        nextCheckAt: at + Math.max(60 * 60_000, finite(this.config.ageRetryMs, DAY_MS)),
+      }, at);
+    }
+  }
+
+  _scheduleAgeChecks(at = this.now()) {
+    if (this.config.ageCheckEnabled === false || this.stopping) return;
+    const concurrency = Math.max(1, finite(this.config.ageCheckConcurrency, 1));
+    const capacity = Math.max(0, concurrency - this.ageChecks.size);
+    if (!capacity) return;
+    const rows = this.store.db.prepare(`
+      SELECT wallet FROM smart_wallet_registry
+      WHERE age_status NOT IN ('ELIGIBLE','BYPASSED')
+        AND COALESCE(age_check_after, 0)<=?
+      ORDER BY COALESCE(age_check_after, 0), discovered_at, wallet
+      LIMIT ?
+    `).all(at, capacity);
+    for (const row of rows) {
+      if (this.ageChecks.has(row.wallet)) continue;
+      const check = this.verifyWalletAge(row.wallet, at)
+        .catch(() => null)
+        .finally(() => this.ageChecks.delete(row.wallet));
+      this.ageChecks.set(row.wallet, check);
+    }
+  }
+
+  discoverWallet({
+    wallet, source = 'ROLLING_DISCOVERY', seedMint = null,
+    discoveredAt = this.now(), effectiveFrom = null,
+  }) {
+    if (!this.config.enabled || !wallet) return false;
+    const now = this.now();
+    const version = this.version();
+    const ageBypassed = this.config.ageCheckEnabled === false
+      || (source === 'CONFIG_SEED' && this.config.ageSeedBypass === true);
+    const result = this.insertRegistry.run({
+      wallet,
+      status: 'PROBATION',
+      selectionGrade: 'S_C',
+      copyGrade: 'C_C',
+      holdingGrade: 'H_C',
+      riskStatus: 'OK',
+      source,
+      discoveredAt,
+      effectiveFrom: effectiveFrom == null
+        ? discoveredAt + this.config.discoveryDelayMs
+        : effectiveFrom,
+      ageStatus: ageBypassed ? 'BYPASSED' : 'PENDING',
+      ageCheckAfter: ageBypassed ? null : now,
+      metricsJson: JSON.stringify({ candidateStreak: 0, candidateGrades: null }),
+      registryVersion: version,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (seedMint) {
+      this.insertSeed.run({ wallet, seedMint, source, discoveredAt, createdAt: now });
+    }
+    if (result.changes) {
+      this.activeClusterCountsCache = null;
+      this.walletEligibilitySnapshotDirty = true;
+      this.metrics.discovered += 1;
+      this.metrics.lastActionAt = now;
+      this._enqueueHistoryBackfills(now);
+      this._scheduleHistoryBackfills(now, { force: true });
+    }
+    return Boolean(result.changes);
+  }
+
+  nominateWallet({ wallet, seedMint, source = 'GRADUATED_EARLY_BUYER', discoveredAt }) {
+    if (!this.config.enabled || !wallet || !seedMint) return false;
+    const now = this.now();
+    this.insertSeed.run({ wallet, seedMint, source, discoveredAt, createdAt: now });
+    const seedCount = this.store.db.prepare(`
+      SELECT COUNT(DISTINCT seed_mint) n
+      FROM smart_wallet_discovery_seeds WHERE wallet=?
+    `).get(wallet).n;
+    if (seedCount < this.config.discoveryMinSeedMints) return false;
+    return this.discoverWallet({ wallet, source, discoveredAt });
+  }
+
+  _clusterObservationMs() {
+    return Math.max(60 * 60_000, finite(this.config.clusterObservationMs, 12 * 60 * 60_000));
+  }
+
+  _clusterRefreshMs() {
+    return Math.max(60_000, finite(this.config.clusterRefreshMs, 60 * 60_000));
+  }
+
+  refreshClusters(at = this.now(), { force = false } = {}) {
+    if (!this.config.enabled || this.config.clusterAutoEnabled === false) return null;
+    if (!force && this.lastClusterRefreshAt
+      && at - this.lastClusterRefreshAt < this._clusterRefreshMs()) return null;
+    const observationMs = this._clusterObservationMs();
+    const lookbackMs = Math.max(
+      observationMs,
+      finite(this.config.clusterLookbackMs, 7 * DAY_MS),
+    );
+    const minDistinctMints = Math.max(1, finite(this.config.clusterMinDistinctMints, 3));
+    const syncWindowMs = Math.max(0, finite(this.config.clusterSyncWindowMs, 5_000));
+    const amountTolerancePct = Math.max(
+      0, finite(this.config.clusterAmountTolerancePct, 15),
+    );
+    const minCorrelatedMints = Math.max(
+      1, finite(this.config.clusterMinCorrelatedMints, 2),
+    );
+    const minCorrelationPct = Math.max(
+      0, finite(this.config.clusterMinCorrelationPct, 50),
+    );
+    const registryRows = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_registry
+      WHERE discovered_at<=? AND status<>'QUARANTINED' AND risk_status='OK'
+      ORDER BY wallet
+    `).all(at);
+    if (!registryRows.length) {
+      this.lastClusterRefreshAt = at;
+      return { wallets: 0, confirmed: 0, relatedLinks: 0 };
+    }
+    const registryByWallet = new Map(registryRows.map((row) => [row.wallet, row]));
+    const events = this.store.db.prepare(`
+      SELECT event.id, event.wallet, event.mint, event.timestamp_ms, event.sol_amount
+      FROM smart_wallet_events event
+      JOIN smart_wallet_registry registry ON registry.wallet=event.wallet
+      WHERE event.side='BUY' AND COALESCE(event.position_phase, 'OPEN')='OPEN'
+        AND event.timestamp_ms>=? AND event.timestamp_ms<=?
+      ORDER BY event.timestamp_ms, event.id
     `).all(at - lookbackMs, at);
 
     // Keep only the first observed OPEN per wallet/Mint. Repeated ADD behavior is
