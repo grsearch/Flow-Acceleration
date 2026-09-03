@@ -2845,6 +2845,10 @@ const config = {
     stateRetentionMs: integerEnv('FLOW_SMART_CONSENSUS_V2_STATE_RETENTION_MS', 24 * 60 * 60_000, {
       min: 60_000,
     }),
+    postGradSnapshotHorizonsMs: millisecondListEnv(
+      'FLOW_SMART_CONSENSUS_V2_POST_GRAD_SNAPSHOT_SECONDS',
+      [30, 60, 120, 300],
+    ),
     maxRestoredHoldingRows: integerEnv(
       'FLOW_SMART_CONSENSUS_V2_MAX_RESTORED_HOLDING_ROWS', 20_000,
       { min: 100, max: 100_000 },
@@ -3032,6 +3036,8 @@ const config = {
           'POST_GRAD_HOLD3_FIX2M',
           'POST_GRAD_HOLD3_FIX5M',
           'POST_GRAD_HOLD3_CORE80_5M',
+          'POST_GRAD_HOLD3_CORE80_30M',
+          'POST_GRAD_HOLD3_CORE80_6H',
         ],
       },
       booleanEnv('FLOW_SMART_CONSENSUS_V2_EARLY_C25_R3_ENABLED', true) && {
@@ -3125,6 +3131,40 @@ const config = {
         label: '毕业持仓3集群 · +30%卖80% · 20%回撤Runner · 最长5分钟',
         mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
         runnerTrailPct: 20, maxHoldMs: 5 * 60_000, hardStopPct: 20,
+        exitTimeoutMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_EXIT_TIMEOUT_MS', 30_000,
+          { min: 1_000, max: 120_000 },
+        ),
+        entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
+      },
+      {
+        id: 'POST_GRAD_HOLD3_CORE80_30M',
+        label: '毕业持仓3集群 · 不要求首分钟净流入 · +30%卖80% · 30%回撤 · 最长30分钟',
+        mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
+        runnerTrailPct: 30,
+        maxHoldMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_DIRECT_30M_MAX_HOLD_MS',
+          30 * 60_000,
+          { min: 5 * 60_000, max: 60 * 60_000 },
+        ),
+        hardStopPct: 30,
+        exitTimeoutMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_EXIT_TIMEOUT_MS', 30_000,
+          { min: 1_000, max: 120_000 },
+        ),
+        entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
+      },
+      {
+        id: 'POST_GRAD_HOLD3_CORE80_6H',
+        label: '毕业持仓3集群 · 延迟拉升右尾 · +30%卖80% · 30%回撤 · 最长6小时',
+        mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
+        runnerTrailPct: 30,
+        maxHoldMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_DIRECT_6H_MAX_HOLD_MS',
+          6 * 60 * 60_000,
+          { min: 30 * 60_000, max: 12 * 60 * 60_000 },
+        ),
+        hardStopPct: 30,
         exitTimeoutMs: integerEnv(
           'FLOW_SMART_CONSENSUS_V2_POST_GRAD_EXIT_TIMEOUT_MS', 30_000,
           { min: 1_000, max: 120_000 },

@@ -15,25 +15,40 @@ function main() {
     ['holder-b', 'cluster-b'],
     ['holder-c', 'cluster-c'],
     ['holder-d', 'cluster-d'],
+    ['holding-only-a', 'holding-cluster-a'],
+    ['holding-only-b', 'holding-cluster-b'],
+    ['holding-only-c', 'holding-cluster-c'],
   ]);
-  const snapshot = (wallet) => wallets.has(wallet) ? {
-    wallet,
-    clusterId: wallets.get(wallet),
-    status: 'ACTIVE',
-    selectionGrade: 'S_B',
-    copyGrade: 'C_B',
-    holdingGrade: 'H_B',
-    selectionWeight: 1,
-    voteWeight: 1,
-    registryVersion: 7,
-    effectiveFrom: base - 60_000,
-    votingEligible: true,
-  } : null;
+  const monitoringSnapshot = (wallet) => {
+    if (!wallets.has(wallet)) return null;
+    const holdingOnly = wallet.startsWith('holding-only-');
+    return {
+      wallet,
+      clusterId: wallets.get(wallet),
+      status: 'ACTIVE',
+      selectionGrade: holdingOnly ? 'S_C' : 'S_B',
+      copyGrade: holdingOnly ? 'C_C' : 'C_B',
+      holdingGrade: holdingOnly ? 'H_A' : 'H_B',
+      selectionWeight: holdingOnly ? 0 : 1,
+      voteWeight: holdingOnly ? null : 1,
+      registryVersion: 7,
+      effectiveFrom: base - 60_000,
+      votingEligible: !holdingOnly,
+      ageEligible: true,
+      pnlEligible: true,
+      clusterKnown: true,
+      longTermElite: false,
+    };
+  };
+  const votingSnapshot = (wallet) => {
+    const value = monitoringSnapshot(wallet);
+    return value?.votingEligible ? value : null;
+  };
   const registry = {
-    cachedWalletSnapshot: snapshot,
-    walletSnapshot: snapshot,
-    cachedMonitoringSnapshot: snapshot,
-    monitoringSnapshot: snapshot,
+    cachedWalletSnapshot: votingSnapshot,
+    walletSnapshot: votingSnapshot,
+    cachedMonitoringSnapshot: monitoringSnapshot,
+    monitoringSnapshot,
     activeClusterCounts: () => ({ eligible: 4, selectionA: 0 }),
   };
   const store = new ResearchStore({
@@ -51,6 +66,7 @@ function main() {
     probationVoteWeight: 1,
     enforceAGradeAfterClusters: 12,
     stateRetentionMs: 24 * 60 * 60_000,
+    postGradSnapshotHorizonsMs: [30_000, 60_000, 120_000, 300_000],
     maxRestoredHoldingRows: 1_000,
     episodeCooldownMs: 30_000,
     entryDelayMs: 100,
@@ -101,6 +117,8 @@ function main() {
           'POST_GRAD_HOLD3_FIX2M',
           'POST_GRAD_HOLD3_FIX5M',
           'POST_GRAD_HOLD3_CORE80_5M',
+          'POST_GRAD_HOLD3_CORE80_30M',
+          'POST_GRAD_HOLD3_CORE80_6H',
         ],
       },
     ],
@@ -129,6 +147,18 @@ function main() {
         maxHoldMs: 300_000, hardStopPct: 20, exitTimeoutMs: 30_000,
         entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
       },
+      {
+        id: 'POST_GRAD_HOLD3_CORE80_30M', mode: 'CORE_RUNNER',
+        coreActivationPct: 30, coreFraction: 0.8, runnerTrailPct: 30,
+        maxHoldMs: 30 * 60_000, hardStopPct: 30, exitTimeoutMs: 30_000,
+        entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
+      },
+      {
+        id: 'POST_GRAD_HOLD3_CORE80_6H', mode: 'CORE_RUNNER',
+        coreActivationPct: 30, coreFraction: 0.8, runnerTrailPct: 30,
+        maxHoldMs: 6 * 60 * 60_000, hardStopPct: 30, exitTimeoutMs: 30_000,
+        entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
+      },
     ],
     costModel,
   };
@@ -148,14 +178,28 @@ function main() {
       signature: `restore-${index}`, eventIndex: 0,
     });
   }
+  const holdingOnlyRestoreMint = 'RestoreHoldingOnlyConsensus111111111111111111';
+  recordToken(holdingOnlyRestoreMint, 'HRESTORE');
+  for (const [index, wallet] of [
+    'holding-only-a', 'holding-only-b', 'holding-only-c',
+  ].entries()) {
+    store.recordSmartWalletEvent({
+      mint: holdingOnlyRestoreMint, wallet, side: 'BUY', market: 'PUMP_BONDING_CURVE',
+      solAmount: 1, tokenAmount: 1_000, price: 0.001,
+      timestampMs: base - 2_000 + index, receivedAtMs: base - 2_000 + index,
+      signature: `holding-only-restore-${index}`, eventIndex: 0,
+    });
+  }
 
   const suite = new SmartWalletConsensusFlowRunnerShadowSuite({
     config, store, registry, now: () => now,
   });
   suite.start();
-  assert.strictEqual(suite.health().restoredSmartHoldings, 3);
+  assert.strictEqual(suite.health().restoredSmartHoldings, 6);
   assert(suite.trackedMints().includes(restoreMint),
     'three restored holder clusters must keep the mint subscribed for first AMM');
+  assert(suite.trackedMints().includes(holdingOnlyRestoreMint),
+    'H_A holders must restore and subscribe even when they have no S_A/S_B voting right');
 
   const positionEvent = (mint, wallet, offset, balance) => {
     now = base + offset;
@@ -164,7 +208,7 @@ function main() {
       side: balance > 0 ? 'BUY' : 'SELL',
       positionPhase: balance > 0 ? 'OPEN' : 'CLOSE',
       tokenBalanceAfter: balance,
-    }, { walletSnapshot: snapshot(wallet) });
+    }, { walletSnapshot: monitoringSnapshot(wallet) });
   };
   const trade = (mint, offset, side, wallet, quoteSol = 1_000) => {
     now = base + offset;
@@ -206,7 +250,7 @@ function main() {
     SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
     WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_DIRECT'
       AND status='SCALE_PENDING'
-  `).get(mint).n, 3);
+  `).get(mint).n, 5);
 
   trade(mint, 3_200, 'BUY', 'public-2');
   assert.strictEqual(store.db.prepare(`
@@ -216,7 +260,7 @@ function main() {
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
     WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_DIRECT' AND status='OPEN'
-  `).get(mint).n, 3,
+  `).get(mint).n, 5,
   'all direct exit arms must use the next executable AMM trade');
   trade(mint, 3_400, 'BUY', 'public-entry');
   assert.strictEqual(store.db.prepare(`
@@ -287,6 +331,18 @@ function main() {
   assert.strictEqual(evaluation.status, 'REJECTED');
   assert.strictEqual(evaluation.rejection_reason, 'FIRST_AMM_EVENT_MISSED');
 
+  const snapshotMint = 'PostGradLongSnapshot111111111111111111111111';
+  recordToken(snapshotMint, 'SNAP');
+  positionEvent(snapshotMint, 'holder-a', 9_100, 1_000);
+  positionEvent(snapshotMint, 'holder-b', 9_200, 1_000);
+  positionEvent(snapshotMint, 'holder-c', 9_300, 1_000);
+  now = base + 10_000;
+  suite.onGraduated({ mint: snapshotMint, graduatedAt: now, migratedAt: now });
+  trade(snapshotMint, 10_000, 'BUY', 'snapshot-public-1');
+  trade(snapshotMint, 10_200, 'BUY', 'snapshot-public-entry');
+  trade(snapshotMint, 40_300, 'SELL', 'snapshot-30s', 1_050);
+  trade(snapshotMint, 70_300, 'BUY', 'snapshot-60s', 1_050);
+
   trade(mint, 123_500, 'SELL', 'fixed-2m-trigger', 1_100);
   trade(mint, 123_700, 'BUY', 'fixed-2m-exit', 1_100);
   const fixed2m = store.db.prepare(`
@@ -295,6 +351,8 @@ function main() {
   `).get(mint);
   assert.strictEqual(fixed2m.status, 'CLOSED');
   assert.strictEqual(fixed2m.exit_reason, 'MAX_HOLD');
+
+  trade(snapshotMint, 130_300, 'BUY', 'snapshot-120s', 1_050);
 
   trade(mint, 303_500, 'SELL', 'fixed-5m-trigger', 1_200);
   trade(mint, 303_700, 'BUY', 'fixed-5m-exit', 1_200);
@@ -305,10 +363,24 @@ function main() {
   assert.strictEqual(fixed5m.status, 'CLOSED');
   assert.strictEqual(fixed5m.exit_reason, 'MAX_HOLD');
 
+  trade(snapshotMint, 310_300, 'BUY', 'snapshot-300s', 1_050);
+  const snapshotRow = store.db.prepare(`
+    SELECT flow_features_json
+    FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND exit_profile_id='POST_GRAD_HOLD3_CORE80_30M'
+  `).get(snapshotMint);
+  const captured = JSON.parse(snapshotRow.flow_features_json);
+  assert.strictEqual(captured.kind, 'POST_GRAD_SNAPSHOTS');
+  for (const horizon of [30_000, 60_000, 120_000, 300_000]) {
+    assert(captured.snapshots[String(horizon)], `missing ${horizon}ms precursor snapshot`);
+    assert.strictEqual(captured.snapshots[String(horizon)].qualifiedHoldingClusters, 3);
+    assert.strictEqual(captured.snapshots[String(horizon)].qualifiedHoldingWallets, 3);
+  }
+
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
-  assert.strictEqual(suite.health().holdingConsensusQualified, 2);
+  assert.strictEqual(suite.health().holdingConsensusQualified, 4);
   assert.strictEqual(suite.health().holdingConsensusRejected, 4);
-  assert.strictEqual(suite.health().directOpened, 3);
+  assert.strictEqual(suite.health().directOpened, 10);
   suite.stop();
   store.close();
   console.log('Post-graduation holding consensus Shadow tests: PASS');

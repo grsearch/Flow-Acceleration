@@ -54,6 +54,7 @@ function rowToPosition(row) {
     configuredCostPct: row.configured_cost_pct,
     graduatedAt: row.graduated_at,
     flowConfirmedAt: row.flow_confirmed_at,
+    flowFeatures: json(row.flow_features_json, null),
     entryTargetAt: row.entry_target_at,
     entryDeadlineAt: row.entry_deadline_at,
     capitalInSol: finite(row.capital_in_sol, 0),
@@ -92,7 +93,12 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     this.maxFlowWindowMs = Math.max(
       finite(config.flowWindowMs, 0),
       ...(config.entryProfiles || []).map((row) => finite(row.flowWindowMs, 0)),
+      ...(config.postGradSnapshotHorizonsMs || []).map((value) => finite(value, 0)),
     );
+    this.postGradSnapshotHorizonsMs = [...new Set(config.postGradSnapshotHorizonsMs || [])]
+      .map((value) => finite(value, 0))
+      .filter((value) => value > 0)
+      .sort((left, right) => left - right);
     this.postGradHoldingProfiles = [...this.entryProfiles.values()].filter(
       (row) => row.postGraduationHoldingConsensus === true && row.enabled !== false,
     );
@@ -337,13 +343,15 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
   trackedMints() {
     const mints = new Set(this.rowsByMint.keys());
     if (Number.isFinite(this.minPostGradHoldingClusters)) {
+      const at = this.now();
       for (const [mint, state] of this.states) {
-        const clusters = new Set(
-          [...state.smartHoldings.values()]
-            .filter((row) => row.votingEligible)
-            .map((row) => row.clusterId),
-        );
-        if (clusters.size >= this.minPostGradHoldingClusters) mints.add(mint);
+        // Holding-grade wallets keep a not-yet-migrated mint subscribed even
+        // when they are not S_A/S_B graduation-prediction voters. Once the
+        // first AMM trade has been evaluated, active Shadow rows own the
+        // subscription and prevent an unnecessary 24-hour broad AMM tail.
+        if (state.firstAmmObservedAt != null) continue;
+        const votes = this._holdingVotes(state, at);
+        if (votes.length >= this.minPostGradHoldingClusters) mints.add(mint);
       }
     }
     return [...mints];
@@ -358,6 +366,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       rugPolicy: 'OBSERVE_ONLY_NOT_AN_ENTRY_FILTER',
       activePositions: this.positions.size,
       trackedMints: this.rowsByMint.size,
+      holdingSubscriptionMints: this.trackedMints().filter(
+        (mint) => !this.rowsByMint.has(mint),
+      ).length,
       dynamicThresholds: this._thresholdSnapshot(this.now()),
       entryProfiles: [...this.entryProfiles.values()],
       exitProfiles: [...this.exitProfiles.values()],
@@ -442,9 +453,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       LIMIT ?
     `).all(at - this.config.stateRetentionMs, limit);
     for (const row of rows) {
-      const snapshot = typeof this.registry.cachedWalletSnapshot === 'function'
-        ? this.registry.cachedWalletSnapshot(row.wallet, at)
-        : this.registry.walletSnapshot(row.wallet, at);
+      const snapshot = typeof this.registry.cachedMonitoringSnapshot === 'function'
+        ? this.registry.cachedMonitoringSnapshot(row.wallet, at)
+        : this.registry.monitoringSnapshot(row.wallet, at);
       if (!snapshot) continue;
       this._rememberSmartHolding({
         wallet: row.wallet,
@@ -722,46 +733,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
   }
 
   _holdingConsensus(state, at, profile) {
-    const byCluster = new Map();
-    let eligibleWallets = 0;
-    for (const holding of state.smartHoldings.values()) {
-      if (!(holding.tokenBalanceAfter > 0) || holding.timestampMs > at) continue;
-      // Post-graduation holding consensus is a different capability from
-      // predicting graduation. It may use H_A/H_B or a 60d elite wallet, while
-      // pre-graduation _consensus() below remains restricted to S_A/S_B votes.
-      const snapshot = typeof this.registry.cachedMonitoringSnapshot === 'function'
-        ? this.registry.cachedMonitoringSnapshot(holding.wallet, at)
-        : this.registry.monitoringSnapshot(holding.wallet, at);
-      if (!snapshot) continue;
-      if (snapshot.ageEligible === false || snapshot.pnlEligible === false) continue;
-      if (!snapshot.longTermElite
-        && !['H_A', 'H_B'].includes(snapshot.holdingGrade)) continue;
-      if (snapshot.source !== 'CONFIG_SEED' && snapshot.clusterKnown === false) continue;
-      eligibleWallets += 1;
-      const holdingWeight = snapshot.longTermElite || snapshot.holdingGrade === 'H_A'
-        ? 1 : 0.5;
-      const vote = {
-        timestampMs: holding.timestampMs,
-        wallet: holding.wallet,
-        eventId: holding.eventId,
-        clusterId: snapshot.clusterId || holding.clusterId || holding.wallet,
-        selectionGrade: snapshot.selectionGrade,
-        copyGrade: snapshot.copyGrade,
-        holdingGrade: snapshot.holdingGrade,
-        registryVersion: finite(snapshot.registryVersion, holding.registryVersion || 0),
-        weight: holdingWeight,
-        tokenBalanceAfter: holding.tokenBalanceAfter,
-      };
-      const current = byCluster.get(vote.clusterId);
-      if (!current || vote.weight > current.weight
-        || (vote.weight === current.weight
-          && vote.tokenBalanceAfter > current.tokenBalanceAfter)) {
-        byCluster.set(vote.clusterId, vote);
-      }
-    }
-    const votes = [...byCluster.values()].sort(
-      (left, right) => left.timestampMs - right.timestampMs,
-    );
+    const votes = this._holdingVotes(state, at);
+    const eligibleWallets = votes.reduce((sum, row) => sum + row.walletCount, 0);
     const required = Math.max(2, Math.trunc(finite(profile.requiredHoldingClusters, 3)));
     const selectionA = votes.filter((row) => row.selectionGrade === 'S_A').length;
     const copyA = votes.filter((row) => row.copyGrade === 'C_A').length;
@@ -780,6 +753,57 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       eligibleWallets,
       rejectionReason,
     };
+  }
+
+  _holdingSnapshotEligible(snapshot) {
+    if (!snapshot || snapshot.ageEligible === false || snapshot.pnlEligible === false) {
+      return false;
+    }
+    if (!snapshot.longTermElite && !['H_A', 'H_B'].includes(snapshot.holdingGrade)) {
+      return false;
+    }
+    return snapshot.source === 'CONFIG_SEED' || snapshot.clusterKnown !== false;
+  }
+
+  _holdingVotes(state, at) {
+    const byCluster = new Map();
+    for (const holding of state.smartHoldings.values()) {
+      if (!(holding.tokenBalanceAfter > 0) || holding.timestampMs > at) continue;
+      // Post-graduation holding consensus is a different capability from
+      // predicting graduation. It may use H_A/H_B or a 60d elite wallet, while
+      // pre-graduation _consensus() below remains restricted to S_A/S_B votes.
+      const snapshot = typeof this.registry.cachedMonitoringSnapshot === 'function'
+        ? this.registry.cachedMonitoringSnapshot(holding.wallet, at)
+        : this.registry.monitoringSnapshot(holding.wallet, at);
+      if (!this._holdingSnapshotEligible(snapshot)) continue;
+      const holdingWeight = snapshot.longTermElite || snapshot.holdingGrade === 'H_A'
+        ? 1 : 0.5;
+      const vote = {
+        timestampMs: holding.timestampMs,
+        wallet: holding.wallet,
+        eventId: holding.eventId,
+        clusterId: snapshot.clusterId || holding.clusterId || holding.wallet,
+        selectionGrade: snapshot.selectionGrade,
+        copyGrade: snapshot.copyGrade,
+        holdingGrade: snapshot.holdingGrade,
+        registryVersion: finite(snapshot.registryVersion, holding.registryVersion || 0),
+        weight: holdingWeight,
+        tokenBalanceAfter: holding.tokenBalanceAfter,
+        walletCount: 1,
+      };
+      const current = byCluster.get(vote.clusterId);
+      if (!current || vote.weight > current.weight
+        || (vote.weight === current.weight
+          && vote.tokenBalanceAfter > current.tokenBalanceAfter)) {
+        vote.walletCount = finite(current?.walletCount, 0) + 1;
+        byCluster.set(vote.clusterId, vote);
+      } else {
+        current.walletCount += 1;
+      }
+    }
+    return [...byCluster.values()].sort(
+      (left, right) => left.timestampMs - right.timestampMs,
+    );
   }
 
   _evaluatePostGradHoldingProfiles(trade, state, at, price) {
@@ -999,6 +1023,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     }
     if (!['SCOUT_OPEN', 'OPEN', 'RUNNER', 'EXIT_PENDING'].includes(position.status)
       || !(position.tokenUnits > 0)) return;
+    this._capturePostGradSnapshot(position, trade, state, at, price);
     const markReturn = (price / position.entryPrice - 1) * 100;
     position.highestReturnPct = Math.max(position.highestReturnPct, markReturn);
     const exit = this.exitProfiles.get(position.exitProfileId);
@@ -1105,6 +1130,37 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     return features.current.netFlowSol >= this.config.strictMinFlowNetSol
       && features.current.netFlowSharePct >= this.config.strictMinFlowNetSharePct
       && at <= position.graduatedAt + this.config.strictMaxFlowConfirmationDelayMs;
+  }
+
+  _capturePostGradSnapshot(position, trade, state, at, price) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    const exit = this.exitProfiles.get(position.exitProfileId);
+    if (profile?.directPostGraduationEntry !== true || trade.market !== 'PUMP_AMM'
+      || finite(exit?.maxHoldMs, 0) < 30 * 60_000
+      || !this.postGradSnapshotHorizonsMs.length) return;
+    const features = position.flowFeatures && position.flowFeatures.kind === 'POST_GRAD_SNAPSHOTS'
+      ? position.flowFeatures
+      : { kind: 'POST_GRAD_SNAPSHOTS', snapshots: {} };
+    let changed = false;
+    for (const horizonMs of this.postGradSnapshotHorizonsMs) {
+      if (features.snapshots[String(horizonMs)] || at < position.signalAt + horizonMs) continue;
+      const flow = this._flowFeatures(state, at, {
+        flowWindowMs: horizonMs,
+        cumulativePostGraduationFlow: true,
+      }, position);
+      const holdings = this._holdingVotes(state, at);
+      features.snapshots[String(horizonMs)] = {
+        observedAt: at,
+        markReturnPct: position.entryPrice > 0 ? (price / position.entryPrice - 1) * 100 : null,
+        publicFlow: flow.current,
+        qualifiedHoldingClusters: holdings.length,
+        qualifiedHoldingWallets: holdings.reduce((sum, row) => sum + row.walletCount, 0),
+        observedSmartHoldingWallets: [...state.smartHoldings.values()]
+          .filter((row) => row.tokenBalanceAfter > 0 && row.timestampMs <= at).length,
+      };
+      changed = true;
+    }
+    if (changed) position.flowFeatures = features;
   }
 
   _maxFlowWaitMs(position) {
