@@ -121,6 +121,9 @@ const EXPLICIT_FILTERS = Object.freeze({
   smart_wallet_consensus_overlay_rows: {
     where: 'source_signal_at >= ? AND source_signal_at < ?', anchor: 'source_signal_at',
   },
+  smart_wallet_post_grad_holding_evaluations: {
+    where: 'evaluated_at >= ? AND evaluated_at < ?', anchor: 'evaluated_at',
+  },
 });
 
 // These tables describe the current Smart Wallet registry state rather than

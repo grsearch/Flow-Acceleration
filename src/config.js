@@ -2820,6 +2820,10 @@ const config = {
     stateRetentionMs: integerEnv('FLOW_SMART_CONSENSUS_V2_STATE_RETENTION_MS', 24 * 60 * 60_000, {
       min: 60_000,
     }),
+    maxRestoredHoldingRows: integerEnv(
+      'FLOW_SMART_CONSENSUS_V2_MAX_RESTORED_HOLDING_ROWS', 20_000,
+      { min: 100, max: 100_000 },
+    ),
     episodeCooldownMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EPISODE_COOLDOWN_MS', 30 * 60_000, {
       min: 1_000,
     }),
@@ -2880,6 +2884,48 @@ const config = {
         consensusWindowMs: 300_000, scoutFraction: 0.25, flowGate: 'STRICT',
         minSelectionAClusters: 3, minWeightedScoreRatio: 0.6,
       },
+      booleanEnv('FLOW_SMART_CONSENSUS_V2_POST_GRAD_HOLD3_ENABLED', true) && {
+        id: 'POST_GRAD_HOLD3_FLOW2_60',
+        label: '真实AMM毕业 · 3个独立集群仍持仓 · 60秒2买家净流入',
+        strength: 'HOLDING_STRONG',
+        postGraduationHoldingConsensus: true,
+        requiredHoldingClusters: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_HOLDING_CLUSTERS', 3, { min: 2 },
+        ),
+        minWeightedScoreRatio: numberEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_MIN_WEIGHT_RATIO', 0.5,
+          { min: 0, max: 1 },
+        ),
+        cumulativePostGraduationFlow: true,
+        flowWindowMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_FLOW_WINDOW_MS', 60_000,
+          { min: 5_000, max: 5 * 60_000 },
+        ),
+        maxFlowWaitMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_MAX_FLOW_WAIT_MS', 60_000,
+          { min: 5_000, max: 5 * 60_000 },
+        ),
+        minFlowNetSol: numberEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_MIN_FLOW_NET_SOL', 0, { min: 0 },
+        ),
+        minFlowBuyers: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_MIN_FLOW_BUYERS', 2, { min: 1 },
+        ),
+        minFlowBuyTx: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_MIN_FLOW_BUY_TX', 2, { min: 1 },
+        ),
+        requirePositiveFlow: true,
+        requireFlowAcceleration: false,
+        entryDelayMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_ENTRY_DELAY_MS', 200, { min: 0 },
+        ),
+        entryTimeoutMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_ENTRY_TIMEOUT_MS', 30_000,
+          { min: 1_000, max: 120_000 },
+        ),
+        scoutFraction: 0,
+        exitProfileIds: ['CORE80_RUNNER30M'],
+      },
       booleanEnv('FLOW_SMART_CONSENSUS_V2_EARLY_C25_R3_ENABLED', true) && {
         id: 'EARLY_C25_R3',
         label: '早期Curve<25% · 180秒3个独立集群直接入场',
@@ -2927,6 +2973,22 @@ const config = {
         runnerTrailPct: 30, maxHoldMs: 6 * 60 * 60_000, hardStopPct: 20,
         scoutProtectActivationPct: 30, scoutProtectTrailPct: 20,
         scoutProtectFloorPct: 5,
+      },
+      {
+        id: 'CORE80_RUNNER30M',
+        label: '毕业持仓共振 · +30%卖80% · 20% Runner回撤30% · 最长30分钟',
+        mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
+        runnerTrailPct: 30,
+        maxHoldMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_MAX_HOLD_MS', 30 * 60_000,
+          { min: 60_000, max: 6 * 60 * 60_000 },
+        ),
+        hardStopPct: 20,
+        exitTimeoutMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_POST_GRAD_EXIT_TIMEOUT_MS', 30_000,
+          { min: 1_000, max: 120_000 },
+        ),
+        entryProfileIds: ['POST_GRAD_HOLD3_FLOW2_60'],
       },
     ],
     costModel: normalizeCostModel({

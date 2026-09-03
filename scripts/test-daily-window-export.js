@@ -75,6 +75,10 @@ function main() {
       smart_event_id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL,
       wallet TEXT NOT NULL, mint TEXT NOT NULL
     );
+    CREATE TABLE smart_wallet_post_grad_holding_evaluations (
+      id INTEGER PRIMARY KEY, entry_profile_id TEXT NOT NULL,
+      mint TEXT NOT NULL, evaluated_at INTEGER NOT NULL, status TEXT NOT NULL
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -134,6 +138,10 @@ function main() {
     .run(70, startMs + 70, 'voter', 'inside-vote');
   db.prepare('INSERT INTO smart_wallet_voting_event_snapshots VALUES (?, ?, ?, ?)')
     .run(71, endMs + 70, 'voter', 'future-vote');
+  db.prepare('INSERT INTO smart_wallet_post_grad_holding_evaluations VALUES (?, ?, ?, ?, ?)')
+    .run(80, 'POST_GRAD_HOLD3_FLOW2_60', 'inside-holding', startMs + 80, 'QUALIFIED');
+  db.prepare('INSERT INTO smart_wallet_post_grad_holding_evaluations VALUES (?, ?, ?, ?, ?)')
+    .run(81, 'POST_GRAD_HOLD3_FLOW2_60', 'future-holding', endMs + 80, 'REJECTED');
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
@@ -211,6 +219,13 @@ function main() {
     `).all().map((row) => row.smart_event_id),
     [70],
     'the causal wallet-vote snapshots must be available in the next daily analysis export',
+  );
+  assert.deepStrictEqual(
+    exported.prepare(`
+      SELECT id FROM smart_wallet_post_grad_holding_evaluations ORDER BY id
+    `).all().map((row) => row.id),
+    [80],
+    'post-graduation holding evaluations must be clipped to the daily analysis window',
   );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();

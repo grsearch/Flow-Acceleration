@@ -765,6 +765,12 @@ function createRuntime(runtimeConfig = config) {
                   normalizedSmartEvent, registryMonitoringSnapshot,
                 )
               ));
+              observeShadow('smartConsensusV2PositionEvent', () => (
+                smartWalletConsensusFlowRunnerShadow.onSmartWalletPositionEvent(
+                  normalizedSmartEvent,
+                  { walletSnapshot: registryVotingSnapshot || registryMonitoringSnapshot },
+                )
+              ));
             }
             if (isRegistryVotingWalletTrade) {
               observeShadow('smartVotingSnapshot', () => persistVotingSnapshot(

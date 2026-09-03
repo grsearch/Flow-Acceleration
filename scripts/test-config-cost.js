@@ -111,6 +111,29 @@ assert.deepStrictEqual(
   earlyCurveConsensus.exitProfileIds,
   ['FIX30', 'CORE80_RUNNER6H_SP30T20'],
 );
+const postGradHoldingConsensus = config.smartWalletConsensusFlowRunnerShadow.entryProfiles.find(
+  (profile) => profile.id === 'POST_GRAD_HOLD3_FLOW2_60',
+);
+assert(postGradHoldingConsensus);
+assert.strictEqual(postGradHoldingConsensus.postGraduationHoldingConsensus, true);
+assert.strictEqual(postGradHoldingConsensus.requiredHoldingClusters, 3);
+assert.strictEqual(postGradHoldingConsensus.flowWindowMs, 60_000);
+assert.strictEqual(postGradHoldingConsensus.maxFlowWaitMs, 60_000);
+assert.strictEqual(postGradHoldingConsensus.minFlowBuyers, 2);
+assert.strictEqual(postGradHoldingConsensus.minFlowBuyTx, 2);
+assert.strictEqual(postGradHoldingConsensus.requirePositiveFlow, true);
+assert.strictEqual(postGradHoldingConsensus.entryTimeoutMs, 30_000);
+assert.deepStrictEqual(postGradHoldingConsensus.exitProfileIds, ['CORE80_RUNNER30M']);
+const postGradHoldingExit = config.smartWalletConsensusFlowRunnerShadow.exitProfiles.find(
+  (profile) => profile.id === 'CORE80_RUNNER30M',
+);
+assert(postGradHoldingExit);
+assert.strictEqual(postGradHoldingExit.coreActivationPct, 30);
+assert.strictEqual(postGradHoldingExit.coreFraction, 0.8);
+assert.strictEqual(postGradHoldingExit.runnerTrailPct, 30);
+assert.strictEqual(postGradHoldingExit.maxHoldMs, 30 * 60_000);
+assert.strictEqual(postGradHoldingExit.hardStopPct, 20);
+assert.strictEqual(postGradHoldingExit.exitTimeoutMs, 30_000);
 const earlyBurstConsensus = config.earlyPureBuyBurstShadow.entryProfiles.find(
   (profile) => profile.id === 'EB_A_SWC_R2_W300',
 );

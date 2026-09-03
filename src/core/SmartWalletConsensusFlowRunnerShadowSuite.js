@@ -89,6 +89,17 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
     this.maxConsensusWindowMs = Math.max(0, ...(config.entryProfiles || [])
       .map((row) => finite(row.consensusWindowMs, 0)));
+    this.maxFlowWindowMs = Math.max(
+      finite(config.flowWindowMs, 0),
+      ...(config.entryProfiles || []).map((row) => finite(row.flowWindowMs, 0)),
+    );
+    this.postGradHoldingProfiles = [...this.entryProfiles.values()].filter(
+      (row) => row.postGraduationHoldingConsensus === true && row.enabled !== false,
+    );
+    this.minPostGradHoldingClusters = Math.min(
+      Infinity,
+      ...this.postGradHoldingProfiles.map((row) => finite(row.requiredHoldingClusters, 3)),
+    );
     this.states = new Map();
     this.positions = new Map();
     this.rowsByMint = new Map();
@@ -96,6 +107,12 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     this.metrics = {
       observedTrades: 0,
       observedSmartOpens: 0,
+      observedSmartPositionEvents: 0,
+      restoredSmartHoldings: 0,
+      firstAmmHoldingEvaluations: 0,
+      holdingConsensusQualified: 0,
+      holdingConsensusRejected: 0,
+      migrationAnchorRejected: 0,
       consensusSignals: 0,
       scoutOpened: 0,
       directOpened: 0,
@@ -181,6 +198,27 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         ON smart_wallet_consensus_flow_runner_shadow_positions(
           entry_profile_id, exit_profile_id, status
         );
+      CREATE TABLE IF NOT EXISTS smart_wallet_post_grad_holding_evaluations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entry_profile_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        evaluated_at INTEGER NOT NULL,
+        migrated_at INTEGER,
+        first_amm_at INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        required_clusters INTEGER NOT NULL,
+        distinct_clusters INTEGER NOT NULL,
+        eligible_wallets INTEGER NOT NULL,
+        selection_a_clusters INTEGER NOT NULL,
+        weighted_score REAL NOT NULL,
+        cluster_votes_json TEXT NOT NULL,
+        registry_version INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(entry_profile_id, mint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_swc_post_grad_holding_status
+        ON smart_wallet_post_grad_holding_evaluations(status, evaluated_at DESC);
     `);
     initializeVotingSnapshotStorage(this.store);
     const columns = new Set(this.store.db.prepare(
@@ -248,6 +286,19 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         estimated_cost_sol=@estimatedCostSol, updated_at=@updatedAt
       WHERE id=@id
     `);
+    this.insertHoldingEvaluation = this.store.db.prepare(`
+      INSERT OR IGNORE INTO smart_wallet_post_grad_holding_evaluations (
+        entry_profile_id, mint, evaluated_at, migrated_at, first_amm_at,
+        status, rejection_reason, required_clusters, distinct_clusters,
+        eligible_wallets, selection_a_clusters, weighted_score,
+        cluster_votes_json, registry_version, created_at
+      ) VALUES (
+        @entryProfileId, @mint, @evaluatedAt, @migratedAt, @firstAmmAt,
+        @status, @rejectionReason, @requiredClusters, @distinctClusters,
+        @eligibleWallets, @selectionAClusters, @weightedScore,
+        @clusterVotesJson, @registryVersion, @createdAt
+      )
+    `);
   }
 
   start() {
@@ -277,12 +328,26 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     )) {
       this._rememberSmartOpen(restored.event, restored.walletSnapshot, { restored: true });
     }
+    this._restoreSmartHoldings(this.now());
     this.advanceTime(this.now());
   }
 
   stop() {}
 
-  trackedMints() { return [...this.rowsByMint.keys()]; }
+  trackedMints() {
+    const mints = new Set(this.rowsByMint.keys());
+    if (Number.isFinite(this.minPostGradHoldingClusters)) {
+      for (const [mint, state] of this.states) {
+        const clusters = new Set(
+          [...state.smartHoldings.values()]
+            .filter((row) => row.votingEligible)
+            .map((row) => row.clusterId),
+        );
+        if (clusters.size >= this.minPostGradHoldingClusters) mints.add(mint);
+      }
+    }
+    return [...mints];
+  }
 
   health() {
     return {
@@ -297,6 +362,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       entryProfiles: [...this.entryProfiles.values()],
       exitProfiles: [...this.exitProfiles.values()],
       table: 'smart_wallet_consensus_flow_runner_shadow_positions',
+      postGradHoldingEvaluationTable: 'smart_wallet_post_grad_holding_evaluations',
       ...this.metrics,
     };
   }
@@ -341,6 +407,18 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         GROUP BY entry_profile_id, exit_profile_id
         ORDER BY entry_profile_id, exit_profile_id
       `).all(),
+      postGradHoldingSummary: this.store.db.prepare(`
+        SELECT entry_profile_id, status, rejection_reason, COUNT(*) n,
+          AVG(distinct_clusters) avg_distinct_clusters,
+          MAX(distinct_clusters) max_distinct_clusters
+        FROM smart_wallet_post_grad_holding_evaluations
+        GROUP BY entry_profile_id, status, rejection_reason
+        ORDER BY entry_profile_id, status, rejection_reason
+      `).all(),
+      recentPostGradHoldingEvaluations: this.store.db.prepare(`
+        SELECT * FROM smart_wallet_post_grad_holding_evaluations
+        ORDER BY evaluated_at DESC, id DESC LIMIT ?
+      `).all(capped),
       recent: this.store.db.prepare(`
         SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
         ORDER BY signal_at DESC, id DESC LIMIT ?
@@ -348,18 +426,96 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     };
   }
 
+  _restoreSmartHoldings(at) {
+    if (!this.postGradHoldingProfiles.length) return;
+    const limit = Math.max(100, Math.trunc(finite(
+      this.config.maxRestoredHoldingRows, 20_000,
+    )));
+    const rows = this.store.db.prepare(`
+      SELECT position.wallet, position.mint, position.token_balance,
+        position.updated_at
+      FROM smart_wallet_positions position
+      JOIN flow_tokens token ON token.mint=position.mint
+      WHERE position.token_balance>0 AND position.updated_at>=?
+        AND token.migrated_at IS NULL
+      ORDER BY position.updated_at DESC
+      LIMIT ?
+    `).all(at - this.config.stateRetentionMs, limit);
+    for (const row of rows) {
+      const snapshot = typeof this.registry.cachedWalletSnapshot === 'function'
+        ? this.registry.cachedWalletSnapshot(row.wallet, at)
+        : this.registry.walletSnapshot(row.wallet, at);
+      if (!snapshot) continue;
+      this._rememberSmartHolding({
+        wallet: row.wallet,
+        mint: row.mint,
+        timestampMs: row.updated_at,
+        tokenBalanceAfter: row.token_balance,
+      }, snapshot);
+      this.metrics.restoredSmartHoldings += 1;
+    }
+  }
+
+  onSmartWalletPositionEvent(event, { walletSnapshot = null } = {}) {
+    if (!this.config.enabled || !event?.mint || !event?.wallet) return false;
+    const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
+    const snapshot = walletSnapshot
+      || (typeof this.registry.cachedMonitoringSnapshot === 'function'
+        ? this.registry.cachedMonitoringSnapshot(event.wallet, timestampMs)
+        : this.registry.monitoringSnapshot(event.wallet, timestampMs));
+    if (!(timestampMs > 0) || !snapshot) return false;
+    const remembered = this._rememberSmartHolding(event, snapshot);
+    if (remembered) this.metrics.observedSmartPositionEvents += 1;
+    return remembered;
+  }
+
+  _rememberSmartHolding(event, snapshot) {
+    const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
+    const tokenBalanceAfter = finite(
+      event.tokenBalanceAfter ?? event.token_balance_after,
+    );
+    if (!(timestampMs > 0) || tokenBalanceAfter == null || !event.wallet || !snapshot) {
+      return false;
+    }
+    const state = this._state(event.mint);
+    const previous = state.smartHoldings.get(event.wallet);
+    if (previous && previous.timestampMs > timestampMs) return false;
+    if (!(tokenBalanceAfter > 0)) {
+      state.smartHoldings.delete(event.wallet);
+    } else {
+      state.smartHoldings.set(event.wallet, {
+        timestampMs,
+        wallet: event.wallet,
+        eventId: finite(event.id ?? event.smartEventId ?? event.smart_event_id),
+        tokenBalanceAfter,
+        clusterId: snapshot.clusterId || event.wallet,
+        selectionGrade: snapshot.selectionGrade,
+        copyGrade: snapshot.copyGrade,
+        holdingGrade: snapshot.holdingGrade,
+        registryVersion: finite(snapshot.registryVersion, 0),
+        weight: Number.isFinite(snapshot.voteWeight)
+          ? snapshot.voteWeight
+          : finite(snapshot.selectionWeight, 1),
+        votingEligible: snapshot.votingEligible === true,
+      });
+    }
+    state.lastAt = Math.max(state.lastAt, timestampMs);
+    return true;
+  }
+
   onSmartWalletEvent(event, {
     replay = false, walletSnapshot = null, persist = true,
   } = {}) {
-    if (!this.config.enabled || replay || !event?.mint || !event?.wallet
-      || String(event.side || '').toUpperCase() !== 'BUY'
-      || String(event.positionPhase || event.position_phase || '').toUpperCase() !== 'OPEN') return [];
+    if (!this.config.enabled || replay || !event?.mint || !event?.wallet) return [];
     const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
-    const price = tradePrice(event);
     const snapshot = walletSnapshot
       || (typeof this.registry.cachedWalletSnapshot === 'function'
         ? this.registry.cachedWalletSnapshot(event.wallet, timestampMs)
         : this.registry.walletSnapshot(event.wallet, timestampMs));
+    this._rememberSmartHolding(event, snapshot);
+    if (String(event.side || '').toUpperCase() !== 'BUY'
+      || String(event.positionPhase || event.position_phase || '').toUpperCase() !== 'OPEN') return [];
+    const price = tradePrice(event);
     if (!(timestampMs > 0) || !(price > 0) || !snapshot) return [];
     if (persist) persistVotingSnapshot(this.store, event, snapshot, this.now());
     const state = this._state(event.mint);
@@ -419,6 +575,11 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     if (!(at > 0)) return;
     const state = this._state(event.mint);
     state.graduatedAt = at;
+    const migratedAt = finite(event.migrated_at ?? event.migratedAt);
+    if (migratedAt > 0) {
+      state.migratedAt = migratedAt;
+      state.migrationObservedLive = true;
+    }
     this.store.db.prepare(`
       UPDATE smart_wallet_consensus_flow_runner_shadow_positions
       SET graduated_at=COALESCE(graduated_at,?), updated_at=?
@@ -455,6 +616,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       )),
     });
     this._prune(state, timestampMs);
+    if (trade.market === 'PUMP_AMM') {
+      this._evaluatePostGradHoldingProfiles(trade, state, timestampMs, price);
+    }
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
       const position = this.positions.get(id);
       if (position) this._observePosition(position, trade, timestampMs, price, state);
@@ -505,8 +669,11 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     if (!state) {
       const token = this.store.getToken(mint);
       state = {
-        smartBuys: [], trades: [], lastAt: 0,
+        smartBuys: [], smartHoldings: new Map(), trades: [], lastAt: 0,
         graduatedAt: finite(token?.graduated_at ?? token?.graduatedAt),
+        migratedAt: finite(token?.migrated_at ?? token?.migratedAt),
+        migrationObservedLive: false,
+        firstAmmObservedAt: null,
       };
       this.states.set(mint, state);
     }
@@ -515,7 +682,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   _prune(state, at) {
     const smartCutoff = at - this.maxConsensusWindowMs;
-    const flowCutoff = at - Math.max(this.config.flowWindowMs, this.maxConsensusWindowMs);
+    const flowCutoff = at - Math.max(this.maxFlowWindowMs, this.maxConsensusWindowMs);
     while (state.smartBuys.length && state.smartBuys[0].timestampMs < smartCutoff) {
       state.smartBuys.shift();
     }
@@ -537,6 +704,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
   }
 
   _profileAcceptsSignal(profile, event, state) {
+    if (profile?.postGraduationHoldingConsensus) return false;
     if (!profile?.directCurveEntry) return true;
     const curvePct = finite(event.curvePct ?? event.curve_pct);
     const market = String(event.market || '').toUpperCase();
@@ -545,6 +713,113 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       && curvePct != null
       && curvePct >= finite(profile.minCurvePct, 0)
       && curvePct < finite(profile.maxCurvePct, 100);
+  }
+
+  _holdingConsensus(state, at, profile) {
+    const byCluster = new Map();
+    let eligibleWallets = 0;
+    for (const holding of state.smartHoldings.values()) {
+      if (!(holding.tokenBalanceAfter > 0) || holding.timestampMs > at) continue;
+      const snapshot = typeof this.registry.cachedWalletSnapshot === 'function'
+        ? this.registry.cachedWalletSnapshot(holding.wallet, at)
+        : this.registry.walletSnapshot(holding.wallet, at);
+      if (!snapshot) continue;
+      eligibleWallets += 1;
+      const vote = {
+        timestampMs: holding.timestampMs,
+        wallet: holding.wallet,
+        eventId: holding.eventId,
+        clusterId: snapshot.clusterId || holding.clusterId || holding.wallet,
+        selectionGrade: snapshot.selectionGrade,
+        copyGrade: snapshot.copyGrade,
+        holdingGrade: snapshot.holdingGrade,
+        registryVersion: finite(snapshot.registryVersion, holding.registryVersion || 0),
+        weight: Number.isFinite(snapshot.voteWeight)
+          ? snapshot.voteWeight
+          : finite(snapshot.selectionWeight, holding.weight || 1),
+        tokenBalanceAfter: holding.tokenBalanceAfter,
+      };
+      const current = byCluster.get(vote.clusterId);
+      if (!current || vote.weight > current.weight
+        || (vote.weight === current.weight
+          && vote.tokenBalanceAfter > current.tokenBalanceAfter)) {
+        byCluster.set(vote.clusterId, vote);
+      }
+    }
+    const votes = [...byCluster.values()].sort(
+      (left, right) => left.timestampMs - right.timestampMs,
+    );
+    const required = Math.max(2, Math.trunc(finite(profile.requiredHoldingClusters, 3)));
+    const selectionA = votes.filter((row) => row.selectionGrade === 'S_A').length;
+    const copyA = votes.filter((row) => row.copyGrade === 'C_A').length;
+    const weightedScore = votes.reduce((sum, row) => sum + Math.max(0, row.weight), 0);
+    const minWeightedScore = required * finite(profile.minWeightedScoreRatio, 0.5);
+    let rejectionReason = null;
+    if (votes.length < required) rejectionReason = `HOLDING_CLUSTERS_LT_${required}`;
+    else if (weightedScore < minWeightedScore) rejectionReason = 'HOLDING_WEIGHT_TOO_LOW';
+    return {
+      votes,
+      thresholds: this._thresholdSnapshot(at),
+      required,
+      selectionA,
+      copyA,
+      weightedScore,
+      eligibleWallets,
+      rejectionReason,
+    };
+  }
+
+  _evaluatePostGradHoldingProfiles(trade, state, at, price) {
+    if (!this.postGradHoldingProfiles.length || state.firstAmmObservedAt != null) return [];
+    state.firstAmmObservedAt = at;
+    const token = this.store.getToken(trade.mint);
+    const migratedAt = finite(
+      token?.migrated_at ?? token?.migratedAt ?? state.migratedAt,
+    );
+    const created = [];
+    for (const profile of this.postGradHoldingProfiles) {
+      const consensus = this._holdingConsensus(state, at, profile);
+      let rejectionReason = consensus.rejectionReason;
+      if (!(migratedAt > 0)) rejectionReason = 'MIGRATION_ANCHOR_MISSING';
+      else if (!state.migrationObservedLive) rejectionReason = 'FIRST_AMM_EVENT_MISSED';
+      const status = rejectionReason ? 'REJECTED' : 'QUALIFIED';
+      const registryVersion = consensus.votes.reduce(
+        (maximum, vote) => Math.max(maximum, finite(vote.registryVersion, 0)),
+        0,
+      );
+      const result = this.insertHoldingEvaluation.run({
+        entryProfileId: profile.id,
+        mint: trade.mint,
+        evaluatedAt: at,
+        migratedAt: migratedAt ?? null,
+        firstAmmAt: at,
+        status,
+        rejectionReason,
+        requiredClusters: consensus.required,
+        distinctClusters: consensus.votes.length,
+        eligibleWallets: consensus.eligibleWallets,
+        selectionAClusters: consensus.selectionA,
+        weightedScore: consensus.weightedScore,
+        clusterVotesJson: JSON.stringify(consensus.votes),
+        registryVersion,
+        createdAt: this.now(),
+      });
+      if (!result.changes) continue;
+      this.metrics.firstAmmHoldingEvaluations += 1;
+      if (rejectionReason) {
+        this.metrics.holdingConsensusRejected += 1;
+        if (rejectionReason === 'MIGRATION_ANCHOR_MISSING'
+          || rejectionReason === 'FIRST_AMM_EVENT_MISSED') {
+          this.metrics.migrationAnchorRejected += 1;
+        }
+        continue;
+      }
+      this.metrics.holdingConsensusQualified += 1;
+      this.lastEpisodes.set(`${trade.mint}:${profile.id}`, at);
+      created.push(...this._recordSignal(trade, profile, consensus, at, price));
+    }
+    if (created.length) this.metrics.lastActionAt = this.now();
+    return created;
   }
 
   _exitProfilesFor(profile) {
@@ -586,7 +861,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   _recordSignal(event, profile, consensus, at, price) {
     const token = this.store.getToken(event.mint);
-    const graduatedAt = finite(token?.graduated_at ?? token?.graduatedAt);
+    const graduatedAt = profile.postGraduationHoldingConsensus
+      ? finite(token?.migrated_at ?? token?.migratedAt ?? at)
+      : finite(token?.graduated_at ?? token?.graduatedAt);
     const rugLabel = this.rugRiskTracker?.snapshot
       ? this.rugRiskTracker.snapshot(event.mint, at) : null;
     if (rugLabel) this.metrics.rugLabelsObserved += 1;
@@ -596,6 +873,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       const directCurveEntry = profile.directCurveEntry === true && !graduatedAt;
       const scoutFraction = directCurveEntry
         ? 1 : (graduatedAt ? 0 : finite(profile.scoutFraction, 0));
+      const entryDelayMs = finite(profile.entryDelayMs, this.config.entryDelayMs);
+      const entryTimeoutMs = finite(profile.entryTimeoutMs, this.config.entryTimeoutMs);
       const status = scoutFraction > 0 ? 'PENDING_SCOUT'
         : (graduatedAt ? 'WAITING_FLOW' : 'WAITING_GRADUATION');
       const now = this.now();
@@ -627,9 +906,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         configuredCostPct: this.costs.deterministicCostPct,
         rugLabelJson: rugLabel ? JSON.stringify(rugLabel) : null,
         graduatedAt,
-        entryTargetAt: scoutFraction > 0 ? at + this.config.entryDelayMs : null,
+        entryTargetAt: scoutFraction > 0 ? at + entryDelayMs : null,
         entryDeadlineAt: scoutFraction > 0
-          ? at + this.config.entryDelayMs + this.config.entryTimeoutMs : null,
+          ? at + entryDelayMs + entryTimeoutMs : null,
         createdAt: now,
         updatedAt: now,
       });
@@ -669,14 +948,15 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     }
     if (['SCOUT_OPEN', 'WAITING_FLOW'].includes(position.status)
       && position.graduatedAt && trade.market === 'PUMP_AMM') {
-      const features = this._flowFeatures(state, at);
       const profile = this.entryProfiles.get(position.entryProfileId);
+      const features = this._flowFeatures(state, at, profile, position);
       if (this._flowQualified(features, profile, position, at)) {
         position.flowConfirmedAt = at;
         position.flowFeatures = features;
         position.status = 'SCALE_PENDING';
-        position.entryTargetAt = at + this.config.entryDelayMs;
-        position.entryDeadlineAt = position.entryTargetAt + this.config.entryTimeoutMs;
+        position.entryTargetAt = at + finite(profile?.entryDelayMs, this.config.entryDelayMs);
+        position.entryDeadlineAt = position.entryTargetAt
+          + finite(profile?.entryTimeoutMs, this.config.entryTimeoutMs);
         this.metrics.flowConfirmed += 1;
         this._save(position);
       }
@@ -741,11 +1021,16 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     return true;
   }
 
-  _flowFeatures(state, at) {
+  _flowFeatures(state, at, profile = null, position = null) {
+    const windowMs = Math.max(1, finite(profile?.flowWindowMs, this.config.flowWindowMs));
+    const cumulative = profile?.cumulativePostGraduationFlow === true;
+    const startAt = cumulative
+      ? Math.max(at - windowMs, finite(position?.signalAt, at - windowMs))
+      : at - windowMs;
     const rows = state.trades.filter((row) => row.market === 'PUMP_AMM'
-      && !row.registeredWallet && row.timestampMs >= at - this.config.flowWindowMs
+      && !row.registeredWallet && row.timestampMs >= startAt
       && row.timestampMs <= at);
-    const splitAt = at - this.config.flowWindowMs / 2;
+    const splitAt = at - windowMs / 2;
     const summarize = (sample) => {
       const buys = sample.filter((row) => row.side === 'BUY');
       const sells = sample.filter((row) => row.side === 'SELL');
@@ -765,17 +1050,27 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       };
     };
     return {
-      windowMs: this.config.flowWindowMs,
-      current: summarize(rows.filter((row) => row.timestampMs >= splitAt)),
-      previous: summarize(rows.filter((row) => row.timestampMs < splitAt)),
+      windowMs,
+      cumulative,
+      current: summarize(cumulative ? rows : rows.filter((row) => row.timestampMs >= splitAt)),
+      previous: summarize(cumulative ? [] : rows.filter((row) => row.timestampMs < splitAt)),
     };
   }
 
   _flowQualified(features, profile, position, at) {
-    const baseQualified = features.current.netFlowSol >= this.config.minFlowNetSol
-      && features.current.buyers >= this.config.minFlowBuyers
-      && features.current.buyTx >= this.config.minFlowBuyTx
-      && features.current.buyTx > features.previous.buyTx;
+    const minFlowNetSol = finite(profile?.minFlowNetSol, this.config.minFlowNetSol);
+    const minFlowBuyers = finite(profile?.minFlowBuyers, this.config.minFlowBuyers);
+    const minFlowBuyTx = finite(profile?.minFlowBuyTx, this.config.minFlowBuyTx);
+    const positiveFlowQualified = profile?.requirePositiveFlow === true
+      ? features.current.netFlowSol > 0
+      : features.current.netFlowSol >= minFlowNetSol;
+    const accelerationQualified = profile?.requireFlowAcceleration === false
+      || features.current.buyTx > features.previous.buyTx;
+    const baseQualified = positiveFlowQualified
+      && features.current.netFlowSol >= minFlowNetSol
+      && features.current.buyers >= minFlowBuyers
+      && features.current.buyTx >= minFlowBuyTx
+      && accelerationQualified;
     if (!baseQualified || profile?.flowGate !== 'STRICT') return baseQualified;
     return features.current.netFlowSol >= this.config.strictMinFlowNetSol
       && features.current.netFlowSharePct >= this.config.strictMinFlowNetSharePct
@@ -784,6 +1079,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   _maxFlowWaitMs(position) {
     const profile = this.entryProfiles.get(position.entryProfileId);
+    if (Number.isFinite(profile?.maxFlowWaitMs)) return profile.maxFlowWaitMs;
     return profile?.flowGate === 'STRICT'
       ? Math.min(this.config.maxFlowWaitMs, this.config.strictMaxFlowConfirmationDelayMs)
       : this.config.maxFlowWaitMs;
@@ -806,10 +1102,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   _requestExit(position, at, reason) {
     if (position.status === 'EXIT_PENDING') return;
+    const exit = this.exitProfiles.get(position.exitProfileId);
+    const exitDelayMs = finite(exit?.exitDelayMs, this.config.exitDelayMs);
+    const exitTimeoutMs = finite(exit?.exitTimeoutMs, this.config.exitTimeoutMs);
     position.status = 'EXIT_PENDING';
     position.exitTriggerAt = at;
-    position.exitTargetAt = at + this.config.exitDelayMs;
-    position.exitDeadlineAt = position.exitTargetAt + this.config.exitTimeoutMs;
+    position.exitTargetAt = at + exitDelayMs;
+    position.exitDeadlineAt = position.exitTargetAt + exitTimeoutMs;
     position.exitReason = reason;
     this._save(position);
   }
