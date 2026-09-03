@@ -459,6 +459,13 @@ async function testWalletAgeGate(costModel) {
     'wallet-unknown': 'UNKNOWN',
     'wallet-young': 'TOO_NEW',
   });
+  registry._refreshWalletEligibilitySnapshot(now, { force: true });
+  assert.strictEqual(registry.cachedMonitoringSnapshot('wallet-young', now), null);
+  assert.strictEqual(registry.cachedMonitoringSnapshot('wallet-unknown', now), null,
+    'unresolved-age wallets must not create realtime Smart Wallet write load');
+  assert(registry.cachedMonitoringSnapshot('wallet-probation', now),
+    'verified 7-30d wallets remain eligible for observation-only event collection');
+  assert(registry.cachedMonitoringSnapshot('wallet-old', now));
   assert.strictEqual(registry.monitoringSnapshot('wallet-young', now), null,
     'wallets younger than seven days must be excluded from smart-wallet monitoring');
   assert(registry.monitoringSnapshot('wallet-probation', now));
@@ -569,6 +576,7 @@ function testActualWalletPnlGate(costModel) {
     WHERE wallet='wallet-partial' AND mint='partial-mint'
   `).get().status, 'PARTIAL');
 
+  registry.refreshGrades(now);
   const gateHealth = registry.health();
   assert.strictEqual(gateHealth.pnlProfitable, 1);
   assert.strictEqual(gateHealth.pnlLossBlocked, 1);
@@ -588,10 +596,14 @@ function testActualWalletPnlGate(costModel) {
     price: 0.0011, signature: 'pnl-backfill-sell', eventIndex: 0,
   });
   assert(backfillBuy.inserted && backfillSell.inserted);
-  assert.strictEqual(registry._backfillActualWalletEvents(), 2,
-    'startup migration must reconstruct the real ledger from stored smart events');
-  assert.strictEqual(registry._backfillActualWalletEvents(), 0,
+  assert.strictEqual(registry._backfillActualWalletEvents(1), 1,
+    'startup migration must process only the configured bounded batch');
+  assert.strictEqual(registry.actualEventBackfillPending, true);
+  assert.strictEqual(registry._backfillActualWalletEvents(1), 1,
+    'a later maintenance turn must continue the real ledger reconstruction');
+  assert.strictEqual(registry._backfillActualWalletEvents(1), 0,
     'real wallet ledger backfill must be idempotent');
+  assert.strictEqual(registry.actualEventBackfillPending, false);
   assert.strictEqual(
     registry.monitoringSnapshot('wallet-backfill', now).pnlStatus,
     'PNL_PROFITABLE',

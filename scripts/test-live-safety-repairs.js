@@ -1,8 +1,26 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const LiveTradingManager = require('../src/core/LiveTradingManager');
 const { ResearchStore } = require('../src/data/ResearchStore');
+
+function assertRealtimeOrdering() {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  const liveAt = source.indexOf('trader.observeTrade(trade);');
+  const registryAt = source.indexOf("observeShadow('smartWalletRegistry'");
+  const cachedMonitoringAt = source.indexOf('smartWalletRegistry.cachedMonitoringSnapshot(');
+  const cachedVotingAt = source.indexOf('smartWalletRegistry.cachedWalletSnapshot(');
+  assert(liveAt >= 0 && registryAt > liveAt,
+    'live signal and position handling must run before Smart Wallet research');
+  assert(cachedMonitoringAt > liveAt && cachedVotingAt > liveAt,
+    'the realtime Smart Wallet path must use local eligibility snapshots');
+  assert.strictEqual(source.includes('smartWalletRegistry.monitoringSnapshot('), false,
+    'the realtime runtime must not query exact wallet monitoring state per trade');
+  assert.strictEqual(source.includes('smartWalletRegistry.walletSnapshot('), false,
+    'the realtime runtime must not query exact wallet voting/PnL state per trade');
+}
 
 function managerConfig(strategies, dryRun) {
   return {
@@ -74,6 +92,7 @@ function signal(strategyId, mint, now, episodeId) {
 }
 
 async function main() {
+  assertRealtimeOrdering();
   let now = 2_000_000_000_000;
   const store = new ResearchStore({
     dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,

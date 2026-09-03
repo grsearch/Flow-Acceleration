@@ -516,6 +516,15 @@ class MigratedDropReboundShadowSuite {
       .filter((token) => token.completedAt && !token.migratedAt).length;
     const migratedObservationMints = [...this.tracked.values()]
       .filter((token) => token.migratedAt).length;
+    const resolvedMigrationEvents = this.metrics.migrationEventsObserved
+      + this.metrics.firstAmmMigrationRecoveries;
+    const migrationResolutionPct = this.metrics.graduationEventsObserved > 0
+      ? Math.min(100, resolvedMigrationEvents / this.metrics.graduationEventsObserved * 100)
+      : null;
+    const ammMigrationMetadataCoveragePct = this.metrics.ammTradesObserved > 0
+      ? Math.max(0, 100 * (this.metrics.ammTradesObserved
+        - this.metrics.missingMigratedAtAmmTrades) / this.metrics.ammTradesObserved)
+      : null;
     return {
       enabled: this.config.enabled,
       mode: 'SHADOW_G',
@@ -524,6 +533,12 @@ class MigratedDropReboundShadowSuite {
       trackedMints: this.tracked.size,
       pendingMigrationMints,
       migratedObservationMints,
+      resolvedMigrationEvents,
+      migrationResolutionPct,
+      ammMigrationMetadataCoveragePct,
+      migrationResolutionMode: this.metrics.migrationEventsObserved > 0
+        ? (this.metrics.firstAmmMigrationRecoveries > 0 ? 'CHAIN_AND_FIRST_AMM' : 'CHAIN_EVENT')
+        : (this.metrics.firstAmmMigrationRecoveries > 0 ? 'FIRST_AMM_ONLY' : 'UNRESOLVED'),
       detectorStates: Object.fromEntries(this.lifecycleStages.map((stage) => [
         stage.id,
         [...this.detectors.values()]

@@ -1,8038 +1,608 @@
-'use strict';
-
-require('dotenv').config();
-
-const { costBreakdown, normalizeCostModel } = require('./core/CostModel');
-const { PRIMARY_THRESHOLD_VARIANTS } = require('./core/PrimaryThresholdProfiles');
-
-function numberEnv(name, fallback, { min = -Infinity, max = Infinity } = {}) {
-  const raw = process.env[name];
-  const value = raw == null || raw === '' ? fallback : Number(raw);
-  if (!Number.isFinite(value)) return fallback;
-  return Math.min(max, Math.max(min, value));
-}
-
-function integerEnv(name, fallback, bounds = {}) {
-  return Math.trunc(numberEnv(name, fallback, bounds));
-}
-
-function nullableNumberEnv(name, fallback = null, bounds = {}) {
-  const raw = process.env[name];
-  if (raw === undefined || String(raw).trim() === '') return fallback;
-  return numberEnv(name, fallback, bounds);
-}
-
-function booleanEnv(name, fallback = false) {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return fallback;
-  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
-}
-
-function listEnv(name, fallback = []) {
-  const raw = process.env[name];
-  if (raw == null || raw.trim() === '') return [...fallback];
-  return raw.split(',').map((value) => value.trim()).filter(Boolean);
-}
-
-function positiveNumberListEnv(name, fallback = []) {
-  const values = listEnv(name, fallback.map(String))
-    .map(Number)
-    .filter((value) => Number.isFinite(value) && value > 0);
-  return [...new Set(values)];
-}
-
-function millisecondListEnv(name, fallbackSeconds = []) {
-  const values = listEnv(name, fallbackSeconds.map(String))
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value) && value > 0)
-    .map((seconds) => Math.trunc(seconds * 1_000));
-  return [...new Set(values)].sort((left, right) => left - right);
-}
-
-function unique(values) {
-  return [...new Set(values.filter(Boolean))];
-}
-
-function liveTradingGuard(requestedEnabled, safetyLock, dryRun) {
-  return {
-    enabled: Boolean(requestedEnabled) && !Boolean(safetyLock),
-    requestedEnabled: Boolean(requestedEnabled),
-    safetyLock: Boolean(safetyLock),
-    dryRun: Boolean(safetyLock) || Boolean(dryRun),
-  };
-}
-
-function normalizeEndpoint(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  const withProtocol = /^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
-  const parsed = new URL(withProtocol);
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new TypeError(`Unsupported gRPC endpoint protocol: ${parsed.protocol}`);
-  }
-  return parsed.toString().replace(/\/$/, '');
-}
-
-function endpointEnv(name, fallback = []) {
-  return listEnv(name, fallback).map(normalizeEndpoint).filter(Boolean);
-}
-
-const heliusEndpoints = endpointEnv('HELIUS_LASERSTREAM_ENDPOINTS',
-  process.env.HELIUS_LASERSTREAM_ENDPOINT ? [process.env.HELIUS_LASERSTREAM_ENDPOINT] : []);
-const allenHarkEndpoints = endpointEnv('ALLENHARK_GRPC_ENDPOINTS');
-const explicitEndpoints = endpointEnv('FLOW_GRPC_ENDPOINTS');
-const labelCostModel = normalizeCostModel({
-  platformFeePct: numberEnv(
-    'FLOW_PLATFORM_FEE_PCT',
-    numberEnv('FLOW_DEFAULT_TRADING_COST_PCT', 1.4, { min: 0 }),
-    { min: 0 },
-  ),
-  buySlippagePct: numberEnv('FLOW_BUY_SLIPPAGE_PCT', 0.3, { min: 0 }),
-  sellSlippagePct: numberEnv('FLOW_SELL_SLIPPAGE_PCT', 0.3, { min: 0 }),
-  priceImpactPct: numberEnv('FLOW_PRICE_IMPACT_PCT', 0.2, { min: 0 }),
-  baseTxFeeSol: numberEnv('FLOW_BASE_TX_FEE_SOL', 0.00001, { min: 0 }),
-  priorityFeeSol: numberEnv('FLOW_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
-  jitoTipSol: numberEnv('FLOW_JITO_TIP_SOL', 0, { min: 0 }),
-  fixedCostSol: numberEnv('FLOW_FIXED_COST_SOL', 0, { min: 0 }),
-  positionSizeSol: numberEnv('FLOW_POSITION_SIZE_SOL', 0.2, { min: 0.000001 }),
-  entryFailureRatePct: numberEnv(
-    'FLOW_ENTRY_FAILURE_RATE_PCT',
-    numberEnv('FLOW_FAILURE_RATE_PCT', 0, { min: 0, max: 100 }),
-    { min: 0, max: 100 },
-  ),
-  entryFailureCostPct: numberEnv(
-    'FLOW_ENTRY_FAILURE_COST_PCT',
-    numberEnv('FLOW_FAILURE_LOSS_PCT', 1, { min: 0 }),
-    { min: 0 },
-  ),
-});
-
-const liveEntryThreshold = {
-  id: 'balanced',
-  signalVariant: PRIMARY_THRESHOLD_VARIANTS.BALANCED,
-  minNetFlowW3Sol: numberEnv('FLOW_LIVE_MIN_NETFLOW_W3_SOL', 5, { min: 0 }),
-  minUniqueBuyersW3: integerEnv('FLOW_LIVE_MIN_BUYERS_W3', 4, { min: 0 }),
-};
-const primaryThresholdProfiles = [
-  {
-    id: 'aggressive',
-    signalVariant: PRIMARY_THRESHOLD_VARIANTS.AGGRESSIVE,
-    minNetFlowW3Sol: numberEnv('FLOW_SIGNAL_SHADOW_AGGRESSIVE_MIN_NETFLOW_W3_SOL', 3, { min: 0 }),
-    minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_AGGRESSIVE_MIN_BUYERS_W3', 3, { min: 0 }),
-  },
-  liveEntryThreshold,
-  {
-    id: 'conservative',
-    signalVariant: PRIMARY_THRESHOLD_VARIANTS.CONSERVATIVE,
-    minNetFlowW3Sol: numberEnv('FLOW_SIGNAL_SHADOW_CONSERVATIVE_MIN_NETFLOW_W3_SOL', 7, { min: 0 }),
-    minUniqueBuyersW3: integerEnv('FLOW_SIGNAL_SHADOW_CONSERVATIVE_MIN_BUYERS_W3', 5, { min: 0 }),
-  },
-];
-const liveTradingRequested = booleanEnv('FLOW_LIVE_TRADING_ENABLED', false);
-// Safety lock defaults to ON so an existing server .env with live trading enabled
-// cannot resume signing after this research-only A/B release is deployed.
-const liveTradingSafetyLock = booleanEnv('FLOW_LIVE_TRADING_SAFETY_LOCK', true);
-const guardedLiveTrading = liveTradingGuard(
-  liveTradingRequested,
-  liveTradingSafetyLock,
-  booleanEnv('FLOW_LIVE_DRY_RUN', true),
-);
-const retiredShadowsEnabled = booleanEnv('FLOW_RETIRED_SHADOWS_ENABLED', false);
-// Cohorts with a sufficiently large, consistently negative forward sample are
-// disabled behind a second explicit override. This prevents an old server .env
-// containing strategy-specific `..._ENABLED=true` values from silently
-// restarting them after an upgrade. Historical rows and raw collection remain.
-const provenNegativeShadowsEnabled = booleanEnv(
-  'FLOW_PROVEN_NEGATIVE_SHADOWS_ENABLED',
-  false,
-);
-// Holder Growth produced a large, consistently negative entry/exit cross-product.
-// Keep the complete historical matrix queryable, but only create new rows for the
-// 15-second control and the isolated forward quality cohorts unless an operator
-// explicitly re-enables the full experiment. A new flag is used so an older server
-// .env cannot silently restore a retired experiment after a normal code upgrade.
-const holderGrowthFullMatrixEnabled = booleanEnv(
-  'FLOW_HOLDER_GROWTH_FULL_MATRIX_ENABLED',
-  false,
-);
-// Forward-only quality cohorts selected on two non-overlapping 24-hour windows.
-// This deliberately uses a new flag: an old STRONG_FLOW=true server setting must
-// not revive the proven-negative absolute-flow cohorts.
-const holderGrowthQualityEnabled = booleanEnv(
-  'FLOW_HOLDER_GROWTH_QUALITY_ENABLED',
-  true,
-);
-// The first PFL matrix was useful as a future-label discovery sample but is
-// consistently negative as an entry rule. Keep those cohort definitions behind
-// an explicit opt-in while the narrower B2 forward cohort starts a clean sample.
-const publicFlowLeadLegacyProfilesEnabled = booleanEnv(
-  'FLOW_PUBLIC_FLOW_LEAD_LEGACY_PROFILES_ENABLED',
-  false,
-);
-// G-FR is intentionally isolated from the rest of Lifecycle Drop/Rebound G.
-// Operators can pause this compute-heavier forward experiment without losing
-// the mature G cohorts or their historical rows.
-const migratedReboundGfrEnabled = booleanEnv(
-  'FLOW_MIGRATED_REBOUND_GFR_ENABLED',
-  true,
-);
-
-// One shared fallback keeps every research-only strategy on the same economic
-// scale. A strategy-specific environment variable may still override it.
-const defaultShadowPositionSol = numberEnv('FLOW_SHADOW_DEFAULT_POSITION_SOL', 1, {
-  min: 0.000001,
-});
-
-// Old deployments copied 0.05 into every strategy-specific variable. Treat
-// that exact former default as inherited so a normal code upgrade really moves
-// every Shadow to the shared 1 SOL default. Other explicit custom sizes remain
-// valid; setting the shared default itself to 0.05 still opts all Shadows back.
-function shadowPositionEnv(name) {
-  const raw = process.env[name];
-  if (raw == null || raw === '' || Number(raw) === 0.05) return defaultShadowPositionSol;
-  return numberEnv(name, defaultShadowPositionSol, { min: 0.000001 });
-}
-
-// Live strategies previously shipped with 0.05 SOL and then 1 SOL defaults.
-// Treat both historical values as inherited so an existing server moves to the
-// current 0.1 SOL default on a normal code upgrade. Other values remain explicit
-// operator overrides.
-function livePositionEnv(name, fallback = 0.1, legacyName = null) {
-  const raw = process.env[name] ?? (legacyName ? process.env[legacyName] : undefined);
-  if (raw == null || raw === '' || [0.05, 1].includes(Number(raw))) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) ? Math.max(0.000001, value) : fallback;
-}
-
-function priorityFeeMicroLamports(priorityFeeSol, computeUnitLimit) {
-  if (!(priorityFeeSol > 0) || !(computeUnitLimit > 0)) return 0;
-  // 1 SOL = 1e9 lamports and 1 lamport = 1e6 micro-lamports.
-  return Math.ceil((priorityFeeSol * 1e15) / computeUnitLimit);
-}
-
-// Forward-only first-pullback entry experiments. These profiles are consumed by
-// both the observer (causal reference detection) and Shadow F (simulated entry).
-// Keep their IDs immutable so results never merge with the historical 7.5% groups.
-const launchDeepPullbackProfiles = [
-  {
-    id: 'DEEP_D10_R3',
-    cohortId: 'FD10_R3_5S',
-    label: 'FD10-R3 Â· å›žè¸©10% / åå¼¹3% / ç¨³å®š0.5ç§’',
-    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D10_R3_PULLBACK_PCT', 10, {
-      min: 0.1, max: 100,
-    }),
-    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D10_R3_REBOUND_PCT', 3, { min: 0 }),
-    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D10_R3_LOW_STABLE_MS', 500, { min: 0 }),
-  },
-  {
-    id: 'DEEP_D12_5_R3',
-    cohortId: 'FD12_5_R3_5S',
-    label: 'FD12.5-R3 Â· å›žè¸©12.5% / åå¼¹3% / ç¨³å®š0.5ç§’',
-    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R3_PULLBACK_PCT', 12.5, {
-      min: 0.1, max: 100,
-    }),
-    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R3_REBOUND_PCT', 3, { min: 0 }),
-    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D12_5_R3_LOW_STABLE_MS', 500, { min: 0 }),
-  },
-  {
-    id: 'DEEP_D12_5_R5',
-    cohortId: 'FD12_5_R5_5S',
-    label: 'FD12.5-R5 Â· å›žè¸©12.5% / åå¼¹5% / ç¨³å®š1ç§’',
-    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R5_PULLBACK_PCT', 12.5, {
-      min: 0.1, max: 100,
-    }),
-    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D12_5_R5_REBOUND_PCT', 5, { min: 0 }),
-    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D12_5_R5_LOW_STABLE_MS', 1_000, { min: 0 }),
-  },
-  {
-    id: 'DEEP_D15_R5',
-    cohortId: 'FD15_R5_5S',
-    label: 'FD15-R5 Â· å›žè¸©15% / åå¼¹5% / ç¨³å®š1ç§’',
-    pullbackPct: numberEnv('FLOW_LAUNCH_DEEP_D15_R5_PULLBACK_PCT', 15, {
-      min: 0.1, max: 100,
-    }),
-    reboundPct: numberEnv('FLOW_LAUNCH_DEEP_D15_R5_REBOUND_PCT', 5, { min: 0 }),
-    lowStableMs: integerEnv('FLOW_LAUNCH_DEEP_D15_R5_LOW_STABLE_MS', 1_000, { min: 0 }),
-  },
-].map((profile) => ({
-  ...profile,
-  minNewBuyers: integerEnv('FLOW_LAUNCH_DEEP_MIN_NEW_BUYERS', 2, { min: 0 }),
-  flowWindowMs: integerEnv('FLOW_LAUNCH_DEEP_FLOW_WINDOW_MS', 1_000, { min: 100 }),
-  minWindowNetFlowSol: numberEnv('FLOW_LAUNCH_DEEP_MIN_WINDOW_NET_FLOW_SOL', 0.01, { min: 0 }),
-  maxPullbackPct: numberEnv('FLOW_LAUNCH_DEEP_MAX_PULLBACK_PCT', 25, {
-    min: 0.1, max: 100,
-  }),
-}));
-
-const m2fNearHighThresholds = Object.freeze({
-  minAgeMs: 60_000,
-  maxAgeMs: 240_000,
-  minCurrentImpulsePct: 10,
-  maxCurrentImpulsePct: 150,
-  minPeakImpulsePct: 25,
-  minPullbackPct: 5,
-  maxPullbackPct: 15,
-  minReboundPct: 3,
-  minNetFlow10sSol: 1,
-  minNetFlow3sSol: 0.1,
-  minBuyers10s: 10,
-  minBuyers3s: 2,
-  maxLargestBuyerSharePct: 45,
-  minBuySpeedRatio: 1.05,
-  minNetFlowAcceleration: 0,
-  maxSellDecelerationRatio: 1.1,
-  minHolderDiffusionIndex: 8,
-  maxEstimatedImpact1SolPct: 1,
-});
-
-// Retired research paths stay queryable for historical analysis, but an old server
-// .env must not silently reopen them. Reopening requires this explicit master gate
-// as well as the individual strategy switch.
-const retiredResearchReopenEnabled = booleanEnv(
-  'FLOW_RETIRED_RESEARCH_REOPEN_ENABLED',
-  false,
-);
-
-// Late post-migration stabilization (LPS) is intentionally isolated from the
-// retired M2F entry matrix. M2F-OBS already keeps eight minutes of causal
-// PumpSwap snapshots, so these delayed controls add no RPC calls. The 150s
-// cohort is the primary forward test; 180/240/300s are sparse controls.
-const lpsTargetToleranceMs = integerEnv('FLOW_LPS_TARGET_TOLERANCE_MS', 3_000, {
-  min: 500,
-  max: 15_000,
-});
-const lpsPositionSizeSol = numberEnv('FLOW_LPS_POSITION_SOL', 1, {
-  min: 0.01,
-  max: 100,
-});
-const lpsThresholds = (targetAgeMs) => ({
-  minAgeMs: targetAgeMs - lpsTargetToleranceMs,
-  maxAgeMs: targetAgeMs + lpsTargetToleranceMs,
-  maxObservationLagMs: integerEnv('FLOW_LPS_MAX_OBSERVATION_LAG_MS', 3_000, {
-    min: 250,
-    max: 30_000,
-  }),
-  minCurrentImpulsePct: -100,
-  maxCurrentImpulsePct: 10_000,
-  minPeakImpulsePct: -100,
-  minPullbackPct: -100,
-  maxPullbackPct: 100,
-  minReboundPct: -100,
-  maxReboundPct: 10_000,
-  minNetFlow10sSol: numberEnv('FLOW_LPS_MIN_NET_FLOW_10S_SOL', 8, {
-    min: -10_000,
-    max: 10_000,
-  }),
-  minNetFlow3sSol: -10_000,
-  minBuyers10s: integerEnv('FLOW_LPS_MIN_BUYERS_10S', 7, {
-    min: 0,
-    max: 10_000,
-  }),
-  minBuyers3s: 0,
-  maxLargestBuyerSharePct: numberEnv('FLOW_LPS_MAX_TOP1_SHARE_PCT', 50, {
-    min: 0,
-    max: 100,
-  }),
-  minBuySpeedRatio: -1_000,
-  minNetFlowAcceleration: numberEnv('FLOW_LPS_MIN_NET_FLOW_ACCELERATION', 0.001, {
-    min: -10_000,
-    max: 10_000,
-  }),
-  maxSellDecelerationRatio: 1_000_000_000,
-  minHolderDiffusionIndex: -10_000,
-  minQuoteReserveSol: 0,
-  maxEstimatedImpact1SolPct: numberEnv('FLOW_LPS_MAX_IMPACT_1SOL_PCT', 15, {
-    min: 0,
-    max: 100,
-  }),
-});
-const lpsEntryTargets = [
-  ['LPS-D150', 150_000, 'FLOW_LPS_150_ENABLED', [30_000, 60_000, 120_000]],
-  ['LPS-D180', 180_000, 'FLOW_LPS_180_ENABLED', [30_000]],
-  ['LPS-D240', 240_000, 'FLOW_LPS_240_ENABLED', [30_000]],
-  ['LPS-D300', 300_000, 'FLOW_LPS_300_ENABLED', [30_000]],
-];
-const lpsCohorts = lpsEntryTargets.flatMap(([
-  prefix, targetAgeMs, enabledEnv, holds,
-]) => holds.map((maxHoldMs) => ({
-  id: `${prefix}-X${maxHoldMs / 1_000}`,
-  label: `Late stabilization ${targetAgeMs / 1_000}s / fixed ${maxHoldMs / 1_000}s`,
-  enabled: booleanEnv(enabledEnv, true),
-  studyMode: 'LATE_POST_MIGRATION_STABILIZATION',
-  confirmationMode: 'IMMEDIATE',
-  positionSizeSol: lpsPositionSizeSol,
-  entryDelayMs: 200,
-  entryTimeoutMs: 2_000,
-  exitDelayMs: 200,
-  exitTimeoutMs: 2_000,
-  maxEntryPriceJumpPct: 15,
-  maxNegativeEntryJumpPct: 30,
-  hardStopPct: 100,
-  maxHoldMs,
-  thresholds: lpsThresholds(targetAgeMs),
-})));
-
-// The existing O-C80 live bridge deliberately keeps its 15% entry-move guard.
-// These new forward-only cohorts measure two different counterfactuals without
-// changing, signing or submitting any live order:
-// 1) wait for the first executable PumpSwap tape after graduation; and
-// 2) accept selected 40-70% curve repricing bands only after a fresh public BUY.
-const graduationRelaxedEntryShadowEnabled = booleanEnv(
-  'FLOW_GRADUATION_ACCEL_RELAXED_ENTRY_SHADOW_ENABLED',
-  true,
-);
-const graduationRelaxedCapacitySols = positiveNumberListEnv(
-  'FLOW_GRADUATION_ACCEL_RELAXED_CAPACITY_SOLS',
-  [0.1, 1],
-);
-const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
-  ...[0, 200, 500].flatMap((handoffDelayMs) => (
-    [60_000, 120_000].map((runnerMaxHoldMs) => ({
-      id: `O_C80_HO${handoffDelayMs}_X${runnerMaxHoldMs / 1_000}`,
-      label: `O-C80-HO${handoffDelayMs} Â· æ¯•ä¸šåŽPumpSwapæŽ¥åŠ› / å›ºå®š${runnerMaxHoldMs / 1_000}ç§’`,
-      studyGroup: 'O_C80_POST_GRADUATION_HANDOFF',
-      mode: 'CURVE_MILESTONE',
-      thresholdPct: 80,
-      recentWindowMs: 5_000,
-      minCurveDeltaPct: 5,
-      minBuyers: 2,
-      maxSellTx: 0,
-      requireNoCreatorSell: true,
-      migrationHandoff: true,
-      handoffLiveStrategyId: handoffDelayMs === 500 && runnerMaxHoldMs === 60_000
-        ? 'graduation_accel_o_c80_ho500_x60_recovery_live'
-        : null,
-      liveBridgeCapacitySol: 1,
-      capacityAwareExit: true,
-      capacitySols: graduationRelaxedCapacitySols,
-      coreExitPct: 0,
-      postMigrationEntryGate: {
-        windowMs: handoffDelayMs,
-        // Keep the first executable post-delay trade in the causal snapshot.
-        evaluateAtFill: true,
-        captureWindowMs: 10_000,
-        minBuyers: 1,
-        minNetFlowSol: 0,
-        maxSellBuyRatio: 1,
-        maxDrawdownPct: 20,
-        maxMarketMovePct: 15,
-        maxSelfImpactPct: 10,
-      },
-      runnerExitMode: 'FIXED_HOLD',
-      runnerMaxHoldMs,
-    }))
-  )),
-  ...[
-    ['DAY0420', 4, 20],
-    ['OFF2004', 20, 4],
-  ].map(([sessionId, sessionStartHourCst, sessionEndHourCst]) => ({
-    id: `O_C80_HO500_X60_${sessionId}`,
-    label: `O-C80-HO500-${sessionId} Â· PumpSwapæŽ¥åŠ› / å›ºå®š60ç§’ / åŒ—äº¬æ—¶æ®µåˆ†å±‚`,
-    studyGroup: 'O_C80_POST_GRADUATION_HANDOFF_TIME',
-    mode: 'CURVE_MILESTONE',
-    thresholdPct: 80,
-    recentWindowMs: 5_000,
-    minCurveDeltaPct: 5,
-    minBuyers: 2,
-    maxSellTx: 0,
-    requireNoCreatorSell: true,
-    migrationHandoff: true,
-    capacityAwareExit: true,
-    capacitySols: graduationRelaxedCapacitySols,
-    sessionStartHourCst,
-    sessionEndHourCst,
-    coreExitPct: 0,
-    postMigrationEntryGate: {
-      windowMs: 500,
-      evaluateAtFill: true,
-      captureWindowMs: 10_000,
-      minBuyers: 1,
-      minNetFlowSol: 0,
-      maxSellBuyRatio: 1,
-      maxDrawdownPct: 20,
-      maxMarketMovePct: 15,
-      maxSelfImpactPct: 10,
-    },
-    runnerExitMode: 'FIXED_HOLD',
-    runnerMaxHoldMs: 60_000,
-  })),
-  ...[[40, 50], [50, 60], [60, 70]].flatMap(([minPct, maxPct]) => (
-    [60_000, 120_000].map((runnerMaxHoldMs) => ({
-      id: `O_C80_J${minPct}_${maxPct}_X${runnerMaxHoldMs / 1_000}`,
-      label: `O-C80-J${minPct}-${maxPct} Â· Curveå†²å‡»${minPct}%â€“${maxPct}% / æ–°BUYç¡®è®¤ / å›ºå®š${runnerMaxHoldMs / 1_000}ç§’`,
-      studyGroup: 'O_C80_CURVE_JUMP_BAND',
-      mode: 'CURVE_MILESTONE',
-      thresholdPct: 80,
-      recentWindowMs: 5_000,
-      minCurveDeltaPct: 5,
-      minBuyers: 2,
-      maxSellTx: 0,
-      requireNoCreatorSell: true,
-      capacityAwareExit: true,
-      capacitySols: graduationRelaxedCapacitySols,
-      entryPriceJumpBand: {
-        minPct,
-        maxPct,
-        minPostSignalBuyers: 1,
-        minPostSignalNetFlowSol: 0,
-        maxPostSignalSellTx: 0,
-      },
-      coreExitPct: 0,
-      runnerExitMode: 'FIXED_HOLD',
-      runnerMaxHoldMs,
-    }))
-  )),
-] : [];
-
-const config = {
-  pump: {
-    programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-    ammProgramId: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',
-    wsolMint: 'So11111111111111111111111111111111111111112',
-    tokenDecimals: 6,
-  },
-
-  stream: {
-    endpoints: unique(explicitEndpoints.length > 0
-      ? explicitEndpoints
-      : [...heliusEndpoints, ...allenHarkEndpoints]),
-    heliusEndpoints: new Set(heliusEndpoints),
-    heliusToken: process.env.FLOW_GRPC_TOKEN
-      || process.env.HELIUS_LASERSTREAM_TOKEN
-      || process.env.HELIUS_API_KEY
-      || '',
-    allenHarkEndpoints: new Set(allenHarkEndpoints),
-    allenHarkToken: process.env.ALLENHARK_GRPC_TOKEN || '',
-    reconnectMinMs: integerEnv('FLOW_STREAM_RECONNECT_MIN_MS', 1_000, { min: 250 }),
-    reconnectMaxMs: integerEnv('FLOW_STREAM_RECONNECT_MAX_MS', 30_000, { min: 1_000 }),
-    staleTimeoutMs: integerEnv('FLOW_STREAM_STALE_TIMEOUT_MS', 15_000, { min: 5_000 }),
-    staleCheckMs: integerEnv('FLOW_STREAM_STALE_CHECK_MS', 2_000, { min: 500 }),
-    dedupTtlMs: integerEnv('FLOW_STREAM_DEDUP_TTL_MS', 300_000, { min: 10_000 }),
-    dedupMax: integerEnv('FLOW_STREAM_DEDUP_MAX', 100_000, { min: 1_000 }),
-  },
-
-  strategy: {
-    bufferMs: integerEnv('FLOW_BUFFER_MS', 10 * 60_000, { min: 60_000 }),
-    activityWindowMs: integerEnv('FLOW_ACTIVITY_WINDOW_MS', 5_000, { min: 1_000 }),
-    activityMinVolumeSol: numberEnv('FLOW_ACTIVITY_MIN_VOLUME_SOL', 3, { min: 0 }),
-    activityMinTxCount: integerEnv('FLOW_ACTIVITY_MIN_TX_COUNT', 12, { min: 1 }),
-    activityMinUniqueWallets: integerEnv('FLOW_ACTIVITY_MIN_UNIQUE_WALLETS', 8, { min: 1 }),
-    signalWindowMs: integerEnv('FLOW_SIGNAL_WINDOW_MS', 2_000, { min: 250 }),
-    minNetFlowW3Sol: numberEnv('FLOW_MIN_NET_W3_SOL', 1, { min: 0 }),
-    minNetFlowDeltaSol: numberEnv('FLOW_MIN_NET_DELTA_SOL', 0.1, { min: 0 }),
-    minAccelerationRatio: numberEnv('FLOW_MIN_ACCEL_RATIO', 1.2, { min: 1 }),
-    ratioFloorSol: numberEnv('FLOW_RATIO_FLOOR_SOL', 0.05, { min: 0.000001 }),
-    signalCooldownMs: integerEnv('FLOW_SIGNAL_COOLDOWN_MS', 0, { min: 0 }),
-    candidateIdleMs: integerEnv('FLOW_CANDIDATE_IDLE_MS', 15_000, { min: 2_000 }),
-    primaryThresholdProfiles,
-  },
-
-  labels: {
-    horizonsSeconds: [1, 2, 3, 5, 8, 10, 15, 20, 30, 60],
-    excursionSeconds: [5, 10, 30],
-    maxObservationLagMs: integerEnv('FLOW_LABEL_MAX_OBSERVATION_LAG_MS', 2_000, { min: 0 }),
-    costModel: labelCostModel,
-    configuredTradingCostPct: costBreakdown(labelCostModel).deterministicCostPct,
-  },
-
-  backtest: {
-    executionDelayMs: integerEnv('FLOW_BACKTEST_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_BACKTEST_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitExecutionDelayMs: integerEnv('FLOW_BACKTEST_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_BACKTEST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    noExitLossPct: nullableNumberEnv('FLOW_BACKTEST_NO_EXIT_LOSS_PCT', null, { min: 0 }),
-    signalCooldownMs: integerEnv('FLOW_BACKTEST_SIGNAL_COOLDOWN_MS', 5_000, { min: 0 }),
-    singlePositionPerMint: booleanEnv('FLOW_BACKTEST_SINGLE_POSITION_PER_MINT', true),
-  },
-
-  smartWallets: listEnv('FLOW_SMART_WALLETS', [
-    'Bi4rd5FH5bYEN8scZ7wevxNZyNmKHdaBcvewdPFxYdLt',
-    '7yd579zXmWPoxEE22BUYTzAo8nyMmQtPyEWS3g1BFhH4',
-  ]),
-
-  liveTrading: {
-    ...guardedLiveTrading,
-    rpcUrl: process.env.FLOW_RPC_URL || '',
-    contextFallbackRpcUrl: process.env.FLOW_LIVE_CONTEXT_FALLBACK_RPC_URL || '',
-    privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
-    maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
-    maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 10, { min: 1, max: 20 }),
-    maxConcurrentPositionsPerMint: integerEnv(
-      'FLOW_LIVE_MAX_CONCURRENT_POSITIONS_PER_MINT',
-      3,
-      { min: 1, max: 10 },
-    ),
-    minWalletReserveSol: numberEnv('FLOW_LIVE_MIN_WALLET_RESERVE_SOL', 0.05, { min: 0 }),
-    mintCooldownMs: integerEnv('FLOW_LIVE_MINT_COOLDOWN_MS', 10 * 60_000, { min: 0 }),
-    failedEntryCooldownMs: integerEnv(
-      'FLOW_LIVE_FAILED_ENTRY_COOLDOWN_MS', 30_000, { min: 0 },
-    ),
-    failedEntryWindowMs: integerEnv(
-      'FLOW_LIVE_FAILED_ENTRY_WINDOW_MS', 5 * 60_000, { min: 1 },
-    ),
-    maxFailedEntriesPerMint: integerEnv(
-      'FLOW_LIVE_MAX_FAILED_ENTRIES_PER_MINT', 2, { min: 1, max: 20 },
-    ),
-    heldMintLockRecheckMs: integerEnv(
-      'FLOW_LIVE_HELD_MINT_LOCK_RECHECK_MS', 60_000, { min: 1_000 },
-    ),
-    heldMintLockRecheckBatch: integerEnv(
-      'FLOW_LIVE_HELD_MINT_LOCK_RECHECK_BATCH', 10, { min: 1, max: 100 },
-    ),
-    maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_MAX_ENTRY_PRICE_JUMP_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    maxEntrySelfImpactPct: numberEnv('FLOW_LIVE_MAX_ENTRY_SELF_IMPACT_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    buySlippagePct: numberEnv('FLOW_LIVE_BUY_SLIPPAGE_PCT', 10, { min: 0.1, max: 50 }),
-    sellSlippagePct: numberEnv('FLOW_LIVE_SELL_SLIPPAGE_PCT', 15, { min: 0.1, max: 50 }),
-    computeUnitLimit: integerEnv('FLOW_LIVE_COMPUTE_UNIT_LIMIT', 250_000, {
-      min: 100_000,
-      max: 1_400_000,
-    }),
-    priorityFeeSol: numberEnv('FLOW_LIVE_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
-    // The transaction stream is processed-level. Quote against the same newest view,
-    // but retain confirmed-level finality for position state and reconciliation.
-    readCommitment: process.env.FLOW_LIVE_READ_COMMITMENT || 'processed',
-    confirmationCommitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
-      || process.env.FLOW_LIVE_COMMITMENT
-      || 'confirmed',
-    contextSlotRetryCount: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRIES', 6, {
-      min: 0,
-      max: 10,
-    }),
-    contextSlotRetryDelayMs: integerEnv('FLOW_LIVE_CONTEXT_SLOT_RETRY_DELAY_MS', 50, {
-      min: 0,
-      max: 500,
-    }),
-    // Backward-compatible alias consumed by older dashboard/export code.
-    commitment: process.env.FLOW_LIVE_CONFIRMATION_COMMITMENT
-      || process.env.FLOW_LIVE_COMMITMENT
-      || 'confirmed',
-    maxHoldMs: 15_000,
-    exitRetryCount: integerEnv('FLOW_LIVE_EXIT_RETRY_COUNT', 10, { min: 0, max: 60 }),
-    exitRetryDelayMs: integerEnv('FLOW_LIVE_EXIT_RETRY_DELAY_MS', 1_000, { min: 100 }),
-    emergencyExitRetryDelayMs: integerEnv(
-      'FLOW_LIVE_EMERGENCY_EXIT_RETRY_DELAY_MS',
-      100,
-      { min: 25, max: 1_000 },
-    ),
-    entryReconcileCount: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_COUNT', 5, {
-      min: 1,
-      max: 30,
-    }),
-    entryReconcileDelayMs: integerEnv('FLOW_LIVE_ENTRY_RECONCILE_DELAY_MS', 1_000, {
-      min: 100,
-      max: 30_000,
-    }),
-    expiredEntryReleaseMs: integerEnv('FLOW_LIVE_EXPIRED_ENTRY_RELEASE_MS', 10 * 60_000, {
-      min: 60_000,
-      max: 24 * 60 * 60_000,
-    }),
-    killSwitchFile: process.env.FLOW_LIVE_KILL_SWITCH_FILE || './data/LIVE_TRADING_DISABLED',
-    ammPriceContinuity: {
-      minRatio: numberEnv('FLOW_LIVE_AMM_PRICE_MIN_RATIO', 0.2, { min: 0.0001, max: 1 }),
-      maxRatio: numberEnv('FLOW_LIVE_AMM_PRICE_MAX_RATIO', 5, { min: 1 }),
-      resetAfterMs: integerEnv('FLOW_LIVE_AMM_PRICE_RESET_MS', 15_000, { min: 1_000 }),
-    },
-    // Multiple live strategies can coexist here. Each one owns its own SOL size
-    // and independent decision history; the retired Primary live rule is not listed.
-    strategies: [
-      {
-        id: 'cya_organic_burst_cob_f_core25_runner_live',
-        code: 'COB-F-C25-R75-X120',
-        label: 'CYA Organic Burst Â· COB-F Strict 7 SOL Â· 25/75 Stair Runner',
-        ruleVersion: 'cya_organic_burst_cob_f_core25_runner_live_v1',
-        signalSource: 'CYA_ORGANIC_BURST_COB_F',
-        enabled: booleanEnv('FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_ENTRY_ENABLED',
-          false,
-        ),
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 1_000 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'CORE_RUNNER',
-        hardStopPct: 0,
-        coreActivationPct: 20,
-        coreExitPct: 25,
-        trailingActivationPct: 20,
-        baseTrailingDrawdownPct: 15,
-        trailingTiers: [
-          { activationPct: 50, drawdownPct: 20 },
-          { activationPct: 100, drawdownPct: 25 },
-        ],
-        maxHoldMs: 120_000,
-        sourceShadowCohortId: 'COB_F_CORE25_R75_X120',
-      },
-      {
-        id: 'cya_organic_burst_cob_d_fix30_live',
-        code: 'COB-D-T30-D10-X60',
-        label: 'CYA Organic Burst Â· COB-D Strict 5 SOL Â· Fast TP + Trailing',
-        ruleVersion: 'cya_organic_burst_cob_d_fast_tp_trailing_live_v3',
-        signalSource: 'CYA_ORGANIC_BURST_COB_D',
-        enabled: booleanEnv('FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_ENTRY_ENABLED',
-          false,
-        ),
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 1_000 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'TRAILING',
-        minHoldMs: 0,
-        fastTakeProfitPct: numberEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_FAST_TP_PCT',
-          10,
-          { min: 0 },
-        ),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_FAST_TP_WINDOW_MS',
-          2_000,
-          { min: 0 },
-        ),
-        trailingActivationPct: 30,
-        trailingStopPct: 10,
-        hardStopPct: 20,
-        maxHoldMs: 60_000,
-        sourceShadowCohortId: 'COB_D_T30_10_X60',
-      },
-      {
-        id: 'big_winner_pbr_a_x50_15_live',
-        code: 'PBR-A-X50-15',
-        label: 'Big Winner PBR-A Â· X50_15 Core + Runner',
-        ruleVersion: 'big_winner_pbr_a_x50_15_live_v2',
-        signalSource: 'BIG_WINNER_PBR_A',
-        enabled: booleanEnv('FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_ENABLED', true),
-        // Keep the definition loaded for history and already-open exits, but a stale
-        // server .env must not reopen this loss-making live cohort.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'PBR_CORE_RUNNER',
-        hardStopPct: 15,
-        coreActivationPct: 20,
-        coreExitPct: 50,
-        trailingActivationPct: 30,
-        baseTrailingDrawdownPct: 15,
-        trailingTiers: [
-          { activationPct: 80, drawdownPct: 20 },
-          { activationPct: 150, drawdownPct: 25 },
-        ],
-        maxHoldMs: 180_000,
-        sourceShadowCohortId: 'PBR_A:X50_15',
-      },
-      {
-        id: 'migrated_gfr_300_hs20_h30_live',
-        code: 'GFR-300-HS20-H30',
-        label: 'Lifecycle Drop/Rebound G Â· GFR_300 30ç§’å°¾ä»“',
-        ruleVersion: 'migrated_gfr_300_hs20_h30_live_v1',
-        signalSource: 'MIGRATED_GFR_300_CONFIRMED',
-        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_ENABLED', true),
-        // Historical rows and already-open exits remain available, but new
-        // entries are hard-locked off after the negative live/RUG sample.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL', 0.1),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GFR_300_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GFR_300_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GFR_300_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'TAIL',
-        hardStopPct: 20,
-        maxHoldMs: 30_000,
-        sourceShadowCohortId: 'POST_GFR_300_GFR_HS20_H30_C10',
-      },
-      {
-        id: 'migrated_ge30_r23_f2_only_g2_xleg_live',
-        code: 'POST-GE30-R23-F2-G2-XLEG',
-        label: 'Lifecycle Drop/Rebound G Â· ç¬¬äºŒæ¬¡æœºä¼š XLEG',
-        ruleVersion: 'migrated_ge30_r23_f2_only_g2_xleg_live_v1',
-        signalSource: 'MIGRATED_GE30_R23_F2_ONLY_G2_XLEG',
-        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENTRY_ENABLED',
-          true,
-        ),
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        // The latest overlapping 24h sample was sharply negative from
-        // 00:00-04:00 Beijing and positive outside it. Keep this scoped to
-        // this live rule; its source Shadow remains an all-day control.
-        entryBeijingStartHour: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENTRY_BEIJING_START_HOUR',
-          4,
-          { min: 0, max: 24 },
-        ),
-        entryBeijingEndHour: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENTRY_BEIJING_END_HOUR',
-          24,
-          { min: 0, max: 24 },
-        ),
-        // Error 6040 is a stale AMM quote, not a strategy-rule rejection.
-        // One immediate fresh quote is allowed while the original 15% price
-        // guard, self-impact guard and signal-age bound still apply.
-        entryQuoteRefreshRetryCount: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_QUOTE_REFRESH_RETRY_COUNT',
-          1,
-          { min: 0, max: 1 },
-        ),
-        entryQuoteRefreshMaxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_QUOTE_REFRESH_MAX_SIGNAL_AGE_MS',
-          2_500,
-          { min: 100, max: 10_000 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'LEGACY',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 6_000,
-        maxHoldMs: 15_000,
-        sourceShadowCohortId: 'POST_GE30_R23_F2_ONLY_G2_XLEG',
-      },
-      {
-        id: 'migrated_grt_r23_f3_v2_xleg_live',
-        code: 'GRT-R23-F3-V2-XLEG',
-        label: 'Lifecycle Drop/Rebound G Â· GRTå‰ä¸‰æ¬¡æœºä¼šå‰å‘ XLEG',
-        ruleVersion: 'migrated_grt_r23_f3_v2_xleg_live_v1',
-        signalSource: 'MIGRATED_GRT_R23_F3_V2_XLEG',
-        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_ENTRY_ENABLED',
-          true,
-        ),
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        entryQuoteRefreshRetryCount: integerEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_QUOTE_REFRESH_RETRY_COUNT',
-          1,
-          { min: 0, max: 1 },
-        ),
-        entryQuoteRefreshMaxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_QUOTE_REFRESH_MAX_SIGNAL_AGE_MS',
-          2_500,
-          { min: 100, max: 10_000 },
-        ),
-        maxEntriesPerMint: 3,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'LEGACY',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 6_000,
-        maxHoldMs: 15_000,
-        sourceShadowCohortId: 'POST_GRT_R23_F3_V2_GRT_F3_XLEG_V2',
-      },
-      {
-        id: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
-        code: 'G-V2-EXEC01-R2-H15',
-        label: 'Lifecycle Drop/Rebound G Â· V2å¯æ‰§è¡Œ0.1 SOL / R2-H15ï¼ˆåœæ­¢æ–°å¼€ä»“ï¼‰',
-        ruleVersion: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live_v1',
-        signalSource: 'MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15',
-        enabled: booleanEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_ENABLED',
-          true,
-        ),
-        // Keep the definition loaded for historical display and management of
-        // already-open positions, but permanently stop new entries. This is a
-        // code-level lock so a stale deployment environment cannot reopen it.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        entryQuoteRefreshRetryCount: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_QUOTE_REFRESH_RETRY_COUNT',
-          1,
-          { min: 0, max: 1 },
-        ),
-        entryQuoteRefreshMaxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_QUOTE_REFRESH_MAX_SIGNAL_AGE_MS',
-          2_500,
-          { min: 100, max: 10_000 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_MAX_ENTRY_JUMP_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'RISK_XLEG',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        hardStopPct: 15,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 2_000,
-        lossCheckRecoveryPct: 1,
-        maxHoldMs: 15_000,
-        sourceShadowCohortId: 'POST_GE30_D25_32_R24_F1_EXEC1_V2_R2_H15_0_1SOL',
-      },
-      {
-        id: 'migrated_gd25_35_x8_live',
-        code: 'POST-GD25-35-X8',
-        label: 'Lifecycle Drop/Rebound G Â· GD25-35 å›ºå®š8ç§’',
-        ruleVersion: 'migrated_gd25_35_x8_live_v1',
-        signalSource: 'MIGRATED_GD25_35_X8',
-        enabled: booleanEnv('FLOW_LIVE_MIGRATED_GD25_35_X8_ENABLED', true),
-        entryEnabled: booleanEnv('FLOW_LIVE_MIGRATED_GD25_35_X8_ENTRY_ENABLED', true),
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv('FLOW_LIVE_MIGRATED_GD25_35_X8_POSITION_SOL', 0.1),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATED_GD25_35_X8_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GD25_35_X8_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_MIGRATED_GD25_35_X8_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 8_000,
-        maxHoldMs: 8_000,
-        sourceShadowCohortId: 'POST_GD25_35_X8',
-      },
-      {
-        id: 'migration_continuity_mc_c5_t12_5_live',
-        code: 'M-C5-T12.5',
-        label: 'Migration Continuity M Â· 10ç§’ä¿æŠ¤ / T12.5',
-        ruleVersion: 'migration_continuity_mc_c5_t12_5_live_v1',
-        signalSource: 'MIGRATION_CONTINUITY_MC_C5_T12_5',
-        enabled: booleanEnv('FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_ENABLED', true),
-        // Keep historical rows and already-open exits available, but do not let
-        // a stale production .env reopen the currently negative live cohort.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL',
-          0.5,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_MAX_ENTRY_JUMP_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'TRAILING',
-        minHoldMs: 10_000,
-        trailingActivationPct: 15,
-        trailingStopPct: 12.5,
-        hardStopPct: 20,
-        maxHoldMs: 180_000,
-        sourceShadowCohortId: 'MC_C5_T12_5',
-      },
-      {
-        id: 'graduation_accel_o90_m5_stair120_live',
-        code: 'O90-M5-STAIR120',
-        label: 'Graduation Acceleration O Â· O90 M5 STAIR120',
-        ruleVersion: 'graduation_accel_o90_m5_stair120_live_v1',
-        signalSource: 'GRADUATION_ACCEL_O90_M5_STAIR120',
-        enabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_ENABLED',
-          true,
-        ),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_ENTRY_ENABLED',
-          true,
-        ),
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 1_000 },
-        ),
-        exitMode: 'GRADUATION_CORE_RUNNER',
-        hardStopPct: 30,
-        coreExitPct: 50,
-        maxPreGraduationHoldMs: 5 * 60_000,
-        maxPostGraduationHoldMs: 120_000,
-        maxHoldMs: 5 * 60_000,
-        postMigrationGate: {
-          windowMs: 5_000,
-          minBuyers: 25,
-          minNetFlowSol: 0,
-        },
-        trailingTiers: [
-          { activationPct: 20, drawdownPct: 10 },
-          { activationPct: 40, drawdownPct: 15 },
-          { activationPct: 80, drawdownPct: 20 },
-          { activationPct: 150, drawdownPct: 25 },
-          { activationPct: 300, drawdownPct: 30 },
-        ],
-        sourceShadowCohortId: 'O90_M5_STAIR120:C10',
-      },
-      {
-        id: 'migration_continuity_mc_c5_e120_live',
-        code: 'M-C5-E120',
-        label: 'Migration Continuity M Â· å›ºå®š120ç§’',
-        ruleVersion: 'migration_continuity_mc_c5_e120_live_v1',
-        signalSource: 'MIGRATION_CONTINUITY_MC_C5',
-        enabled: booleanEnv('FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_ENABLED', true),
-        // Historical display and already-open exits stay loaded, but this rule
-        // is no longer allowed to create a new live position.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_MAX_ENTRY_JUMP_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 120_000,
-        hardStopPct: 20,
-        maxHoldMs: 120_000,
-      },
-      {
-        id: 'quality_leader_ql_strict_protected_live',
-        code: 'QL-STRICT-PR',
-        label: 'Quality Leader QL Strict Â· Protected Runner',
-        ruleVersion: 'quality_leader_ql_strict_protected_live_v1',
-        signalSource: 'QUALITY_LEADER_QL_STRICT_PROTECTED',
-        enabled: booleanEnv('FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_ENABLED', true),
-        // Historical rows and already-open exits remain visible, but stale
-        // production .env values must not reopen a strategy whose realised
-        // RUG losses diverged materially from its mark-price Shadow results.
-        entryEnabled: false,
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_ENTRY_JUMP_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxShadowEntryImpactPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_SHADOW_IMPACT_PCT',
-          12,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'QUALITY_PROTECTED_RUNNER',
-        hardStopPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_HARD_STOP_PCT',
-          20,
-          { min: 0.1, max: 100 },
-        ),
-        strengthActivationPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_STRENGTH_PCT',
-          20,
-          { min: 0.1, max: 1_000 },
-        ),
-        noStrengthMs: integerEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_NO_STRENGTH_MS',
-          30_000,
-          { min: 1_000, max: 5 * 60_000 },
-        ),
-        maxHoldMs: integerEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_MAX_HOLD_MS',
-          5 * 60_000,
-          { min: 10_000, max: 30 * 60_000 },
-        ),
-        protectedFloors: [
-          { activationPct: 20, minFloorPct: 0, peakGivebackPct: 15 },
-          { activationPct: 50, minFloorPct: 15, peakGivebackPct: 25 },
-          { activationPct: 100, minFloorPct: 40, peakGivebackPct: 40 },
-          { activationPct: 200, minFloorPct: 100, peakGivebackPct: 80 },
-        ],
-        qualityCriteria: {
-          minReturn10Pct: 140,
-          maxDrawdown20Pct: 12,
-          minBuyerDelta: 8,
-          minNetFlowDeltaSol: 3,
-          minRetentionPct: 80,
-          maxCreatorSharePct: 3,
-          minCurvePct: 55,
-          maxCurvePct: 90,
-          maxSellBuyRatio: 0.55,
-          minVirtualSolReserves: 30,
-        },
-      },
-      {
-        id: 'quality_leader_ql_strict_guard_protected_live',
-        code: 'QL-STRICT-GUARD',
-        label: 'Quality Leader QL Strict Guard Â· Protected Runner',
-        ruleVersion: 'quality_leader_ql_strict_guard_protected_live_v1',
-        signalSource: 'QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED',
-        enabled: booleanEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_ENABLED',
-          true,
-        ),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_ENTRY_ENABLED',
-          true,
-        ),
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_ENTRY_JUMP_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxShadowEntryImpactPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_SHADOW_IMPACT_PCT',
-          12,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'QUALITY_PROTECTED_RUNNER',
-        hardStopPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_HARD_STOP_PCT',
-          20,
-          { min: 0.1, max: 100 },
-        ),
-        strengthActivationPct: numberEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_STRENGTH_PCT',
-          20,
-          { min: 0.1, max: 1_000 },
-        ),
-        noStrengthMs: integerEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_NO_STRENGTH_MS',
-          30_000,
-          { min: 1_000, max: 5 * 60_000 },
-        ),
-        maxHoldMs: integerEnv(
-          'FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_MAX_HOLD_MS',
-          5 * 60_000,
-          { min: 10_000, max: 30 * 60_000 },
-        ),
-        protectedFloors: [
-          { activationPct: 20, minFloorPct: 0, peakGivebackPct: 15 },
-          { activationPct: 50, minFloorPct: 15, peakGivebackPct: 25 },
-          { activationPct: 100, minFloorPct: 40, peakGivebackPct: 40 },
-          { activationPct: 200, minFloorPct: 100, peakGivebackPct: 80 },
-        ],
-        qualityCriteria: {
-          minReturn10Pct: 140,
-          maxDrawdown20Pct: 12,
-          minBuyerDelta: 8,
-          minNetFlowDeltaSol: 3,
-          minRetentionPct: 80,
-          maxCreatorSharePct: 3,
-          minCurvePct: 55,
-          maxCurvePct: 90,
-          maxSellBuyRatio: 0.55,
-          minVirtualSolReserves: 30,
-          requireHealthyRugRisk: true,
-        },
-        sourceShadowCohortId: 'QL_STRICT_GUARD:QL_PROTECTED',
-      },
-      {
-        id: 'launch_pullback_fo_rb10_30s_live',
-        code: 'F-FO-RB10-X30',
-        label: 'Launch Pullback F Â· FO-RB10 å›ºå®š30ç§’',
-        ruleVersion: 'launch_pullback_fo_rb10_30s_live_v1',
-        signalSource: 'LAUNCH_PULLBACK_FO_RB10_30S',
-        enabled: booleanEnv('FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_ENABLED', true),
-        // Retain the strategy definition for historical display and safe exit
-        // handling, but prevent an older production .env from reopening it.
-        entryEnabled: false,
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_MAX_ENTRY_JUMP_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_LAUNCH_PULLBACK_FO_RB10_30S_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 30_000,
-        hardStopPct: 0,
-        maxHoldMs: 30_000,
-        sourceShadowCohortId: 'FO_RB10_30S',
-      },
-      {
-        id: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
-        code: 'O-C80-D5-B2-S0-NC',
-        label: 'Graduation Acceleration O Â· Curve80 D5 B2 S0 NC',
-        ruleVersion: 'graduation_accel_o_c80_d5_b2_s0_nc_live_v4',
-        signalSource: 'GRADUATION_ACCEL_O_C80_D5_B2_S0_NC',
-        // Exact strategy keys prevent an old Curve80 canary setting from
-        // silently changing this promoted rule's enablement.
-        enabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_ENABLED',
-          true,
-        ),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_ENTRY_ENABLED',
-          true,
-        ),
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          // V3 deliberately bypasses the previous server-side V2=0.5 value.
-          // Shadow remains 1 SOL; only the real order size returns to 0.1 SOL.
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V3_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 1_000 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'GRADUATION_CORE_RUNNER',
-        hardStopPct: 30,
-        coreExitPct: 50,
-        maxPreGraduationHoldMs: 5 * 60_000,
-        maxPostGraduationHoldMs: 5 * 60_000,
-        maxHoldMs: 5 * 60_000,
-        trailingTiers: [
-          { activationPct: 20, drawdownPct: 10 },
-          { activationPct: 40, drawdownPct: 15 },
-          { activationPct: 80, drawdownPct: 20 },
-          { activationPct: 150, drawdownPct: 25 },
-          { activationPct: 300, drawdownPct: 30 },
-        ],
-        sourceShadowCohortId: 'O_C80_D5_B2_S0_NC:1SOL',
-      },
-      {
-        id: 'graduation_accel_o_c80_p500_stair240_live',
-        code: 'O-C80-P500-STAIR240',
-        label: 'Graduation Acceleration O Â· Curve80æŒç»­500ms / å…¨ä»“é˜¶æ¢¯å°¾ä»“240ç§’',
-        ruleVersion: 'graduation_accel_o_c80_p500_stair240_live_v1',
-        signalSource: 'GRADUATION_ACCEL_O_C80_P500_STAIR240',
-        enabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_ENABLED',
-          true,
-        ),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_ENTRY_ENABLED',
-          true,
-        ),
-        market: 'PUMP_BONDING_CURVE',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 1_000 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'GRADUATION_CORE_RUNNER',
-        hardStopPct: 30,
-        coreExitPct: 0,
-        maxPreGraduationHoldMs: 5 * 60_000,
-        maxPostGraduationHoldMs: 240_000,
-        maxHoldMs: 5 * 60_000,
-        trailingTiers: [
-          { activationPct: 20, drawdownPct: 10 },
-          { activationPct: 40, drawdownPct: 15 },
-          { activationPct: 80, drawdownPct: 20 },
-          { activationPct: 150, drawdownPct: 25 },
-          { activationPct: 300, drawdownPct: 30 },
-        ],
-        sourceShadowCohortId: 'O_C80_P500_STAIR240:1SOL',
-      },
-      {
-        id: 'graduation_accel_o_c80_ho500_x60_recovery_live',
-        code: 'O-C80-HO500-X60-R',
-        label: 'Graduation Acceleration O Â· PumpSwap 500ms Recovery',
-        ruleVersion: 'graduation_accel_o_c80_ho500_x60_recovery_live_v1',
-        signalSource: 'GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY',
-        enabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_ENABLED',
-          true,
-        ),
-        // Code-locked after the negative live sample. Keep the strategy loaded
-        // only for historical display and any outstanding position exit; a
-        // stale server .env must not reopen new entries.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_POSITION_SOL',
-          0.1,
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 1_000 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxShadowEntryImpactPct: numberEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_HO500_X60_RECOVERY_MAX_SHADOW_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 60_000,
-        hardStopPct: 30,
-        maxHoldMs: 60_000,
-        sourceShadowCohortId: 'O_C80_HO500_X60:1SOL',
-      },
-      {
-        id: 'post_gd20_35_r1_5_5_age60_xleg_v3',
-        code: 'G20-35-R1.5-A60-V3',
-        label: 'æ¯•ä¸šåŽå®½å¹…æ·±è·Œåå¼¹ Â· XLEG-V3ï¼ˆåœæ­¢æ–°å¼€ä»“ï¼‰',
-        ruleVersion: 'post_migration_age60_drop20_35_rebound1_5_5_xleg_v3',
-        enabled: booleanEnv('FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_ENABLED', true),
-        // Keep the strategy loaded so an already-open position still receives
-        // its original exit management after an upgrade. New entries remain
-        // off unless an operator explicitly re-enables this exact rule.
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_ENTRY_ENABLED',
-          false,
-        ),
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL',
-          0.1,
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL',
-        ),
-        trackingAgeMs: integerEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_TRACKING_MS',
-          60_000,
-          { min: 10_000, max: 10 * 60_000 },
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        windowMs: integerEnv('FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_WINDOW_MS', 1_000, {
-          min: 250,
-        }),
-        dropMinPct: numberEnv('FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_DROP_MIN_PCT', 20, {
-          min: 0.1,
-        }),
-        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_DROP_MAX_PCT', 35, {
-          min: 0.1,
-        }),
-        reboundMinPct: numberEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_REBOUND_MIN_PCT',
-          1.5,
-          { min: 0.1 },
-        ),
-        reboundMaxPct: numberEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_REBOUND_MAX_PCT',
-          5,
-          { min: 0.1 },
-        ),
-        reboundTimeoutMs: integerEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_REBOUND_TIMEOUT_MS',
-          1_000,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: integerEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_MAX_ENTRIES_PER_MINT',
-          1,
-          { min: 1, max: 10 },
-        ),
-        reentryCooldownMs: integerEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_REENTRY_COOLDOWN_MS',
-          1_000,
-          { min: 0, max: 10 * 60_000 },
-        ),
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_MAX_ENTRY_JUMP_PCT',
-          3,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        trailingActivationPct: numberEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_TRAILING_ACTIVATION_PCT',
-          8,
-          { min: 0.1 },
-        ),
-        trailingStopPct: numberEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_TRAILING_STOP_PCT',
-          3,
-          { min: 0.1, max: 100 },
-        ),
-        fastTakeProfitPct: numberEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_FAST_TP_PCT',
-          18,
-          { min: 0 },
-        ),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_FAST_TP_WINDOW_MS',
-          5_000,
-          { min: 0 },
-        ),
-        lossCheckAtMs: integerEnv(
-          'FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_LOSS_CHECK_MS',
-          6_000,
-          { min: 0 },
-        ),
-        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_MAX_HOLD_MS', 15_000, {
-          min: 1_000,
-        }),
-      },
-      {
-        id: 'post_gd25_32_r2_4_age30_xleg_v2',
-        code: 'G25-32-R2-4-A30-V2',
-        label: 'æ¯•ä¸šåŽç²¾é€‰æ·±è·Œåå¼¹ Â· XLEG-V2ï¼ˆåœæ­¢æ–°å¼€ä»“ï¼‰',
-        ruleVersion: 'post_migration_age30_drop25_32_rebound2_4_xleg_v2',
-        enabled: booleanEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_ENABLED', true),
-        // Preserve historical statistics and exit behavior without mixing new
-        // V3 entries into the narrow V2 sample.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL',
-          0.1,
-          'FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL',
-        ),
-        trackingAgeMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_TRACKING_MS',
-          30_000,
-          { min: 10_000, max: 10 * 60_000 },
-        ),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        windowMs: integerEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_WINDOW_MS', 1_000, {
-          min: 250,
-        }),
-        dropMinPct: numberEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_DROP_MIN_PCT', 25, {
-          min: 0.1,
-        }),
-        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_DROP_MAX_PCT', 32, {
-          min: 0.1,
-        }),
-        reboundMinPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REBOUND_MIN_PCT',
-          2,
-          { min: 0.1 },
-        ),
-        reboundMaxPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REBOUND_MAX_PCT',
-          4,
-          { min: 0.1 },
-        ),
-        reboundTimeoutMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REBOUND_TIMEOUT_MS',
-          1_000,
-          { min: 100 },
-        ),
-        maxEntriesPerMint: integerEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_ENTRIES_PER_MINT',
-          1,
-          { min: 1, max: 10 },
-        ),
-        reentryCooldownMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_REENTRY_COOLDOWN_MS',
-          1_000,
-          { min: 0, max: 10 * 60_000 },
-        ),
-        // Market movement and the strategy's own 1-SOL price impact are independent
-        // guards. PumpSwap virtual quote reserves are included in both spot prices.
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_ENTRY_JUMP_PCT',
-          3,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        trailingActivationPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_TRAILING_ACTIVATION_PCT',
-          8,
-          { min: 0.1 },
-        ),
-        trailingStopPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_TRAILING_STOP_PCT',
-          3,
-          { min: 0.1, max: 100 },
-        ),
-        fastTakeProfitPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_FAST_TP_PCT',
-          18,
-          { min: 0 },
-        ),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_FAST_TP_WINDOW_MS',
-          5_000,
-          { min: 0 },
-        ),
-        lossCheckAtMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_LOSS_CHECK_MS',
-          6_000,
-          { min: 0 },
-        ),
-        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_MAX_HOLD_MS', 15_000, {
-          min: 1_000,
-        }),
-      },
-      {
-        id: 'post_gd25_35_f1_xleg_live_v1',
-        code: 'GD25-35-F1-XLEG',
-        label: 'æ¯•ä¸šåŽæ·±è·Œåå¼¹ Â· GD25 F1 XLEG',
-        ruleVersion: 'post_migration_gd25_35_first_xleg_live_v1',
-        enabled: booleanEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_ENABLED', true),
-        // Preserve the complete live sample and any outstanding exit handling,
-        // while permanently stopping new entries for this version.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_POSITION_SOL',
-          0.1,
-          'FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL',
-        ),
-        trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_TRACKING_MS', 120_000, {
-          min: 30_000,
-          max: 10 * 60_000,
-        }),
-        maxSignalAgeMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_SIGNAL_AGE_MS',
-          1_500,
-          { min: 100 },
-        ),
-        windowMs: integerEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_WINDOW_MS', 1_000, {
-          min: 250,
-        }),
-        dropMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_DROP_MIN_PCT', 25, {
-          min: 0.1,
-        }),
-        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_DROP_MAX_PCT', 35, {
-          min: 0.1,
-        }),
-        reboundMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_REBOUND_MIN_PCT', 2, {
-          min: 0.1,
-        }),
-        reboundMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_REBOUND_MAX_PCT', 5, {
-          min: 0.1,
-        }),
-        reboundTimeoutMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_REBOUND_TIMEOUT_MS',
-          1_000,
-          { min: 100 },
-        ),
-        // This is the promoted form of the offline "first row per Mint" result.
-        // A matched opportunity is consumed even if execution is later rejected
-        // or fails, so later rebounds cannot silently change the tested sample.
-        maxSignalsPerMint: 1,
-        maxEntriesPerMint: 1,
-        reentryCooldownMs: 0,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_ENTRY_JUMP_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        maxEntrySelfImpactPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_ENTRY_SELF_IMPACT_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        trailingActivationPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_TRAILING_ACTIVATION_PCT',
-          8,
-          { min: 0.1 },
-        ),
-        trailingStopPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_TRAILING_STOP_PCT',
-          3,
-          { min: 0.1, max: 100 },
-        ),
-        fastTakeProfitPct: numberEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_FAST_TP_PCT',
-          18,
-          { min: 0 },
-        ),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_FAST_TP_WINDOW_MS',
-          5_000,
-          { min: 0 },
-        ),
-        lossCheckAtMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_35_F1_XLEG_LOSS_CHECK_MS',
-          6_000,
-          { min: 0 },
-        ),
-        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD25_35_F1_XLEG_MAX_HOLD_MS', 15_000, {
-          min: 1_000,
-        }),
-      },
-      {
-        id: 'post_gd25_35_xleg',
-        code: 'GD25-35-XLEG-V1',
-        label: 'æ¯•ä¸šåŽæ·±è·Œåå¼¹ Â· XLEGï¼ˆæ—§ç‰ˆåœæ­¢æ–°å¼€ä»“ï¼‰',
-        ruleVersion: 'post_migration_gd25_35_xleg_reentry2_v2',
-        enabled: true,
-        // Keep the definition loaded so historical rows stay visible and any
-        // legacy active position still has its original exit rules after restart.
-        entryEnabled: false,
-        market: 'PUMP_AMM',
-        positionSizeSol: livePositionEnv('FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL', 0.1),
-        trackingAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_TRACKING_MS', 120_000, {
-          min: 30_000,
-          max: 10 * 60_000,
-        }),
-        maxSignalAgeMs: integerEnv('FLOW_LIVE_POST_GD25_35_MAX_SIGNAL_AGE_MS', 1_500, {
-          min: 100,
-        }),
-        windowMs: integerEnv('FLOW_LIVE_POST_GD25_35_WINDOW_MS', 1_000, { min: 250 }),
-        dropMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_DROP_MIN_PCT', 25, { min: 0.1 }),
-        dropMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_DROP_MAX_PCT', 35, { min: 0.1 }),
-        reboundMinPct: numberEnv('FLOW_LIVE_POST_GD25_35_REBOUND_MIN_PCT', 2, { min: 0.1 }),
-        reboundMaxPct: numberEnv('FLOW_LIVE_POST_GD25_35_REBOUND_MAX_PCT', 5, { min: 0.1 }),
-        reboundTimeoutMs: integerEnv('FLOW_LIVE_POST_GD25_35_REBOUND_TIMEOUT_MS', 1_000, {
-          min: 100,
-        }),
-        maxEntriesPerMint: integerEnv(
-          'FLOW_LIVE_POST_GD25_35_MAX_ENTRIES_PER_MINT',
-          2,
-          { min: 1, max: 10 },
-        ),
-        reentryCooldownMs: integerEnv(
-          'FLOW_LIVE_POST_GD25_35_REENTRY_COOLDOWN_MS',
-          1_000,
-          { min: 0, max: 10 * 60_000 },
-        ),
-        maxEntryPriceJumpPct: numberEnv('FLOW_LIVE_POST_GD25_35_MAX_ENTRY_JUMP_PCT', 15, {
-          min: 0,
-          max: 100,
-        }),
-        trailingActivationPct: numberEnv('FLOW_LIVE_POST_GD25_35_TRAILING_ACTIVATION_PCT', 8, {
-          min: 0.1,
-        }),
-        trailingStopPct: numberEnv('FLOW_LIVE_POST_GD25_35_TRAILING_STOP_PCT', 3, {
-          min: 0.1,
-          max: 100,
-        }),
-        fastTakeProfitPct: numberEnv('FLOW_LIVE_POST_GD25_35_FAST_TP_PCT', 18, { min: 0 }),
-        fastTakeProfitWindowMs: integerEnv('FLOW_LIVE_POST_GD25_35_FAST_TP_WINDOW_MS', 5_000, {
-          min: 0,
-        }),
-        lossCheckAtMs: integerEnv('FLOW_LIVE_POST_GD25_35_LOSS_CHECK_MS', 6_000, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_LIVE_POST_GD25_35_MAX_HOLD_MS', 15_000, {
-          min: 1_000,
-        }),
-      },
-    ],
-  },
-
-  // Research-only execution path. It never creates or signs a transaction.
-  signalShadow: {
-    enabled: retiredShadowsEnabled && booleanEnv('FLOW_SIGNAL_SHADOW_ENABLED', false),
-    profiles: primaryThresholdProfiles,
-    positionSizeSol: shadowPositionEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL'),
-    maxSignalAgeMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
-    entryDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SIGNAL_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SIGNAL_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_SIGNAL_SHADOW_MAX_ENTRY_JUMP_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    trailingStopPct: numberEnv('FLOW_SIGNAL_SHADOW_TRAILING_STOP_PCT', 7.5, {
-      min: 0.1,
-      max: 100,
-    }),
-    maxHoldMs: integerEnv('FLOW_SIGNAL_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SIGNAL_SHADOW_POSITION_SOL'),
-    }),
-  },
-
-  // Direct Primary Flow research. Each 30-second signal episode is simulated once
-  // per exit cohort; all cohorts share the same 200ms-delayed market fill.
-  flowFirstShadow: {
-    enabled: retiredShadowsEnabled && booleanEnv('FLOW_FIRST_SHADOW_ENABLED', false),
-    signalVariant: 'primary_3w',
-    episodeGapMs: 30_000,
-    positionSizeSol: shadowPositionEnv('FLOW_FIRST_SHADOW_POSITION_SOL'),
-    maxSignalAgeMs: integerEnv('FLOW_FIRST_SHADOW_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
-    entryDelayMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_FIRST_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxHoldMs: integerEnv('FLOW_FIRST_SHADOW_MAX_HOLD_MS', 60_000, { min: 1_000 }),
-    bigWinnerPct: numberEnv('FLOW_FIRST_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
-    cohorts: [
-      {
-        id: 'C5',
-        label: 'C5 å›ºå®šæŒæœ‰5ç§’',
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_FIRST_SHADOW_FIXED_HOLD_MS', 5_000, { min: 250 }),
-      },
-      {
-        id: 'C75',
-        label: 'C7.5 å³°å€¼å›žæ’¤7.5%',
-        exitMode: 'TRAILING',
-        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C75_TRAILING_STOP_PCT', 7.5, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-      {
-        id: 'C125',
-        label: 'C12.5 å³°å€¼å›žæ’¤12.5%',
-        exitMode: 'TRAILING',
-        trailingStopPct: numberEnv('FLOW_FIRST_SHADOW_C125_TRAILING_STOP_PCT', 12.5, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_FIRST_SHADOW_POSITION_SOL'),
-    }),
-  },
-
-  // Smart Wallet pullback A/B research. This path only records simulated
-  // positions and never owns an executor or signing key.
-  smartPullbackShadow: {
-    enabled: booleanEnv('FLOW_SMART_PULLBACK_SHADOW_ENABLED', false),
-    minSmartBuySol: numberEnv('FLOW_SMART_PULLBACK_MIN_BUY_SOL', 0.1, { min: 0.000001 }),
-    episodeGapMs: integerEnv('FLOW_SMART_PULLBACK_EPISODE_GAP_MS', 30_000, { min: 1_000 }),
-    confirmationWindowMs: integerEnv(
-      'FLOW_SMART_PULLBACK_CONFIRMATION_WINDOW_MS',
-      15_000,
-      { min: 1_000 },
-    ),
-    pullbackPct: numberEnv('FLOW_SMART_PULLBACK_DRAWDOWN_PCT', 2.5, {
-      min: 0.1,
-      max: 100,
-    }),
-    reboundPct: numberEnv('FLOW_SMART_PULLBACK_REBOUND_PCT', 7.5, {
-      min: 0.1,
-      max: 500,
-    }),
-    minReboundBuyers: integerEnv('FLOW_SMART_PULLBACK_MIN_REBOUND_BUYERS', 1, { min: 1 }),
-    maxEntryVsSmartBuyPct: numberEnv('FLOW_SMART_PULLBACK_MAX_ENTRY_VS_SMART_PCT', 2, {
-      min: 0,
-      max: 100,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_PULLBACK_MAX_CONFIRM_JUMP_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
-    entryDelayMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_PULLBACK_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxHoldMs: integerEnv('FLOW_SMART_PULLBACK_MAX_HOLD_MS', 60_000, { min: 1_000 }),
-    bigWinnerPct: numberEnv('FLOW_SMART_PULLBACK_BIG_WINNER_PCT', 50, { min: 1 }),
-    cohorts: [
-      {
-        id: 'A',
-        label: 'A Â· Trailing 7.5%',
-        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_A_TRAILING_STOP_PCT', 7.5, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-      {
-        id: 'B',
-        label: 'B Â· Trailing 12.5%',
-        trailingStopPct: numberEnv('FLOW_SMART_PULLBACK_B_TRAILING_STOP_PCT', 12.5, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_PULLBACK_POSITION_SOL'),
-    }),
-  },
-
-  // Isolated true Smart Wallet OPEN research. This path has its own table and
-  // never signs or sends a transaction; existing Shadow strategies are unchanged.
-  smartOpenShadow: {
-    enabled: retiredShadowsEnabled && booleanEnv('FLOW_SMART_OPEN_SHADOW_ENABLED', false),
-    minSmartOpenSol: numberEnv('FLOW_SMART_OPEN_SHADOW_MIN_SOL', 1, { min: 0.000001 }),
-    preBuyWindowMs: integerEnv('FLOW_SMART_OPEN_SHADOW_PREBUY_WINDOW_MS', 2_000, {
-      min: 100,
-    }),
-    minPreBuyers: integerEnv('FLOW_SMART_OPEN_SHADOW_MIN_PREBUY_BUYERS', 2, { min: 0 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_OPEN_SHADOW_MAX_ENTRY_JUMP_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
-    entryDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_OPEN_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    bigWinnerPct: numberEnv('FLOW_SMART_OPEN_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
-    cohorts: [
-      {
-        id: 'D0',
-        label: 'D0 Â· çœŸOPENå›ºå®š5ç§’',
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D0_HOLD_MS', 5_000, { min: 250 }),
-        followSmartExit: false,
-      },
-      {
-        id: 'D1',
-        label: 'D1 Â· å»¶è¿Ÿæ¿€æ´»ç§»åŠ¨æ­¢ç›ˆ',
-        exitMode: 'DELAYED_TRAILING',
-        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_HARD_STOP_PCT', 12.5, {
-          min: 0.1,
-          max: 100,
-        }),
-        trailingActivationPct: numberEnv(
-          'FLOW_SMART_OPEN_SHADOW_D1_TRAILING_ACTIVATION_PCT',
-          20,
-          { min: 0, max: 1_000 },
-        ),
-        trailingStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D1_TRAILING_STOP_PCT', 15, {
-          min: 0.1,
-          max: 100,
-        }),
-        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D1_MAX_HOLD_MS', 60_000, {
-          min: 1_000,
-        }),
-        followSmartExit: false,
-      },
-      {
-        id: 'D2',
-        label: 'D2 Â· è·ŸéšSmartå‡ä»“/æ¸…ä»“',
-        exitMode: 'SMART_FOLLOW',
-        hardStopPct: numberEnv('FLOW_SMART_OPEN_SHADOW_D2_HARD_STOP_PCT', 12.5, {
-          min: 0.1,
-          max: 100,
-        }),
-        maxHoldMs: integerEnv('FLOW_SMART_OPEN_SHADOW_D2_MAX_HOLD_MS', 180_000, {
-          min: 1_000,
-        }),
-        followSmartExit: true,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_OPEN_SHADOW_POSITION_SOL'),
-    }),
-  },
-
-  // Forward-only confirmation research. A Primary Flow signal is only eligible
-  // after a monitored wallet opens the same mint; entry is then simulated on
-  // the first later Bonding Curve trade. This intentionally does not reuse the
-  // retrospective smart_signal_confirmations label as an earlier entry price.
-  flowSmartConfirmShadow: {
-    // The completed forward sample remained negative. Keep the table/API for
-    // historical analysis, but require the explicit proven-negative override
-    // before this retired experiment can create more positions.
-    enabled: provenNegativeShadowsEnabled
-      && booleanEnv('FLOW_SMART_CONFIRM_SHADOW_ENABLED', true),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_CONFIRM_SHADOW_POSITION_SOL'),
-    minSmartOpenSol: numberEnv('FLOW_SMART_CONFIRM_SHADOW_MIN_OPEN_SOL', 0.1, { min: 0 }),
-    entryDelayMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_CONFIRM_SHADOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv(
-      'FLOW_SMART_CONFIRM_SHADOW_MAX_ENTRY_JUMP_PCT',
-      10,
-      { min: 0, max: 100 },
-    ),
-    bigWinnerPct: numberEnv('FLOW_SMART_CONFIRM_SHADOW_BIG_WINNER_PCT', 50, { min: 1 }),
-    cohorts: [
-      {
-        id: 'L5_F5',
-        label: 'L5-F5 Â· Smart OPEN within 5s / fixed 5s',
-        maxConfirmationDelayMs: 5_000,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 5_000,
-      },
-      {
-        id: 'L15_F5',
-        label: 'L15-F5 Â· Smart OPEN within 15s / fixed 5s',
-        maxConfirmationDelayMs: 15_000,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 5_000,
-      },
-      {
-        id: 'L5_T15',
-        label: 'L5-T15 Â· Smart OPEN within 5s / trailing 15%',
-        maxConfirmationDelayMs: 5_000,
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: 10,
-        trailingDrawdownPct: 15,
-        hardStopPct: 25,
-        minHoldMs: 1_000,
-        maxHoldMs: 60_000,
-      },
-      {
-        id: 'L15_T20',
-        label: 'L15-T20 Â· Smart OPEN within 15s / trailing 20%',
-        maxConfirmationDelayMs: 15_000,
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: 20,
-        trailingDrawdownPct: 20,
-        hardStopPct: 30,
-        minHoldMs: 2_000,
-        maxHoldMs: 120_000,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_CONFIRM_SHADOW_POSITION_SOL'),
-    }),
-  },
-
-  // Strictly forward-only public-trade observer. The score describes the
-  // low-alternation, one-sided stair-step pattern seen before many direct RUGs.
-  // It performs no RPC calls. All entry-capable live and Shadow strategies use
-  // the same forward-only guard. Live entry reads memory cache only and fails open.
-  preEntryRugRisk: {
-    enabled: booleanEnv('FLOW_PRE_ENTRY_RUG_RISK_ENABLED', true),
-    windowMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_WINDOW_MS', 15_000, { min: 1_000 }),
-    stateRetentionMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_RETENTION_MS', 60_000, {
-      min: 15_000,
-    }),
-    sweepIntervalMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_SWEEP_MS', 5_000, { min: 1_000 }),
-    maxEventsPerMint: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MAX_EVENTS', 256, { min: 32 }),
-    cacheMaxAgeMs: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_CACHE_MAX_AGE_MS', 1_000, {
-      min: 50, max: 10_000,
-    }),
-    minTrades: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_TRADES', 10, { min: 3 }),
-    minBuySharePct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_BUY_SHARE_PCT', 58, {
-      min: 0, max: 100,
-    }),
-    minConsecutiveBuys: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_BUY_STREAK', 14, { min: 2 }),
-    maxSideAlternationPct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MAX_ALTERNATION_PCT', 30, {
-      min: 0, max: 100,
-    }),
-    minUpTickSharePct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_UPTICK_PCT', 55, {
-      min: 0, max: 100,
-    }),
-    minReturnPct: numberEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_RETURN_PCT', 30, { min: 0 }),
-    minFlags: integerEnv('FLOW_PRE_ENTRY_RUG_RISK_MIN_FLAGS', 5, { min: 1, max: 5 }),
-    verticalFragileMinReturnPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_VERTICAL_MIN_RETURN_PCT', 50, { min: 0 },
-    ),
-    verticalFragileMinBuyImpactPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_VERTICAL_MIN_BUY_IMPACT_PCT', 10, { min: 0 },
-    ),
-    verticalFragileMinWalletTxSharePct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_VERTICAL_MIN_WALLET_TX_SHARE_PCT', 8, { min: 0, max: 100 },
-    ),
-    sparseBreadthMinBuysPerBuyer: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_SPARSE_MIN_BUYS_PER_BUYER', 2, { min: 1 },
-    ),
-    chaseRepeatedMinReturnPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_REPEAT_MIN_RETURN_PCT', 30, { min: 0 },
-    ),
-    chaseRepeatedMinSizeSharePct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_REPEAT_MIN_SIZE_SHARE_PCT', 15, { min: 0, max: 100 },
-    ),
-    beijingRiskWindowEnabled: booleanEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_WINDOW_ENABLED', true,
-    ),
-    beijingRiskStartHour: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_START_HOUR', 16, { min: 0, max: 23 },
-    ),
-    beijingRiskEndHour: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_END_HOUR', 20, { min: 0, max: 23 },
-    ),
-    beijingRiskMinFlags: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_RISK_BEIJING_MIN_FLAGS', 4, { min: 1, max: 5 },
-    ),
-    // Forward-only labels for the failure mode that a chart stop cannot
-    // protect against: one to three public sells collapse the pool before the
-    // next independent trade confirms that the lower price persisted. These
-    // labels correct Shadow capacity accounting; they are not entry blockers.
-    cliffEnabled: booleanEnv('FLOW_PRE_ENTRY_RUG_CLIFF_ENABLED', true),
-    cliffWindowMs: integerEnv('FLOW_PRE_ENTRY_RUG_CLIFF_WINDOW_MS', 2_000, {
-      min: 100, max: 10_000,
-    }),
-    cliffMaxSells: integerEnv('FLOW_PRE_ENTRY_RUG_CLIFF_MAX_SELLS', 3, {
-      min: 1, max: 10,
-    }),
-    cliffMinDropPct: numberEnv('FLOW_PRE_ENTRY_RUG_CLIFF_MIN_DROP_PCT', 50, {
-      min: 20, max: 99,
-    }),
-    cliffPersistMaxRatioPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_CLIFF_PERSIST_MAX_RATIO_PCT', 75, { min: 1, max: 100 },
-    ),
-    cliffPairIgnoreMs: integerEnv('FLOW_PRE_ENTRY_RUG_CLIFF_PAIR_IGNORE_MS', 100, {
-      min: 0, max: 1_000,
-    }),
-    slowRugMinDurationMs: integerEnv('FLOW_PRE_ENTRY_RUG_SLOW_MIN_DURATION_MS', 10_000, {
-      min: 1_000, max: 120_000,
-    }),
-    // Estimate how much of the visible token inventory the largest observed
-    // wallets could dump, then simulate our 1-SOL exit after them. This uses
-    // the existing bounded in-memory event ring and trade reserves only.
-    dumpabilityEnabled: booleanEnv('FLOW_PRE_ENTRY_RUG_DUMPABILITY_ENABLED', true),
-    dumpabilityPositionSol: numberEnv('FLOW_PRE_ENTRY_RUG_DUMPABILITY_POSITION_SOL', 1, {
-      min: 0.001, max: 100,
-    }),
-    dumpTop1ReserveWarnPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_DUMP_TOP1_RESERVE_WARN_PCT', 25, { min: 0, max: 1_000 },
-    ),
-    dumpTop3ReserveWarnPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_DUMP_TOP3_RESERVE_WARN_PCT', 50, { min: 0, max: 1_000 },
-    ),
-    // Paired counterfactual only: evaluate two pre-first-cliff filters on every
-    // entry opportunity that the current guard passes. No entry is blocked and
-    // no RPC/SQLite lookup is added to the hot path.
-    firstCliffCounterfactualEnabled: booleanEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_COUNTERFACTUAL_ENABLED', true,
-    ),
-    firstCliffHorizonMs: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HORIZON_MS', 30_000, { min: 5_000, max: 120_000 },
-    ),
-    firstCliffMaxPending: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_MAX_PENDING', 10_000, { min: 100, max: 100_000 },
-    ),
-    firstCliffAuditFlushMs: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AUDIT_FLUSH_MS', 1_000, { min: 250, max: 10_000 },
-    ),
-    firstCliffEffectiveBuyersMax: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_EFFECTIVE_BUYERS_MAX', 3, { min: 1, max: 100 },
-    ),
-    firstCliffHc1Top1Pct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC1_TOP1_PCT', 15, { min: 0, max: 1_000 },
-    ),
-    firstCliffHc1Top3Pct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC1_TOP3_PCT', 35, { min: 0, max: 1_000 },
-    ),
-    firstCliffHc2Top1Pct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC2_TOP1_PCT', 20, { min: 0, max: 1_000 },
-    ),
-    firstCliffHc2Top3Pct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_HC2_TOP3_PCT', 35, { min: 0, max: 1_000 },
-    ),
-    // Lifecycle-specific paired research. These boundaries and PumpSwap
-    // concentration/recovery checks only label counterfactual cohorts; they do
-    // not change the universal live guard until forward precision is proven.
-    firstCliffLifecycleEnabled: booleanEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_LIFECYCLE_ENABLED', true,
-    ),
-    firstCliffLaunchMaxAgeMs: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_LAUNCH_MAX_AGE_MS', 5_000,
-      { min: 500, max: 30_000 },
-    ),
-    firstCliffCurveEarlyMaxAgeMs: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_EARLY_MAX_AGE_MS', 30_000,
-      { min: 5_000, max: 300_000 },
-    ),
-    firstCliffCurveMigrationMinPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_MIGRATION_MIN_PCT', 80,
-      { min: 0, max: 100 },
-    ),
-    firstCliffAmmEarlyMaxAgeMs: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_EARLY_MAX_AGE_MS', 10_000,
-      { min: 500, max: 120_000 },
-    ),
-    firstCliffAmmHc1Top3RecoveryMaxPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC1_TOP3_RECOVERY_MAX_PCT', 50,
-      { min: 0, max: 100 },
-    ),
-    firstCliffAmmHc2Top3RecoveryMaxPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC2_TOP3_RECOVERY_MAX_PCT', 40,
-      { min: 0, max: 100 },
-    ),
-    firstCliffAmmHc1WalletBuyTxSharePct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC1_WALLET_BUY_TX_SHARE_PCT', 50,
-      { min: 0, max: 100 },
-    ),
-    firstCliffAmmHc2WalletBuyTxSharePct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_HC2_WALLET_BUY_TX_SHARE_PCT', 60,
-      { min: 0, max: 100 },
-    ),
-    // Stage-specific forward candidates derived from independent historical
-    // episodes. They are audit labels only: no live/Shadow entry rejection and
-    // no additional RPC or database lookup is allowed on the entry path.
-    firstCliffCurveLateCandidateRecoveryMaxPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_LATE_CANDIDATE_RECOVERY_MAX_PCT', 2,
-      { min: 0, max: 100 },
-    ),
-    firstCliffCurveMigrationCandidateWalletBuyTxSharePct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_CURVE_MIGRATION_CANDIDATE_WALLET_BUY_TX_SHARE_PCT', 70,
-      { min: 0, max: 100 },
-    ),
-    firstCliffAmmEarlyCandidateRecoveryMaxPct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_EARLY_CANDIDATE_RECOVERY_MAX_PCT', 20,
-      { min: 0, max: 100 },
-    ),
-    firstCliffAmmEarlyCandidateWalletBuyTxSharePct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_FIRST_CLIFF_AMM_EARLY_CANDIDATE_WALLET_BUY_TX_SHARE_PCT', 25,
-      { min: 0, max: 100 },
-    ),
-    // Learn repeated launch/rug families from public trades only. Four large
-    // buys in a sub-500ms burst form a template; after that template visibly
-    // collapses, later Mints with the same amount/timing vector or at least two
-    // learned wallets are blocked without requiring the native 10-trade sample.
-    crossMintEnabled: booleanEnv('FLOW_PRE_ENTRY_RUG_CROSS_MINT_ENABLED', true),
-    templateWindowMs: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_WINDOW_MS', 5_000, {
-      min: 100, max: 30_000,
-    }),
-    templateLargeBuyMinSol: numberEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_LARGE_BUY_MIN_SOL', 1, {
-      min: 0.01,
-    }),
-    templateMinLargeBuys: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MIN_LARGE_BUYS', 4, {
-      min: 2, max: 16,
-    }),
-    templateMaxLargeBuys: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MAX_LARGE_BUYS', 6, {
-      min: 2, max: 32,
-    }),
-    templateMinTotalBuySol: numberEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MIN_TOTAL_BUY_SOL', 40, {
-      min: 1,
-    }),
-    templateMaxBurstSpanMs: integerEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_MAX_BURST_SPAN_MS', 500, {
-      min: 10, max: 5_000,
-    }),
-    templateSizeBucketSol: numberEnv('FLOW_PRE_ENTRY_RUG_TEMPLATE_SIZE_BUCKET_SOL', 0.25, {
-      min: 0.01, max: 10,
-    }),
-    toxicCollapsePct: numberEnv('FLOW_PRE_ENTRY_RUG_TOXIC_COLLAPSE_PCT', 60, {
-      min: 20, max: 100,
-    }),
-    toxicCollapseWindowMs: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_COLLAPSE_WINDOW_MS', 30_000, {
-      min: 1_000, max: 120_000,
-    }),
-    toxicRetentionMs: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_RETENTION_MS', 86_400_000, {
-      min: 60_000, max: 7 * 86_400_000,
-    }),
-    toxicMemoryPath: process.env.FLOW_PRE_ENTRY_RUG_TOXIC_MEMORY_PATH
-      || './data/pre-entry-rug-toxic-memory.json',
-    toxicPersistIntervalMs: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_TOXIC_PERSIST_INTERVAL_MS', 5_000, { min: 1_000, max: 60_000 },
-    ),
-    toxicAmountTolerancePct: numberEnv(
-      'FLOW_PRE_ENTRY_RUG_TOXIC_AMOUNT_TOLERANCE_PCT', 2, { min: 0, max: 10 },
-    ),
-    toxicBurstToleranceMs: integerEnv(
-      'FLOW_PRE_ENTRY_RUG_TOXIC_BURST_TOLERANCE_MS', 100, { min: 0, max: 1_000 },
-    ),
-    toxicWalletOverlapMin: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_WALLET_OVERLAP_MIN', 2, {
-      min: 1, max: 16,
-    }),
-    maxToxicWallets: integerEnv('FLOW_PRE_ENTRY_RUG_MAX_TOXIC_WALLETS', 4_096, {
-      min: 64, max: 65_536,
-    }),
-    maxToxicTemplates: integerEnv('FLOW_PRE_ENTRY_RUG_MAX_TOXIC_TEMPLATES', 1_024, {
-      min: 32, max: 16_384,
-    }),
-  },
-
-  // Independent causal study derived from the observed behavior of consistently
-  // profitable wallets. It never signs transactions and never reuses a future
-  // Smart OPEN as an earlier fill price.
-  smartLikeEarlyShadow: {
-    enabled: booleanEnv('FLOW_SMART_LIKE_EARLY_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_LIKE_EARLY_POSITION_SOL'),
-    stateWindowMs: integerEnv('FLOW_SMART_LIKE_EARLY_STATE_WINDOW_MS', 5_000, { min: 1_000 }),
-    stateRetentionMs: integerEnv('FLOW_SMART_LIKE_EARLY_STATE_RETENTION_MS', 240_000, {
-      min: 30_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_SMART_LIKE_EARLY_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_LIKE_EARLY_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_LIKE_EARLY_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_LIKE_EARLY_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0, max: 100,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_ENTRY_DROP_PCT', 30, {
-      min: 0, max: 100,
-    }),
-    maxCurvePct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_CURVE_PCT', 40, { min: 0, max: 100 }),
-    maxAgeMs: integerEnv('FLOW_SMART_LIKE_EARLY_MAX_AGE_MS', 10_000, { min: 250 }),
-    maxReturn5sPct: numberEnv('FLOW_SMART_LIKE_EARLY_MAX_RETURN_5S_PCT', 10, {
-      min: -100, max: 1_000,
-    }),
-    minNetFlow5s: numberEnv('FLOW_SMART_LIKE_EARLY_MIN_NETFLOW_5S_SOL', 0, { min: -1_000 }),
-    minSmartOpenSol: numberEnv('FLOW_SMART_LIKE_EARLY_MIN_SMART_OPEN_SOL', 0.1, { min: 0 }),
-    smartConfirmationMs: integerEnv('FLOW_SMART_LIKE_EARLY_CONFIRMATION_MS', 5_000, { min: 100 }),
-    clusterDedupMs: integerEnv('FLOW_SMART_LIKE_EARLY_CLUSTER_DEDUP_MS', 1_000, { min: 0 }),
-    addThresholdsPct: [50, 80, 120],
-    addFraction: numberEnv('FLOW_SMART_LIKE_EARLY_ADD_FRACTION', 0.08, { min: 0, max: 1 }),
-    hardStopPct: numberEnv('FLOW_SMART_LIKE_EARLY_HARD_STOP_PCT', 20, { min: 0.1, max: 100 }),
-    noStrengthMs: integerEnv('FLOW_SMART_LIKE_EARLY_NO_STRENGTH_MS', 25_000, { min: 1_000 }),
-    noStrengthMfePct: numberEnv('FLOW_SMART_LIKE_EARLY_NO_STRENGTH_MFE_PCT', 10, {
-      min: 0, max: 1_000,
-    }),
-    flowDecayNetFlow1s: numberEnv('FLOW_SMART_LIKE_EARLY_FLOW_DECAY_NETFLOW_1S', -1, {
-      min: -1_000,
-    }),
-    flowDecaySellTx1s: integerEnv('FLOW_SMART_LIKE_EARLY_FLOW_DECAY_SELL_TX_1S', 3, {
-      min: 1,
-    }),
-    priorityWallets: listEnv('FLOW_SMART_LIKE_EARLY_PRIORITY_WALLETS', [
-      'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o',
-      '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9',
-      '2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f',
-      'ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT',
-      'Bi4rd5FH5bYEN8scZ7wevxNZyNmKHdaBcvewdPFxYdLt',
-    ]),
-    walletClusters: [{
-      id: 'F9_FAIC_CLUSTER',
-      wallets: [
-        'F9zT1F46HAoPanR4NC1Yw7TyP8Z9tCavTe48mrzK7aN4',
-        'FAicXNV5FVqtfbpn4Zccs71XcfGeyxBSGbqLDyDJZjke',
-      ],
-    }],
-    entryProfiles: [
-      {
-        id: 'SMART_DIRECT', label: 'Smart OPEN / Curve<=40 / no chase',
-        sourceType: 'SMART_OPEN', requireAge: false, requireFlowConfirmation: false,
-      },
-      {
-        id: 'SMART_STRICT', label: 'Smart OPEN / AGE<=10s / prior Flow<=5s',
-        sourceType: 'SMART_OPEN', requireAge: true, requireFlowConfirmation: true,
-      },
-      {
-        id: 'FLOW_PREDICT', label: 'Primary Rank 1 predictive entry / later Smart label',
-        sourceType: 'FLOW_PREDICT', requireAge: true, requireFlowConfirmation: false,
-      },
-    ],
-    addProfiles: [
-      { id: 'BASE', label: 'No add', thresholdsPct: [], addFraction: 0 },
-      {
-        id: 'PYRAMID', label: 'Add 8% at +50/+80/+120%',
-        thresholdsPct: [50, 80, 120],
-        addFraction: numberEnv('FLOW_SMART_LIKE_EARLY_ADD_FRACTION', 0.08, {
-          min: 0, max: 1,
-        }),
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'E50_T12', label: '+50% sell 40%, runner trail 12%',
-        activationPct: 50, sellFraction: 0.4, trailingStopPct: 12,
-        maxHoldMs: 180_000, flowDecayExit: false,
-      },
-      {
-        id: 'E75_T15', label: '+75% sell 50%, runner trail 15%',
-        activationPct: 75, sellFraction: 0.5, trailingStopPct: 15,
-        maxHoldMs: 180_000, flowDecayExit: false,
-      },
-      {
-        id: 'E100_FLOW', label: '+100% sell 40%, flow decay or trail 20%',
-        activationPct: 100, sellFraction: 0.4, trailingStopPct: 20,
-        maxHoldMs: 180_000, flowDecayExit: true,
-      },
-      {
-        id: 'FIX60_H20', label: '-20% hard stop / otherwise fixed 60s',
-        mode: 'FIXED_HOLD', hardStopPct: 20, maxHoldMs: 60_000,
-        allowedAddProfileIds: ['BASE'],
-      },
-      {
-        id: 'FIX120_H20', label: '-20% hard stop / otherwise fixed 120s',
-        mode: 'FIXED_HOLD', hardStopPct: 20, maxHoldMs: 120_000,
-        allowedAddProfileIds: ['BASE'],
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_LIKE_EARLY_POSITION_SOL'),
-    }),
-  },
-
-  // Strictly causal multi-wallet resonance study. A signal exists only when the
-  // second or third distinct monitored wallet BUY has actually been observed.
-  // The signal price is never treated as a fill: every cohort waits for the
-  // first comparable market trade after the configured execution delay.
-  smartResonanceShadow: {
-    enabled: provenNegativeShadowsEnabled
-      && booleanEnv('FLOW_SMART_RESONANCE_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
-    featureWindowMs: integerEnv('FLOW_SMART_RESONANCE_FEATURE_WINDOW_MS', 5_000, {
-      min: 1_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_SMART_RESONANCE_STATE_RETENTION_MS', 10 * 60_000, {
-      min: 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_SMART_RESONANCE_EPISODE_COOLDOWN_MS', 60_000, {
-      min: 1_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_SMART_RESONANCE_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_RESONANCE_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_RESONANCE_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_RESONANCE_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_RESONANCE_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_SMART_RESONANCE_MAX_ENTRY_DROP_PCT', 30, {
-      min: 0, max: 100,
-    }),
-    maxCrossMarketPriceJumpPct: numberEnv(
-      'FLOW_SMART_RESONANCE_MAX_CROSS_MARKET_JUMP_PCT',
-      50,
-      { min: 0, max: 1_000 },
-    ),
-    entryProfiles: [
-      {
-        id: 'SR_R0',
-        label: 'SR-R0 Â· 2 Smart Wallet / 5s baseline',
-        resonanceWindowMs: 5_000,
-        requiredWallets: 2,
-      },
-      {
-        id: 'SR_R1',
-        label: 'SR-R1 Â· 2 Wallet/5s + public Buyers20 + BuyFlow15 + Top1<=25%',
-        resonanceWindowMs: 5_000,
-        requiredWallets: 2,
-        minPublicBuyers5s: 20,
-        minPublicBuyFlow5sSol: 15,
-        maxLargestBuyerSharePct: 25,
-      },
-      {
-        id: 'SR_R2',
-        label: 'SR-R2 Â· 3 Wallet/60s + public Buyers20 + Top1<=20%',
-        resonanceWindowMs: 60_000,
-        requiredWallets: 3,
-        minPublicBuyers5s: 20,
-        maxLargestBuyerSharePct: 20,
-      },
-      {
-        id: 'SR_R3',
-        label: 'SR-R3 Â· 2 Wallet/60s + pre-grad AGE25s + Curve60-80 + Buyers20',
-        resonanceWindowMs: 60_000,
-        requiredWallets: 2,
-        minPublicBuyers5s: 20,
-        requirePreGraduation: true,
-        requiredMarket: 'PUMP_BONDING_CURVE',
-        maxAgeMs: 25_000,
-        minCurvePct: 60,
-        maxCurvePct: 80,
-      },
-      {
-        id: 'SR_R3_GUARD',
-        label: 'SR-R3-GUARD Â· R3 + å…¬å…±è®¢å•æµRUGè¿‡æ»¤',
-        resonanceWindowMs: 60_000,
-        requiredWallets: 2,
-        minPublicBuyers5s: 20,
-        requirePreGraduation: true,
-        requiredMarket: 'PUMP_BONDING_CURVE',
-        maxAgeMs: 25_000,
-        minCurvePct: 60,
-        maxCurvePct: 80,
-        requireHealthyRugRisk: true,
-      },
-    ],
-    exitProfiles: [20, 30].flatMap((hardStopPct) => (
-      [60, 120, 180, 240].map((holdSeconds) => ({
-        id: `H${hardStopPct}_T${holdSeconds}`,
-        label: `Hard stop ${hardStopPct}% / fixed ${holdSeconds}s`,
-        hardStopPct,
-        maxHoldMs: holdSeconds * 1_000,
-      }))
-    )),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_RESONANCE_POSITION_SOL'),
-    }),
-  },
-
-  // Versioned, forward-only wallet registry. New wallets are nominated from
-  // early buyers of graduated tokens, need repeated seed-token evidence, and
-  // become eligible only after a delay. The discovery token itself is excluded
-  // from grading so the registry cannot grade on its own selection sample.
-  smartWalletRegistry: {
-    enabled: booleanEnv('FLOW_SMART_WALLET_REGISTRY_ENABLED', true),
-    discoveryEnabled: booleanEnv('FLOW_SMART_WALLET_DISCOVERY_ENABLED', true),
-    discoveryMinSeedMints: integerEnv('FLOW_SMART_WALLET_DISCOVERY_MIN_SEEDS', 2, { min: 1 }),
-    discoveryMinBuySol: numberEnv('FLOW_SMART_WALLET_DISCOVERY_MIN_BUY_SOL', 0.2, { min: 0 }),
-    discoveryMaxEarlyBuyers: integerEnv('FLOW_SMART_WALLET_DISCOVERY_MAX_BUYERS', 25, {
-      min: 1, max: 500,
-    }),
-    discoveryMaxCurvePct: numberEnv('FLOW_SMART_WALLET_DISCOVERY_MAX_CURVE_PCT', 80, {
-      min: 0, max: 100,
-    }),
-    discoveryDelayMs: integerEnv('FLOW_SMART_WALLET_DISCOVERY_DELAY_MS', 24 * 60 * 60_000, {
-      min: 0,
-    }),
-    ageCheckEnabled: booleanEnv('FLOW_SMART_WALLET_AGE_CHECK_ENABLED', true),
-    ageRpcUrl: process.env.FLOW_SMART_WALLET_AGE_RPC_URL || process.env.FLOW_RPC_URL || '',
-    ageHardRejectMs: integerEnv('FLOW_SMART_WALLET_AGE_HARD_REJECT_MS', 7 * 24 * 60 * 60_000, {
-      min: 0,
-    }),
-    ageMinVoteMs: integerEnv('FLOW_SMART_WALLET_AGE_MIN_VOTE_MS', 30 * 24 * 60 * 60_000, {
-      min: 24 * 60 * 60_000,
-    }),
-    ageRetryMs: integerEnv('FLOW_SMART_WALLET_AGE_RETRY_MS', 60 * 60_000, {
-      min: 60_000,
-    }),
-    ageRpcTimeoutMs: integerEnv('FLOW_SMART_WALLET_AGE_RPC_TIMEOUT_MS', 10_000, {
-      min: 1_000, max: 60_000,
-    }),
-    ageRpcPageSize: integerEnv('FLOW_SMART_WALLET_AGE_RPC_PAGE_SIZE', 1_000, {
-      min: 1, max: 1_000,
-    }),
-    ageRpcPagesPerCheck: integerEnv('FLOW_SMART_WALLET_AGE_RPC_PAGES_PER_CHECK', 2, {
-      min: 1, max: 20,
-    }),
-    ageCheckConcurrency: integerEnv('FLOW_SMART_WALLET_AGE_CHECK_CONCURRENCY', 2, {
-      min: 1, max: 10,
-    }),
-    ageSeedBypass: booleanEnv('FLOW_SMART_WALLET_AGE_SEED_BYPASS', false),
-    pnlGateEnabled: booleanEnv('FLOW_SMART_WALLET_PNL_GATE_ENABLED', true),
-    pnlWindowMs: integerEnv('FLOW_SMART_WALLET_PNL_WINDOW_MS', 24 * 60 * 60_000, {
-      min: 24 * 60 * 60_000,
-    }),
-    pnlMinClosedPositions: integerEnv('FLOW_SMART_WALLET_PNL_MIN_CLOSED', 1, {
-      min: 1, max: 1_000,
-    }),
-    pnlMinRealizedSol: numberEnv('FLOW_SMART_WALLET_PNL_MIN_REALIZED_SOL', 0, {
-      min: 0,
-    }),
-    pnlMinCapitalReturnPct: numberEnv('FLOW_SMART_WALLET_PNL_MIN_RETURN_PCT', 0, {
-      min: 0,
-    }),
-    pnlSnapshotCacheMs: integerEnv('FLOW_SMART_WALLET_PNL_CACHE_MS', 1_000, {
-      min: 100, max: 60_000,
-    }),
-    // Full cluster/grade maintenance grows with the historical wallet ledger.
-    // Keep it off the realtime Node event loop so HTTP and stream callbacks do
-    // not pause while SQLite performs multi-day scans.
-    maintenanceWorkerEnabled: booleanEnv(
-      'FLOW_SMART_WALLET_MAINTENANCE_WORKER_ENABLED', true,
-    ),
-    maintenanceWorkerTimeoutMs: integerEnv(
-      'FLOW_SMART_WALLET_MAINTENANCE_WORKER_TIMEOUT_MS', 10 * 60_000,
-      { min: 60_000, max: 60 * 60_000 },
-    ),
-    gradeDirtyRefreshMinMs: integerEnv(
-      'FLOW_SMART_WALLET_GRADE_DIRTY_REFRESH_MIN_MS', 5 * 60_000,
-      { min: 60_000, max: 24 * 60 * 60_000 },
-    ),
-    clusterCountCacheMs: integerEnv(
-      'FLOW_SMART_WALLET_CLUSTER_COUNT_CACHE_MS', 5_000,
-      { min: 100, max: 60_000 },
-    ),
-    historyBackfillEnabled: booleanEnv(
-      'FLOW_SMART_WALLET_HISTORY_BACKFILL_ENABLED', true,
-    ),
-    historyRpcUrl: process.env.FLOW_SMART_WALLET_HISTORY_RPC_URL
-      || process.env.FLOW_RPC_URL || '',
-    historyWindowMs: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_WINDOW_MS', 60 * 24 * 60 * 60_000,
-      { min: 7 * 24 * 60 * 60_000 },
-    ),
-    historyWarmupMs: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_WARMUP_MS', 30 * 24 * 60 * 60_000,
-      { min: 0 },
-    ),
-    historyInitialAllEnabled: booleanEnv(
-      'FLOW_SMART_WALLET_HISTORY_INITIAL_ALL_ENABLED', true,
-    ),
-    historyDailyWalletLimit: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_DAILY_WALLET_LIMIT', 50, { min: 1, max: 10_000 },
-    ),
-    historyConcurrency: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_CONCURRENCY', 2, { min: 1, max: 10 },
-    ),
-    historyPageSize: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_PAGE_SIZE', 1_000, { min: 1, max: 1_000 },
-    ),
-    historyMaxPagesPerWallet: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_MAX_PAGES_PER_WALLET', 500, { min: 1, max: 10_000 },
-    ),
-    historyRpcTimeoutMs: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_RPC_TIMEOUT_MS', 60_000, { min: 1_000, max: 120_000 },
-    ),
-    historyRetryMs: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_RETRY_MS', 60 * 60_000, { min: 60_000 },
-    ),
-    historyCreditsPerPage: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_CREDITS_PER_PAGE', 50, { min: 1, max: 10_000 },
-    ),
-    historyDailyCreditLimit: integerEnv(
-      'FLOW_SMART_WALLET_HISTORY_DAILY_CREDIT_LIMIT', 250_000,
-      { min: 1_000, max: 100_000_000 },
-    ),
-    elite60dEnabled: booleanEnv('FLOW_SMART_WALLET_ELITE_60D_ENABLED', true),
-    elite60dWindowMs: integerEnv(
-      'FLOW_SMART_WALLET_ELITE_60D_WINDOW_MS', 60 * 24 * 60 * 60_000,
-      { min: 7 * 24 * 60 * 60_000 },
-    ),
-    elite60dMinRealizedSol: numberEnv(
-      'FLOW_SMART_WALLET_ELITE_60D_MIN_REALIZED_SOL', 200, { min: 0 },
-    ),
-    clusterAutoEnabled: booleanEnv('FLOW_SMART_WALLET_CLUSTER_AUTO_ENABLED', true),
-    clusterObservationMs: integerEnv(
-      'FLOW_SMART_WALLET_CLUSTER_OBSERVATION_MS', 12 * 60 * 60_000,
-      { min: 60 * 60_000 },
-    ),
-    clusterRefreshMs: integerEnv('FLOW_SMART_WALLET_CLUSTER_REFRESH_MS', 5 * 60_000, {
-      min: 60_000,
-    }),
-    clusterLookbackMs: integerEnv(
-      'FLOW_SMART_WALLET_CLUSTER_LOOKBACK_MS', 7 * 24 * 60 * 60_000,
-      { min: 12 * 60 * 60_000 },
-    ),
-    clusterMinDistinctMints: integerEnv('FLOW_SMART_WALLET_CLUSTER_MIN_MINTS', 3, {
-      min: 1, max: 1_000,
-    }),
-    clusterSyncWindowMs: integerEnv('FLOW_SMART_WALLET_CLUSTER_SYNC_WINDOW_MS', 5_000, {
-      min: 100, max: 60_000,
-    }),
-    clusterAmountTolerancePct: numberEnv(
-      'FLOW_SMART_WALLET_CLUSTER_AMOUNT_TOLERANCE_PCT', 15,
-      { min: 0, max: 100 },
-    ),
-    clusterMinCorrelatedMints: integerEnv(
-      'FLOW_SMART_WALLET_CLUSTER_MIN_CORRELATED_MINTS', 2,
-      { min: 1, max: 100 },
-    ),
-    clusterMinCorrelationPct: numberEnv(
-      'FLOW_SMART_WALLET_CLUSTER_MIN_CORRELATION_PCT', 50,
-      { min: 0, max: 100 },
-    ),
-    autoVoteRequiresActive: booleanEnv('FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_ACTIVE', true),
-    autoVoteRequiresKnownCluster: booleanEnv(
-      'FLOW_SMART_WALLET_AUTO_VOTE_REQUIRES_KNOWN_CLUSTER', true,
-    ),
-    gradeRefreshMs: integerEnv('FLOW_SMART_WALLET_GRADE_REFRESH_MS', 24 * 60 * 60_000, {
-      min: 60_000,
-    }),
-    lookbackMs: integerEnv('FLOW_SMART_WALLET_GRADE_LOOKBACK_MS', 60 * 24 * 60 * 60_000, {
-      min: 7 * 24 * 60 * 60_000,
-    }),
-    labelPositionSol: shadowPositionEnv('FLOW_SMART_WALLET_LABEL_POSITION_SOL'),
-    labelEntryDelayMs: integerEnv('FLOW_SMART_WALLET_LABEL_ENTRY_DELAY_MS', 5_000, { min: 0 }),
-    labelEntryTimeoutMs: integerEnv('FLOW_SMART_WALLET_LABEL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    labelGraceMs: integerEnv('FLOW_SMART_WALLET_LABEL_GRACE_MS', 10_000, { min: 0 }),
-    copyReturnHorizonMs: integerEnv('FLOW_SMART_WALLET_COPY_HORIZON_MS', 30_000, {
-      min: 1_000,
-    }),
-    selectionHorizonMs: integerEnv('FLOW_SMART_WALLET_SELECTION_HORIZON_MS', 300_000, {
-      min: 30_000,
-    }),
-    noExitReturnPct: numberEnv('FLOW_SMART_WALLET_NO_EXIT_RETURN_PCT', -100, {
-      min: -100, max: 0,
-    }),
-    maxNoExitRatePct: numberEnv('FLOW_SMART_WALLET_MAX_NO_EXIT_RATE_PCT', 20, {
-      min: 0, max: 100,
-    }),
-    maxCrossMarketJumpPct: numberEnv('FLOW_SMART_WALLET_MAX_CROSS_MARKET_JUMP_PCT', 500, {
-      min: 0, max: 10_000,
-    }),
-    selectionMinSamples: integerEnv('FLOW_SMART_WALLET_SELECTION_MIN_SAMPLES', 30, { min: 5 }),
-    copyMinSamples: integerEnv('FLOW_SMART_WALLET_COPY_MIN_SAMPLES', 30, { min: 5 }),
-    holdingMinSamples: integerEnv('FLOW_SMART_WALLET_HOLDING_MIN_SAMPLES', 30, { min: 5 }),
-    minActiveDays: integerEnv('FLOW_SMART_WALLET_MIN_ACTIVE_DAYS', 7, { min: 1 }),
-    minGraduationLift: numberEnv('FLOW_SMART_WALLET_MIN_GRAD_LIFT', 1.5, { min: 0 }),
-    minBig50Lift: numberEnv('FLOW_SMART_WALLET_MIN_BIG50_LIFT', 1.5, { min: 0 }),
-    minSelectionBLift: numberEnv('FLOW_SMART_WALLET_MIN_SELECTION_B_LIFT', 1.1, { min: 0 }),
-    minCopyPf: numberEnv('FLOW_SMART_WALLET_MIN_COPY_PF', 1.2, { min: 0 }),
-    minPositiveWindowPct: numberEnv('FLOW_SMART_WALLET_MIN_POSITIVE_WINDOW_PCT', 70, {
-      min: 0, max: 100,
-    }),
-    maxTop1ProfitPct: numberEnv('FLOW_SMART_WALLET_MAX_TOP1_PROFIT_PCT', 35, {
-      min: 0, max: 100,
-    }),
-    holdingBigWinnerPct: numberEnv('FLOW_SMART_WALLET_HOLDING_BIG_WINNER_PCT', 100, {
-      min: 0,
-    }),
-    holdingMinRunnerUpliftPct: numberEnv(
-      'FLOW_SMART_WALLET_HOLDING_MIN_RUNNER_UPLIFT_PCT', 20, { min: 0 },
-    ),
-    holdingMinBigWinnerRatePct: numberEnv(
-      'FLOW_SMART_WALLET_HOLDING_MIN_BIG_WINNER_RATE_PCT', 10, { min: 0, max: 100 },
-    ),
-    gradeConfirmationRuns: integerEnv('FLOW_SMART_WALLET_GRADE_CONFIRMATION_RUNS', 2, {
-      min: 1, max: 10,
-    }),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_WALLET_LABEL_POSITION_SOL'),
-    }),
-  },
-
-  // FEA-OBS V2: smart-wallet consensus is the causal candidate trigger. A
-  // pre-graduation scout is optional, graduation must be followed by independent
-  // public AMM flow before scaling, and the long-tail arm sells a core while
-  // retaining a trailing runner. RUG output is recorded as a label only.
-  smartWalletConsensusFlowRunnerShadow: {
-    enabled: booleanEnv('FLOW_SMART_CONSENSUS_V2_SHADOW_ENABLED', true),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_CONSENSUS_V2_POSITION_SOL'),
-    probationVoteWeight: numberEnv('FLOW_SMART_CONSENSUS_V2_PROBATION_WEIGHT', 1, {
-      min: 0, max: 1,
-    }),
-    enforceAGradeAfterClusters: integerEnv(
-      'FLOW_SMART_CONSENSUS_V2_ENFORCE_A_AFTER_CLUSTERS', 12, { min: 1 },
-    ),
-    stateRetentionMs: integerEnv('FLOW_SMART_CONSENSUS_V2_STATE_RETENTION_MS', 24 * 60 * 60_000, {
-      min: 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EPISODE_COOLDOWN_MS', 30 * 60_000, {
-      min: 1_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_SMART_CONSENSUS_V2_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_CONSENSUS_V2_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxScoutWaitMs: integerEnv('FLOW_SMART_CONSENSUS_V2_MAX_SCOUT_WAIT_MS', 15 * 60_000, {
-      min: 30_000,
-    }),
-    maxFlowWaitMs: integerEnv('FLOW_SMART_CONSENSUS_V2_MAX_FLOW_WAIT_MS', 2 * 60_000, {
-      min: 10_000,
-    }),
-    flowWindowMs: integerEnv('FLOW_SMART_CONSENSUS_V2_FLOW_WINDOW_MS', 20_000, {
-      min: 2_000,
-    }),
-    minFlowNetSol: numberEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_NET_SOL', 0.1, { min: 0 }),
-    minFlowBuyers: integerEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_BUYERS', 3, { min: 1 }),
-    minFlowBuyTx: integerEnv('FLOW_SMART_CONSENSUS_V2_MIN_FLOW_BUY_TX', 3, { min: 1 }),
-    strictMinFlowNetSol: numberEnv(
-      'FLOW_SMART_CONSENSUS_V2_STRICT_MIN_FLOW_NET_SOL', 1, { min: 0 },
-    ),
-    strictMinFlowNetSharePct: numberEnv(
-      'FLOW_SMART_CONSENSUS_V2_STRICT_MIN_FLOW_NET_SHARE_PCT', 3, { min: 0, max: 100 },
-    ),
-    strictMaxFlowConfirmationDelayMs: integerEnv(
-      'FLOW_SMART_CONSENSUS_V2_STRICT_MAX_FLOW_CONFIRM_DELAY_MS', 30_000, { min: 1_000 },
-    ),
-    dynamicThresholds: [
-      { maxEligibleClusters: 10, ordinary: 2, strong: 3 },
-      { maxEligibleClusters: 25, ordinary: 3, strong: 5 },
-      { maxEligibleClusters: 50, ordinary: 4, strong: 7 },
-      { maxEligibleClusters: Number.MAX_SAFE_INTEGER, ordinary: 6, strong: 10 },
-    ],
-    entryProfiles: [
-      {
-        id: 'POST_FLOW', label: 'æ¯•ä¸šåŽå…¬å…±æµç¡®è®¤', strength: 'ORDINARY',
-        consensusWindowMs: 180_000, scoutFraction: 0,
-        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
-      },
-      {
-        id: 'SCOUT15_FLOW', label: 'æ¯•ä¸šå‰15%è¯•ä»“ + æ¯•ä¸šåŽå…¬å…±æµåŠ ä»“', strength: 'ORDINARY',
-        consensusWindowMs: 180_000, scoutFraction: 0.15,
-        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
-      },
-      {
-        id: 'POST_FLOW_STRICT', label: 'æ¯•ä¸šåŽå¼ºå…¬å…±æµç¡®è®¤', strength: 'ORDINARY',
-        consensusWindowMs: 180_000, scoutFraction: 0, flowGate: 'STRICT',
-        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
-      },
-      {
-        id: 'SCOUT15_FLOW_STRICT', label: 'æ¯•ä¸šå‰15%è¯•ä»“ + å¼ºå…¬å…±æµåŠ ä»“', strength: 'ORDINARY',
-        consensusWindowMs: 180_000, scoutFraction: 0.15, flowGate: 'STRICT',
-        minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
-      },
-      {
-        id: 'STRONG25_FLOW', label: 'å¼ºå…±è¯†æ¯•ä¸šå‰25%è¯•ä»“ + æ¯•ä¸šåŽå…¬å…±æµåŠ ä»“', strength: 'STRONG',
-        consensusWindowMs: 300_000, scoutFraction: 0.25, flowGate: 'STRICT',
-        minSelectionAClusters: 3, minWeightedScoreRatio: 0.6,
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'FIX120_H20', label: 'å›ºå®š120ç§’å¯¹ç…§', mode: 'FIXED_HOLD',
-        fixedHoldMs: 120_000, maxHoldMs: 120_000, hardStopPct: 20,
-      },
-      {
-        id: 'CORE80_RUNNER6H', label: '+30%å–80%æ ¸å¿ƒä»“ï¼Œä½™ä»“30%å›žæ’¤é€€å‡º',
-        mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
-        runnerTrailPct: 30, maxHoldMs: 6 * 60 * 60_000, hardStopPct: 20,
-      },
-      {
-        id: 'CORE80_RUNNER6H_SP30T20',
-        label: 'Scoutå³°å€¼ä¿æŠ¤ + +30%å–80%æ ¸å¿ƒä»“ï¼Œä½™ä»“30%å›žæ’¤é€€å‡º',
-        mode: 'CORE_RUNNER', coreActivationPct: 30, coreFraction: 0.8,
-        runnerTrailPct: 30, maxHoldMs: 6 * 60 * 60_000, hardStopPct: 20,
-        scoutProtectActivationPct: 30, scoutProtectTrailPct: 20,
-        scoutProtectFloorPct: 5,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_CONSENSUS_V2_POSITION_SOL'),
-    }),
-  },
-
-  // Forward-only A/B layer: keep every source Shadow cohort untouched, then
-  // measure the exact same simulated fills only when a qualified Registry
-  // consensus existed before the source signal. It observes persisted rows,
-  // does not duplicate execution state, and can never send a transaction.
-  smartWalletConsensusOverlay: {
-    enabled: booleanEnv('FLOW_SMART_CONSENSUS_OVERLAY_ENABLED', true),
-    gateWindowMs: integerEnv(
-      'FLOW_SMART_CONSENSUS_OVERLAY_WINDOW_MS', 15 * 60_000, { min: 60_000 },
-    ),
-    gateFinalizeDelayMs: integerEnv(
-      'FLOW_SMART_CONSENSUS_OVERLAY_FINALIZE_DELAY_MS', 60_000, { min: 5_000 },
-    ),
-    syncMs: integerEnv('FLOW_SMART_CONSENSUS_OVERLAY_SYNC_MS', 5_000, { min: 1_000 }),
-    maxRowsPerSync: integerEnv(
-      'FLOW_SMART_CONSENSUS_OVERLAY_MAX_ROWS_PER_SYNC', 2_000,
-      { min: 10, max: 20_000 },
-    ),
-    profiles: [
-      {
-        id: 'SWC_G_GE30_R23_F2_G2_XLEG',
-        label: 'G Â· GE30 R23 F2 G2 XLEG + Smartå…±è¯†',
-        source: 'MIGRATED_DROP_REBOUND',
-        sourceCohortId: 'POST_GE30_R23_F2_ONLY_G2_XLEG',
-      },
-      {
-        id: 'SWC_G_GD25_35_X8',
-        label: 'G Â· GD25-35 X8 + Smartå…±è¯†',
-        source: 'MIGRATED_DROP_REBOUND',
-        sourceCohortId: 'POST_GD25_35_X8',
-      },
-      {
-        id: 'SWC_O_C80_D5_B2_S0_NC',
-        label: 'O Â· C80 D5 B2 S0 NC + Smartå…±è¯†',
-        source: 'GRADUATION_ACCELERATION',
-        sourceCohortId: 'O_C80_D5_B2_S0_NC:1SOL',
-      },
-      {
-        id: 'SWC_O90_M5_STAIR120',
-        label: 'O Â· O90 M5 STAIR120 + Smartå…±è¯†',
-        source: 'GRADUATION_ACCELERATION',
-        sourceCohortId: 'O90_M5_STAIR120:1SOL',
-      },
-      {
-        id: 'SWC_FEA_BNH_120',
-        label: 'FEA Â· BNH-120 + Smartå…±è¯†',
-        source: 'FEATURE_EDGE_BNH',
-        sourceCohortId: 'FEA_BNH_120',
-      },
-    ],
-  },
-
-  // Forward-only study of why monitored Smart Wallet first entries avoid rapid
-  // collapses. It never follows ADD events and never changes a live decision.
-  // Every OPEN creates an unguarded fixed-hold control, a causal 10-second
-  // emergency-exit cohort, and an isolated synthetic-ramp guard cohort.
-  smartWalletRugEscapeShadow: {
-    enabled: booleanEnv('FLOW_SMART_WALLET_RUG_ESCAPE_SHADOW_ENABLED', true),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_WALLET_RUG_ESCAPE_POSITION_SOL'),
-    entryDelayMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_EXIT_TIMEOUT_MS', 2_000, { min: 1 }),
-    emergencyWindowMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_EMERGENCY_WINDOW_MS', 10_000, {
-      min: 1_000,
-    }),
-    emergencyRecentFlowMs: integerEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_RECENT_FLOW_MS',
-      1_000,
-      { min: 250 },
-    ),
-    labelHorizonMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_LABEL_HORIZON_MS', 30_000, {
-      min: 10_000,
-    }),
-    minLargeSellSol: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_MIN_LARGE_SELL_SOL', 1, {
-      min: 0,
-    }),
-    minSellBuyFlowRatio: numberEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_MIN_SELL_BUY_FLOW_RATIO',
-      0.35,
-      { min: 0, max: 10 },
-    ),
-    flowFlipNetSol: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_FLOW_FLIP_SOL', -1, {
-      max: 0,
-    }),
-    buyerStallMs: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_BUYER_STALL_MS', 1_500, {
-      min: 250,
-    }),
-    minBuyersBeforeStall: integerEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_MIN_BUYERS_BEFORE_STALL',
-      3,
-      { min: 1 },
-    ),
-    fastDropPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_FAST_DROP_PCT', 15, {
-      min: 1, max: 100,
-    }),
-    rug50Pct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_RUG50_PCT', 50, {
-      min: 1, max: 100,
-    }),
-    rug70Pct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_RUG70_PCT', 70, {
-      min: 1, max: 100,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_MAX_ENTRY_JUMP_PCT', 20, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_MAX_ENTRY_DROP_PCT', 30, {
-      min: 0, max: 100,
-    }),
-    syntheticMinFlags: integerEnv('FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_FLAGS', 2, {
-      min: 1,
-    }),
-    syntheticMinRunupPct: numberEnv('FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_RUNUP_PCT', 25),
-    syntheticMinBuySharePct: numberEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_BUY_SHARE_PCT',
-      80,
-      { min: 0, max: 100 },
-    ),
-    syntheticMaxAlternationPct: numberEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MAX_ALTERNATION_PCT',
-      20,
-      { min: 0, max: 100 },
-    ),
-    syntheticMinConsecutiveBuys: integerEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_CONSECUTIVE_BUYS',
-      8,
-      { min: 1 },
-    ),
-    syntheticMinRepeatedSizePct: numberEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_REPEATED_SIZE_PCT',
-      35,
-      { min: 0, max: 100 },
-    ),
-    syntheticMinWalletSharePct: numberEnv(
-      'FLOW_SMART_WALLET_RUG_ESCAPE_SYNTH_MIN_WALLET_SHARE_PCT',
-      35,
-      { min: 0, max: 100 },
-    ),
-    profiles: [
-      {
-        id: 'BASE_T30', label: 'First OPEN Â· fixed 30s control',
-        syntheticGuard: false, emergencyExit: false, holdMs: 30_000,
-      },
-      {
-        id: 'EE10', label: 'First OPEN Â· 10s causal emergency escape',
-        syntheticGuard: false, emergencyExit: true, holdMs: 30_000,
-      },
-      {
-        id: 'SRG_EE10', label: 'Synthetic ramp guard + 10s emergency escape',
-        syntheticGuard: true, emergencyExit: true, holdMs: 30_000,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_WALLET_RUG_ESCAPE_POSITION_SOL'),
-    }),
-  },
-
-  // Historical Smart-first trigger experiment. Waiting for the monitored OPEN
-  // proved causally late, so a second explicit gate defaults to false even when
-  // an older server .env still contains the original ENABLED=true setting.
-  // Rows remain queryable; new causal entries live in Public Flow Lead V2 below.
-  smartWalletFirstOpenRightTailShadow: {
-    enabled: booleanEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_TRIGGER_V2_ENABLED', false)
-      && booleanEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_POSITION_SOL'),
-    entryDelayMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_EXIT_TIMEOUT_MS', 2_000, { min: 1 }),
-    flowFadeWindowMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_FLOW_FADE_WINDOW_MS', 3_000, {
-      min: 500,
-    }),
-    maxEpisodeMs: integerEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_MAX_EPISODE_MS', 130_000, {
-      min: 20_000,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_MAX_ENTRY_JUMP_PCT', 20, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_MAX_ENTRY_DROP_PCT', 30, {
-      min: 0, max: 100,
-    }),
-    entryProfiles: [
-      {
-        id: 'S50_R8', label: 'Strict Â· pre-return <=50% Â· consecutive buys <=8',
-        maxPreReturnPct: 50, maxConsecutiveBuys: 8,
-      },
-      {
-        id: 'B70_R10', label: 'Balanced Â· pre-return <=70% Â· consecutive buys <=10',
-        maxPreReturnPct: 70, maxConsecutiveBuys: 10,
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'X20', label: 'Fixed 20s control', mode: 'FIXED_HOLD',
-        maxHoldMs: 20_000, hardStopPct: 0, coreWeightPct: 0,
-      },
-      {
-        id: 'X60', label: 'Fixed 60s control', mode: 'FIXED_HOLD',
-        maxHoldMs: 60_000, hardStopPct: 0, coreWeightPct: 0,
-      },
-      {
-        id: 'X120', label: 'Fixed 120s control', mode: 'FIXED_HOLD',
-        maxHoldMs: 120_000, hardStopPct: 0, coreWeightPct: 0,
-      },
-      {
-        id: 'FF15_X120', label: '15s protection + 3s flow-fade / max 120s', mode: 'FLOW_FADE',
-        protectionMs: 15_000, flowFadeNetSol: -0.5, maxHoldMs: 120_000,
-        hardStopPct: 20, coreWeightPct: 0,
-      },
-      {
-        id: 'C25_R75_X120', label: '25% core + 75% protected runner / max 120s', mode: 'CORE_RUNNER',
-        coreWeightPct: 25, coreActivationPct: 50, trailingDrawdownPct: 20,
-        hardStopPct: 20, maxHoldMs: 120_000,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_SMART_FIRST_OPEN_RIGHT_TAIL_POSITION_SOL'),
-    }),
-  },
-
-  // Public-order-flow lead study derived from the pre-buy structure observed
-  // around profitable Smart Wallet entries. Entry never waits for or consumes a
-  // Smart Wallet event. A later Smart OPEN is stored only as a future label;
-  // ADD events are intentionally ignored because repeated small adds can be
-  // promotional rather than incremental conviction.
-  publicFlowLeadShadow: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_PUBLIC_FLOW_LEAD_V2_ENABLED', false),
-    // Forward public-flow signals remain useful as labels, but the first live
-    // sample invalidated the simulated-entry edge. Keep observation on while
-    // stopping new paper positions by default; historical rows stay queryable.
-    simulatePositions: booleanEnv(
-      'FLOW_PUBLIC_FLOW_LEAD_SIMULATED_ENTRIES_ENABLED',
-      false,
-    ),
-    positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
-    featureWindowMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_FEATURE_WINDOW_MS', 5_000, {
-      min: 2_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_STATE_RETENTION_MS', 10 * 60_000, {
-      min: 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_EPISODE_COOLDOWN_MS', 30_000, {
-      min: 1_000,
-    }),
-    smartLabelWindowMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_SMART_LABEL_WINDOW_MS', 15_000, {
-      min: 5_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_PUBLIC_FLOW_LEAD_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_PUBLIC_FLOW_LEAD_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_PUBLIC_FLOW_LEAD_MAX_ENTRY_DROP_PCT', 30, {
-      min: 0, max: 100,
-    }),
-    maxCrossMarketPriceJumpPct: numberEnv(
-      'FLOW_PUBLIC_FLOW_LEAD_MAX_CROSS_MARKET_JUMP_PCT',
-      50,
-      { min: 0, max: 1_000 },
-    ),
-    entryProfiles: [
-      {
-        id: 'PFL_S50_R8',
-        label: 'PFL-S50-R8 Â· strict public-flow lead / future Smart label',
-        minAgeMs: 3_000, maxAgeMs: 45_000,
-        minCurvePct: 20, maxCurvePct: 85,
-        minPublicBuyers1s: 2, minPublicBuyers5s: 6,
-        minPublicBuyFlow1sSol: 0.5, minPublicBuyFlow5sSol: 2,
-        minPublicNetFlow5sSol: 1, maxLargestBuyerSharePct: 35,
-        maxReturn5sPct: 30,
-        requirePreRiskSampleReady: true,
-        maxPreReturnPct: 50,
-        maxPreConsecutiveBuys: 8,
-      },
-      {
-        id: 'PFL_B70_R10',
-        label: 'PFL-B70-R10 Â· balanced public-flow lead / future Smart label',
-        minAgeMs: 3_000, maxAgeMs: 60_000,
-        minCurvePct: 20, maxCurvePct: 90,
-        minPublicBuyers1s: 1, minPublicBuyers5s: 4,
-        minPublicBuyFlow1sSol: 0.25, minPublicBuyFlow5sSol: 1,
-        minPublicNetFlow5sSol: 0.5, maxLargestBuyerSharePct: 45,
-        maxReturn5sPct: 40,
-        requirePreRiskSampleReady: true,
-        maxPreReturnPct: 70,
-        maxPreConsecutiveBuys: 10,
-      },
-      ...(publicFlowLeadLegacyProfilesEnabled ? [
-      {
-        id: 'PFL_B0',
-        label: 'PFL-B0 Â· broad public breadth baseline',
-        minAgeMs: 10_000, maxAgeMs: 35_000,
-        minCurvePct: 55, maxCurvePct: 85,
-        minPublicBuyers5s: 20, minPublicBuyFlow5sSol: 12,
-        minPublicNetFlow5sSol: 0, maxLargestBuyerSharePct: 30,
-        maxReturn5sPct: 40,
-      },
-      {
-        id: 'PFL_B1',
-        label: 'PFL-B1 Â· big-winner analogue / early diversified flow',
-        minAgeMs: 5_000, maxAgeMs: 25_000,
-        minCurvePct: 60, maxCurvePct: 80,
-        minPublicBuyers5s: 25, minPublicBuyFlow5sSol: 15,
-        minPublicNetFlow5sSol: 2.5, maxLargestBuyerSharePct: 20,
-        maxReturn5sPct: 30,
-      },
-      {
-        id: 'PFL_A1',
-        label: 'PFL-A1 Â· 1s public-flow re-acceleration',
-        minAgeMs: 5_000, maxAgeMs: 30_000,
-        minCurvePct: 55, maxCurvePct: 85,
-        minPublicBuyers1s: 5, minPublicBuyers5s: 20,
-        minPublicBuyFlow1sSol: 3, minPublicBuyFlow5sSol: 12,
-        minPublicNetFlow5sSol: 0, maxLargestBuyerSharePct: 25,
-        minFlowAccelerationRatio: 1.5, maxReturn5sPct: 35,
-      },
-      {
-        id: 'PFL_R1',
-        label: 'PFL-R1 Â· healthy two-way rotation / broad demand',
-        minAgeMs: 10_000, maxAgeMs: 35_000,
-        minCurvePct: 60, maxCurvePct: 85,
-        minPublicBuyers5s: 20, minPublicBuyFlow5sSol: 12,
-        minPublicNetFlow5sSol: 0, maxLargestBuyerSharePct: 25,
-        minSellBuyRatio: 0.35, maxSellBuyRatio: 0.9,
-        maxReturn5sPct: 30,
-      },
-      ] : []),
-      ...(booleanEnv('FLOW_PUBLIC_FLOW_LEAD_B2_ENABLED', false) ? [{
-        id: 'PFL_B2',
-        label: 'PFL-B2 Â· 8â€“12s diversified flow / future Smart OPEN study',
-        minAgeMs: 8_000, maxAgeMs: 12_000,
-        minCurvePct: 60, maxCurvePct: 75,
-        minPublicBuyers1s: 9, maxPublicBuyers1s: 12,
-        minPublicBuyers5s: 45,
-        minPublicBuyFlow5sSol: 26, maxPublicBuyFlow5sSol: 35,
-        minPublicNetFlow5sSol: 2,
-        maxLargestBuyerSharePct: 15,
-        minReturn5sPct: 10, maxReturn5sPct: 25,
-        minFlowAccelerationRatio: 1, maxFlowAccelerationRatio: 2.5,
-      }] : []),
-    ],
-    exitProfiles: [20, 30].flatMap((hardStopPct) => (
-      [120, 180, 240].map((holdSeconds) => ({
-        id: `H${hardStopPct}_T${holdSeconds}`,
-        label: `Hard stop ${hardStopPct}% / fixed ${holdSeconds}s`,
-        hardStopPct,
-        maxHoldMs: holdSeconds * 1_000,
-      }))
-    )),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
-    }),
-  },
-
-  // Forward-only creator-affinity observer. Creator launch history from every
-  // token already present in flow_tokens is kept separate from the selected
-  // Smart-Wallet trade sample. Historical simulated positions remain readable,
-  // but the disproven CAF entry family no longer creates new positions.
-  creatorAffinityShadow: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_CREATOR_AFFINITY_SHADOW_ENABLED', false),
-    simulatePositions: false,
-    storageTable: 'creator_affinity_shadow_positions',
-    strategyCode: 'CAF',
-    strategyName: 'Creator Affinity + Public Flow',
-    modeCode: 'CAF',
-    creatorAffinity: {
-      enabled: true,
-      lookbackMs: integerEnv(
-        'FLOW_CREATOR_AFFINITY_LOOKBACK_MS',
-        7 * 24 * 60 * 60_000,
-        { min: 24 * 60 * 60_000 },
-      ),
-      serialLowQualityMinPriorLaunches: integerEnv(
-        'FLOW_CREATOR_AFFINITY_SERIAL_LOW_QUALITY_MIN_PRIOR_LAUNCHES',
-        20,
-        { min: 1 },
-      ),
-      serialLowQualityMaxGraduationRatePct: numberEnv(
-        'FLOW_CREATOR_AFFINITY_SERIAL_LOW_QUALITY_MAX_GRADUATION_RATE_PCT',
-        2,
-        { min: 0, max: 100 },
-      ),
-    },
-    positionSizeSol: shadowPositionEnv('FLOW_CREATOR_AFFINITY_POSITION_SOL'),
-    featureWindowMs: integerEnv('FLOW_CREATOR_AFFINITY_FEATURE_WINDOW_MS', 5_000, {
-      min: 2_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_CREATOR_AFFINITY_STATE_RETENTION_MS', 10 * 60_000, {
-      min: 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_CREATOR_AFFINITY_EPISODE_COOLDOWN_MS', 30_000, {
-      min: 1_000,
-    }),
-    smartLabelWindowMs: integerEnv('FLOW_CREATOR_AFFINITY_SMART_LABEL_WINDOW_MS', 15_000, {
-      min: 5_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_CREATOR_AFFINITY_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_CREATOR_AFFINITY_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_CREATOR_AFFINITY_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_CREATOR_AFFINITY_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_CREATOR_AFFINITY_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_CREATOR_AFFINITY_MAX_ENTRY_DROP_PCT', 30, {
-      min: 0, max: 100,
-    }),
-    maxCrossMarketPriceJumpPct: numberEnv(
-      'FLOW_CREATOR_AFFINITY_MAX_CROSS_MARKET_JUMP_PCT',
-      50,
-      { min: 0, max: 1_000 },
-    ),
-    entryProfiles: [
-      {
-        id: 'CAF_ALL_E15',
-        label: 'CAF-ALL-E15 Â· current-DB all-launch observer baseline',
-        minAgeMs: 3_000, maxAgeMs: 15_000,
-        minCurvePct: 10, maxCurvePct: 85,
-        minPublicBuyers1s: 1, minPublicBuyers5s: 3,
-        minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
-        maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
-        requirePreRiskSampleReady: true,
-        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
-      },
-      {
-        id: 'CAF_W50_E10',
-        label: 'CAF-W50-E10 Â· Smart sample win>=50% + all-launch quality',
-        minAgeMs: 3_000, maxAgeMs: 10_000,
-        minCurvePct: 10, maxCurvePct: 85,
-        minPublicBuyers1s: 1, minPublicBuyers5s: 3,
-        minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
-        maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
-        minCreatorPriorCompleted: 3, minCreatorPriorWinRatePct: 50,
-        minCreatorAllPriorLaunches: 3, minCreatorAllPriorGraduated: 1,
-        minCreatorAllPriorGraduationRatePct: 2,
-        rejectCreatorSerialLowQuality: true,
-        requirePreRiskSampleReady: true,
-        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
-      },
-      {
-        id: 'CAF_P0_E10',
-        label: 'CAF-P0-E10 Â· Smart sample return>=0 + all-launch quality',
-        minAgeMs: 3_000, maxAgeMs: 10_000,
-        minCurvePct: 10, maxCurvePct: 85,
-        minPublicBuyers1s: 1, minPublicBuyers5s: 3,
-        minPublicBuyFlow5sSol: 0.5, minPublicNetFlow5sSol: 0.25,
-        maxLargestBuyerSharePct: 50, maxReturn5sPct: 50,
-        minCreatorPriorCompleted: 3, minCreatorPriorCapitalReturnPct: 0,
-        minCreatorAllPriorLaunches: 3, minCreatorAllPriorGraduated: 1,
-        minCreatorAllPriorGraduationRatePct: 2,
-        rejectCreatorSerialLowQuality: true,
-        requirePreRiskSampleReady: true,
-        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
-      },
-      {
-        id: 'CAF_W50_B5_E15',
-        label: 'CAF-W50-B5-E15 Â· Smart sample quality + broader public flow',
-        minAgeMs: 3_000, maxAgeMs: 15_000,
-        minCurvePct: 10, maxCurvePct: 85,
-        minPublicBuyers1s: 1, minPublicBuyers5s: 5,
-        minPublicBuyFlow5sSol: 1, minPublicNetFlow5sSol: 0.5,
-        maxLargestBuyerSharePct: 45, maxReturn5sPct: 50,
-        minCreatorPriorCompleted: 3, minCreatorPriorWinRatePct: 50,
-        minCreatorAllPriorLaunches: 3, minCreatorAllPriorGraduated: 1,
-        minCreatorAllPriorGraduationRatePct: 2,
-        rejectCreatorSerialLowQuality: true,
-        requirePreRiskSampleReady: true,
-        maxPreReturnPct: 50, maxPreConsecutiveBuys: 8,
-      },
-    ],
-    exitProfiles: [60, 120, 240].map((holdSeconds) => ({
-      id: `H20_T${holdSeconds}`,
-      label: `Hard stop 20% / fixed ${holdSeconds}s`,
-      hardStopPct: 20,
-      maxHoldMs: holdSeconds * 1_000,
-    })),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_CREATOR_AFFINITY_POSITION_SOL'),
-    }),
-  },
-
-  // Independent right-tail study. It consumes the existing PumpSwap trade stream,
-  // opens no real positions, and never treats an unobservable exit as a total loss.
-  bigWinnerShadow: {
-    // V3 reopens only the PBR-C frequency entry for a clean forward sample.
-    // The new key prevents a stale server V2=false from silently keeping the
-    // suite paused after deployment; every other entry profile remains gated
-    // independently below.
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_BIG_WINNER_SHADOW_V3_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_BIG_WINNER_SHADOW_POSITION_SOL'),
-    stateWindowMs: integerEnv('FLOW_BIG_WINNER_SHADOW_STATE_WINDOW_MS', 10_000, {
-      min: 8_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_BIG_WINNER_SHADOW_STATE_RETENTION_MS', 10 * 60_000, {
-      min: 6 * 60_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_BIG_WINNER_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_BIG_WINNER_SHADOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    noExitGraceMs: integerEnv('FLOW_BIG_WINNER_SHADOW_NO_EXIT_GRACE_MS', 60_000, {
-      min: 1_000,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_ENTRY_JUMP_PCT', 50, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_ENTRY_DROP_PCT', 50, {
-      min: 0, max: 100,
-    }),
-    maxEntryImpactPct: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_ENTRY_IMPACT_PCT', 40, {
-      min: 0, max: 1_000,
-    }),
-    maxAdjacentPriceRatio: numberEnv('FLOW_BIG_WINNER_SHADOW_MAX_PRICE_RATIO', 20, {
-      min: 2, max: 1_000,
-    }),
-    transientUpPriceRatio: numberEnv(
-      'FLOW_BIG_WINNER_SHADOW_TRANSIENT_UP_PRICE_RATIO', 2, { min: 1.1, max: 100 },
-    ),
-    priceConfirmationWindowMs: integerEnv(
-      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_WINDOW_MS', 500, { min: 10, max: 5_000 },
-    ),
-    priceConfirmationMinPersistenceMs: integerEnv(
-      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_MIN_PERSISTENCE_MS', 150,
-      { min: 1, max: 5_000 },
-    ),
-    priceConfirmationTolerancePct: numberEnv(
-      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_TOLERANCE_PCT', 25,
-      { min: 1, max: 100 },
-    ),
-    priceConfirmationMinWallets: integerEnv(
-      'FLOW_BIG_WINNER_SHADOW_PRICE_CONFIRMATION_MIN_WALLETS', 2, { min: 1, max: 10 },
-    ),
-    entryProfiles: [
-      {
-        id: 'PBR_A',
-        label: 'PBR-A balanced: wave 40 / pullback 12-25 / NF3 3',
-        newEntriesEnabled: false,
-        liveStrategyId: 'big_winner_pbr_a_x50_15_live',
-        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
-        minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 25,
-        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 3,
-        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
-      },
-      {
-        id: 'PBR_A_B10_PB20',
-        label: 'PBR-A-B10-PB20 Â· wave40 / pullback12-20 / NF3â‰¥3 / Buyers3â‰¥10',
-        newEntriesEnabled: false,
-        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
-        minFirstWavePct: 40, minPullbackPct: 12, maxPullbackPct: 20,
-        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 3,
-        minBuyers3s: 10, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
-        exitProfileIds: ['X50_15'],
-      },
-      {
-        id: 'PBR_B',
-        label: 'PBR-B right tail: wave 50 / pullback 18-30 / NF3 2',
-        newEntriesEnabled: false,
-        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
-        minFirstWavePct: 50, minPullbackPct: 18, maxPullbackPct: 30,
-        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
-        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
-      },
-      {
-        // Clean forward-only sample. The legacy PBR_B rows stay frozen so the
-        // fragile right-tail result cannot be mixed with fresh observations.
-        id: 'PBR_B_RT_V2',
-        label: 'PBR-B-RT-V2 Â· wave50 / pullback18-30 / NF3â‰¥2',
-        newEntriesEnabled: booleanEnv('FLOW_BIG_WINNER_PBR_B_RT_V2_ENABLED', true),
-        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
-        minFirstWavePct: 50, minPullbackPct: 18, maxPullbackPct: 30,
-        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
-        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
-        exitProfileIds: ['X50_12', 'X50_RATCHET'],
-      },
-      {
-        id: 'PBR_C',
-        label: 'PBR-C frequency: wave 40 / pullback 15-25 / NF3 2',
-        newEntriesEnabled: false,
-        family: 'PULLBACK', minAgeMs: 5_000, maxAgeMs: 180_000,
-        minFirstWavePct: 40, minPullbackPct: 15, maxPullbackPct: 25,
-        minReboundPct: 2, maxReboundPct: 10, minNetFlow3sSol: 2,
-        minBuyers3s: 4, maxSingleSell3sSol: 10, minCurrentVsBaselinePct: -10,
-        exitProfileIds: ['X50_12', 'X50_15', 'X50_RATCHET'],
-      },
-      {
-        id: 'FLOW_R',
-        label: 'FLOW-R: post-grad 5-60s / NF8 20 / buyers 12 / no chase',
-        newEntriesEnabled: false,
-        family: 'FLOW', minAgeMs: 5_000, maxAgeMs: 60_000,
-        minNetFlow8sSol: 20, minBuyers8s: 12, maxLargestBuyerShare8s: 0.5,
-        maxRunupPct: 40, maxDistanceFromHigh10sPct: 10, maxJump2sPct: 20,
-        minRecentFlowRatio: 0.5,
-      },
-      {
-        id: 'PP_DIRECT_10',
-        label: 'PP-Direct Â· æ¯•ä¸šåŽ10â€“30ç§’ Â· å‚ä¸Žåº¦æŒç»­ç¡®è®¤',
-        newEntriesEnabled: false,
-        family: 'PARTICIPATION', mode: 'DIRECT', minAgeMs: 10_000, maxAgeMs: 30_000,
-        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
-        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
-        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
-        exitProfileIds: ['XFIX120_H15_PP', 'XFIX240_H15_PP', 'X25_RATCHET_PP'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'PP_PULLBACK_8_20',
-        label: 'PP-Pullback Â· å‚ä¸Žåº¦ç¡®è®¤åŽé¦–æ¬¡å›žè¸©8â€“20% + äºŒæ¬¡åŠ é€Ÿ',
-        newEntriesEnabled: false,
-        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
-        qualificationMaxAgeMs: 30_000,
-        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
-        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
-        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
-        minPullbackPct: 8, maxPullbackPct: 20,
-        minReboundPct: 2, maxReboundPct: 8,
-        minNetFlow3sSol: 2, minBuyers3s: 4, requireFlowAcceleration: true,
-        exitProfileIds: ['XFIX120_H15_PP', 'XFIX240_H15_PP', 'X25_RATCHET_PP'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'PP_PULLBACK_8_30',
-        label: 'PP-Pullback Broad Â· å›žè¸©8â€“30% + æ¸©å’ŒäºŒæ¬¡åŠ é€Ÿ',
-        newEntriesEnabled: false,
-        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 75_000,
-        qualificationMaxAgeMs: 30_000,
-        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
-        maxLargestBuyerShare10s: 0.6, minRecentBuyers5s: 7,
-        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.25,
-        minPullbackPct: 8, maxPullbackPct: 30,
-        minReboundPct: 1.5, maxReboundPct: 10,
-        minNetFlow3sSol: 1, minBuyers3s: 3, requireFlowAcceleration: true,
-        exitProfileIds: ['XFIX120_H15_PP', 'XFIX240_H15_PP', 'X25_RATCHET_PP'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'PP_PULLBACK_8_30_NF8_3',
-        label: 'PP8-30-NF8-3 Â· å›žè¸©8â€“30% / NetFlow8â‰¥3 SOL / X25 Runner',
-        newEntriesEnabled: false,
-        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 75_000,
-        qualificationMaxAgeMs: 30_000,
-        minTrades10s: 40, minBuyers10s: 20, minNetFlow10sSol: 3,
-        maxLargestBuyerShare10s: 0.6, minRecentBuyers5s: 7,
-        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.25,
-        minPullbackPct: 8, maxPullbackPct: 30,
-        minReboundPct: 1.5, maxReboundPct: 10,
-        minNetFlow3sSol: 1, minNetFlow8sSol: 3, minBuyers3s: 3,
-        requireFlowAcceleration: true,
-        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_BIG_WINNER_PP_NF8_CAPACITY_SOLS', ['0.1', '0.25'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'PP20_B45',
-        label: 'PP20-B45 Â· é¦–æ¬¡å›žè¸©8â€“20% / Buyers10â‰¥45',
-        newEntriesEnabled: false,
-        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 60_000,
-        qualificationMaxAgeMs: 30_000,
-        minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
-        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
-        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
-        minPullbackPct: 8, maxPullbackPct: 20,
-        minReboundPct: 2, maxReboundPct: 8,
-        minNetFlow3sSol: 2, minBuyers3s: 4, requireFlowAcceleration: true,
-        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS', ['0.05', '0.1', '0.25'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'PP20_EARLY_BREADTH',
-        label: 'PP20-Early-Breadth Â· AGEâ‰¤25s / Buyers3â‰¥15 / Buyers10â‰¥45',
-        newEntriesEnabled: false,
-        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 25_000,
-        qualificationMaxAgeMs: 25_000,
-        minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
-        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
-        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
-        minPullbackPct: 8, maxPullbackPct: 20,
-        minReboundPct: 2, maxReboundPct: 8,
-        minNetFlow3sSol: 2, minBuyers3s: 15, requireFlowAcceleration: true,
-        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS', ['0.05', '0.1', '0.25'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'PP20_QUALITY',
-        label: 'PP20-Quality Â· AGEâ‰¤30s / Buyers3â‰¥15 / Buyers10â‰¥45 / Sell3â‰¤2.5',
-        newEntriesEnabled: false,
-        family: 'PARTICIPATION', mode: 'PULLBACK', minAgeMs: 10_000, maxAgeMs: 30_000,
-        qualificationMaxAgeMs: 30_000,
-        minTrades10s: 40, minBuyers10s: 45, minNetFlow10sSol: 3,
-        maxLargestBuyerShare10s: 0.55, minRecentBuyers5s: 8,
-        minRecentNetFlow5sSol: 0, minRecentFlowRetentionRatio: 0.35,
-        minPullbackPct: 8, maxPullbackPct: 20,
-        minReboundPct: 2, maxReboundPct: 8,
-        minNetFlow3sSol: 2, minBuyers3s: 15, maxSingleSell3sSol: 2.5,
-        requireFlowAcceleration: true,
-        exitProfileIds: ['X25_RATCHET_PP'], capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_BIG_WINNER_PP_CAPACITY_SOLS', ['0.05', '0.1', '0.25'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'X50_15', label: '+20 sell 50%; adaptive 15/20/25 trail',
-        coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 15,
-        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
-        trailingTiers: [
-          { activationPct: 80, drawdownPct: 20 },
-          { activationPct: 150, drawdownPct: 25 },
-        ],
-        profitFloors: [], maxHoldMs: 180_000,
-      },
-      {
-        id: 'X50_12', label: '+20 sell 50%; tighter -12 hard stop',
-        coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 12,
-        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
-        trailingTiers: [
-          { activationPct: 80, drawdownPct: 20 },
-          { activationPct: 150, drawdownPct: 25 },
-        ],
-        profitFloors: [], maxHoldMs: 180_000,
-      },
-      {
-        id: 'X50_RATCHET', label: '+20 sell 50%; runner profit ratchet',
-        coreActivationPct: 20, coreWeightPct: 50, hardStopPct: 15,
-        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
-        trailingTiers: [],
-        profitFloors: [
-          { activationPct: 50, lockPct: 20 },
-          { activationPct: 100, lockPct: 60 },
-          { activationPct: 150, lockPct: 100 },
-          { activationPct: 250, lockPct: 170 },
-        ],
-        maxHoldMs: 300_000,
-      },
-      {
-        id: 'X40_RATCHET', label: '+20 sell 40%; 60% runner profit ratchet',
-        coreActivationPct: 20, coreWeightPct: 40, hardStopPct: 15,
-        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
-        trailingTiers: [],
-        profitFloors: [
-          { activationPct: 50, lockPct: 20 },
-          { activationPct: 100, lockPct: 60 },
-          { activationPct: 150, lockPct: 100 },
-          { activationPct: 250, lockPct: 170 },
-        ],
-        maxHoldMs: 300_000,
-      },
-      {
-        id: 'XFIX60_H15', label: '-15% hard stop / otherwise fixed 60s',
-        mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
-        trailingTiers: [], profitFloors: [], maxHoldMs: 60_000,
-      },
-      {
-        id: 'XFIX120_H15', label: '-15% hard stop / otherwise fixed 120s',
-        mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
-        trailingTiers: [], profitFloors: [], maxHoldMs: 120_000,
-      },
-      {
-        id: 'XFIX120_H15_PP', label: 'PP Â· -15% hard stop / otherwise fixed 120s',
-        entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
-        mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
-        trailingTiers: [], profitFloors: [], maxHoldMs: 120_000,
-      },
-      {
-        id: 'XFIX240_H15_PP', label: 'PP Â· -15% hard stop / otherwise fixed 240s',
-        entryProfileIds: ['PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30'],
-        mode: 'FIXED_HOLD', coreWeightPct: 0, hardStopPct: 15,
-        trailingTiers: [], profitFloors: [], maxHoldMs: 240_000,
-      },
-      {
-        id: 'X25_RATCHET_PP', label: 'PP Â· 25% Core + 75% protected runner',
-        entryProfileIds: [
-          'PP_DIRECT_10', 'PP_PULLBACK_8_20', 'PP_PULLBACK_8_30',
-          'PP_PULLBACK_8_30_NF8_3',
-          'PP20_B45', 'PP20_EARLY_BREADTH', 'PP20_QUALITY',
-        ],
-        coreActivationPct: 20, coreWeightPct: 25, hardStopPct: 15,
-        trailingActivationPct: 30, baseTrailingDrawdownPct: 15,
-        trailingTiers: [],
-        profitFloors: [
-          { activationPct: 50, lockPct: 20 },
-          { activationPct: 100, lockPct: 60 },
-          { activationPct: 150, lockPct: 100 },
-          { activationPct: 250, lockPct: 170 },
-        ],
-        maxHoldMs: 300_000,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_BIG_WINNER_SHADOW_POSITION_SOL'),
-    }),
-  },
-
-  // Independent first-pullback execution research. References are emitted by
-  // LaunchQualityObserver, but every simulated position lives in its own table.
-  launchPullbackShadow: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
-    entryDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_ENTRY_TIMEOUT_MS', 2_000, {
-      min: 1,
-    }),
-    exitDelayMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_EXIT_TIMEOUT_MS', 5_000, {
-      min: 1,
-    }),
-    maxEntryPriceJumpPct: numberEnv(
-      'FLOW_LAUNCH_PULLBACK_SHADOW_MAX_ENTRY_JUMP_PCT',
-      10,
-      { min: 0, max: 100 },
-    ),
-    bigWinnerPct: numberEnv('FLOW_LAUNCH_PULLBACK_SHADOW_BIG_WINNER_PCT', 50, {
-      min: 1,
-    }),
-    // These cohorts have stable, large negative samples. They remain defined so
-    // their historical rows and any already-open position can still be restored,
-    // but LaunchPullbackShadowSuite no longer creates new positions for them.
-    // Only the three 30-SOL right-tail execution controls keep collecting data.
-    retiredCohortIds: [
-      'F1_3S', 'F1_8S', 'F2_3S', 'F2_8S', 'F3_3S', 'F3_8S',
-      'FQ1_3S', 'FQ1_8S', 'FQ2_3S', 'FQ2_8S',
-      'FT_A', 'FT_B', 'FT_C', 'FT_D', 'FQ_X15', 'FQ_X30',
-      'FD10_R3_5S', 'FD12_5_R3_5S', 'FD12_5_R5_5S', 'FD15_R5_5S',
-      'FC_BASE_X12', 'FC_STRICT_NF20_X12', 'FC_BASE_STAIR60',
-      'FC_BASE_WEAK3_X12', 'FC_BASE_WEAK5_X12',
-      'FO_F2_J2_3S', 'FO_C70_10S', 'FO_C70_T15',
-      'FO_RB10_30S', 'FO_RB10_T20', 'FO_RB10_H20_60S', 'FO_RB10_H20_120S',
-      'FO_D12_R3_10S', 'FO_D12_R3_T15', 'FO_D12_R3_Q_10S',
-      'FO_D12_R3_QC_10S', 'FO_D12_R3_Q_T10_H30',
-      'F2_8S_NF30', 'FT_C_NF30',
-      'F_ABSORB3_8S', 'F_ABSORB5_RUNNER', 'F_REACCEL0_8S',
-    ],
-    profiles: [
-      {
-        id: 'F1',
-        label: 'F1 Â· NetFlowâ‰¥15 / Creatorâ‰¤5%',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F1_MIN_NET_FLOW_SOL', 15, { min: 0 }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F1_MAX_CREATOR_SHARE_PCT',
-          5,
-          { min: 0, max: 100 },
-        ),
-      },
-      {
-        id: 'F2',
-        label: 'F2 Â· NetFlowâ‰¥20 / Creatorâ‰¤10%',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, { min: 0 }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-      },
-      {
-        id: 'F3',
-        label: 'F3 å¯¹ç…§ Â· NetFlowâ‰¥20 / Creatorâ‰¤20%',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F3_MIN_NET_FLOW_SOL', 20, { min: 0 }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F3_MAX_CREATOR_SHARE_PCT',
-          20,
-          { min: 0, max: 100 },
-        ),
-      },
-      {
-        id: 'FQ1',
-        label: 'FQ1 å‰å‘ Â· F1 + Buyersâ‰¥10 / Recentâ‰¥3 / Retentionâ‰¥50% / Top3â‰¤70%',
-        minNetFlowSol: 15,
-        maxCreatorSharePct: 5,
-        minBuyers: 10,
-        minRecentBuyers: 3,
-        minRetentionPct: 50,
-        maxTop3SharePct: 70,
-      },
-      {
-        id: 'FQ2',
-        label: 'FQ2 å‰å‘ Â· F1 + Buyersâ‰¥15 / Recentâ‰¥3 / Retentionâ‰¥50% / Top3â‰¤70%',
-        minNetFlowSol: 15,
-        maxCreatorSharePct: 5,
-        minBuyers: 15,
-        minRecentBuyers: 3,
-        minRetentionPct: 50,
-        maxTop3SharePct: 70,
-      },
-    ],
-    holds: [
-      {
-        id: '3S',
-        label: 'å›ºå®šæŒæœ‰3ç§’',
-        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_3S_MS', 3_000, {
-          min: 250,
-        }),
-      },
-      {
-        id: '8S',
-        label: 'å›ºå®šæŒæœ‰8ç§’',
-        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
-          min: 250,
-        }),
-      },
-    ],
-    // These cohorts retain the exact F1/F2 entry filters above and only vary exits.
-    // Their IDs are intentionally independent from the historical fixed-hold cohorts.
-    trailingCohorts: [
-      {
-        id: 'FT_A',
-        label: 'FT-A Â· F2ç«‹å³æ¿€æ´»/å›žæ’¤20%/æ— ç¡¬æ­¢æŸ',
-        profileId: 'F2',
-        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_ACTIVATION_PCT', 0, {
-          min: 0,
-        }),
-        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_A_DRAWDOWN_PCT', 20, {
-          min: 0.1,
-          max: 100,
-        }),
-        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MIN_HOLD_MS', 3_000, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_A_MAX_HOLD_MS', 120_000, {
-          min: 1_000,
-        }),
-        hardStopPct: null,
-      },
-      {
-        id: 'FT_B',
-        label: 'FT-B Â· F1ç›ˆåˆ©10%æ¿€æ´»/å›žæ’¤20%/æ­¢æŸ30%',
-        profileId: 'F1',
-        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_ACTIVATION_PCT', 10, {
-          min: 0,
-        }),
-        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_DRAWDOWN_PCT', 20, {
-          min: 0.1,
-          max: 100,
-        }),
-        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MIN_HOLD_MS', 3_000, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_B_MAX_HOLD_MS', 120_000, {
-          min: 1_000,
-        }),
-        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_B_HARD_STOP_PCT', 30, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-      {
-        id: 'FT_C',
-        label: 'FT-C Â· F2ç›ˆåˆ©30%æ¿€æ´»/å›žæ’¤20%/æ­¢æŸ30%',
-        profileId: 'F2',
-        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
-          min: 0,
-        }),
-        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
-          min: 0.1,
-          max: 100,
-        }),
-        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
-          min: 1_000,
-        }),
-        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-      {
-        id: 'FT_D',
-        label: 'FT-Då¯¹ç…§ Â· F1ç›ˆåˆ©30%æ¿€æ´»/å›žæ’¤15%/æ­¢æŸ30%',
-        profileId: 'F1',
-        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_ACTIVATION_PCT', 30, {
-          min: 0,
-        }),
-        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_DRAWDOWN_PCT', 15, {
-          min: 0.1,
-          max: 100,
-        }),
-        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MIN_HOLD_MS', 3_000, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_D_MAX_HOLD_MS', 120_000, {
-          min: 1_000,
-        }),
-        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_D_HARD_STOP_PCT', 30, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-      {
-        id: 'FQ_X15',
-        label: 'FQ-X15 Â· FQ1ç›ˆåˆ©8%æ¿€æ´»/å›žæ’¤5%/15ç§’å…œåº•',
-        profileId: 'FQ1',
-        trailingActivationPct: 8,
-        trailingDrawdownPct: 5,
-        minHoldMs: 1_000,
-        maxHoldMs: 15_000,
-        hardStopPct: 12.5,
-      },
-      {
-        id: 'FQ_X30',
-        label: 'FQ-X30 Â· FQ2ç›ˆåˆ©10%æ¿€æ´»/å›žæ’¤7.5%/30ç§’å…œåº•',
-        profileId: 'FQ2',
-        trailingActivationPct: 10,
-        trailingDrawdownPct: 7.5,
-        minHoldMs: 2_000,
-        maxHoldMs: 30_000,
-        hardStopPct: 15,
-      },
-    ],
-    // New entry cohorts intentionally do not reuse F1/F2/F3/FT IDs. All four
-    // share the same quality/exit gates so their entry depth is comparable.
-    deepCohorts: launchDeepPullbackProfiles.map((profile) => ({
-      ...profile,
-      profileId: profile.id,
-      minNetFlowSol: numberEnv('FLOW_LAUNCH_DEEP_MIN_NET_FLOW_SOL', 15, { min: 0 }),
-      maxCreatorSharePct: numberEnv('FLOW_LAUNCH_DEEP_MAX_CREATOR_SHARE_PCT', 5, {
-        min: 0, max: 100,
-      }),
-      minBuyers: 0,
-      minRecentBuyers: 0,
-      minRetentionPct: 0,
-      maxTop3SharePct: 100,
-      fixedHoldMs: integerEnv('FLOW_LAUNCH_DEEP_FIXED_HOLD_MS', 5_000, { min: 250 }),
-    })),
-    // New independent cohorts preserve all historical F/FT/FD definitions.
-    // They are based on the chronological 70/30 screen from the latest export:
-    // low holder concentration was stable at 10s, while creator<=5% with
-    // continuing buyers retained a useful 30s right tail.
-    optimizationCohorts: [
-      ...(booleanEnv('FLOW_LAUNCH_FLOW_CONSENSUS_ENABLED', true) ? [
-        {
-          id: 'FC_BASE_X12',
-          label: 'FC-Base Â· FO-RB10 + prior-5s Flow BuyersW3>=3 Â· jump<=3% Â· fixed12s',
-          referenceProfileId: 'LEGACY_7_5_R3',
-          referencePullbackPct: 7.5,
-          referenceReboundPct: 3,
-          profileId: 'FC_BASE',
-          minNetFlowSol: 5,
-          maxCreatorSharePct: 5,
-          minBuyers: 0,
-          minRecentBuyers: 10,
-          minRetentionPct: 0,
-          maxTop3SharePct: 100,
-          flowConfirmationWindowMs: 5_000,
-          minFlowSignalBuyersW3: 3,
-          maxEntryPriceJumpPct: 3,
-          exitPolicy: 'FIXED_HOLD',
-          fixedHoldMs: 12_000,
-        },
-        {
-          id: 'FC_STRICT_NF20_X12',
-          label: 'FC-Strict Â· FC + NetFlow>=20 Â· jump<=5% Â· fixed12s',
-          referenceProfileId: 'LEGACY_7_5_R3',
-          referencePullbackPct: 7.5,
-          referenceReboundPct: 3,
-          profileId: 'FC_STRICT',
-          minNetFlowSol: 20,
-          maxCreatorSharePct: 5,
-          minBuyers: 0,
-          minRecentBuyers: 10,
-          minRetentionPct: 0,
-          maxTop3SharePct: 100,
-          flowConfirmationWindowMs: 5_000,
-          minFlowSignalBuyersW3: 3,
-          maxEntryPriceJumpPct: 5,
-          exitPolicy: 'FIXED_HOLD',
-          fixedHoldMs: 12_000,
-        },
-        {
-          id: 'FC_BASE_STAIR60',
-          label: 'FC-Base Â· 20/40/80% tiered trailing Â· max60s',
-          referenceProfileId: 'LEGACY_7_5_R3',
-          referencePullbackPct: 7.5,
-          referenceReboundPct: 3,
-          profileId: 'FC_BASE',
-          minNetFlowSol: 5,
-          maxCreatorSharePct: 5,
-          minBuyers: 0,
-          minRecentBuyers: 10,
-          minRetentionPct: 0,
-          maxTop3SharePct: 100,
-          flowConfirmationWindowMs: 5_000,
-          minFlowSignalBuyersW3: 3,
-          maxEntryPriceJumpPct: 3,
-          exitPolicy: 'TIERED_TRAILING',
-          trailingTiers: [
-            { activationPct: 20, drawdownPct: 10 },
-            { activationPct: 40, drawdownPct: 15 },
-            { activationPct: 80, drawdownPct: 20 },
-          ],
-          minHoldMs: 0,
-          maxHoldMs: 60_000,
-          hardStopPct: 25,
-        },
-        {
-          id: 'FC_BASE_WEAK3_X12',
-          label: 'FC-Base Â· 3s MFE<5% early exit Â· max12s',
-          referenceProfileId: 'LEGACY_7_5_R3',
-          referencePullbackPct: 7.5,
-          referenceReboundPct: 3,
-          profileId: 'FC_BASE',
-          minNetFlowSol: 5,
-          maxCreatorSharePct: 5,
-          minBuyers: 0,
-          minRecentBuyers: 10,
-          minRetentionPct: 0,
-          maxTop3SharePct: 100,
-          flowConfirmationWindowMs: 5_000,
-          minFlowSignalBuyersW3: 3,
-          maxEntryPriceJumpPct: 3,
-          exitPolicy: 'EARLY_STRENGTH',
-          strengthCheckMs: 3_000,
-          minStrengthMfePct: 5,
-          maxHoldMs: 12_000,
-          hardStopPct: 25,
-        },
-        {
-          id: 'FC_BASE_WEAK5_X12',
-          label: 'FC-Base Â· 5s MFE<10% early exit Â· max12s',
-          referenceProfileId: 'LEGACY_7_5_R3',
-          referencePullbackPct: 7.5,
-          referenceReboundPct: 3,
-          profileId: 'FC_BASE',
-          minNetFlowSol: 5,
-          maxCreatorSharePct: 5,
-          minBuyers: 0,
-          minRecentBuyers: 10,
-          minRetentionPct: 0,
-          maxTop3SharePct: 100,
-          flowConfirmationWindowMs: 5_000,
-          minFlowSignalBuyersW3: 3,
-          maxEntryPriceJumpPct: 3,
-          exitPolicy: 'EARLY_STRENGTH',
-          strengthCheckMs: 5_000,
-          minStrengthMfePct: 10,
-          maxHoldMs: 12_000,
-          hardStopPct: 25,
-        },
-      ] : []),
-      {
-        id: 'FO_F2_J2_3S',
-        label: 'FO-F2-J2 Â· F2 + å…¥åœºè·³ä»·<=2% / fixed 3s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_F2_J2',
-        minNetFlowSol: 20,
-        maxCreatorSharePct: 10,
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        maxEntryPriceJumpPct: 2,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 3_000,
-      },
-      {
-        id: 'FO_C70_10S',
-        label: 'FO-C70 Â· Top3<=70% / fixed 10s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_C70',
-        minNetFlowSol: 0,
-        maxCreatorSharePct: 100,
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 70,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 10_000,
-      },
-      {
-        id: 'FO_C70_T15',
-        label: 'FO-C70-T15 Â· Top3<=70% / trailing 15%',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_C70',
-        minNetFlowSol: 0,
-        maxCreatorSharePct: 100,
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 70,
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: 10,
-        trailingDrawdownPct: 15,
-        hardStopPct: 25,
-        minHoldMs: 1_000,
-        maxHoldMs: 60_000,
-      },
-      {
-        id: 'FO_RB10_30S',
-        label: 'FO-RB10 Â· Creator<=5% / recent buyers>=10 / fixed 30s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_RB10',
-        minNetFlowSol: 5,
-        maxCreatorSharePct: 5,
-        minBuyers: 0,
-        minRecentBuyers: 10,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 30_000,
-        liveStrategyId: 'launch_pullback_fo_rb10_30s_live',
-      },
-      {
-        id: 'FO_RB10_T20',
-        label: 'FO-RB10-T20 Â· Creator<=5% / recent buyers>=10 / trailing 20%',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_RB10',
-        minNetFlowSol: 5,
-        maxCreatorSharePct: 5,
-        minBuyers: 0,
-        minRecentBuyers: 10,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: 20,
-        trailingDrawdownPct: 20,
-        hardStopPct: 30,
-        minHoldMs: 2_000,
-        maxHoldMs: 120_000,
-      },
-      {
-        id: 'FO_RB10_H20_60S',
-        label: 'FO-RB10 | -20% hard stop / otherwise fixed 60s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_RB10',
-        minNetFlowSol: 5,
-        maxCreatorSharePct: 5,
-        minBuyers: 0,
-        minRecentBuyers: 10,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 60_000,
-        hardStopPct: 20,
-      },
-      {
-        id: 'FO_RB10_H20_120S',
-        label: 'FO-RB10 | -20% hard stop / otherwise fixed 120s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_RB10',
-        minNetFlowSol: 5,
-        maxCreatorSharePct: 5,
-        minBuyers: 0,
-        minRecentBuyers: 10,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 120_000,
-        hardStopPct: 20,
-      },
-      {
-        id: 'FO_D12_R3_10S',
-        label: 'FO-D12-R3 Â· deep pullback / fixed 10s',
-        referenceProfileId: 'DEEP_D12_5_R3',
-        referencePullbackPct: 12.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_D12_R3',
-        minNetFlowSol: 15,
-        maxCreatorSharePct: 5,
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 10_000,
-      },
-      {
-        id: 'FO_D12_R3_T15',
-        label: 'FO-D12-R3-T15 Â· deep pullback / trailing 15%',
-        referenceProfileId: 'DEEP_D12_5_R3',
-        referencePullbackPct: 12.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_D12_R3',
-        minNetFlowSol: 15,
-        maxCreatorSharePct: 5,
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: 10,
-        trailingDrawdownPct: 15,
-        hardStopPct: 25,
-        minHoldMs: 1_000,
-        maxHoldMs: 60_000,
-      },
-      {
-        id: 'FO_D12_R3_Q_10S',
-        label: 'FO-D12-R3-Q | retention>=70 / Top3<50 / NetFlow 15-50 / fixed 10s',
-        referenceProfileId: 'DEEP_D12_5_R3',
-        referencePullbackPct: 12.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_D12_R3_Q',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_NET_FLOW_SOL', 15, {
-          min: 0,
-        }),
-        maxNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_NET_FLOW_SOL', 50, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_D12_QUALITY_MAX_CREATOR_SHARE_PCT',
-          5,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_RETENTION_PCT', 70, {
-          min: 0, max: 100,
-        }),
-        maxTop3SharePct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_TOP3_SHARE_PCT', 50, {
-          min: 0, max: 100,
-        }),
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_LAUNCH_D12_QUALITY_FIXED_HOLD_MS', 10_000, {
-          min: 250,
-        }),
-      },
-      {
-        id: 'FO_D12_R3_QC_10S',
-        label: 'FO-D12-R3-QC | Q + Creator<=3 / fixed 10s',
-        referenceProfileId: 'DEEP_D12_5_R3',
-        referencePullbackPct: 12.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_D12_R3_QC',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_NET_FLOW_SOL', 15, {
-          min: 0,
-        }),
-        maxNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_NET_FLOW_SOL', 50, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_D12_STRICT_MAX_CREATOR_SHARE_PCT',
-          3,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_RETENTION_PCT', 70, {
-          min: 0, max: 100,
-        }),
-        maxTop3SharePct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_TOP3_SHARE_PCT', 50, {
-          min: 0, max: 100,
-        }),
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_LAUNCH_D12_QUALITY_FIXED_HOLD_MS', 10_000, {
-          min: 250,
-        }),
-      },
-      {
-        id: 'FO_D12_R3_Q_T10_H30',
-        label: 'FO-D12-R3-Q-T10 | +20 activation / drawdown 10 / max 30s',
-        referenceProfileId: 'DEEP_D12_5_R3',
-        referencePullbackPct: 12.5,
-        referenceReboundPct: 3,
-        profileId: 'FO_D12_R3_Q',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_NET_FLOW_SOL', 15, {
-          min: 0,
-        }),
-        maxNetFlowSol: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_NET_FLOW_SOL', 50, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_D12_QUALITY_MAX_CREATOR_SHARE_PCT',
-          5,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MIN_RETENTION_PCT', 70, {
-          min: 0, max: 100,
-        }),
-        maxTop3SharePct: numberEnv('FLOW_LAUNCH_D12_QUALITY_MAX_TOP3_SHARE_PCT', 50, {
-          min: 0, max: 100,
-        }),
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: numberEnv(
-          'FLOW_LAUNCH_D12_QUALITY_TRAILING_ACTIVATION_PCT', 20, { min: 0 },
-        ),
-        trailingDrawdownPct: numberEnv(
-          'FLOW_LAUNCH_D12_QUALITY_TRAILING_DRAWDOWN_PCT', 10, { min: 0.1, max: 100 },
-        ),
-        hardStopPct: numberEnv(
-          'FLOW_LAUNCH_D12_QUALITY_HARD_STOP_PCT', 20, { min: 0.1, max: 100 },
-        ),
-        minHoldMs: 0,
-        maxHoldMs: integerEnv('FLOW_LAUNCH_D12_QUALITY_TRAILING_MAX_HOLD_MS', 30_000, {
-          min: 1_000,
-        }),
-      },
-
-      {
-        id: 'F2_8S_NF30',
-        label: 'F2-8S-NF30 | F2 + NetFlow>=30 SOL / fixed 8s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F2_NF30',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
-          min: 250,
-        }),
-      },
-      {
-        id: 'FT_C_NF30',
-        label: 'FT-C-NF30 | F2 + NetFlow>=30 SOL / right-tail trailing',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F2_NF30',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
-          min: 0,
-        }),
-        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
-          min: 0.1,
-          max: 100,
-        }),
-        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
-          min: 1_000,
-        }),
-        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-      {
-        id: 'F2_NF30_H20_60S',
-        label: 'F2-NF30 | -20% hard stop / otherwise fixed 60s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F2_NF30',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 60_000,
-        hardStopPct: 20,
-      },
-      {
-        id: 'F2_NF30_H20_120S',
-        label: 'F2-NF30 | -20% hard stop / otherwise fixed 120s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F2_NF30',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 120_000,
-        hardStopPct: 20,
-      },
-      {
-        id: 'F2_NF30_H20_120S_EXEC1',
-        label: 'F2-NF30-EXEC1 | 1 SOL executable entry/exit / H20 / fixed 120s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F2_NF30_EXEC1',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_NF30_MIN_NET_FLOW_SOL', 30, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        positionSizeSol: 1,
-        requireExecutableCapacity: true,
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: 120_000,
-        hardStopPct: 20,
-      },
-      {
-        id: 'F_ABSORB3_8S',
-        label: 'F-ABSORB3 | F2 + peak sell>=3 SOL + refill>=50% / fixed 8s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F_ABSORB3',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        minSellSolSincePeak: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_ABSORB3_MIN_SELL_SOL', 3, { min: 0 },
-        ),
-        minBuyRefillRatio: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
-        ),
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
-          min: 250,
-        }),
-      },
-      {
-        id: 'F_ABSORB5_RUNNER',
-        label: 'F-ABSORB5 | F2 + peak sell>=5 SOL + refill>=50% / right-tail trailing',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F_ABSORB5',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        minSellSolSincePeak: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_ABSORB5_MIN_SELL_SOL', 5, { min: 0 },
-        ),
-        minBuyRefillRatio: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_MIN_BUY_REFILL_RATIO', 0.5, { min: 0 },
-        ),
-        exitPolicy: 'TRAILING_STOP',
-        trailingActivationPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_ACTIVATION_PCT', 30, {
-          min: 0,
-        }),
-        trailingDrawdownPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_DRAWDOWN_PCT', 20, {
-          min: 0.1,
-          max: 100,
-        }),
-        minHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MIN_HOLD_MS', 0, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_FT_C_MAX_HOLD_MS', 120_000, {
-          min: 1_000,
-        }),
-        hardStopPct: numberEnv('FLOW_LAUNCH_PULLBACK_FT_C_HARD_STOP_PCT', 30, {
-          min: 0.1,
-          max: 100,
-        }),
-      },
-      {
-        id: 'F_REACCEL0_8S',
-        label: 'F-REACCEL0 | F2 + current 1s net>=0 + acceleration>=0 / fixed 8s',
-        referenceProfileId: 'LEGACY_7_5_R3',
-        referencePullbackPct: 7.5,
-        referenceReboundPct: 3,
-        profileId: 'F_REACCEL0',
-        minNetFlowSol: numberEnv('FLOW_LAUNCH_PULLBACK_F2_MIN_NET_FLOW_SOL', 20, {
-          min: 0,
-        }),
-        maxCreatorSharePct: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_F2_MAX_CREATOR_SHARE_PCT',
-          10,
-          { min: 0, max: 100 },
-        ),
-        minBuyers: 0,
-        minRecentBuyers: 0,
-        minRetentionPct: 0,
-        maxTop3SharePct: 100,
-        minRecentNetFlow1s: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_NET_FLOW_1S_SOL', 0,
-        ),
-        minNetFlowAcceleration1s: numberEnv(
-          'FLOW_LAUNCH_PULLBACK_REACCEL_MIN_ACCEL_1S_SOL', 0,
-        ),
-        exitPolicy: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_LAUNCH_PULLBACK_SHADOW_HOLD_8S_MS', 8_000, {
-          min: 250,
-        }),
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_LAUNCH_PULLBACK_SHADOW_POSITION_SOL'),
-    }),
-  },
-
-  // Forward-only public-order-flow analogue of the profitable CYA wallet's
-  // earliest entries. Signals are evaluated only when a completed Solana slot
-  // is followed by the first public trade of the next slot. The target wallet
-  // and all monitored Smart Wallets are excluded from causal features; a later
-  // target OPEN is recorded strictly as a future label.
-  cyaSlotFlowShadow: {
-    // Completed-slot CSF cohorts stayed negative after execution costs. Keep
-    // their historical rows visible while disabling new causal episodes.
-    enabled: booleanEnv('FLOW_CYA_SLOT_FLOW_SHADOW_V2_ENABLED', false),
-    targetWallet: process.env.FLOW_CYA_SLOT_FLOW_TARGET_WALLET
-      || 'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o',
-    positionSizeSol: shadowPositionEnv('FLOW_CYA_SLOT_FLOW_POSITION_SOL'),
-    featureWindowMs: integerEnv('FLOW_CYA_SLOT_FLOW_FEATURE_WINDOW_MS', 5_000, {
-      min: 2_000, max: 10_000,
-    }),
-    maxTradesPerMint: integerEnv('FLOW_CYA_SLOT_FLOW_MAX_TRADES_PER_MINT', 256, {
-      min: 32, max: 2_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_CYA_SLOT_FLOW_STATE_RETENTION_MS', 10 * 60_000, {
-      min: 60_000, max: 60 * 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_CYA_SLOT_FLOW_EPISODE_COOLDOWN_MS', 10 * 60_000, {
-      min: 1_000,
-    }),
-    targetLabelWindowMs: integerEnv('FLOW_CYA_SLOT_FLOW_TARGET_LABEL_WINDOW_MS', 15_000, {
-      min: 1_000, max: 60_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_CYA_SLOT_FLOW_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_CYA_SLOT_FLOW_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_CYA_SLOT_FLOW_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_CYA_SLOT_FLOW_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ENTRY_JUMP_PCT', 35, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ENTRY_DROP_PCT', 35, {
-      min: 0, max: 100,
-    }),
-    maxEntryImpactPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ENTRY_IMPACT_PCT', 25, {
-      min: 0, max: 1_000,
-    }),
-    maxAddImpactPct: numberEnv('FLOW_CYA_SLOT_FLOW_MAX_ADD_IMPACT_PCT', 20, {
-      min: 0, max: 1_000,
-    }),
-    entryProfiles: [
-      {
-        id: 'CSF_C03',
-        label: 'CSF-C03 Â· 0â€“3s early control',
-        minAgeMs: 0, maxAgeMs: 3_000,
-        minBuyers5s: 5, minNetFlow5sSol: 5,
-        minBuyTxSharePct: 75, maxLargestBuyerSharePct: 40,
-        minReturn5sPct: 20, maxReturn5sPct: 140,
-        minSourceSlotBuyers: 1, minSourceSlotNetFlowSol: 0,
-        requireCreatorNoSell: false,
-        newEntriesEnabled: false,
-      },
-      {
-        id: 'CSF_E35',
-        label: 'CSF-E35 Â· 3â€“5s diversified prior-slot flow',
-        minAgeMs: 3_000, maxAgeMs: 5_000,
-        minBuyers5s: 5, minNetFlow5sSol: 5,
-        minBuyTxSharePct: 75, maxLargestBuyerSharePct: 40,
-        minReturn5sPct: 20, maxReturn5sPct: 140,
-        minSourceSlotBuyers: 1, minSourceSlotNetFlowSol: 0,
-        requireCreatorNoSell: false,
-        newEntriesEnabled: false,
-      },
-      {
-        id: 'CSF_E510',
-        label: 'CSF-E510 Â· 5â€“10s broad persistent flow',
-        minAgeMs: 5_000, maxAgeMs: 10_000,
-        minBuyers5s: 7, minNetFlow5sSol: 8,
-        minBuyTxSharePct: 80, maxLargestBuyerSharePct: 35,
-        minReturn5sPct: 20, maxReturn5sPct: 140,
-        minSourceSlotBuyers: 2, minSourceSlotNetFlowSol: 0.25,
-        requireCreatorNoSell: false,
-        newEntriesEnabled: false,
-      },
-      {
-        id: 'CSF_S310',
-        label: 'CSF-S310 Â· 3â€“10s strict / creator no-sell',
-        minAgeMs: 3_000, maxAgeMs: 10_000,
-        minBuyers5s: 9, minNetFlow5sSol: 10,
-        minBuyTxSharePct: 80, maxLargestBuyerSharePct: 30,
-        minReturn5sPct: 30, maxReturn5sPct: 120,
-        minSourceSlotBuyers: 2, minSourceSlotNetFlowSol: 0.5,
-        requireCreatorNoSell: true,
-        newEntriesEnabled: false,
-      },
-      {
-        id: 'CSF_E510_Q',
-        label: 'CSF-E510-Q Â· 5â€“10s strict diversified flow',
-        minAgeMs: 5_000, maxAgeMs: 10_000,
-        minBuyers5s: 15, minNetFlow5sSol: 12,
-        minBuyTxSharePct: 80, maxLargestBuyerSharePct: 35,
-        minReturn5sPct: 20, maxReturn5sPct: 140,
-        minSourceSlotBuyers: 3, minSourceSlotNetFlowSol: 0.25,
-        requireCreatorNoSell: false,
-        newEntriesEnabled: true,
-        managementProfileIds: ['F20'],
-      },
-    ],
-    managementProfiles: [
-      {
-        id: 'F20', label: '20s fixed control / no add',
-        hardStopPct: 30, noContinuationMs: 3_000, minContinuationMfePct: 5,
-        maxHoldMs: 20_000, trailingActivationPct: 0, trailingStopPct: 0,
-        addActivationPct: 0, addMaxAgeMs: 0, addCooldownMs: 0,
-        addStepPct: 0, addFraction: 0, maxAdds: 0,
-        minAddNetFlow1sSol: 0, minAddBuyers1s: 0, minAddBuyTxSharePct: 0,
-      },
-      {
-        id: 'A50_R120', label: '+50% confirmed adds / 120s runner',
-        hardStopPct: 30, noContinuationMs: 3_000, minContinuationMfePct: 10,
-        maxHoldMs: 120_000, trailingActivationPct: 80, trailingStopPct: 25,
-        addActivationPct: 50, addMaxAgeMs: 2_500, addCooldownMs: 250,
-        addStepPct: 15, addFraction: 0.2, maxAdds: 4,
-        minAddNetFlow1sSol: 0.5, minAddBuyers1s: 2, minAddBuyTxSharePct: 70,
-      },
-      {
-        id: 'A60_R120', label: '+60% strict adds / 120s runner',
-        hardStopPct: 30, noContinuationMs: 3_000, minContinuationMfePct: 10,
-        maxHoldMs: 120_000, trailingActivationPct: 100, trailingStopPct: 30,
-        addActivationPct: 60, addMaxAgeMs: 2_500, addCooldownMs: 250,
-        addStepPct: 15, addFraction: 0.2, maxAdds: 4,
-        minAddNetFlow1sSol: 1, minAddBuyers1s: 3, minAddBuyTxSharePct: 75,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_CYA_SLOT_FLOW_POSITION_SOL'),
-    }),
-  },
-
-  // Forward-only public-flow experiment reconstructed from the profitable CYA
-  // wallet's earliest entries. Smart-wallet transactions never contribute to
-  // the causal signal; CYA's later OPEN is retained only as a future label.
-  // All cohorts use reserve-priced 1 SOL execution and a bounded 15s queue.
-  cyaOrganicBurstShadow: {
-    enabled: booleanEnv('FLOW_CYA_ORGANIC_BURST_SHADOW_ENABLED', true),
-    targetWallet: process.env.FLOW_CYA_ORGANIC_BURST_TARGET_WALLET
-      || 'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o',
-    positionSizeSol: shadowPositionEnv('FLOW_CYA_ORGANIC_BURST_POSITION_SOL'),
-    featureWindowMs: integerEnv('FLOW_CYA_ORGANIC_BURST_FEATURE_WINDOW_MS', 15_000, {
-      min: 5_000, max: 30_000,
-    }),
-    maxTradesPerMint: integerEnv('FLOW_CYA_ORGANIC_BURST_MAX_TRADES_PER_MINT', 256, {
-      min: 32, max: 2_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_CYA_ORGANIC_BURST_STATE_RETENTION_MS', 10 * 60_000, {
-      min: 60_000, max: 60 * 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_CYA_ORGANIC_BURST_EPISODE_COOLDOWN_MS', 10 * 60_000, {
-      min: 1_000,
-    }),
-    targetLabelWindowMs: integerEnv('FLOW_CYA_ORGANIC_BURST_TARGET_LABEL_WINDOW_MS', 15_000, {
-      min: 1_000, max: 60_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_ORGANIC_BURST_MAX_ENTRY_JUMP_PCT', 35, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_CYA_ORGANIC_BURST_MAX_ENTRY_DROP_PCT', 35, {
-      min: 0, max: 100,
-    }),
-    maxEntryImpactPct: numberEnv('FLOW_CYA_ORGANIC_BURST_MAX_ENTRY_IMPACT_PCT', 25, {
-      min: 0, max: 1_000,
-    }),
-    entryProfiles: [
-      {
-        id: 'COB_A',
-        label: 'COB-A Â· broad organic burst',
-        newEntriesEnabled: false,
-        minAgeMs: 2_000, maxAgeMs: 15_000, maxCurvePct: 60,
-        minBuyers5s: 4, minNetFlow5sSol: null, minBuyTxSharePct: 60,
-        minReturn2sPct: -5, minReturn5sPct: 5, maxReturn5sPct: 60,
-        maxReturn15sPct: null,
-      },
-      {
-        id: 'COB_B',
-        label: 'COB-B Â· recommended balanced burst',
-        newEntriesEnabled: false,
-        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: 55,
-        minBuyers5s: 4, minNetFlow5sSol: 1, minBuyTxSharePct: 65,
-        minReturn2sPct: null, minReturn5sPct: 10, maxReturn5sPct: 60,
-        maxReturn15sPct: 80,
-      },
-      {
-        id: 'COB_C',
-        label: 'COB-C Â· early positive 2s burst',
-        newEntriesEnabled: false,
-        minAgeMs: 2_000, maxAgeMs: 8_000, maxCurvePct: 50,
-        minBuyers5s: 4, minNetFlow5sSol: null, minBuyTxSharePct: 65,
-        minReturn2sPct: 0, minReturn5sPct: 10, maxReturn5sPct: 60,
-        maxReturn15sPct: null,
-      },
-      // Strict forward-only replacements. They are mutually exclusive per
-      // Mint: >=7 SOL is assigned to F first; 5-7 SOL is assigned to D.
-      // FIX30 remains the execution control. CORE25_R75_X120 preserves the
-      // right-tail research path. The retired live routes are not promoted.
-      {
-        id: 'COB_F',
-        label: 'COB-F Â· strict 7 SOL organic pullback',
-        newEntriesEnabled: true,
-        liveStrategyId: 'cya_organic_burst_cob_f_core25_runner_live',
-        liveExitProfileId: 'CORE25_R75_X120',
-        exclusiveGroup: 'COB_STRICT',
-        exitProfileIds: ['FIX30', 'CORE25_R75_X120'],
-        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
-        minBuyers5s: 10, minNetFlow5sSol: 7,
-        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
-        minReturn2sPct: 0, maxReturn2sPct: 40,
-        minReturn5sPct: null, maxReturn5sPct: null,
-        maxReturn15sPct: null, minDrawdown15sPct: 2,
-      },
-      // Forward-only execution comparator for COB-F. It deliberately keeps
-      // the same public-flow signal but reproduces the retired live route's
-      // 0.1 SOL size, 1.5s freshness window and stricter jump/impact limits.
-      // It never emits a live signal and does not alter the original 1 SOL
-      // COB-F cohort or any historical row.
-      {
-        id: 'COB_F_LR01',
-        label: 'COB-F-LR01 Â· 0.1 SOL live-execution replay',
-        newEntriesEnabled: booleanEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENABLED', true),
-        liveReplay: true,
-        exclusiveGroup: 'COB_F_LIVE_REPLAY',
-        exitProfileIds: ['CORE25_R75_X120'],
-        positionSizeSol: numberEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_POSITION_SOL', 0.1, {
-          min: 0.001, max: 100,
-        }),
-        entryDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_DELAY_MS', 200, {
-          min: 0, max: 10_000,
-        }),
-        entryTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_TIMEOUT_MS', 1_500, {
-          min: 1, max: 30_000,
-        }),
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_JUMP_PCT', 15,
-          { min: 0, max: 1_000 },
-        ),
-        maxEntryPriceDropPct: numberEnv(
-          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_DROP_PCT', 35,
-          { min: 0, max: 100 },
-        ),
-        maxEntryImpactPct: numberEnv(
-          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_IMPACT_PCT', 10,
-          { min: 0, max: 1_000 },
-        ),
-        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
-        minBuyers5s: 10, minNetFlow5sSol: 7,
-        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
-        minReturn2sPct: 0, maxReturn2sPct: 40,
-        minReturn5sPct: null, maxReturn5sPct: null,
-        maxReturn15sPct: null, minDrawdown15sPct: 2,
-      },
-      {
-        id: 'COB_D',
-        label: 'COB-D Â· strict 5 SOL organic pullback',
-        newEntriesEnabled: true,
-        liveStrategyId: 'cya_organic_burst_cob_d_fix30_live',
-        exclusiveGroup: 'COB_STRICT',
-        exitProfileIds: ['FIX30', 'CORE25_R75_X120'],
-        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
-        minBuyers5s: 10, minNetFlow5sSol: 5,
-        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
-        minReturn2sPct: 0, maxReturn2sPct: 40,
-        minReturn5sPct: null, maxReturn5sPct: null,
-        maxReturn15sPct: null, minDrawdown15sPct: 2,
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'INV10_X30',
-        label: 'first 10s structure invalidation / max 30s',
-        maxHoldMs: 30_000,
-        structureInvalidationEnabled: true,
-        minInvalidationHoldMs: 1_000,
-        invalidationWindowMs: 10_000,
-        invalidationDrawdownPct: 8,
-        maxInvalidationReturn2sPct: 0,
-      },
-      {
-        id: 'FIX20',
-        label: 'fixed 20s control',
-        maxHoldMs: 20_000,
-        structureInvalidationEnabled: false,
-        minInvalidationHoldMs: 0,
-        invalidationWindowMs: 0,
-        invalidationDrawdownPct: 0,
-        maxInvalidationReturn2sPct: 0,
-      },
-      {
-        id: 'FIX30',
-        label: 'fixed 30s right-tail control',
-        mode: 'FIXED_HOLD',
-        maxHoldMs: 30_000,
-        structureInvalidationEnabled: false,
-        minInvalidationHoldMs: 0,
-        invalidationWindowMs: 0,
-        invalidationDrawdownPct: 0,
-        maxInvalidationReturn2sPct: 0,
-      },
-      {
-        id: 'FLOWFADE_X60',
-        label: '5s protection / 2-of-3 flow fade / max 60s',
-        mode: 'FLOW_FADE',
-        minHoldMs: 5_000,
-        maxHoldMs: 60_000,
-        minFadeVotes: 2,
-        minSellBuyFlowRatio: 0.8,
-        maxBuyerRetentionRatio: 0.5,
-        structureInvalidationEnabled: false,
-      },
-      {
-        id: 'T30_10_X60',
-        label: '-20% stop / +30% activation / 10% drawdown / max 60s',
-        mode: 'TRAILING',
-        hardStopPct: 20,
-        minHoldMs: 0,
-        trailingActivationPct: 30,
-        trailingStopPct: 10,
-        maxHoldMs: 60_000,
-        structureInvalidationEnabled: false,
-      },
-      {
-        id: 'CORE25_R75_X120',
-        label: '+20% sell 25% / 75% stair runner / max 120s',
-        mode: 'CORE_RUNNER',
-        coreActivationPct: 20,
-        coreWeightPct: 25,
-        maxHoldMs: 120_000,
-        trailingTiers: [
-          { activationPct: 20, drawdownPct: 15 },
-          { activationPct: 50, drawdownPct: 20 },
-          { activationPct: 100, drawdownPct: 25 },
-        ],
-        structureInvalidationEnabled: false,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_CYA_ORGANIC_BURST_POSITION_SOL'),
-    }),
-  },
-
-  // Forward-only validation of the FEA early pure-buy observation. These
-  // cohorts never emit live signals. Missing executable exits stay NO_EXIT
-  // and are excluded from return statistics instead of becoming -100%.
-  earlyPureBuyBurstShadow: {
-    enabled: booleanEnv('FLOW_EARLY_PURE_BUY_BURST_SHADOW_ENABLED', true),
-    positionSizeSol: shadowPositionEnv('FLOW_EARLY_PURE_BUY_BURST_POSITION_SOL'),
-    featureWindowMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_FEATURE_WINDOW_MS', 3_000, {
-      min: 3_000, max: 10_000,
-    }),
-    maxTradesPerMint: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_TRADES_PER_MINT', 128, {
-      min: 32, max: 512,
-    }),
-    stateRetentionMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_STATE_RETENTION_MS', 120_000, {
-      min: 30_000, max: 10 * 60_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0, max: 100,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_ENTRY_DROP_PCT', 35, {
-      min: 0, max: 100,
-    }),
-    maxEntryImpactPct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_ENTRY_IMPACT_PCT', 15, {
-      min: 0, max: 100,
-    }),
-    base: {
-      maxAgeMs: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_AGE_MS', 10_000, { min: 1_000 }),
-      maxCurvePct: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_CURVE_PCT', 50, {
-        min: 1, max: 100,
-      }),
-      minNetFlow3sSol: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MIN_NETFLOW_3S_SOL', 3, {
-        min: 0,
-      }),
-      maxNetFlow3sSol: numberEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_NETFLOW_3S_SOL', 5, {
-        min: 0,
-      }),
-      minBuyers3s: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MIN_BUYERS_3S', 2, { min: 1 }),
-      maxBuyers3s: integerEnv('FLOW_EARLY_PURE_BUY_BURST_MAX_BUYERS_3S', 4, { min: 1 }),
-      maxSellTx3s: 0,
-    },
-    confirmationB: {
-      minDelayMs: 300, maxDelayMs: 500, minDeltaBuyers: 1,
-      minDeltaNetFlowSol: 0.5, maxJumpPct: 10,
-    },
-    confirmationC: {
-      minDelayMs: 1_000, maxDelayMs: 3_000,
-      minDrawdownPct: 3, maxDrawdownPct: 8,
-      minReclaimPct: 1, maxReclaimPct: 2,
-      maxSingleSellSol: 0.5, maxSellSharePct: 35,
-    },
-    entryProfiles: [
-      { id: 'EB_A', label: 'EB-A Â· immediate pure-buy burst', newEntriesEnabled: true },
-      { id: 'EB_B', label: 'EB-B Â· 300-500ms continuation', newEntriesEnabled: true },
-      { id: 'EB_C', label: 'EB-C Â· 1-3s pullback reclaim', newEntriesEnabled: true },
-    ],
-    exitProfiles: [
-      { id: 'FIX5', label: 'fixed 5s', maxHoldMs: 5_000 },
-      { id: 'FIX20', label: 'fixed 20s', maxHoldMs: 20_000 },
-      { id: 'FIX30', label: 'fixed 30s', maxHoldMs: 30_000 },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_EARLY_PURE_BUY_BURST_POSITION_SOL'),
-    }),
-  },
-
-  // Independent early Bonding Curve research derived from the original CYA
-  // hypothesis. This retired K matrix is kept separate so its historical rows
-  // never mix with the new completed-slot CSF experiment.
-  cyaEarlyPyramidShadow: {
-    enabled: provenNegativeShadowsEnabled
-      && booleanEnv('FLOW_CYA_EARLY_PYRAMID_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
-    stateWindowMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_WINDOW_MS', 5_000, {
-      min: 2_000,
-      max: 30_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_STATE_RETENTION_MS', 240_000, {
-      min: 30_000,
-      max: 15 * 60_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ENTRY_TIMEOUT_MS', 2_000, {
-      min: 1,
-    }),
-    exitDelayMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_EXIT_TIMEOUT_MS', 5_000, {
-      min: 1,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0,
-      max: 100,
-    }),
-    addStepPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_STEP_PCT', 15, {
-      min: 0.1,
-      max: 500,
-    }),
-    addFraction: numberEnv('FLOW_CYA_EARLY_PYRAMID_ADD_FRACTION', 1 / 12, {
-      min: 0.001,
-      max: 1,
-    }),
-    addCooldownMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_ADD_COOLDOWN_MS', 250, {
-      min: 0,
-      max: 30_000,
-    }),
-    maxAdds: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_ADDS', 6, { min: 0, max: 20 }),
-    firstTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP1_PCT', 50, { min: 1 }),
-    secondTakeProfitPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_TP2_PCT', 100, { min: 1 }),
-    hardStopPct: numberEnv('FLOW_CYA_EARLY_PYRAMID_HARD_STOP_PCT', 30, {
-      min: 0.1,
-      max: 100,
-    }),
-    noStrengthMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MS', 25_000, {
-      min: 1_000,
-    }),
-    noStrengthMfePct: numberEnv('FLOW_CYA_EARLY_PYRAMID_NO_STRENGTH_MFE_PCT', 20, {
-      min: 0,
-    }),
-    maxHoldMs: integerEnv('FLOW_CYA_EARLY_PYRAMID_MAX_HOLD_MS', 180_000, {
-      min: 1_000,
-    }),
-    entryProfiles: [
-      {
-        id: 'K5_30',
-        label: 'K5-30 Â· AGE 5â€“30s / Curve 20â€“60%',
-        minAgeMs: 5_000,
-        maxAgeMs: 30_000,
-        minCurvePct: 20,
-        maxCurvePct: 60,
-        minBuyers5s: 3,
-        maxBuyers5s: 14,
-        minNetFlow5s: 0.1,
-        maxNetFlow5s: 15,
-        maxReturn2sPct: 15,
-      },
-      {
-        id: 'K3_30',
-        label: 'K3-30 Â· AGE 3â€“30s / Curve 20â€“60%',
-        minAgeMs: 3_000,
-        maxAgeMs: 30_000,
-        minCurvePct: 20,
-        maxCurvePct: 60,
-        minBuyers5s: 2,
-        maxBuyers5s: 18,
-        minNetFlow5s: 0,
-        maxNetFlow5s: 20,
-        maxReturn2sPct: 25,
-      },
-    ],
-    exitProfiles: [
-      { id: 'T20', label: 'Runner peak drawdown 20%', trailingStopPct: 20 },
-      { id: 'T30', label: 'Runner peak drawdown 30%', trailingStopPct: 30 },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_CYA_EARLY_PYRAMID_POSITION_SOL'),
-    }),
-  },
-
-  // Independent pre-migration Bonding Curve momentum research. It evaluates
-  // causal order-flow edges and simulated exits only; no execution path exists.
-  bondingCurveMomentumShadow: {
-    enabled: retiredShadowsEnabled && booleanEnv('FLOW_BONDING_MOMENTUM_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
-    stateWindowMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_WINDOW_MS', 5_000, {
-      min: 5_000,
-      max: 30_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_BONDING_MOMENTUM_STATE_RETENTION_MS', 60_000, {
-      min: 5_000,
-      max: 10 * 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_BONDING_MOMENTUM_EPISODE_COOLDOWN_MS', 5_000, {
-      min: 0,
-      max: 10 * 60_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_ENTRY_TIMEOUT_MS', 2_000, {
-      min: 1,
-    }),
-    exitDelayMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_BONDING_MOMENTUM_EXIT_TIMEOUT_MS', 5_000, {
-      min: 1,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_BONDING_MOMENTUM_MAX_ENTRY_JUMP_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    snapshotHorizonsMs: millisecondListEnv(
-      'FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS',
-      [1, 2, 3, 5, 8, 10, 20, 30],
-    ),
-    maxSnapshotLagMs: integerEnv('FLOW_BONDING_MOMENTUM_MAX_SNAPSHOT_LAG_MS', 2_000, {
-      min: 0,
-      max: 30_000,
-    }),
-    flowExitNetFlowSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_NET_SOL', 0),
-    flowExitMaxBuyTxAccel: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_BUY_TX_ACCEL', 0),
-    flowExitMinSellSol: numberEnv('FLOW_BONDING_MOMENTUM_FLOW_EXIT_MIN_SELL_SOL', 0.5, {
-      min: 0,
-    }),
-    bigWinnerPct: numberEnv('FLOW_BONDING_MOMENTUM_BIG_WINNER_PCT', 50, { min: 1 }),
-    entryProfiles: [
-      {
-        id: 'H0',
-        label: 'H0 Â· Lifecycleè®¢å•æµåŸºçº¿',
-        minAgeMs: 10_000,
-        maxAgeMs: 60_000,
-        minCurvePct: 40,
-        maxCurvePct: 100,
-        minNetFlow1s: 5,
-        minFlowAccel1s: 1.5,
-        minBuyers1s: 5,
-        minBuyTx1s: 5,
-      },
-      {
-        id: 'H1',
-        label: 'H1 Â· ä¹°å•é€Ÿåº¦åŠ é€Ÿ',
-        minAgeMs: 10_000,
-        maxAgeMs: 60_000,
-        minCurvePct: 40,
-        maxCurvePct: 100,
-        minNetFlow1s: 5,
-        minFlowAccel1s: 1.5,
-        minBuyers1s: 5,
-        minBuyTx1s: 5,
-        minBuyTxAccel1s: 6,
-        maxTop1SharePct: 50,
-      },
-      {
-        id: 'H2',
-        label: 'H2 Â· æ–°ä¹°å®¶èµ„é‡‘åˆ†æ•£',
-        minAgeMs: 10_000,
-        maxAgeMs: 60_000,
-        minCurvePct: 40,
-        maxCurvePct: 100,
-        minNetFlow1s: 5,
-        minFlowAccel1s: 1.5,
-        minBuyers1s: 5,
-        minNewBuyers1s: 4,
-        minBuyTx1s: 5,
-        maxTop1SharePct: 30,
-      },
-      {
-        id: 'H3',
-        label: 'H3 Â· å–åŽ‹è¡°å‡è½¬æ¢',
-        minAgeMs: 10_000,
-        maxAgeMs: 180_000,
-        minCurvePct: 40,
-        maxCurvePct: 100,
-        minNetFlow1s: 3,
-        minFlowAccel1s: 1.5,
-        minBuyers1s: 5,
-        minBuyTx1s: 5,
-        minPriorSellSol1s: 0.5,
-        maxSellDecayRatio: 0.25,
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'X3',
-        label: 'X3 Â· å›ºå®šæŒæœ‰3ç§’',
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FIXED_HOLD_MS', 3_000, {
-          min: 250,
-        }),
-        maxHoldMs: 3_000,
-      },
-      {
-        id: 'XF',
-        label: 'XF Â· è®¢å•æµåè½¬ / 10ç§’å…œåº•',
-        exitMode: 'FLOW_REVERSAL',
-        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MIN_HOLD_MS', 500, { min: 0 }),
-        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_FLOW_MAX_HOLD_MS', 10_000, {
-          min: 1_000,
-        }),
-      },
-      {
-        id: 'XT',
-        label: 'XT Â· +10%æ¿€æ´» / å›žæ’¤7.5% / 30ç§’å…œåº•',
-        exitMode: 'WINNER_TRAIL',
-        minHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MIN_HOLD_MS', 500, { min: 0 }),
-        trailingActivationPct: numberEnv(
-          'FLOW_BONDING_MOMENTUM_TRAIL_ACTIVATION_PCT',
-          10,
-          { min: 0.1, max: 1_000 },
-        ),
-        trailingStopPct: numberEnv('FLOW_BONDING_MOMENTUM_TRAIL_STOP_PCT', 7.5, {
-          min: 0.1,
-          max: 100,
-        }),
-        maxHoldMs: integerEnv('FLOW_BONDING_MOMENTUM_TRAIL_MAX_HOLD_MS', 30_000, {
-          min: 1_000,
-        }),
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_BONDING_MOMENTUM_POSITION_SOL'),
-    }),
-  },
-
-  // Graduation probability is used only as a hold/exit overlay on an earlier
-  // Primary Flow entry. It never opens a fresh position above the configured
-  // Curve ceiling and never owns a signer or transaction executor.
-  graduationHoldShadow: {
-    enabled: retiredShadowsEnabled && booleanEnv('FLOW_GRADUATION_HOLD_SHADOW_ENABLED', false),
-    signalVariant: 'primary_3w',
-    positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
-    maxSignalLatencyMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_SIGNAL_LATENCY_MS', 1_500, {
-      min: 100,
-    }),
-    maxSignalCurvePct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_CURVE_PCT', 70, {
-      min: 0,
-      max: 100,
-    }),
-    maxTokenAgeMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_TOKEN_AGE_MS', 10 * 60_000, {
-      min: 1_000,
-      max: 60 * 60_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_GRADUATION_HOLD_STATE_RETENTION_MS', 10 * 60_000, {
-      min: 5_000,
-      max: 60 * 60_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_ENTRY_TIMEOUT_MS', 2_000, {
-      min: 1,
-    }),
-    exitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_EXIT_TIMEOUT_MS', 5_000, {
-      min: 1,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_GRADUATION_HOLD_MAX_ENTRY_JUMP_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    hardStopPct: numberEnv('FLOW_GRADUATION_HOLD_HARD_STOP_PCT', 30, {
-      min: 0.1,
-      max: 100,
-    }),
-    controlTrailingStopPct: numberEnv('FLOW_GRADUATION_HOLD_I0_TRAILING_STOP_PCT', 7.5, {
-      min: 0.1,
-      max: 100,
-    }),
-    controlMaxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_I0_MAX_HOLD_MS', 60_000, {
-      min: 1_000,
-    }),
-    maxHoldMs: integerEnv('FLOW_GRADUATION_HOLD_MAX_HOLD_MS', 120_000, {
-      min: 1_000,
-    }),
-    firstCheckpointTimeoutMs: integerEnv(
-      'FLOW_GRADUATION_HOLD_FIRST_CHECKPOINT_TIMEOUT_MS',
-      20_000,
-      { min: 1_000 },
-    ),
-    stepTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_STEP_TIMEOUT_MS', 3_000, {
-      min: 250,
-    }),
-    graduationTimeoutMs: integerEnv('FLOW_GRADUATION_HOLD_GRADUATION_TIMEOUT_MS', 15_000, {
-      min: 1_000,
-    }),
-    ammExitDelayMs: integerEnv('FLOW_GRADUATION_HOLD_I2_AMM_EXIT_DELAY_MS', 5_000, {
-      min: 0,
-    }),
-    bridgeMinBuyers5: integerEnv('FLOW_GRADUATION_HOLD_I2_MIN_BUYERS_5S', 12, {
-      min: 1,
-    }),
-    bridgeMaxCumulativeTrades: integerEnv(
-      'FLOW_GRADUATION_HOLD_I2_MAX_CUMULATIVE_TRADES',
-      20,
-      { min: 1 },
-    ),
-    checkpoints: [70, 80, 85, 90, 95, 97],
-    checkpointRules: [
-      {
-        thresholdPct: 70,
-        minNetFlow5Sol: 0,
-        minBuyers5: 3,
-        maxSellSol5: 1,
-        minCurveDelta5: 5,
-      },
-      {
-        thresholdPct: 80,
-        minNetFlow5Sol: 0,
-        minBuyers5: 1,
-        maxSellSol5: null,
-        minCurveDelta5: 5,
-      },
-      {
-        thresholdPct: 85,
-        minNetFlow5Sol: 0,
-        minBuyers5: 1,
-        maxSellSol5: null,
-        minCurveDelta5: 5,
-      },
-      {
-        thresholdPct: 90,
-        minNetFlow5Sol: 0,
-        minBuyers5: 4,
-        maxSellSol5: null,
-        minCurveDelta5: 5,
-      },
-      {
-        thresholdPct: 95,
-        minNetFlow5Sol: 0,
-        minBuyers5: 4,
-        maxSellSol5: null,
-        minCurveDelta5: 5,
-      },
-    ],
-    cohorts: [
-      {
-        id: 'I0',
-        label: 'I0 Â· Early Entryç§»åŠ¨æ­¢ç›ˆå¯¹ç…§',
-        exitMode: 'CONTROL_TRAILING',
-      },
-      {
-        id: 'I1',
-        label: 'I1 Â· æ¦‚çŽ‡æ£€æŸ¥ç‚¹ / 97%æ¯•ä¸šå‰é€€å‡º',
-        exitMode: 'PRE_GRAD_CHECKPOINTS',
-      },
-      {
-        id: 'I2',
-        label: 'I2 Â· ä¸¥æ ¼æ¦‚çŽ‡æ£€æŸ¥ç‚¹ / ç©¿è¶Šæ¯•ä¸š',
-        exitMode: 'THROUGH_GRADUATION',
-      },
-    ],
-    bigWinnerPct: numberEnv('FLOW_GRADUATION_HOLD_BIG_WINNER_PCT', 50, { min: 1 }),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_GRADUATION_HOLD_POSITION_SOL'),
-    }),
-  },
-
-  // Lifecycle oversold-rebound research. Pre-migration curve trades and the
-  // post-migration PumpSwap subscription use separate cohorts; profiles below
-  // are orthogonal online experiments and never create or sign a transaction.
-  migratedDropReboundShadow: {
-    enabled: booleanEnv('FLOW_MIGRATED_REBOUND_SHADOW_ENABLED', true),
-    gfrEnabled: migratedReboundGfrEnabled,
-    // Cohort-level retirement keeps the useful G/GQ/GFR controls running while
-    // stopping only the repeatedly negative combinations. Prefix matching also
-    // covers their capacity suffixes (for example _0P1SOL and _1SOL).
-    retiredCohortPrefixes: [
-      'POST_GD25_35_RUG_GUARD_T20_24_',
-      'POST_GD25_35_X3',
-      'POST_GD25_35_XLEG',
-      'POST_GD25_35_XB25',
-      'POST_GD25_35_XB50',
-      'POST_GE30_R23_F1_',
-      'POST_GE30_R23_F3_',
-      'POST_GE30_R23_F1_G1_B50_H60',
-      'POST_GE30_R23_F1_G1_B75_H30',
-      'POST_GE30_D25_32_R24_F1_04_24_V2_TIME_R2_H15',
-    ],
-    lifecycleStages: [
-      { id: 'POST_MIGRATION', label: 'æ¯•ä¸šåŽ', market: 'PUMP_AMM' },
-    ],
-    stateRetentionMs: integerEnv('FLOW_REBOUND_DETECTOR_STATE_RETENTION_MS', 60_000, {
-      min: 5_000,
-      max: 10 * 60_000,
-    }),
-    trackingAgeMs: Math.min(120_000, integerEnv('FLOW_MIGRATED_REBOUND_TRACKING_MS', 120_000, {
-      min: 30_000,
-      max: 30 * 60_000,
-    })),
-    // Keep lightweight post-migration observation alive for offline labels and
-    // later-stage research. Individual entry profiles retain their own much
-    // shorter causal age gates (the direct-dump cohort remains <=30 seconds).
-    observationAgeMs: integerEnv(
-      'FLOW_MIGRATED_REBOUND_OBSERVATION_MS',
-      30 * 60_000,
-      { min: 120_000, max: 60 * 60_000 },
-    ),
-    // Completion and PumpSwap migration are separate events. Keep completed
-    // Mints subscribed long enough to observe a delayed migration/first AMM
-    // trade, without extending any profile's post-migration entry age gate.
-    pendingMigrationTrackingMs: integerEnv(
-      'FLOW_MIGRATED_REBOUND_PENDING_MIGRATION_MS',
-      2 * 60 * 60_000,
-      { min: 30 * 60_000, max: 6 * 60 * 60_000 },
-    ),
-    positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
-    entryDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_ENTRY_TIMEOUT_MS', 2_000, {
-      min: 1,
-    }),
-    fastFlowMaxTradesPerMint: integerEnv(
-      'FLOW_MIGRATED_REBOUND_GFR_MAX_TRADES_PER_MINT',
-      512,
-      { min: 32, max: 10_000 },
-    ),
-    fastFlowSweepMs: integerEnv(
-      'FLOW_MIGRATED_REBOUND_GFR_SWEEP_MS',
-      5_000,
-      { min: 1_000, max: 60_000 },
-    ),
-    exitDelayMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_MIGRATED_REBOUND_EXIT_TIMEOUT_MS', 5_000, {
-      min: 1,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATED_REBOUND_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0,
-      max: 100,
-    }),
-    maxPlausibleReturnPct: numberEnv(
-      'FLOW_MIGRATED_REBOUND_MAX_PLAUSIBLE_RETURN_PCT',
-      1_000,
-      { min: 10, max: 100_000 },
-    ),
-    ammPriceContinuity: {
-      minRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MIN_RATIO', 0.2, {
-        min: 0.0001,
-        max: 1,
-      }),
-      maxRatio: numberEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_MAX_RATIO', 5, {
-        min: 1,
-      }),
-      resetAfterMs: integerEnv('FLOW_MIGRATED_REBOUND_AMM_PRICE_RESET_MS', 15_000, {
-        min: 1_000,
-      }),
-      confirmationTrades: integerEnv(
-        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TRADES',
-        2,
-        { min: 2, max: 10 },
-      ),
-      confirmationWindowMs: integerEnv(
-        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_WINDOW_MS',
-        2_000,
-        { min: 100, max: 30_000 },
-      ),
-      confirmationTolerancePct: numberEnv(
-        'FLOW_MIGRATED_REBOUND_AMM_PRICE_CONFIRMATION_TOLERANCE_PCT',
-        20,
-        { min: 0.1, max: 100 },
-      ),
-    },
-    bigWinnerPct: numberEnv('FLOW_MIGRATED_REBOUND_BIG_WINNER_PCT', 50, { min: 1 }),
-    entryProfiles: [
-      {
-        id: 'GD25_35',
-        label: 'æ·±è·Œ25â€“35%',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-        liveExitStrategies: {
-          X8: 'migrated_gd25_35_x8_live',
-        },
-      },
-      {
-        id: 'GD25_35_RUG_GUARD_ALL',
-        label: 'G-RUG-ALL Â· æ·±è·Œåå¼¹ + å…¬å…±è®¢å•æµRUGè¿‡æ»¤',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-        maxSignalsPerMint: 1,
-        requireHealthyRugRisk: true,
-        exitProfileIds: ['X8', 'XLEG'],
-        capacityAware: true,
-        positionSols: [0.1, 1],
-      },
-      {
-        id: 'GD25_35_RUG_GUARD_T20_24',
-        label: 'G-RUG-T20-24 Â· RUGè¿‡æ»¤ + åŒ—äº¬20â€“24æ—¶',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-        maxSignalsPerMint: 1,
-        requireHealthyRugRisk: true,
-        beijingHourRanges: [[20, 24]],
-        exitProfileIds: ['X8', 'XLEG'],
-        capacityAware: true,
-        positionSols: [0.1, 1],
-      },
-      {
-        id: 'GE30_R23_F1',
-        label: 'æ¯•ä¸šåŽ30ç§’å†… Â· åå¼¹2%â€“3% Â· æ¯Minté¦–æ¬¡',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-      },
-      {
-        id: 'GE30_R23_F3',
-        label: 'æ¯•ä¸šåŽ30ç§’å†… Â· åå¼¹2%â€“3% Â· æ¯Mintå‰ä¸‰æ¬¡',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 3,
-      },
-      {
-        id: 'GE30_R23_F1_EXEC',
-        label: 'G-EXEC Â· 30ç§’å†…åå¼¹2%â€“3% Â· é¦–æ¬¡ Â· å¤šå®¹é‡çœŸå®žå†²å‡»',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        exitProfileIds: ['GEXEC_XLEG'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_MIGRATED_REBOUND_EXEC_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25', '0.5', '1'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'GE30_R23_F1_XQ',
-        label: 'G-XQ Â· é¦–æ¬¡åå¼¹ + å¯æ‰§è¡Œå®¹é‡/ä»·æ ¼è´¨é‡',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        maxEntryPriceJumpPct: 5,
-        maxEntryImpactPct: 3,
-        exitProfileIds: ['G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60'],
-        capacityAware: true,
-        positionSols: [0.1, 0.5, 1],
-      },
-      {
-        id: 'GE30_R23_F2_ONLY',
-        label: 'G-F2 Â· 30ç§’å†…åå¼¹2%â€“3% Â· åªå–ç¬¬äºŒæ¬¡æœºä¼š',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        minSignalOrdinal: 2,
-        maxSignalsPerMint: 2,
-        exitProfileIds: ['G2_XLEG', 'G2_XLEG_H20_FWD'],
-        liveExitStrategies: {
-          G2_XLEG: 'migrated_ge30_r23_f2_only_g2_xleg_live',
-        },
-      },
-      {
-        // New IDs intentionally avoid the retired POST_GE30_R23_F3_* prefix.
-        // They create clean forward samples without rewriting historical rows.
-        id: 'GRT_R23_F3_V2',
-        label: 'G-RT-F3-V2 Â· 30ç§’å†…åå¼¹2%â€“3% Â· å‰ä¸‰æ¬¡å‰å‘æ ·æœ¬',
-        newEntriesEnabled: booleanEnv('FLOW_MIGRATED_REBOUND_GRT_R23_F3_V2_ENABLED', true),
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 3,
-        exitProfileIds: ['GRT_F3_XLEG_V2'],
-        liveExitStrategies: {
-          GRT_F3_XLEG_V2: 'migrated_grt_r23_f3_v2_xleg_live',
-        },
-      },
-      {
-        id: 'GRT_R23_F2_ONLY_V2',
-        label: 'G-RT-F2-V2 Â· 30ç§’å†…åå¼¹2%â€“3% Â· åªå–ç¬¬äºŒæ¬¡å‰å‘æ ·æœ¬',
-        newEntriesEnabled: booleanEnv('FLOW_MIGRATED_REBOUND_GRT_R23_F2_V2_ENABLED', true),
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        minSignalOrdinal: 2,
-        maxSignalsPerMint: 2,
-        exitProfileIds: ['GRT_F2_XLEG_V2'],
-      },
-      {
-        id: 'GE30_R23_F3_EXEC',
-        label: 'G-F3-EXEC Â· å‰ä¸‰æ¬¡æœºä¼š Â· çœŸå®žAMMå®¹é‡å†²å‡»',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 3,
-        exitProfileIds: ['G3EXEC_XLEG'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_MIGRATED_REBOUND_F23_EXEC_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25', '0.5', '1'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'GE30_R23_F2_ONLY_EXEC',
-        label: 'G-F2-EXEC Â· åªå–ç¬¬äºŒæ¬¡æœºä¼š Â· çœŸå®žAMMå®¹é‡å†²å‡»',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        minSignalOrdinal: 2,
-        maxSignalsPerMint: 2,
-        exitProfileIds: ['G2EXEC_XLEG'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_MIGRATED_REBOUND_F23_EXEC_CAPACITY_SOLS',
-          ['0.05', '0.1', '0.25', '0.5', '1'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'GE30_R23_F1_NIGHT',
-        label: 'G-TIMEå¤œé—´ Â· 18:00â€“08:00 Â· é¦–æ¬¡',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        beijingHourRanges: [[0, 8], [18, 24]],
-        exitProfileIds: ['GTIME_XLEG'],
-      },
-      {
-        id: 'GE30_R23_F1_DAY',
-        label: 'G-TIMEç™½å¤© Â· 08:00â€“18:00 Â· é¦–æ¬¡å¯¹ç…§',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        beijingHourRanges: [[8, 18]],
-        exitProfileIds: ['GTIME_XLEG'],
-      },
-      {
-        id: 'GE30_D25_32_R24_F1',
-        label: 'V2 Â· æ¯•ä¸šåŽ30ç§’å†… Â· è·Œ25%â€“32% Â· åå¼¹2%â€“4% Â· é¦–æ¬¡',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 32,
-        reboundMinPct: 2,
-        reboundMaxPct: 4,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_V2_MAX_ENTRY_JUMP_PCT',
-          3,
-          { min: 0, max: 100 },
-        ),
-      },
-      {
-        id: 'GE30_D25_32_R24_F1_EXEC1',
-        label: 'V2-EXEC1 Â· 0.1/1 SOLæ‰§è¡Œå®¹é‡å¯¹ç…§ Â· R2-H15',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 32,
-        reboundMinPct: 2,
-        reboundMaxPct: 4,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_V2_MAX_ENTRY_JUMP_PCT',
-          3,
-          { min: 0, max: 100 },
-        ),
-        exitProfileIds: ['V2_R2_H15'],
-        capacityAware: true,
-        positionSols: [0.1, 1],
-        livePositionSol: 0.1,
-        liveExitStrategies: {
-          V2_R2_H15: 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live',
-        },
-      },
-      {
-        id: 'GE30_D25_32_R24_F1_04_24',
-        label: 'V2-TIME Â· 04:00â€“24:00 Â· è·Œ25%â€“32% Â· åå¼¹2%â€“4% Â· é¦–æ¬¡',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 32,
-        reboundMinPct: 2,
-        reboundMaxPct: 4,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        beijingHourRanges: [[4, 24]],
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_V2_MAX_ENTRY_JUMP_PCT',
-          3,
-          { min: 0, max: 100 },
-        ),
-        exitProfileIds: ['V2_TIME_R2_H15'],
-        capacityAware: true,
-        positionSols: [0.1, 0.5, 1],
-      },
-      {
-        id: 'GE30_D25_32_R23_F1_FAST200',
-        label: 'GQ Â· post-grad <=30s Â· drop25-32% Â· rebound2-3% within200ms Â· first',
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 32,
-        reboundMinPct: 2,
-        reboundMaxPct: 3,
-        reboundTimeoutMs: 1_000,
-        maxReboundFromLowMs: 200,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_GQ_MAX_ENTRY_JUMP_PCT',
-          5,
-          { min: 0, max: 100 },
-        ),
-        exitProfileIds: ['GQ_XLEG'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_MIGRATED_REBOUND_GQ_CAPACITY_SOLS',
-          ['0.05', '0.25', '0.5', '1'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-      },
-      {
-        id: 'GE30_DUMP5_NB2_M2',
-        label: 'G-DUMP-NB Â· æ¯•ä¸šåŽ30ç§’å†… Â· >=5 SOLç ¸å• Â· 2ç§’å†…ä¸‹ä¸€ç¬”çœŸå®žä¹°å• Â· æ¯Mintæœ€å¤š2æ¬¡',
-        newEntriesEnabled: booleanEnv(
-          'FLOW_MIGRATED_REBOUND_DUMP_NEXT_BUY_ENABLED',
-          true,
-        ),
-        signalMode: 'DUMP_NEXT_BUY',
-        windowMs: integerEnv('FLOW_MIGRATED_REBOUND_DUMP_WINDOW_MS', 1_000, {
-          min: 250,
-          max: 5_000,
-        }),
-        dropMinPct: numberEnv('FLOW_MIGRATED_REBOUND_DUMP_MIN_DROP_PCT', 15, {
-          min: 1,
-          max: 100,
-        }),
-        dropMaxPct: numberEnv('FLOW_MIGRATED_REBOUND_DUMP_MAX_DROP_PCT', 55, {
-          min: 1,
-          max: 100,
-        }),
-        minDumpSol: numberEnv('FLOW_MIGRATED_REBOUND_DUMP_MIN_SOL', 5, {
-          min: 0.01,
-          max: 10_000,
-        }),
-        nextBuyWindowMs: integerEnv(
-          'FLOW_MIGRATED_REBOUND_DUMP_NEXT_BUY_WINDOW_MS',
-          2_000,
-          { min: 100, max: 10_000 },
-        ),
-        reboundMinPct: 0,
-        reboundMaxPct: 1_000,
-        reboundTimeoutMs: 2_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 2,
-        reentryCooldownMs: 2_000,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_DUMP_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 100 },
-        ),
-        exitProfileIds: ['G_DUMP_NB_X8'],
-        capacityAware: true,
-        positionSols: [1],
-        // Forward comparison only: record the lifecycle-aware guard decision,
-        // but do not block or add latency to this new causal entry cohort.
-        rugGuardMode: 'LABEL_ONLY',
-      },
-      ...(migratedReboundGfrEnabled ? [
-        ['GFR_300', 300],
-        ['GFR_600', 600],
-        ['GFR_1000', 1_000],
-      ].map(([id, confirmationMs]) => ({
-        id,
-        // Keep GFR_300 as the measured fast path. The 600/1000ms variants
-        // remain queryable but stop producing new positions after a
-        // persistently negative forward sample.
-        newEntriesEnabled: id === 'GFR_300',
-        liveStrategyId: id === 'GFR_300' ? 'migrated_gfr_300_hs20_h30_live' : null,
-        label: `G-FR Â· å¿«é€Ÿåè½¬å»¶ç»­ Â· ${confirmationMs}msç¡®è®¤`,
-        windowMs: 1_000,
-        dropMinPct: 25,
-        dropMaxPct: 35,
-        reboundMinPct: 2,
-        reboundMaxPct: 5,
-        reboundTimeoutMs: 1_000,
-        maxLifecycleAgeMs: 30_000,
-        maxSignalsPerMint: 1,
-        maxEntryPriceJumpPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_GFR_MAX_ENTRY_JUMP_PCT',
-          15,
-          { min: 0, max: 100 },
-        ),
-        exitProfileIds: ['GFR_X8', 'GFR_X15', 'GFR_HS20_H30'],
-        capacityAware: true,
-        positionSols: listEnv(
-          'FLOW_MIGRATED_REBOUND_GFR_CAPACITY_SOLS',
-          ['0.05', '0.1'],
-        ).map(Number).filter((value) => Number.isFinite(value) && value > 0),
-        fastConfirmation: {
-          confirmationMs,
-          minPriceContinuationPct: numberEnv(
-            'FLOW_MIGRATED_REBOUND_GFR_MIN_CONTINUATION_PCT',
-            1,
-            { min: -100, max: 100 },
-          ),
-          minBuyTx: integerEnv('FLOW_MIGRATED_REBOUND_GFR_MIN_BUY_TX', 2, {
-            min: 1,
-            max: 100,
-          }),
-          minUniqueBuyers: integerEnv('FLOW_MIGRATED_REBOUND_GFR_MIN_BUYERS', 2, {
-            min: 1,
-            max: 100,
-          }),
-          minNetFlowSol: numberEnv('FLOW_MIGRATED_REBOUND_GFR_MIN_NET_FLOW_SOL', 0.5, {
-            min: -1_000,
-            max: 1_000,
-          }),
-          minNetFlowAccelerationSol: numberEnv(
-            'FLOW_MIGRATED_REBOUND_GFR_MIN_NET_FLOW_ACCEL_SOL',
-            0,
-            { min: -1_000, max: 1_000 },
-          ),
-          maxSellBuyRatio: numberEnv(
-            'FLOW_MIGRATED_REBOUND_GFR_MAX_SELL_BUY_RATIO',
-            0.5,
-            { min: 0, max: 100 },
-          ),
-          maxTopBuyerSharePct: numberEnv(
-            'FLOW_MIGRATED_REBOUND_GFR_MAX_TOP_BUYER_SHARE_PCT',
-            60,
-            { min: 0, max: 100 },
-          ),
-          maxRoundTripImpactPct: numberEnv(
-            'FLOW_MIGRATED_REBOUND_GFR_MAX_ROUND_TRIP_IMPACT_PCT',
-            5,
-            { min: 0, max: 100 },
-          ),
-        },
-      })) : []),
-    ],
-    exitProfiles: [
-      {
-        id: 'G_DUMP_NB_X8',
-        label: 'G-DUMP-NB Â· å›ºå®šæŒæœ‰8ç§’',
-        entryProfileIds: ['GE30_DUMP5_NB2_M2'],
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_DUMP_HOLD_MS', 8_000, {
-          min: 250,
-          max: 60_000,
-        }),
-      },
-      {
-        id: 'X3',
-        label: 'å›ºå®šæŒæœ‰3ç§’',
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_3S_MS', 3_000, { min: 250 }),
-      },
-      {
-        id: 'X8',
-        label: 'å›ºå®šæŒæœ‰8ç§’',
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_HOLD_8S_MS', 8_000, { min: 250 }),
-      },
-      {
-        id: 'XLEG',
-        label: 'æ—§ç‰ˆ +8%æ¿€æ´» / å›žæ’¤3% / 15ç§’å…œåº•',
-        exitMode: 'LEGACY',
-        trailingActivationPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT',
-          8,
-          { min: 0.1, max: 1_000 },
-        ),
-        trailingStopPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, {
-          min: 0.1,
-          max: 100,
-        }),
-        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
-          min: 0,
-          max: 1_000,
-        }),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS',
-          5_000,
-          { min: 0 },
-        ),
-        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
-          min: 0,
-        }),
-        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
-          min: 1_000,
-        }),
-      },
-      ...[
-        ['GEXEC_XLEG', ['GE30_R23_F1_EXEC'], 'å®¹é‡æ„ŸçŸ¥ XLEG'],
-        ['G2_XLEG', ['GE30_R23_F2_ONLY'], 'ç¬¬äºŒæ¬¡æœºä¼š XLEG'],
-        ['GRT_F3_XLEG_V2', ['GRT_R23_F3_V2'], 'å‰ä¸‰æ¬¡æœºä¼šå‰å‘ XLEG'],
-        ['GRT_F2_XLEG_V2', ['GRT_R23_F2_ONLY_V2'], 'ç¬¬äºŒæ¬¡æœºä¼šå‰å‘ XLEG'],
-        ['G3EXEC_XLEG', ['GE30_R23_F3_EXEC'], 'å‰ä¸‰æ¬¡æœºä¼šå®¹é‡æ„ŸçŸ¥ XLEG'],
-        ['G2EXEC_XLEG', ['GE30_R23_F2_ONLY_EXEC'], 'ç¬¬äºŒæ¬¡æœºä¼šå®¹é‡æ„ŸçŸ¥ XLEG'],
-        ['GTIME_XLEG', ['GE30_R23_F1_NIGHT', 'GE30_R23_F1_DAY'], 'åˆ†æ—¶æ®µ XLEG'],
-      ].map(([id, entryProfileIds, label]) => ({
-        id,
-        label,
-        entryProfileIds,
-        exitMode: 'LEGACY',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 6_000,
-        maxHoldMs: 15_000,
-      })),
-      {
-        id: 'G2_XLEG_H20_FWD',
-        label: 'ç¬¬äºŒæ¬¡æœºä¼š XLEG + 20%ç¡¬æ­¢æŸï¼ˆå‰å‘ï¼‰',
-        entryProfileIds: ['GE30_R23_F2_ONLY'],
-        exitMode: 'RISK_XLEG',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        hardStopPct: 20,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 6_000,
-        lossCheckRecoveryPct: 1,
-        maxHoldMs: 15_000,
-      },
-      {
-        id: 'GQ_XLEG',
-        label: 'GQ fast-rebound capacity XLEG',
-        entryProfileIds: ['GE30_D25_32_R23_F1_FAST200'],
-        exitMode: 'LEGACY',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 6_000,
-        maxHoldMs: 15_000,
-      },
-      ...[
-        ['G1XQ_X8', 8_000],
-        ['G1XQ_X30', 30_000],
-        ['G1XQ_X60', 60_000],
-      ].map(([id, fixedHoldMs]) => ({
-        id,
-        label: `${id} Â· G-XQå®¹é‡æ„ŸçŸ¥å›ºå®šæŒæœ‰`,
-        entryProfileIds: ['GE30_R23_F1_XQ'],
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs,
-      })),
-      ...(migratedReboundGfrEnabled ? [{
-        id: 'GFR_X8',
-        label: 'G-FR Â· å›ºå®šæŒæœ‰8ç§’',
-        entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 8_000,
-      }, {
-        id: 'GFR_X15',
-        label: 'G-FR Â· å›ºå®šæŒæœ‰15ç§’',
-        entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 15_000,
-      }, {
-        id: 'GFR_HS20_H30',
-        label: 'G-FR Â· ç¡¬æ­¢æŸ20% / æœ€é•¿30ç§’',
-        entryProfileIds: ['GFR_300', 'GFR_600', 'GFR_1000'],
-        exitMode: 'TAIL',
-        hardStopPct: 20,
-        trailingActivationPct: 1_000,
-        trailingStopPct: 100,
-        maxHoldMs: 30_000,
-      }] : []),
-      ...[
-        ['G1_E2_H6', 2_000, 6],
-        ['G1_E2_H8', 2_000, 8],
-        ['G1_E3_H8', 3_000, 8],
-      ].map(([id, lossCheckAtMs, hardStopPct]) => ({
-        id,
-        label: `${id} Â· F1æ—©æœŸå¼±åŠ¿é€€å‡º`,
-        entryProfileIds: ['GE30_R23_F1'],
-        exitMode: 'RISK_XLEG',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        hardStopPct,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs,
-        lossCheckRecoveryPct: 1,
-        maxHoldMs: 15_000,
-      })),
-      ...[
-        ['G1_B75_H30', 75, 30_000],
-        ['G1_B50_H60', 50, 60_000],
-      ].map(([id, coreWeightPct, runnerHoldMs]) => ({
-        id,
-        label: `${id} Â· F1æ ¸å¿ƒXLEG + å°¾ä»“`,
-        entryProfileIds: ['GE30_R23_F1'],
-        exitMode: 'BLEND_XLEG_RUNNER_RISK',
-        coreWeightPct,
-        runnerHoldMs,
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        hardStopPct: 15,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 6_000,
-      })),
-      ...[
-        ['G1_STAIR_H60', 60_000],
-        ['G1_STAIR_H120', 120_000],
-      ].map(([id, maxHoldMs]) => ({
-        id,
-        label: `${id} Â· F1åˆ†çº§ç§»åŠ¨æ­¢ç›ˆ`,
-        entryProfileIds: ['GE30_R23_F1'],
-        exitMode: 'STAIR_TRAILING',
-        hardStopPct: 15,
-        maxHoldMs,
-        trailingTiers: [
-          { activationPct: 20, stopPct: 8 },
-          { activationPct: 40, stopPct: 12 },
-          { activationPct: 80, stopPct: 18 },
-        ],
-      })),
-      {
-        id: 'XB50',
-        label: '50% XLEG core + 50% fixed-8s runner',
-        entryProfileIds: ['GD25_35'],
-        exitMode: 'BLEND_XLEG_X8',
-        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_50_CORE_WEIGHT_PCT', 50, {
-          min: 0,
-          max: 100,
-        }),
-        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
-          min: 250,
-        }),
-        trailingActivationPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
-        ),
-        trailingStopPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
-        ),
-        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
-          min: 0,
-        }),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
-        ),
-        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
-          min: 0,
-        }),
-      },
-      {
-        id: 'XB25',
-        label: '25% XLEG core + 75% fixed-8s runner',
-        entryProfileIds: ['GD25_35'],
-        exitMode: 'BLEND_XLEG_X8',
-        coreWeightPct: numberEnv('FLOW_MIGRATED_REBOUND_BLEND_25_CORE_WEIGHT_PCT', 25, {
-          min: 0,
-          max: 100,
-        }),
-        runnerHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_BLEND_RUNNER_HOLD_MS', 8_000, {
-          min: 250,
-        }),
-        trailingActivationPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
-        ),
-        trailingStopPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
-        ),
-        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
-          min: 0,
-        }),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
-        ),
-        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_LOSS_CHECK_MS', 6_000, {
-          min: 0,
-        }),
-      },
-      ...[
-        ['V2_R2_H10', 10],
-        ['V2_R2_H15', 15],
-      ].map(([id, fallbackHardStopPct]) => ({
-        id,
-        label: `${id} | 2ç§’å¼±åŠ¿æ£€æŸ¥ / ç¡¬æ­¢æŸ${fallbackHardStopPct}%`,
-        entryProfileIds: id === 'V2_R2_H15'
-          ? ['GE30_D25_32_R24_F1', 'GE30_D25_32_R24_F1_EXEC1']
-          : ['GE30_D25_32_R24_F1'],
-        exitMode: 'RISK_XLEG',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        hardStopPct: numberEnv(
-          `FLOW_MIGRATED_REBOUND_V2_HARD_STOP_${fallbackHardStopPct}_PCT`,
-          fallbackHardStopPct,
-          { min: 0.1, max: 100 },
-        ),
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: integerEnv('FLOW_MIGRATED_REBOUND_V2_LOSS_CHECK_MS', 2_000, {
-          min: 0,
-        }),
-        lossCheckRecoveryPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_V2_MAX_RECOVERY_FROM_LOW_PCT',
-          1,
-          { min: 0, max: 100 },
-        ),
-        maxHoldMs: 15_000,
-      })),
-      {
-        id: 'V2_TIME_R2_H15',
-        label: 'V2-TIME | 04:00â€“24:00 / 2ç§’å¼±åŠ¿æ£€æŸ¥ / ç¡¬æ­¢æŸ15%',
-        entryProfileIds: ['GE30_D25_32_R24_F1_04_24'],
-        exitMode: 'RISK_XLEG',
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        hardStopPct: 15,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 2_000,
-        lossCheckRecoveryPct: 1,
-        maxHoldMs: 15_000,
-      },
-      ...[
-        ['V2_B75_H20', 20_000],
-        ['V2_B75_H60', 60_000],
-      ].map(([id, fallbackRunnerHoldMs]) => ({
-        id,
-        label: `${id} | 25% XLEG core + 75% runner`,
-        entryProfileIds: ['GE30_D25_32_R24_F1'],
-        exitMode: 'BLEND_XLEG_RUNNER',
-        coreWeightPct: 25,
-        runnerHoldMs: integerEnv(
-          `FLOW_MIGRATED_REBOUND_${id}_RUNNER_HOLD_MS`,
-          fallbackRunnerHoldMs,
-          { min: 250 },
-        ),
-        trailingActivationPct: 8,
-        trailingStopPct: 3,
-        fastTakeProfitPct: 18,
-        fastTakeProfitWindowMs: 5_000,
-        lossCheckAtMs: 6_000,
-      })),
-      ...[
-        ['XR3_H12', 3_000, 12],
-        ['XR3_H15', 3_000, 15],
-        ['XR4_H12', 4_000, 12],
-        ['XR4_H15', 4_000, 15],
-      ].map(([id, fallbackLossCheckMs, fallbackHardStopPct]) => ({
-        id,
-        label: `${id} | early weak-state exit`,
-        entryProfileIds: ['GD25_35'],
-        exitMode: 'RISK_XLEG',
-        trailingActivationPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_ACTIVATION_PCT', 8, { min: 0.1 },
-        ),
-        trailingStopPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_TRAILING_STOP_PCT', 3, { min: 0.1, max: 100 },
-        ),
-        hardStopPct: numberEnv(`FLOW_MIGRATED_REBOUND_RISK_HARD_STOP_${fallbackHardStopPct}_PCT`,
-          fallbackHardStopPct, { min: 0.1, max: 100 }),
-        fastTakeProfitPct: numberEnv('FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_PCT', 18, {
-          min: 0,
-        }),
-        fastTakeProfitWindowMs: integerEnv(
-          'FLOW_MIGRATED_REBOUND_LEGACY_FAST_TP_WINDOW_MS', 5_000, { min: 0 },
-        ),
-        lossCheckAtMs: integerEnv(
-          `FLOW_MIGRATED_REBOUND_RISK_CHECK_${fallbackLossCheckMs / 1_000}S_MS`,
-          fallbackLossCheckMs,
-          { min: 0 },
-        ),
-        lossCheckRecoveryPct: numberEnv(
-          'FLOW_MIGRATED_REBOUND_RISK_MAX_RECOVERY_FROM_LOW_PCT', 1, { min: 0, max: 100 },
-        ),
-        maxHoldMs: integerEnv('FLOW_MIGRATED_REBOUND_LEGACY_MAX_HOLD_MS', 15_000, {
-          min: 1_000,
-        }),
-      })),
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_MIGRATED_REBOUND_POSITION_SOL'),
-    }),
-  },
-
-  // Independent post-migration continuation study. The entry thresholds were
-  // selected from the chronological migration-cohort backtest; every exit is
-  // stored as a separate cohort so long-hold winner capture stays auditable.
-  migrationContinuityShadow: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_MIGRATION_CONTINUITY_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
-    confirmWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_CONFIRM_MS', 5_000, {
-      min: 1_000, max: 15_000,
-    }),
-    detectionDeadlineMs: integerEnv('FLOW_MIGRATION_CONTINUITY_DETECTION_MS', 10_000, {
-      min: 5_000, max: 30_000,
-    }),
-    flowWindowMs: integerEnv('FLOW_MIGRATION_CONTINUITY_FLOW_WINDOW_MS', 3_000, {
-      min: 1_000, max: 10_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_ENTRY_TIMEOUT_MS', 2_000, {
-      min: 1,
-    }),
-    exitDelayMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_MIGRATION_CONTINUITY_EXIT_TIMEOUT_MS', 5_000, {
-      min: 1,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_ENTRY_JUMP_PCT', 10, {
-      min: 0, max: 100,
-    }),
-    entryProfile: {
-      id: 'MC_C5',
-      liveStrategyId: 'migration_continuity_mc_c5_t12_5_live',
-      label: 'MC-C Â· æ¯•ä¸šåŽ5ç§’è´¨é‡å»¶ç»­',
-      minBuyers: integerEnv('FLOW_MIGRATION_CONTINUITY_MIN_BUYERS', 20, { min: 1 }),
-      minNetFlowSol: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_NET_FLOW_SOL', 5, { min: 0 }),
-      minReturnPct: numberEnv('FLOW_MIGRATION_CONTINUITY_MIN_RETURN_PCT', 5, { min: -100 }),
-      maxSellBuyRatio: numberEnv('FLOW_MIGRATION_CONTINUITY_MAX_SELL_BUY_RATIO', 0.6, {
-        min: 0, max: 10,
-      }),
-    },
-    exitProfiles: [
-      {
-        id: 'E60', label: 'å›ºå®š60ç§’', exitMode: 'FIXED_HOLD', fixedHoldMs: 60_000,
-        hardStopPct: 20, maxHoldMs: 60_000, newEntriesEnabled: false,
-      },
-      {
-        id: 'E120', label: 'å›ºå®š120ç§’', exitMode: 'FIXED_HOLD', fixedHoldMs: 120_000,
-        hardStopPct: 20, maxHoldMs: 120_000, newEntriesEnabled: false,
-      },
-      {
-        // New id creates a clean forward sample after Universal RUG Guard was
-        // applied to every Shadow entry. Historical E120 rows remain unchanged.
-        id: 'E120_GUARD_V2',
-        label: 'å›ºå®š120ç§’ Â· Universal RUG Guard å‰å‘æ ·æœ¬',
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 120_000,
-        hardStopPct: 20,
-        maxHoldMs: 120_000,
-        newEntriesEnabled: false,
-      },
-      {
-        id: 'T10', label: '5ç§’ä¿æŠ¤ / +10%æ¿€æ´» / å›žæ’¤10%', exitMode: 'TRAILING',
-        minHoldMs: 5_000, trailingActivationPct: 10, trailingStopPct: 10,
-        hardStopPct: 20, maxHoldMs: 120_000, newEntriesEnabled: false,
-      },
-      {
-        id: 'T12_5', label: '10ç§’ä¿æŠ¤ / +15%æ¿€æ´» / å›žæ’¤12.5%', exitMode: 'TRAILING',
-        minHoldMs: 10_000, trailingActivationPct: 15, trailingStopPct: 12.5,
-        hardStopPct: 20, maxHoldMs: 180_000, newEntriesEnabled: false,
-      },
-      {
-        id: 'E120_CONVERGED_V3',
-        label: 'å›ºå®š120ç§’ Â· æ”¶æ•›å‰å‘æ ·æœ¬',
-        exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 120_000,
-        hardStopPct: 20,
-        maxHoldMs: 120_000,
-        newEntriesEnabled: booleanEnv(
-          'FLOW_MIGRATION_CONTINUITY_E120_CONVERGED_V3_ENABLED',
-          true,
-        ),
-      },
-      {
-        id: 'FLOW', label: '10ç§’ä¿æŠ¤ / 3ç§’è®¢å•æµè½¬å¼±', exitMode: 'FLOW_FADE',
-        minHoldMs: 10_000, minSellBuyRatio: 1.2, maxNetFlowSol: -2,
-        hardStopPct: 20, maxHoldMs: 180_000, newEntriesEnabled: false,
-      },
-      {
-        id: 'RUNNER', label: '15ç§’ä¿æŠ¤ / +20%æ¿€æ´» / è‡ªé€‚åº”å°¾ä»“',
-        exitMode: 'ADAPTIVE_TRAILING', minHoldMs: 15_000, trailingActivationPct: 20,
-        hardStopPct: 25, maxHoldMs: 300_000, newEntriesEnabled: false,
-        trailingTiers: [
-          { belowPct: 50, stopPct: 12.5 },
-          { belowPct: 100, stopPct: 20 },
-          { belowPct: Infinity, stopPct: 25 },
-        ],
-      },
-      {
-        id: 'AH60_180',
-        label: 'MC-AH Â· 30ç§’è®¢å•æµåˆ¤å®š / å¼±60ç§’ / å¼º180ç§’',
-        exitMode: 'ADAPTIVE_HORIZON',
-        decisionAtMs: 30_000,
-        weakHoldMs: 60_000,
-        strongHoldMs: 180_000,
-        minStrongNetFlowSol: 1,
-        maxStrongSellBuyRatio: 0.8,
-        minStrongBuyers: 3,
-        hardStopPct: 20,
-        maxHoldMs: 180_000,
-        newEntriesEnabled: false,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_MIGRATION_CONTINUITY_POSITION_SOL'),
-    }),
-  },
-
-  // Independent post-migration range-regime research. Every graduation receives
-  // a short PumpSwap observation window; only qualified oscillating markets keep
-  // the extended subscription. This suite never owns a signer or executor.
-  rangeScalperShadow: {
-    enabled: provenNegativeShadowsEnabled
-      && booleanEnv('FLOW_RANGE_SCALPER_SHADOW_ENABLED', true),
-    positionSizeSol: shadowPositionEnv('FLOW_RANGE_SCALPER_POSITION_SOL'),
-    initialObservationMs: integerEnv('FLOW_RANGE_SCALPER_INITIAL_OBSERVATION_MS', 120_000, {
-      min: 30_000,
-      max: 10 * 60_000,
-    }),
-    maxTrackingMs: integerEnv('FLOW_RANGE_SCALPER_MAX_TRACKING_MS', 20 * 60_000, {
-      min: 120_000,
-      max: 60 * 60_000,
-    }),
-    windowMs: integerEnv('FLOW_RANGE_SCALPER_WINDOW_MS', 60_000, {
-      min: 10_000,
-      max: 5 * 60_000,
-    }),
-    recentFlowWindowMs: integerEnv('FLOW_RANGE_SCALPER_RECENT_FLOW_MS', 1_000, {
-      min: 250,
-      max: 10_000,
-    }),
-    rangeLossConfirmMs: integerEnv('FLOW_RANGE_SCALPER_RANGE_LOSS_CONFIRM_MS', 30_000, {
-      min: 1_000,
-      max: 5 * 60_000,
-    }),
-    unsubscribeGraceMs: integerEnv('FLOW_RANGE_SCALPER_UNSUBSCRIBE_GRACE_MS', 5_000, {
-      min: 0,
-      max: 60_000,
-    }),
-    minTrades: integerEnv('FLOW_RANGE_SCALPER_MIN_TRADES', 60, { min: 5 }),
-    minVolumeSol: numberEnv('FLOW_RANGE_SCALPER_MIN_VOLUME_SOL', 20, { min: 0 }),
-    minUniqueWallets: integerEnv('FLOW_RANGE_SCALPER_MIN_UNIQUE_WALLETS', 20, { min: 2 }),
-    minBuySharePct: numberEnv('FLOW_RANGE_SCALPER_MIN_BUY_SHARE_PCT', 35, {
-      min: 0, max: 100,
-    }),
-    maxBuySharePct: numberEnv('FLOW_RANGE_SCALPER_MAX_BUY_SHARE_PCT', 65, {
-      min: 0, max: 100,
-    }),
-    minRangePct: numberEnv('FLOW_RANGE_SCALPER_MIN_RANGE_PCT', 12, { min: 0.1 }),
-    maxEfficiencyRatio: numberEnv('FLOW_RANGE_SCALPER_MAX_EFFICIENCY_RATIO', 0.35, {
-      min: 0.01, max: 1,
-    }),
-    minMeanCrosses: integerEnv('FLOW_RANGE_SCALPER_MIN_MEAN_CROSSES', 4, { min: 1 }),
-    maxTopWalletSharePct: numberEnv('FLOW_RANGE_SCALPER_MAX_TOP_WALLET_SHARE_PCT', 25, {
-      min: 0.1, max: 100,
-    }),
-    maxTrendPct: numberEnv('FLOW_RANGE_SCALPER_MAX_TREND_PCT', 12, { min: 0.1 }),
-    minRangeScore: numberEnv('FLOW_RANGE_SCALPER_MIN_RANGE_SCORE', 65, {
-      min: 0, max: 100,
-    }),
-    entryDelayMs: integerEnv('FLOW_RANGE_SCALPER_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_RANGE_SCALPER_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_RANGE_SCALPER_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_RANGE_SCALPER_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_RANGE_SCALPER_MAX_ENTRY_JUMP_PCT', 3, {
-      min: 0, max: 100,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_RANGE_SCALPER_MAX_ENTRY_DROP_PCT', 50, {
-      min: 0, max: 100,
-    }),
-    maxObservedPriceScaleRatio: numberEnv(
-      'FLOW_RANGE_SCALPER_MAX_PRICE_SCALE_RATIO',
-      100,
-      { min: 2, max: 1_000_000 },
-    ),
-    entryProfiles: [
-      {
-        id: 'JA',
-        label: 'JA Â· 1Ïƒ åç¦» + 2% åå¼¹',
-        deviationSigma: 1,
-        reboundPct: 2,
-        reboundTimeoutMs: 5_000,
-      },
-      {
-        id: 'JB',
-        label: 'JB Â· 1.5Ïƒ åç¦» + æ­£å‡€æµå…¥',
-        deviationSigma: 1.5,
-        reboundPct: 2,
-        reboundTimeoutMs: 5_000,
-        minRecentNetFlowSol: 0.1,
-      },
-      {
-        id: 'JC',
-        label: 'JC Â· ä¸‹è½¨åå¼¹ + å–åŽ‹è¡°å‡',
-        deviationSigma: 1,
-        reboundPct: 2,
-        reboundTimeoutMs: 5_000,
-        minRecentBuyers: 2,
-        maxSellDecayRatio: 0.5,
-      },
-      {
-        id: 'JW',
-        label: 'JW Â· JBæ¡ä»¶é¢„çƒ­åŽä»…äº¤æ˜“ç¬¬2/3æ³¢',
-        warmupProfileId: 'JB',
-        deviationSigma: 1.5,
-        reboundPct: 2,
-        reboundTimeoutMs: 5_000,
-        minRecentNetFlowSol: 0.1,
-        minOpportunityIndex: 2,
-        maxOpportunityIndex: 3,
-        exitProfileIds: ['X6'],
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'XM', label: 'XM Â· å›žå½’ä¸­è½´', exitMode: 'MIDLINE',
-        hardStopPct: 8, maxHoldMs: 20_000,
-      },
-      {
-        id: 'X6', label: 'X6 Â· å›ºå®š +6%', exitMode: 'TAKE_PROFIT',
-        takeProfitPct: 6, hardStopPct: 8, maxHoldMs: 20_000,
-      },
-      {
-        id: 'XB', label: 'XB Â· ä¸Šè½¨é€€å‡º', exitMode: 'UPPER_BAND',
-        hardStopPct: 8, maxHoldMs: 30_000,
-      },
-      {
-        id: 'XF', label: 'XF Â· ä¸­è½´ä¸”èµ„é‡‘åè½¬', exitMode: 'FLOW_REVERSAL',
-        hardStopPct: 8, maxHoldMs: 30_000,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_RANGE_SCALPER_POSITION_SOL'),
-    }),
-  },
-
-  // Independent observed-holder-growth research. "Holders" here means wallets
-  // seen buying through the captured Pump curve stream; it is deliberately not
-  // presented as an authoritative on-chain holder count.
-  holderGrowthShadow: {
-    enabled: booleanEnv('FLOW_HOLDER_GROWTH_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
-    snapshotHorizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-      min: 5_000,
-      max: 60_000,
-    }),
-    maxSnapshotLagMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_SNAPSHOT_LAG_MS', 2_000, {
-      min: 0,
-      max: 30_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_HOLDER_GROWTH_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_HOLDER_GROWTH_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_HOLDER_GROWTH_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_HOLDER_GROWTH_EXIT_TIMEOUT_MS', 30_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_HOLDER_GROWTH_MAX_ENTRY_JUMP_PCT', 100, {
-      min: 0,
-      max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_HOLDER_GROWTH_MAX_ENTRY_DROP_PCT', 99, {
-      min: 0,
-      max: 100,
-    }),
-    maxPlausibleReturnPct: numberEnv(
-      'FLOW_HOLDER_GROWTH_MAX_PLAUSIBLE_RETURN_PCT',
-      500,
-      { min: 10, max: 100_000 },
-    ),
-    bigWinnerPct: numberEnv('FLOW_HOLDER_GROWTH_BIG_WINNER_PCT', 50, { min: 1 }),
-    entryProfiles: [
-      {
-        id: 'HG10_OPEN',
-        label: 'HG10 Open Â· 10ç§’æ—©æœŸå®½æ¾ç»„',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 5,
-        minNewBuyers: 3,
-        minRetentionPct: 30,
-        minNetFlowSol: 1.5,
-        maxTop3SharePct: 90,
-      },
-      {
-        id: 'HG10_FLOW10_J2',
-        label: 'N Flow Edge 10s Â· NetFlow>=10 Â· entry jump 0-2%',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 5,
-        minNewBuyers: 3,
-        minRetentionPct: 30,
-        minNetFlowSol: 10,
-        maxTop3SharePct: 90,
-        minEntryJumpPct: 0,
-        maxEntryJumpPct: 2,
-      },
-      {
-        id: 'HG10_FLOW15_J2',
-        label: 'N Flow Edge 10s Â· NetFlow>=15 Â· entry jump 0-2%',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_OPEN_HORIZON_MS', 10_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 5,
-        minNewBuyers: 3,
-        minRetentionPct: 30,
-        minNetFlowSol: 15,
-        maxTop3SharePct: 90,
-        minEntryJumpPct: 0,
-        maxEntryJumpPct: 2,
-      },
-      {
-        id: 'HG20_BAL',
-        label: 'HG20 Balanced Â· 20ç§’æ—©æœŸå‡è¡¡ç»„',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 8,
-        minNewBuyers: 5,
-        minRetentionPct: 40,
-        minNetFlowSol: 3,
-        maxTop3SharePct: 85,
-      },
-      {
-        id: 'HG20_FAST',
-        label: 'HG20 Fast Â· 20ç§’æ—©æœŸåŠ é€Ÿç»„',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 8,
-        minRetentionPct: 50,
-        minNetFlowSol: 5,
-        maxTop3SharePct: 80,
-      },
-      {
-        id: 'HG20_QUALITY_J2',
-        label: 'N Quality 20s Â· Buyers>=40 Â· retention>=60% Â· entry jump 0-2%',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_EARLY_HORIZON_MS', 20_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 40,
-        minNewBuyers: 5,
-        minRetentionPct: 60,
-        minNetFlowSol: 5,
-        maxTop3SharePct: 80,
-        minEntryJumpPct: 0,
-        maxEntryJumpPct: 2,
-      },
-      {
-        id: 'HG30_BAL',
-        label: 'HG30 Balanced Â· æ–°å¢žä¹°å®¶â‰¥1/s + ç•™å­˜â‰¥50%',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 10,
-        minRetentionPct: 50,
-        minNetFlowSol: 5,
-        maxTop3SharePct: 80,
-        exitProfileIds: holderGrowthFullMatrixEnabled ? null : ['X15_FIXED'],
-      },
-      {
-        id: 'HG30_FAST',
-        label: 'HG30 Fast Â· æ–°å¢žä¹°å®¶â‰¥2/s + ç•™å­˜â‰¥70%',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 20,
-        minRetentionPct: 70,
-        minNetFlowSol: 10,
-        maxTop3SharePct: 80,
-      },
-      {
-        id: 'HG30_NB20_NF25',
-        label: 'HG30 Strong A Â· æ–°å¢žä¹°å®¶â‰¥20 + NetFlowâ‰¥25',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 20,
-        minRetentionPct: 50,
-        minNetFlowSol: 25,
-        maxTop3SharePct: 80,
-        exitProfileIds: holderGrowthFullMatrixEnabled
-          ? null : ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
-      },
-      {
-        id: 'HG30_RB15_NF25',
-        label: 'HG30 Strong B Â· è¿‘çª—ä¹°å®¶â‰¥15 + NetFlowâ‰¥25',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 10,
-        minRecentBuyers: 15,
-        minRetentionPct: 50,
-        minNetFlowSol: 25,
-        maxTop3SharePct: 80,
-        exitProfileIds: holderGrowthFullMatrixEnabled
-          ? null : ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
-      },
-      {
-        id: 'HG30_B80_NF25',
-        label: 'HG30 Strong C Â· Buyersâ‰¥80 + NetFlowâ‰¥25',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 80,
-        minNewBuyers: 10,
-        minRetentionPct: 50,
-        minNetFlowSol: 25,
-        maxTop3SharePct: 80,
-        exitProfileIds: holderGrowthFullMatrixEnabled
-          ? null : ['X12_FIXED', 'X15_FIXED', 'X18_FIXED', 'X15_R20'],
-      },
-      {
-        id: 'HG30_NQ_A_R75_C40_75',
-        label: 'HG30 NQ-A Â· Retention>=75% Â· Curve 40-75%',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 10,
-        minRetentionPct: 75,
-        minNetFlowSol: 5,
-        maxTop3SharePct: 80,
-        minCurvePct: 40,
-        maxCurvePct: 75,
-        exitProfileIds: ['X15_FIXED'],
-      },
-      {
-        id: 'HG30_NQ_B_R80_C45_70',
-        label: 'HG30 NQ-B Â· Retention>=80% Â· Curve 45-70%',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 10,
-        minRetentionPct: 80,
-        minNetFlowSol: 5,
-        maxTop3SharePct: 80,
-        minCurvePct: 45,
-        maxCurvePct: 70,
-        exitProfileIds: ['X15_FIXED'],
-      },
-      {
-        id: 'HG30_NQ_C_POST_PEAK',
-        label: 'HG30 NQ-C Â· NQ-A + post-peak net buying',
-        horizonMs: integerEnv('FLOW_HOLDER_GROWTH_SNAPSHOT_MS', 30_000, {
-          min: 5_000, max: 60_000,
-        }),
-        minBuyers: 10,
-        minNewBuyers: 10,
-        minRetentionPct: 75,
-        minNetFlowSol: 5,
-        maxTop3SharePct: 80,
-        minCurvePct: 40,
-        maxCurvePct: 75,
-        requirePostPeakNetPositive: true,
-        exitProfileIds: ['X12_FIXED', 'X15_FIXED', 'X18_FIXED'],
-      },
-    ].filter((profile) => holderGrowthFullMatrixEnabled
-      || profile.id === 'HG30_BAL'
-      || (holderGrowthQualityEnabled && [
-        'HG30_NQ_A_R75_C40_75',
-        'HG30_NQ_B_R80_C45_70',
-        'HG30_NQ_C_POST_PEAK',
-      ].includes(profile.id))),
-    // Every exit is crossed with every entry as an independent cohort. Keep
-    // XT15_H120 unchanged so existing production rows remain comparable.
-    exitProfiles: [
-      {
-        id: 'X5_FIXED', label: 'å›ºå®š5ç§’', exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 5_000, hardStopPct: 100, maxHoldMs: 5_000,
-      },
-      {
-        id: 'X15_FIXED', label: 'å›ºå®š15ç§’', exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 15_000, hardStopPct: 100, maxHoldMs: 15_000,
-      },
-      {
-        id: 'X12_FIXED', label: 'å›ºå®š12ç§’', exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 12_000, hardStopPct: 100, maxHoldMs: 12_000,
-      },
-      {
-        id: 'X18_FIXED', label: 'å›ºå®š18ç§’', exitMode: 'FIXED_HOLD',
-        fixedHoldMs: 18_000, hardStopPct: 100, maxHoldMs: 18_000,
-      },
-      {
-        id: 'X15_R20',
-        label: '15ç§’å¼ºåŠ¿å‡ä»“80% / 20%å°¾ä»“',
-        exitMode: 'FIXED_SCALE_RUNNER',
-        fixedHoldMs: 15_000,
-        hardStopPct: 100,
-        scaleOutTriggerPct: 20,
-        scaleOutFractionPct: 80,
-        trailingActivationPct: 20,
-        trailingStopPct: 15,
-        maxHoldMs: 120_000,
-      },
-      {
-        id: 'XT15_H120',
-        label: '+15%æ¿€æ´» / å³°å€¼å›žæ’¤15% / ç¡¬æ­¢æŸ20% / 120ç§’å…œåº•',
-        exitMode: 'TRAILING',
-        hardStopPct: numberEnv('FLOW_HOLDER_GROWTH_HARD_STOP_PCT', 20, {
-          min: 0.1,
-          max: 100,
-        }),
-        trailingActivationPct: numberEnv(
-          'FLOW_HOLDER_GROWTH_TRAILING_ACTIVATION_PCT',
-          15,
-          { min: 0.1, max: 1_000 },
-        ),
-        trailingStopPct: numberEnv('FLOW_HOLDER_GROWTH_TRAILING_STOP_PCT', 15, {
-          min: 0.1,
-          max: 100,
-        }),
-        maxHoldMs: integerEnv('FLOW_HOLDER_GROWTH_MAX_HOLD_MS', 120_000, {
-          min: 1_000,
-          max: 10 * 60_000,
-        }),
-      },
-      {
-        id: 'XT20_D10_H180', label: '+20%æ¿€æ´» / å›žæ’¤10% / 180ç§’å…œåº•',
-        exitMode: 'TRAILING', hardStopPct: 20,
-        trailingActivationPct: 20, trailingStopPct: 10, maxHoldMs: 180_000,
-      },
-      {
-        id: 'XT30_D15_H300', label: '+30%æ¿€æ´» / å›žæ’¤15% / 300ç§’å…œåº•',
-        exitMode: 'TRAILING', hardStopPct: 20,
-        trailingActivationPct: 30, trailingStopPct: 15, maxHoldMs: 300_000,
-      },
-      {
-        id: 'XSCALE_50_RUNNER', label: '+30%å‡ä»“50% / å°¾ä»“å›žæ’¤20%',
-        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
-        scaleOutTriggerPct: 30, scaleOutFractionPct: 50,
-        trailingActivationPct: 30, trailingStopPct: 20, maxHoldMs: 300_000,
-      },
-      {
-        id: 'XP20_50_D15_H120',
-        label: '+20%å‡ä»“50% / å°¾ä»“å›žæ’¤15% / 120ç§’å…œåº•',
-        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
-        scaleOutTriggerPct: 20, scaleOutFractionPct: 50,
-        trailingActivationPct: 20, trailingStopPct: 15, maxHoldMs: 120_000,
-      },
-      {
-        id: 'XP20_70_D20_H180',
-        label: '+20%å‡ä»“70% / å°¾ä»“å›žæ’¤20% / 180ç§’å…œåº•',
-        exitMode: 'SCALE_RUNNER', hardStopPct: 20,
-        scaleOutTriggerPct: 20, scaleOutFractionPct: 70,
-        trailingActivationPct: 20, trailingStopPct: 20, maxHoldMs: 180_000,
-      },
-      {
-        id: 'XP30_70_STAIR',
-        label: '+30%å‡ä»“70% / å°¾ä»“é˜¶æ¢¯å›žæ’¤',
-        exitMode: 'SCALE_ADAPTIVE', hardStopPct: 20,
-        scaleOutTriggerPct: 30, scaleOutFractionPct: 70, maxHoldMs: 300_000,
-        trailingTiers: [
-          { activationPct: 30, drawdownPct: 15 },
-          { activationPct: 60, drawdownPct: 15 },
-          { activationPct: 100, drawdownPct: 20 },
-          { activationPct: 200, drawdownPct: 25 },
-        ],
-      },
-      {
-        id: 'XFLOW_60', label: '60ç§’Holder/èµ„é‡‘æµè½¬å¼±é€€å‡º',
-        exitMode: 'FLOW_CHECK', hardStopPct: 20,
-        flowCheckHorizonMs: 60_000, minBuyerVelocityRatio: 0.5,
-        minNetFlowDeltaSol: 0, trailingActivationPct: 20,
-        trailingStopPct: 15, maxHoldMs: 180_000,
-      },
-      {
-        id: 'XSTAIR_BAL', label: 'é˜¶æ¢¯å‡è¡¡ 20/40/80/150/300',
-        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 360_000,
-        trailingTiers: [
-          { activationPct: 20, drawdownPct: 10 },
-          { activationPct: 40, drawdownPct: 15 },
-          { activationPct: 80, drawdownPct: 20 },
-          { activationPct: 150, drawdownPct: 25 },
-          { activationPct: 300, drawdownPct: 30 },
-        ],
-      },
-      {
-        id: 'XSTAIR_LOCK', label: 'é˜¶æ¢¯ä¿å®ˆ 15/30/60/120',
-        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 300_000,
-        trailingTiers: [
-          { activationPct: 15, drawdownPct: 7.5 },
-          { activationPct: 30, drawdownPct: 10 },
-          { activationPct: 60, drawdownPct: 15 },
-          { activationPct: 120, drawdownPct: 20 },
-        ],
-      },
-      {
-        id: 'XSTAIR_TAIL', label: 'é˜¶æ¢¯å°¾ä»“ 20/50/100/200',
-        exitMode: 'ADAPTIVE_TRAILING', hardStopPct: 20, maxHoldMs: 360_000,
-        trailingTiers: [
-          { activationPct: 20, drawdownPct: 12.5 },
-          { activationPct: 50, drawdownPct: 20 },
-          { activationPct: 100, drawdownPct: 25 },
-          { activationPct: 200, drawdownPct: 30 },
-        ],
-      },
-    ].filter((profile) => holderGrowthFullMatrixEnabled
-      || profile.id === 'X15_FIXED'
-      || (holderGrowthQualityEnabled
-        && ['X12_FIXED', 'X18_FIXED'].includes(profile.id))),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_HOLDER_GROWTH_POSITION_SOL'),
-    }),
-  },
-
-  // Independent two-stage Quality Leader research. It consumes existing 10s/20s
-  // Launch Quality snapshots and therefore adds no RPC or gRPC subscriptions.
-  qualityLeaderShadow: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_QUALITY_LEADER_SHADOW_ENABLED', false),
-    positionSizeSol: shadowPositionEnv('FLOW_QUALITY_LEADER_POSITION_SOL'),
-    snapshot10Ms: 10_000,
-    snapshot20Ms: 20_000,
-    maxSnapshotLagMs: integerEnv('FLOW_QUALITY_LEADER_MAX_SNAPSHOT_LAG_MS', 2_000, {
-      min: 0, max: 30_000,
-    }),
-    entryDelayMs: integerEnv('FLOW_QUALITY_LEADER_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_QUALITY_LEADER_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_QUALITY_LEADER_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_QUALITY_LEADER_EXIT_TIMEOUT_MS', 30_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_QUALITY_LEADER_MAX_ENTRY_JUMP_PCT', 20, {
-      min: 0, max: 1_000,
-    }),
-    maxEntryPriceDropPct: numberEnv('FLOW_QUALITY_LEADER_MAX_ENTRY_DROP_PCT', 20, {
-      min: 0, max: 100,
-    }),
-    hardStopPct: numberEnv('FLOW_QUALITY_LEADER_HARD_STOP_PCT', 20, {
-      min: 0.1, max: 100,
-    }),
-    strengthActivationPct: numberEnv('FLOW_QUALITY_LEADER_STRENGTH_PCT', 20, {
-      min: 0.1, max: 1_000,
-    }),
-    noStrengthMs: integerEnv('FLOW_QUALITY_LEADER_NO_STRENGTH_MS', 30_000, {
-      min: 1_000, max: 5 * 60_000,
-    }),
-    maxHoldMs: integerEnv('FLOW_QUALITY_LEADER_MAX_HOLD_MS', 5 * 60_000, {
-      min: 10_000, max: 30 * 60_000,
-    }),
-    maxPlausibleReturnPct: numberEnv('FLOW_QUALITY_LEADER_MAX_PLAUSIBLE_RETURN_PCT', 5_000, {
-      min: 100, max: 100_000,
-    }),
-    bigWinnerPct: numberEnv('FLOW_QUALITY_LEADER_BIG_WINNER_PCT', 100, { min: 1 }),
-    entryProfiles: [
-      {
-        id: 'QL_STRICT',
-        label: 'QL-A/B Strict Â· Retentionâ‰¥80%',
-        minReturn10Pct: 140,
-        maxDrawdown20Pct: 12,
-        minBuyerDelta: 8,
-        minNetFlowDeltaSol: 3,
-        minRetentionPct: 80,
-        maxCreatorSharePct: 3,
-        minCurvePct: 55,
-        maxCurvePct: 90,
-        maxSellBuyRatio: 0.55,
-        minVirtualSolReserves: 30,
-        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
-      },
-      {
-        id: 'QL_BROAD',
-        label: 'QL-C Broad Â· Retentionâ‰¥60%',
-        minReturn10Pct: 140,
-        maxDrawdown20Pct: 12,
-        minBuyerDelta: 8,
-        minNetFlowDeltaSol: 3,
-        minRetentionPct: 60,
-        maxCreatorSharePct: 3,
-        minCurvePct: 55,
-        maxCurvePct: 90,
-        maxSellBuyRatio: 0.55,
-        minVirtualSolReserves: 30,
-        exitProfileIds: ['QL_BARBELL'],
-      },
-      {
-        id: 'QL_STRICT_GUARD',
-        liveStrategyId: 'quality_leader_ql_strict_guard_protected_live',
-        label: 'QL-GUARD Â· Strict + å…¬å…±è®¢å•æµRUGè¿‡æ»¤',
-        minReturn10Pct: 140,
-        maxDrawdown20Pct: 12,
-        minBuyerDelta: 8,
-        minNetFlowDeltaSol: 3,
-        minRetentionPct: 80,
-        maxCreatorSharePct: 3,
-        minCurvePct: 55,
-        maxCurvePct: 90,
-        maxSellBuyRatio: 0.55,
-        minVirtualSolReserves: 30,
-        requireHealthyRugRisk: true,
-        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
-      },
-      {
-        id: 'QL_STRICT_GUARD_T00_04',
-        label: 'QL-GUARD-T00-04 Â· Strict/RUGè¿‡æ»¤/åŒ—äº¬00â€“04æ—¶',
-        minReturn10Pct: 140,
-        maxDrawdown20Pct: 12,
-        minBuyerDelta: 8,
-        minNetFlowDeltaSol: 3,
-        minRetentionPct: 80,
-        maxCreatorSharePct: 3,
-        minCurvePct: 55,
-        maxCurvePct: 90,
-        maxSellBuyRatio: 0.55,
-        minVirtualSolReserves: 30,
-        requireHealthyRugRisk: true,
-        beijingHourRanges: [[0, 4]],
-        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
-      },
-      {
-        id: 'QL_STRICT_GUARD_T16_20',
-        label: 'QL-GUARD-T16-20 Â· Strict/RUGè¿‡æ»¤/åŒ—äº¬16â€“20æ—¶',
-        minReturn10Pct: 140,
-        maxDrawdown20Pct: 12,
-        minBuyerDelta: 8,
-        minNetFlowDeltaSol: 3,
-        minRetentionPct: 80,
-        maxCreatorSharePct: 3,
-        minCurvePct: 55,
-        maxCurvePct: 90,
-        maxSellBuyRatio: 0.55,
-        minVirtualSolReserves: 30,
-        requireHealthyRugRisk: true,
-        beijingHourRanges: [[16, 20]],
-        exitProfileIds: ['QL_BARBELL', 'QL_PROTECTED'],
-      },
-    ],
-    exitProfiles: [
-      {
-        id: 'QL_BARBELL',
-        label: 'Barbell Â· +20%å–33% / +100%å–17% / 50%ä¿æŠ¤å°¾ä»“',
-        mode: 'BARBELL',
-        scale1TriggerPct: 20,
-        scale1FractionPct: 33,
-        scale2TriggerPct: 100,
-        scale2FractionPct: 17,
-      },
-      {
-        id: 'QL_PROTECTED',
-        label: 'Protected Runner Â· ä¸åˆ†æ‰¹ / é˜¶æ¢¯ä¿æŠ¤å°¾ä»“',
-        mode: 'PROTECTED_RUNNER',
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: shadowPositionEnv('FLOW_QUALITY_LEADER_POSITION_SOL'),
-    }),
-  },
-
-  // Feature Effectiveness Audit Observer. This forward-only audit measures
-  // whether each existing signal family adds predictive value after a real
-  // 1 SOL reserve-impact model. FEA-BNH-120 is an isolated Shadow cohort;
-  // neither path signs or sends a transaction.
-  featureEdgeAudit: {
-    enabled: booleanEnv('FLOW_FEATURE_EDGE_AUDIT_ENABLED', true),
-    canonicalSignalSource: process.env.FLOW_FEATURE_EDGE_AUDIT_CANONICAL_SOURCE
-      || 'FLOW_ACCEL_SIGNAL',
-    positionSol: numberEnv('FLOW_FEATURE_EDGE_AUDIT_POSITION_SOL', 1, { min: 0.01, max: 100 }),
-    sampleCooldownMs: integerEnv(
-      'FLOW_FEATURE_EDGE_AUDIT_SAMPLE_COOLDOWN_MS',
-      30_000,
-      { min: 1_000, max: 30 * 60_000 },
-    ),
-    maxPending: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_PENDING', 3_000, {
-      min: 100, max: 20_000,
-    }),
-    maxObservationLagMs: integerEnv(
-      'FLOW_FEATURE_EDGE_AUDIT_MAX_OBSERVATION_LAG_MS',
-      3_000,
-      { min: 250, max: 30_000 },
-    ),
-    stateRetentionMs: integerEnv(
-      'FLOW_FEATURE_EDGE_AUDIT_STATE_RETENTION_MS',
-      360_000,
-      { min: 310_000, max: 30 * 60_000 },
-    ),
-    minNetFlowSol: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_NETFLOW_SOL', 10, {
-      min: 0, max: 10_000,
-    }),
-    minFlowAccelerationSol: numberEnv(
-      'FLOW_FEATURE_EDGE_AUDIT_MIN_FLOW_ACCELERATION_SOL',
-      2,
-      { min: 0, max: 10_000 },
-    ),
-    minBuyers: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_BUYERS', 7, { min: 1, max: 10_000 }),
-    minBuySharePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_BUY_SHARE_PCT', 70, {
-      min: 0, max: 100,
-    }),
-    maxEntryImpactPct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_ENTRY_IMPACT_PCT', 15, {
-      min: 0, max: 1_000,
-    }),
-    minCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_CURVE_PCT', 60, {
-      min: 0, max: 100,
-    }),
-    maxCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_CURVE_PCT', 95, {
-      min: 0, max: 100,
-    }),
-    minAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MIN_AGE_MS', 5_000, {
-      min: 0, max: 60 * 60_000,
-    }),
-    maxAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_MAX_AGE_MS', 300_000, {
-      min: 1_000, max: 24 * 60 * 60_000,
-    }),
-    bnhEnabled: booleanEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_ENABLED', true),
-    bnhMinAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MIN_AGE_MS', 30_000, {
-      min: 0, max: 60 * 60_000,
-    }),
-    bnhMaxAgeMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MAX_AGE_MS', 120_000, {
-      min: 1_000, max: 24 * 60 * 60_000,
-    }),
-    bnhMinCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MIN_CURVE_PCT', 60, {
-      min: 0, max: 100,
-    }),
-    bnhMaxCurvePct: numberEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_MAX_CURVE_PCT', 90, {
-      min: 0, max: 100,
-    }),
-    bnhHoldMs: integerEnv('FLOW_FEATURE_EDGE_AUDIT_BNH_HOLD_MS', 120_000, {
-      min: 5_000, max: 60 * 60_000,
-    }),
-    bnhRoundTripCostPct: numberEnv(
-      'FLOW_FEATURE_EDGE_AUDIT_BNH_ROUND_TRIP_COST_PCT',
-      3.2,
-      { min: 0, max: 100 },
-    ),
-  },
-
-  // Post-migration Survivor Observer (PM-SURV). Every migrated mint receives
-  // a bounded five-minute baseline. Only liquid, active survivors continue to
-  // 30/60 minutes; a deterministic holdout estimates big-winner false negatives.
-  // Passing 5m also opens isolated capacity-aware 30/60/120s Shadow rows. It
-  // never opens a live position, calls extra RPC endpoints, or signs.
-  postMigrationSurvivorObserver: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_ENABLED', false),
-    newEntriesEnabled: booleanEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_NEW_ENTRIES_ENABLED', false,
-    ),
-    positionSol: numberEnv('FLOW_POST_MIGRATION_SURVIVOR_POSITION_SOL', 1, {
-      min: 0.01, max: 100,
-    }),
-    baselineStageMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_BASELINE_MS', 5 * 60_000, {
-      min: 60_000, max: 30 * 60_000,
-    }),
-    extendedStageMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_EXTENDED_MS', 30 * 60_000, {
-      min: 5 * 60_000, max: 60 * 60_000,
-    }),
-    maxAgeMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_MAX_AGE_MS', 60 * 60_000, {
-      min: 30 * 60_000, max: 2 * 60 * 60_000,
-    }),
-    inactivityMs: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_INACTIVITY_MS', 180_000, {
-      min: 30_000, max: 30 * 60_000,
-    }),
-    maxActive: integerEnv('FLOW_POST_MIGRATION_SURVIVOR_MAX_ACTIVE', 3_000, {
-      min: 100, max: 20_000,
-    }),
-    maxThirtyMinuteSurvivors: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_MAX_30M', 500, { min: 10, max: 10_000 },
-    ),
-    maxSixtyMinuteSurvivors: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_MAX_60M', 100, { min: 5, max: 5_000 },
-    ),
-    holdoutPct: numberEnv('FLOW_POST_MIGRATION_SURVIVOR_HOLDOUT_PCT', 10, {
-      min: 0, max: 100,
-    }),
-    softFailConfirmations: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_SOFT_FAIL_CONFIRMATIONS', 2, { min: 1, max: 10 },
-    ),
-    softFailConfirmationMs: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_SOFT_FAIL_CONFIRMATION_MS', 30_000,
-      { min: 1_000, max: 10 * 60_000 },
-    ),
-    riskCheckIntervalMs: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_RISK_CHECK_INTERVAL_MS', 2_000,
-      { min: 500, max: 60_000 },
-    ),
-    hardPriceRetentionPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_HARD_PRICE_RETENTION_PCT', 15, { min: 0, max: 100 },
-    ),
-    hardExecutableRecoveryPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_HARD_RECOVERY_PCT', 15, { min: 0, max: 100 },
-    ),
-    stage5MinPeakRetentionPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_PEAK_RETENTION_PCT', 30,
-      { min: 0, max: 100 },
-    ),
-    stage5MinTrades60s: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_TRADES_60S', 8, { min: 0, max: 100_000 },
-    ),
-    stage5MinBuyers60s: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_BUYERS_60S', 3, { min: 0, max: 100_000 },
-    ),
-    stage5MinBuyTx60s: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_BUYS_60S', 2, { min: 0, max: 100_000 },
-    ),
-    stage5MinSellTx60s: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_SELLS_60S', 1, { min: 0, max: 100_000 },
-    ),
-    stage5MinExecutableRecoveryPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_5M_MIN_RECOVERY_PCT', 25, { min: 0, max: 100 },
-    ),
-    stage30MinBaselineReturnPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_RETURN_PCT', -10, { min: -100, max: 10_000 },
-    ),
-    stage30MinPeakRetentionPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_PEAK_RETENTION_PCT', 45,
-      { min: 0, max: 100 },
-    ),
-    stage30MinTrades300s: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_TRADES_300S', 12,
-      { min: 0, max: 100_000 },
-    ),
-    stage30MinBuyers300s: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_BUYERS_300S', 5,
-      { min: 0, max: 100_000 },
-    ),
-    stage30MinNetFlowSol: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_NETFLOW_SOL', 0,
-      { min: -100_000, max: 100_000 },
-    ),
-    stage30MinExecutableRecoveryPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_30M_MIN_RECOVERY_PCT', 50, { min: 0, max: 100 },
-    ),
-    maxEventsPerMint: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_MAX_EVENTS_PER_MINT', 512,
-      { min: 64, max: 10_000 },
-    ),
-    dashboardLimit: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_DASHBOARD_LIMIT', 2_000,
-      { min: 100, max: 10_000 },
-    ),
-    transientUpPriceRatio: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_TRANSIENT_UP_PRICE_RATIO', 20,
-      { min: 2, max: 1_000_000 },
-    ),
-    priceConfirmationWindowMs: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_WINDOW_MS', 500,
-      { min: 100, max: 60_000 },
-    ),
-    priceConfirmationMinPersistenceMs: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_MIN_PERSISTENCE_MS', 150,
-      { min: 0, max: 60_000 },
-    ),
-    priceConfirmationTolerancePct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_TOLERANCE_PCT', 25,
-      { min: 1, max: 100 },
-    ),
-    priceConfirmationMinWallets: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_PRICE_CONFIRMATION_MIN_WALLETS', 2,
-      { min: 1, max: 100 },
-    ),
-    shadowEnabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ENABLED', false),
-    shadowFullHoldMatrixEnabled: booleanEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_FULL_HOLD_MATRIX_ENABLED', false,
-    ),
-    shadowHoldMs: booleanEnv('FLOW_POST_MIGRATION_SURVIVOR_FULL_HOLD_MATRIX_ENABLED', false)
-      ? millisecondListEnv(
-        'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_HOLDS_SECONDS', [30, 60, 120],
-      )
-      : [30_000],
-    shadowRoundTripCostPct: numberEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_ROUND_TRIP_COST_PCT', 3.2,
-      { min: 0, max: 100 },
-    ),
-    shadowNoExitGraceMs: integerEnv(
-      'FLOW_POST_MIGRATION_SURVIVOR_SHADOW_NO_EXIT_GRACE_MS', 60_000,
-      { min: 1_000, max: 30 * 60_000 },
-    ),
-  },
-
-  // Graduation Acceleration Shadow O. This is an independent forward-only
-  // experiment derived from the non-overlapping historical graduation study.
-  // It never signs or submits a transaction and does not reuse old I cohorts.
-  graduationAccelerationShadow: {
-    enabled: booleanEnv('FLOW_GRADUATION_ACCEL_SHADOW_ENABLED', true),
-    entryDelayMs: integerEnv('FLOW_GRADUATION_ACCEL_ENTRY_DELAY_MS', 200, { min: 0 }),
-    entryTimeoutMs: integerEnv('FLOW_GRADUATION_ACCEL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
-    exitDelayMs: integerEnv('FLOW_GRADUATION_ACCEL_EXIT_DELAY_MS', 200, { min: 0 }),
-    exitTimeoutMs: integerEnv('FLOW_GRADUATION_ACCEL_EXIT_TIMEOUT_MS', 15_000, { min: 1 }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_GRADUATION_ACCEL_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0, max: 1_000,
-    }),
-    hardStopPct: numberEnv('FLOW_GRADUATION_ACCEL_HARD_STOP_PCT', 30, {
-      min: 0.1, max: 100,
-    }),
-    maxPreGraduationHoldMs: integerEnv(
-      'FLOW_GRADUATION_ACCEL_MAX_PRE_GRAD_HOLD_MS',
-      5 * 60_000,
-      { min: 10_000, max: 30 * 60_000 },
-    ),
-    maxPostGraduationHoldMs: integerEnv(
-      'FLOW_GRADUATION_ACCEL_MAX_POST_GRAD_HOLD_MS',
-      5 * 60_000,
-      { min: 10_000, max: 30 * 60_000 },
-    ),
-    coreExitPct: numberEnv('FLOW_GRADUATION_ACCEL_CORE_EXIT_PCT', 50, {
-      min: 1, max: 99,
-    }),
-    // Shadow remains a 1 SOL research model independently of the promoted
-    // 0.5 SOL live order, preserving the eventual production-size capacity test.
-    capacitySols: listEnv('FLOW_GRADUATION_ACCEL_V2_CAPACITY_SOLS', ['1'])
-      .map(Number).filter((value) => Number.isFinite(value) && value > 0),
-    entryProfiles: [
-      {
-        id: 'O_FAST10_C80_B20_R07',
-        label: '10ç§’ Curveâ‰¥80 / Buyersâ‰¥20 / Sell-Buyâ‰¤0.7',
-        mode: 'FIXED_10S',
-        horizonMs: 10_000,
-        minCurvePct: 80,
-        minBuyers: 20,
-        maxSellBuyRatio: 0.7,
-      },
-      {
-        id: 'O_C80_D5_B2_S0_NC',
-        liveStrategyId: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
-        label: 'é¦–æ¬¡Curve80 / Î”Curve5â‰¥5 / Buyers5â‰¥2 / 0å–å• / Creatoræœªå–',
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 80,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 2,
-        maxSellTx: 0,
-        requireNoCreatorSell: true,
-        capacityAwareExit: true,
-      },
-      ...[15, 20].map((hardStopPct) => ({
-        id: `O_C80_D5_B2_S0_NC_H${hardStopPct}`,
-        label: `O-C80-D5æ­¢æŸå¯¹ç…§ Â· H${hardStopPct}% / å…¶ä½™é€€å‡ºä¸å˜`,
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 80,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 2,
-        maxSellTx: 0,
-        requireNoCreatorSell: true,
-        capacityAwareExit: true,
-        hardStopPct,
-      })),
-      ...[75, 78].map((thresholdPct) => ({
-        id: `O_C${thresholdPct}_D5_B2_S0_NC_EARLY`,
-        label: `O-C${thresholdPct}-EARLY Â· Curve${thresholdPct}æå‰è§¦å‘ / Î”Curve5â‰¥5 / Buyersâ‰¥2 / 0å–å•`,
-        mode: 'CURVE_MILESTONE',
-        thresholdPct,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 2,
-        maxSellTx: 0,
-        requireNoCreatorSell: true,
-        capacityAwareExit: true,
-        coreExitPct: 50,
-        runnerExitMode: 'TIERED_TRAILING',
-        runnerMaxHoldMs: 240_000,
-      })),
-      {
-        id: 'O_C80_M5_HANDOFF_X60',
-        label: 'O-C80-M5-HANDOFF Â· Curve80ä¿¡å·åŽç­‰å¾…æ¯•ä¸š / PumpSwapé¦–5ç§’ç¡®è®¤ / å›ºå®š60ç§’',
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 80,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 2,
-        maxSellTx: 0,
-        requireNoCreatorSell: true,
-        migrationHandoff: true,
-        capacityAwareExit: true,
-        coreExitPct: 0,
-        postMigrationEntryGate: {
-          windowMs: 5_000,
-          minBuyers: 5,
-          minNetFlowSol: 0,
-          maxSellBuyRatio: 0.7,
-          maxDrawdownPct: 20,
-          maxMarketMovePct: 15,
-          maxSelfImpactPct: 10,
-        },
-        runnerExitMode: 'FIXED_HOLD',
-        runnerMaxHoldMs: 60_000,
-      },
-      ...[
-        ['O_C80_LIVE_MIG_X20', 20_000],
-        ['O_C80_LIVE_MIG_X30', 30_000],
-      ].map(([id, runnerMaxHoldMs]) => ({
-        id,
-        label: `${id} Â· O-C80å®žç›˜è¿ç§»æ‹’ç»åŽ / PumpSwapè‡ªç„¶æµç¡®è®¤ / å›ºå®š${runnerMaxHoldMs / 1_000}ç§’`,
-        mode: 'LIVE_MIGRATION_FAILURE',
-        sourceLiveStrategyId: 'graduation_accel_o_c80_d5_b2_s0_nc_live',
-        migrationHandoff: true,
-        capacityAwareExit: true,
-        capacitySols: [1],
-        entryTimeoutMs: 2_500,
-        coreExitPct: 0,
-        postMigrationEntryGate: {
-          entryDelayMs: 500,
-          captureWindowMs: 3_000,
-          evaluateAtFill: true,
-          waitForQualification: true,
-          minTrades: 3,
-          minBuyTx: 2,
-          minBuyers: 2,
-          minNetFlowSol: 0.1,
-          maxSellBuyRatio: 0.5,
-          maxLargestSellSol: 1,
-          maxDrawdownPct: 12,
-          maxMarketMovePct: 15,
-          maxSelfImpactPct: 10,
-        },
-        runnerExitMode: 'FIXED_HOLD',
-        runnerMaxHoldMs,
-      })),
-      ...[
-        ['O_C80_P500_STAIR240', 500, 'TIERED_TRAILING', 240_000],
-        ['O_C80_P1000_X60', 1_000, 'FIXED_HOLD', 60_000],
-        ['O_C80_P1000_X120', 1_000, 'FIXED_HOLD', 120_000],
-        ['O_C80_P1000_STAIR240', 1_000, 'TIERED_TRAILING', 240_000],
-      ].map(([id, persistenceMs, runnerExitMode, runnerMaxHoldMs]) => ({
-        id,
-        liveStrategyId: id === 'O_C80_P500_STAIR240'
-          ? 'graduation_accel_o_c80_p500_stair240_live'
-          : null,
-        label: `${id} Â· Curve80æŒç»­ç¡®è®¤ / 1 SOLå¯æ‰§è¡Œé€€å‡º`,
-        mode: 'CURVE_MILESTONE_PERSISTENCE',
-        thresholdPct: 80,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 2,
-        maxSellTx: 0,
-        requireNoCreatorSell: true,
-        capacityAwareExit: true,
-        persistenceMs,
-        maxPersistenceSellTx: 0,
-        maxPersistencePullbackPct: 5,
-        coreExitPct: 0,
-        runnerExitMode,
-        runnerMaxHoldMs,
-      })),
-      ...[
-        ['O90_M5_X60', 'FIXED_HOLD', 60_000],
-        ['O90_M5_X120', 'FIXED_HOLD', 120_000],
-        ['O90_M5_STAIR120', 'TIERED_TRAILING', 120_000],
-      ].map(([id, runnerExitMode, runnerMaxHoldMs]) => ({
-        id,
-        liveStrategyId: id === 'O90_M5_STAIR120'
-          ? 'graduation_accel_o90_m5_stair120_live'
-          : null,
-        label: `${id} Â· Curve90 graduation probability + first PumpSwap 5s gate`,
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 90,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 1,
-        maxSellTx: 1,
-        requireNoCreatorSell: true,
-        capacityAwareExit: true,
-        coreExitPct: 50,
-        postMigrationGate: {
-          windowMs: 5_000,
-          minBuyers: 25,
-          minNetFlowSol: 0,
-        },
-        runnerExitMode,
-        runnerMaxHoldMs,
-      })),
-      ...[
-        ['O90_Q70_D30_X60', 'FIXED_HOLD', 60_000],
-        ['O90_Q70_D30_STAIR120', 'TIERED_TRAILING', 120_000],
-      ].map(([id, runnerExitMode, runnerMaxHoldMs]) => ({
-        id,
-        label: `${id} Â· Curve90 / Buyers5â‰¥3 / NetFlow5â‰¥70 / Î”Curve5â‰¥30 Â· forward-only`,
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 90,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 30,
-        minBuyers: 3,
-        minNetFlowSol: 70,
-        maxSellTx: 1,
-        requireNoCreatorSell: true,
-        coreExitPct: 50,
-        capacityAwareExit: true,
-        postMigrationGate: {
-          windowMs: 5_000,
-          minBuyers: 25,
-          minNetFlowSol: 0,
-        },
-        runnerExitMode,
-        runnerMaxHoldMs,
-      })),
-      {
-        id: 'O90_DAY0818_STAIR120',
-        label: 'O90-DAY-0818 Â· åŒ—äº¬æ—¶é—´08â€“18ç‚¹ / æ—§O90å…¥åœº / é˜¶æ¢¯120ç§’',
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 90,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 1,
-        maxSellTx: 1,
-        requireNoCreatorSell: true,
-        sessionStartHourCst: 8,
-        sessionEndHourCst: 18,
-        coreExitPct: 50,
-        capacityAwareExit: true,
-        postMigrationGate: {
-          windowMs: 5_000,
-          minBuyers: 25,
-          minNetFlowSol: 0,
-        },
-        runnerExitMode: 'TIERED_TRAILING',
-        runnerMaxHoldMs: 120_000,
-      },
-      {
-        id: 'O_C80_DAY1218_STAIR240',
-        label: 'O-C80-DAY-1218 Â· åŒ—äº¬æ—¶é—´12â€“18ç‚¹ / æ—§Curve80å…¥åœº / é˜¶æ¢¯240ç§’',
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 80,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 2,
-        maxSellTx: 0,
-        requireNoCreatorSell: true,
-        sessionStartHourCst: 12,
-        sessionEndHourCst: 18,
-        coreExitPct: 50,
-        capacityAwareExit: true,
-        runnerExitMode: 'TIERED_TRAILING',
-        runnerMaxHoldMs: 240_000,
-      },
-      ...[
-        ['O_C80_NIGHT0004_STAIR240', 'O-C80-NIGHT-0004', 0, 4],
-        ['O_C80_EVENING2024_STAIR240', 'O-C80-EVENING-2024', 20, 24],
-      ].map(([id, labelPrefix, sessionStartHourCst, sessionEndHourCst]) => ({
-        id,
-        label: `${labelPrefix} Â· åŒ—äº¬æ—¶æ®µ / æ—§Curve80å…¥åœº / é˜¶æ¢¯240ç§’`,
-        mode: 'CURVE_MILESTONE',
-        thresholdPct: 80,
-        recentWindowMs: 5_000,
-        minCurveDeltaPct: 5,
-        minBuyers: 2,
-        maxSellTx: 0,
-        requireNoCreatorSell: true,
-        sessionStartHourCst,
-        sessionEndHourCst,
-        coreExitPct: 50,
-        capacityAwareExit: true,
-        runnerExitMode: 'TIERED_TRAILING',
-        runnerMaxHoldMs: 240_000,
-      })),
-      ...graduationRelaxedEntryProfiles,
-    ],
-    trailingTiers: [
-      { activationPct: 20, drawdownPct: 10 },
-      { activationPct: 40, drawdownPct: 15 },
-      { activationPct: 80, drawdownPct: 20 },
-      { activationPct: 150, drawdownPct: 25 },
-      { activationPct: 300, drawdownPct: 30 },
-    ],
-    bigWinnerPct: numberEnv('FLOW_GRADUATION_ACCEL_BIG_WINNER_PCT', 50, { min: 1 }),
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: 1,
-    }),
-  },
-
-  // Observer-only Launch Quality research. Reference percentages label market
-  // structure for later analysis; they never become an entry or execution rule.
-  launchQualityObserver: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED', false),
-    snapshotHorizonsMs: millisecondListEnv(
-      'FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS',
-      [5, 10, 20, 30, 60],
-    ),
-    maxLaunchAgeMs: integerEnv('FLOW_LAUNCH_QUALITY_MAX_AGE_MS', 90_000, {
-      min: 30_000,
-      max: 10 * 60_000,
-    }),
-    pumpReferencePct: numberEnv('FLOW_LAUNCH_QUALITY_PUMP_REFERENCE_PCT', 25, {
-      min: 0.1,
-      max: 10_000,
-    }),
-    pullbackReferencePct: numberEnv(
-      'FLOW_LAUNCH_QUALITY_PULLBACK_REFERENCE_PCT',
-      7.5,
-      { min: 0.1, max: 100 },
-    ),
-    reboundReferencePct: numberEnv(
-      'FLOW_LAUNCH_QUALITY_REBOUND_REFERENCE_PCT',
-      3,
-      { min: 0, max: 1_000 },
-    ),
-    deepReferenceProfiles: launchDeepPullbackProfiles.map((profile) => ({ ...profile })),
-    recentBuyerWindowMs: integerEnv(
-      'FLOW_LAUNCH_QUALITY_RECENT_BUYER_WINDOW_MS',
-      10_000,
-      { min: 500, max: 60_000 },
-    ),
-    retentionFloorPct: numberEnv('FLOW_LAUNCH_QUALITY_RETENTION_FLOOR_PCT', 10, {
-      min: 0,
-      max: 100,
-    }),
-    maxObservationLagMs: integerEnv(
-      'FLOW_LAUNCH_QUALITY_MAX_OBSERVATION_LAG_MS',
-      2_000,
-      { min: 0, max: 30_000 },
-    ),
-    marketRegimeLookbackMs: integerEnv(
-      'FLOW_LAUNCH_MARKET_REGIME_LOOKBACK_MS',
-      30 * 60_000,
-      { min: 5 * 60_000, max: 6 * 60 * 60_000 },
-    ),
-    marketRegimeSettlementLagMs: integerEnv(
-      'FLOW_LAUNCH_MARKET_REGIME_SETTLEMENT_LAG_MS',
-      60_000,
-      { min: 60_000, max: 10 * 60_000 },
-    ),
-    marketRegimeCacheMs: integerEnv(
-      'FLOW_LAUNCH_MARKET_REGIME_CACHE_MS',
-      5_000,
-      { min: 1_000, max: 60_000 },
-    ),
-  },
-
-  // M2F-OBS collects causal post-migration second-leg evidence only. It has
-  // no position model, execution callback, RPC enrichment or transaction path.
-  migrationSecondLegObserver: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_M2F_OBSERVER_ENABLED', false),
-    maxAgeMs: integerEnv('FLOW_M2F_OBSERVER_MAX_AGE_MS', 480_000, {
-      min: 60_000,
-      max: 30 * 60_000,
-    }),
-    snapshotIntervalMs: integerEnv('FLOW_M2F_OBSERVER_SNAPSHOT_INTERVAL_MS', 1_000, {
-      min: 250,
-      max: 10_000,
-    }),
-    restoreGraceMs: integerEnv('FLOW_M2F_OBSERVER_RESTORE_GRACE_MS', 60_000, {
-      min: 0,
-      max: 10 * 60_000,
-    }),
-    pullbackArmPct: numberEnv('FLOW_M2F_OBSERVER_PULLBACK_ARM_PCT', 8, {
-      min: 0.1,
-      max: 100,
-    }),
-    reboundReferencePct: numberEnv('FLOW_M2F_OBSERVER_REBOUND_REFERENCE_PCT', 3, {
-      min: 0,
-      max: 100,
-    }),
-    retentionFloorPct: numberEnv('FLOW_M2F_OBSERVER_RETENTION_FLOOR_PCT', 20, {
-      min: 0,
-      max: 100,
-    }),
-    effectiveBuyMinSol: numberEnv('FLOW_M2F_OBSERVER_EFFECTIVE_BUY_MIN_SOL', 0.02, {
-      min: 0,
-      max: 100,
-    }),
-  },
-
-  // Retire the old M2F position cohorts after the negative forward sample.
-  // Reuse the independent eight-minute M2F-OBS tape for a separately named
-  // late-stabilization matrix; old M2F rows remain untouched and queryable.
-  migrationSecondLegShadow: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_LPS_SHADOW_ENABLED', false),
-    newEntriesEnabled: booleanEnv('FLOW_LPS_SHADOW_NEW_ENTRIES_ENABLED', false),
-    strategyName: 'Late Post-Migration Stabilization LPS',
-    // Labels the broad post-migration tape for Shadow research only. This
-    // object is not consumed by LiveTradingManager or any live strategy.
-    marketRegime: {
-      enabled: retiredResearchReopenEnabled
-        && booleanEnv('FLOW_M2F_MARKET_REGIME_SHADOW_ENABLED', false),
-      maturityAgeMs: integerEnv('FLOW_M2F_MARKET_REGIME_MATURITY_MS', 120_000, {
-        min: 10_000, max: 10 * 60_000,
-      }),
-      lookbackMs: integerEnv('FLOW_M2F_MARKET_REGIME_LOOKBACK_MS', 10 * 60_000, {
-        min: 60_000, max: 6 * 60 * 60_000,
-      }),
-      minMints: integerEnv('FLOW_M2F_MARKET_REGIME_MIN_MINTS', 12, {
-        min: 3, max: 1_000,
-      }),
-      minPositiveReturnRatePct: numberEnv(
-        'FLOW_M2F_MARKET_REGIME_MIN_POSITIVE_RETURN_RATE_PCT', 50, { min: 0, max: 100 },
-      ),
-      maxRugCollapseRatePct: numberEnv(
-        'FLOW_M2F_MARKET_REGIME_MAX_RUG_RATE_PCT', 15, { min: 0, max: 100 },
-      ),
-      minPositiveNetFlowRatePct: numberEnv(
-        'FLOW_M2F_MARKET_REGIME_MIN_POSITIVE_FLOW_RATE_PCT', 55, { min: 0, max: 100 },
-      ),
-      maxMedianEstimatedImpact1SolPct: numberEnv(
-        'FLOW_M2F_MARKET_REGIME_MAX_MEDIAN_IMPACT_1SOL_PCT', 5, { min: 0, max: 100 },
-      ),
-    },
-    cohortId: 'M2F-NH10-GUARD-B',
-    positionSizeSol: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_POSITION_SOL', 1, {
-      min: 0.01,
-      max: 100,
-    }),
-    entryDelayMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENTRY_DELAY_MS', 200, {
-      min: 0,
-      max: 10_000,
-    }),
-    entryTimeoutMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENTRY_TIMEOUT_MS', 2_000, {
-      min: 100,
-      max: 30_000,
-    }),
-    exitDelayMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_EXIT_DELAY_MS', 200, {
-      min: 0,
-      max: 10_000,
-    }),
-    exitTimeoutMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_EXIT_TIMEOUT_MS', 2_000, {
-      min: 100,
-      max: 30_000,
-    }),
-    maxEntryPriceJumpPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_ENTRY_JUMP_PCT', 15, {
-      min: 0,
-      max: 1_000,
-    }),
-    maxNegativeEntryJumpPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_ENTRY_DROP_PCT', 30, {
-      min: 0,
-      max: 100,
-    }),
-    // A PumpSwap token cannot causally reprice by hundreds of times between
-    // adjacent observations in this short study. Such rows are reserve/decimal
-    // scale discontinuities and must not become giant MFE or PnL winners.
-    maxObservedPriceRatio: numberEnv('FLOW_M2F_MAX_OBSERVED_PRICE_RATIO', 100, {
-      min: 2,
-      max: 1_000_000,
-    }),
-    hardStopPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_HARD_STOP_PCT', 15, {
-      min: 0,
-      max: 100,
-    }),
-    maxHoldMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_HOLD_MS', 10_000, {
-      min: 1_000,
-      max: 10 * 60_000,
-    }),
-    thresholds: { ...m2fNearHighThresholds },
-    cohorts: [
-      {
-        id: 'M2F-NH10-GUARD-B',
-        label: 'Near-high 10s entry control',
-        enabled: false,
-        studyMode: 'ENTRY_CONTROL',
-        confirmationMode: 'IMMEDIATE',
-        hardStopPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_HARD_STOP_PCT', 15, {
-          min: 0,
-          max: 100,
-        }),
-        maxHoldMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_HOLD_MS', 10_000, {
-          min: 1_000,
-          max: 10 * 60_000,
-        }),
-      },
-      {
-        id: 'M2F-HOLD-120',
-        label: 'Same-entry fixed 120s hold extension',
-        enabled: false,
-        studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
-        confirmationMode: 'IMMEDIATE',
-        hardStopPct: 100,
-        maxHoldMs: integerEnv('FLOW_M2F_HOLD_120_MS', 120_000, {
-          min: 10_000,
-          max: 10 * 60_000,
-        }),
-      },
-      {
-        id: 'M2F-HOLD-240',
-        label: 'Same-entry fixed 240s right-tail extension',
-        enabled: false,
-        studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
-        confirmationMode: 'IMMEDIATE',
-        hardStopPct: 100,
-        maxHoldMs: integerEnv('FLOW_M2F_HOLD_240_MS', 240_000, {
-          min: 10_000,
-          max: 10 * 60_000,
-        }),
-      },
-      {
-        id: 'M2F-HOLD-240-H20',
-        label: 'Same-entry 240s extension with 20% mark stop',
-        enabled: false,
-        studyMode: 'SAME_ENTRY_HOLD_EXTENSION',
-        confirmationMode: 'IMMEDIATE',
-        hardStopPct: 20,
-        maxHoldMs: integerEnv('FLOW_M2F_HOLD_240_H20_MS', 240_000, {
-          min: 10_000,
-          max: 10 * 60_000,
-        }),
-      },
-      {
-        id: 'M2F-CF2-H10',
-        label: 'Two-snapshot persistence filter / original 10s exit',
-        enabled: false,
-        studyMode: 'CONFIRM_FILTER',
-        confirmationMode: 'TWO_SNAPSHOT_PERSISTENCE',
-        confirmationMinGapMs: integerEnv('FLOW_M2F_CONFIRM_MIN_GAP_MS', 500, {
-          min: 100,
-          max: 5_000,
-        }),
-        confirmationMaxGapMs: integerEnv('FLOW_M2F_CONFIRM_MAX_GAP_MS', 2_500, {
-          min: 500,
-          max: 10_000,
-        }),
-        maxSellDecelerationIncrease: numberEnv(
-          'FLOW_M2F_CONFIRM_MAX_SELL_DECEL_INCREASE', 0.1, { min: 0, max: 10 },
-        ),
-        hardStopPct: 15,
-        maxHoldMs: 10_000,
-      },
-      ...[
-        ['M2F-SSR-CTRL-X60', 'SSR control / fixed 60s', false, 100, 60_000],
-        ['M2F-SSR-MRG-X60', 'SSR + MRG green / fixed 60s', true, 100, 60_000],
-        ['M2F-SSR-MRG-X120', 'SSR + MRG green / fixed 120s', true, 100, 120_000],
-        ['M2F-SSR-MRG-R120-H20', 'SSR + MRG green / H20 / 120s', true, 20, 120_000],
-        ['M2F-SSR-MRG-R240-H20', 'SSR + MRG green / H20 / 240s right tail', true, 20, 240_000],
-      ].map(([id, label, requireGreenRegime, hardStopPct, maxHoldMs]) => ({
-        id,
-        label,
-        enabled: false,
-        studyMode: requireGreenRegime
-          ? 'SELL_STRESS_RECOVERY_MARKET_REGIME'
-          : 'SELL_STRESS_RECOVERY_CONTROL',
-        confirmationMode: 'TWO_SNAPSHOT_PERSISTENCE',
-        confirmationMinGapMs: 500,
-        confirmationMaxGapMs: 2_500,
-        maxSellDecelerationIncrease: 0.15,
-        requireGreenRegime,
-        hardStopPct,
-        maxHoldMs,
-        thresholds: {
-          minAgeMs: 10_000,
-          maxAgeMs: 90_000,
-          minCurrentImpulsePct: 20,
-          maxCurrentImpulsePct: 100,
-          minPeakImpulsePct: 20,
-          minPullbackPct: 10,
-          maxPullbackPct: 30,
-          minReboundPct: 3,
-          maxReboundPct: 15,
-          minNetFlow10sSol: 1,
-          minNetFlow3sSol: 0.5,
-          minBuyers10s: 8,
-          minBuyers3s: 1,
-          maxLargestBuyerSharePct: 40,
-          minBuySpeedRatio: 0,
-          minNetFlowAcceleration: -1_000,
-          maxSellDecelerationRatio: 0.8,
-          minHolderDiffusionIndex: -10_000,
-          minQuoteReserveSol: 20,
-          maxEstimatedImpact1SolPct: 5,
-        },
-      })),
-      ...lpsCohorts,
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: 1,
-    }),
-  },
-
-  // Forward-only theoretical same-slot backrun study. This observer never
-  // signs or sends a transaction. It measures whether a large PumpSwap sell
-  // is followed by a buy in the same slot and prices the hypothetical 0.1 SOL
-  // round trip from the sell event's post-trade reserves.
-  sameSlotDumpBackrunShadow: {
-    // The completed-slot export produced zero winners across every tested
-    // horizon. Keep the historical table/API but stop generating new rows.
-    // This is intentionally hard-disabled: an old server .env=true must not
-    // silently reactivate a retired strategy after an ordinary code update.
-    retired: true,
-    enabled: false,
-    positionSizeSol: numberEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_POSITION_SOL', 0.1, {
-      min: 0.01,
-      max: 10,
-    }),
-    trackingAgeMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_TRACKING_AGE_MS', 15 * 60_000, {
-      min: 60_000,
-      max: 60 * 60_000,
-    }),
-    stateRetentionMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_STATE_RETENTION_MS', 20 * 60_000, {
-      min: 60_000,
-      max: 2 * 60 * 60_000,
-    }),
-    episodeCooldownMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_EPISODE_COOLDOWN_MS', 10_000, {
-      min: 0,
-      max: 10 * 60_000,
-    }),
-    exitGraceMs: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_EXIT_GRACE_MS', 2_000, {
-      min: 100,
-      max: 30_000,
-    }),
-    maxEpisodesPerMint: integerEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_MAX_EPISODES_PER_MINT', 20, {
-      min: 1,
-      max: 100,
-    }),
-    entryProfiles: [
-      {
-        id: 'SDBR-S10-D15',
-        label: 'Sell>=10 SOL / drop>=15%',
-        minSellSol: 10,
-        minDropPct: 15,
-        maxDropPct: 70,
-        minQuoteReserveSol: 5,
-        maxEntryImpactPct: 12,
-      },
-      {
-        id: 'SDBR-S20-D20',
-        label: 'Sell>=20 SOL / drop>=20%',
-        minSellSol: 20,
-        minDropPct: 20,
-        maxDropPct: 70,
-        minQuoteReserveSol: 5,
-        maxEntryImpactPct: 12,
-      },
-    ],
-    exitProfiles: [
-      { id: 'H250', label: 'fixed 250ms', kind: 'FIXED', holdMs: 250 },
-      { id: 'H500', label: 'fixed 500ms', kind: 'FIXED', holdMs: 500 },
-      { id: 'H1000', label: 'fixed 1s', kind: 'FIXED', holdMs: 1_000 },
-      { id: 'H2000', label: 'fixed 2s', kind: 'FIXED', holdMs: 2_000 },
-      {
-        id: 'TP8-H2000',
-        label: '+8% or fixed 2s',
-        kind: 'TAKE_OR_FIXED',
-        takeProfitPct: 8,
-        maxHoldMs: 2_000,
-      },
-    ],
-    costModel: normalizeCostModel({
-      ...labelCostModel,
-      positionSizeSol: numberEnv('FLOW_SAME_SLOT_DUMP_BACKRUN_POSITION_SOL', 0.1, {
-        min: 0.01,
-        max: 10,
-      }),
-    }),
-  },
-
-  storage: {
-    dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
-    rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 48, { min: 24 }),
-    archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
-    busyTimeoutMs: integerEnv('FLOW_DB_BUSY_TIMEOUT_MS', 5_000, {
-      min: 50,
-      max: 30_000,
-    }),
-    writeRetryMinMs: integerEnv('FLOW_DB_WRITE_RETRY_MIN_MS', 250, {
-      min: 50,
-      max: 10_000,
-    }),
-    writeRetryMaxMs: integerEnv('FLOW_DB_WRITE_RETRY_MAX_MS', 30_000, {
-      min: 1_000,
-      max: 5 * 60_000,
-    }),
-    maxPendingTrades: integerEnv('FLOW_DB_MAX_PENDING_TRADES', 250_000, {
-      min: 10_000,
-      max: 5_000_000,
-    }),
-    flushMs: integerEnv('FLOW_DB_FLUSH_MS', 250, { min: 25 }),
-    flushMax: integerEnv('FLOW_DB_FLUSH_MAX', 1_000, { min: 10 }),
-    healthRefreshMs: integerEnv('FLOW_DB_HEALTH_REFRESH_MS', 15 * 60_000, {
-      min: 60_000,
-      max: 60 * 60_000,
-    }),
-    startupReplayCacheMs: integerEnv('FLOW_STARTUP_REPLAY_CACHE_MS', 15 * 60_000, {
-      min: 0,
-      max: 60 * 60_000,
-    }),
-  },
-
-  server: {
-    port: integerEnv('FLOW_DASHBOARD_PORT', 3001, { min: 1, max: 65_535 }),
-    host: process.env.FLOW_BIND_HOST || '0.0.0.0',
-  },
-};
-
-// Solana requests priority price per CU, while operators reason about the total
-// fee per transaction. Derive one shared buy/sell CU price from the SOL target.
-config.liveTrading.priorityFeeMicroLamports = priorityFeeMicroLamports(
-  config.liveTrading.priorityFeeSol,
-  config.liveTrading.computeUnitLimit,
-);
-
-function streamTokenFor(endpoint) {
-  if (config.stream.allenHarkEndpoints.has(endpoint)) return config.stream.allenHarkToken || undefined;
-  return config.stream.heliusToken || undefined;
-}
-
-function validateConfig() {
-  const errors = [];
-  if (config.stream.endpoints.length === 0) {
-    errors.push('Missing FLOW_GRPC_ENDPOINTS or HELIUS_LASERSTREAM_ENDPOINT(S)');
-  }
-  if (config.strategy.signalWindowMs * 3 > config.strategy.bufferMs) {
-    errors.push('FLOW_BUFFER_MS must cover all three signal windows');
-  }
-  if (config.launchQualityObserver.snapshotHorizonsMs.length === 0) {
-    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must contain at least one value');
-  }
-  if (config.holderGrowthShadow.enabled && !config.launchQualityObserver.enabled) {
-    errors.push('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED must be true when Holder Growth is enabled');
-  }
-  const holderGrowthHorizons = new Set([
-    ...config.holderGrowthShadow.entryProfiles.map((profile) => (
-      profile.horizonMs || config.holderGrowthShadow.snapshotHorizonMs
-    )),
-    ...config.holderGrowthShadow.exitProfiles
-      .map((profile) => profile.flowCheckHorizonMs).filter(Boolean),
-  ]);
-  if (config.holderGrowthShadow.enabled
-    && [...holderGrowthHorizons].some((horizonMs) => (
-      !config.launchQualityObserver.snapshotHorizonsMs.includes(horizonMs)
-    ))) {
-    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include all Holder Growth horizons');
-  }
-  const holderGrowthExitIds = new Set(
-    config.holderGrowthShadow.exitProfiles.map((profile) => profile.id),
-  );
-  for (const profile of config.holderGrowthShadow.entryProfiles) {
-    for (const exitProfileId of profile.exitProfileIds || []) {
-      if (!holderGrowthExitIds.has(exitProfileId)) {
-        errors.push(`Holder Growth entry ${profile.id} references missing exit ${exitProfileId}`);
-      }
-    }
-  }
-  if (config.qualityLeaderShadow.enabled && !config.launchQualityObserver.enabled) {
-    errors.push('FLOW_LAUNCH_QUALITY_OBSERVER_ENABLED must be true when Quality Leader is enabled');
-  }
-  if (config.qualityLeaderShadow.enabled
-    && ![config.qualityLeaderShadow.snapshot10Ms, config.qualityLeaderShadow.snapshot20Ms]
-      .every((horizonMs) => config.launchQualityObserver.snapshotHorizonsMs.includes(horizonMs))) {
-    errors.push('FLOW_LAUNCH_QUALITY_SNAPSHOT_SECONDS must include 10 and 20 for Quality Leader');
-  }
-  const qualityLeaderExitIds = new Set(
-    config.qualityLeaderShadow.exitProfiles.map((profile) => profile.id),
-  );
-  for (const profile of config.qualityLeaderShadow.entryProfiles) {
-    for (const exitProfileId of profile.exitProfileIds || []) {
-      if (!qualityLeaderExitIds.has(exitProfileId)) {
-        errors.push(`Quality Leader entry ${profile.id} references missing exit ${exitProfileId}`);
-      }
-    }
-  }
-  if (config.bigWinnerShadow.enabled) {
-    if (config.bigWinnerShadow.entryProfiles.length === 0) {
-      errors.push('Big Winner Shadow requires at least one entry profile');
-    }
-    if (config.bigWinnerShadow.exitProfiles.length === 0) {
-      errors.push('Big Winner Shadow requires at least one exit profile');
-    }
-    const bigWinnerEntryIds = new Set(config.bigWinnerShadow.entryProfiles.map((row) => row.id));
-    const bigWinnerExitIds = new Set(config.bigWinnerShadow.exitProfiles.map((row) => row.id));
-    if (bigWinnerEntryIds.size !== config.bigWinnerShadow.entryProfiles.length) {
-      errors.push('Big Winner Shadow entry profile ids must be unique');
-    }
-    if (bigWinnerExitIds.size !== config.bigWinnerShadow.exitProfiles.length) {
-      errors.push('Big Winner Shadow exit profile ids must be unique');
-    }
-  }
-  if (config.sameSlotDumpBackrunShadow.enabled) {
-    const entryIds = new Set(
-      config.sameSlotDumpBackrunShadow.entryProfiles.map((profile) => profile.id),
-    );
-    const exitIds = new Set(
-      config.sameSlotDumpBackrunShadow.exitProfiles.map((profile) => profile.id),
-    );
-    if (!entryIds.size || entryIds.size !== config.sameSlotDumpBackrunShadow.entryProfiles.length) {
-      errors.push('Same-Slot Dump Backrun Shadow entry profile ids must be present and unique');
-    }
-    if (!exitIds.size || exitIds.size !== config.sameSlotDumpBackrunShadow.exitProfiles.length) {
-      errors.push('Same-Slot Dump Backrun Shadow exit profile ids must be present and unique');
-    }
-  }
-  if (config.bondingCurveMomentumShadow.snapshotHorizonsMs.length === 0) {
-    errors.push('FLOW_BONDING_MOMENTUM_SNAPSHOT_SECONDS must contain at least one value');
-  }
-  if (config.liveTrading.enabled && !config.liveTrading.dryRun) {
-    if (!config.liveTrading.rpcUrl) errors.push('FLOW_RPC_URL is required for live trading');
-    if (!config.liveTrading.privateKey) {
-      errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
-    }
-    if (!process.env.FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_POSITION_SOL
-      && !process.env.FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_POSITION_SOL
-      && !process.env.FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_POSITION_SOL
-      && !process.env.FLOW_LIVE_MIGRATED_GD25_35_X8_POSITION_SOL
-      && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_GUARD_PROTECTED_POSITION_SOL
-      && !process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_F_POSITION_SOL
-      && !process.env.FLOW_LIVE_CYA_ORGANIC_BURST_COB_D_POSITION_SOL
-      && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_V2_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V3_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V2_POSITION_SOL
-      && !process.env.FLOW_LIVE_BIG_WINNER_PBR_A_X50_15_POSITION_SOL
-      && !process.env.FLOW_LIVE_MIGRATED_GFR_300_POSITION_SOL
-      && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_T12_5_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_POSITION_SOL
-      && !process.env.FLOW_LIVE_MIGRATION_CONTINUITY_MC_C5_E120_POSITION_SOL
-      && !process.env.FLOW_LIVE_QUALITY_LEADER_QL_STRICT_PROTECTED_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V3_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_V2_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_D5_B2_S0_NC_POSITION_SOL
-      && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O_C80_POSITION_SOL
-      && !process.env.FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL
-      && !process.env.FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL
-      && !process.env.FLOW_LIVE_POST_GD25_35_F1_XLEG_POSITION_SOL
-      && !process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL) {
-      errors.push(
-        'At least one active live strategy POSITION_SOL must be explicitly set (a previous XLEG size is accepted during migration)',
-      );
-    }
-  }
-  return errors;
-}
-
-module.exports = {
-  config,
-  normalizeEndpoint,
-  liveTradingGuard,
-  shadowPositionEnv,
-  livePositionEnv,
-  priorityFeeMicroLamports,
-  validateConfig,
-  streamTokenFor,
-};
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×N6ï„èµ©hºÚn¶X§zÍIÝ\ÙHÝšXÝ	ÎÃBƒBœ™\]Z\™J	ÙÝ[‰ÊK˜ÛÛ™šYÊ
+NÃBƒB˜ÛÛœÝÈÛÜÝœ™XZÙÝÛ‹›Ü›X[^™PÛÜÝ[Ù[HH™\]Z\™J	Ë‹ØÛÜ™KÐÛÜÝ[Ù[	ÊNÃB˜ÛÛœÝÈ’SPT–WÕ‘TÒÓÕT’PS•ÈHH™\]Z\™J	Ë‹ØÛÜ™KÔš[X\žU™\ÚÛ›Ùš[\ÉÊNÃBƒB™[˜Ý[Ûˆ[X™\‘[Š˜[YK˜[˜XÚËÈZ[ˆHR[™š[š]KX^H[™š[š]HHHßJHÃBˆÛÛœÝ˜]ÈH›ØÙ\ÜË™[–Û˜[YWNÃBˆÛÛœÝ˜[YHH˜]ÈOH[˜]ÈOOH	ÉÈÈ˜[˜XÚÈˆ[X™\Š˜]ÊNÃBˆYˆ
+S[X™\‹š\Ñš[š]J˜[YJJH™]\›ˆ˜[˜XÚÎÃBˆ™]\›ˆX]›Z[ŠX^X]›X^
+Z[‹˜[YJJNÃBŸCBƒB™[˜Ý[Ûˆ[YÙ\‘[Š˜[YK˜[˜XÚË›Ý[™ÈHßJHÂˆ™]\›ˆX][˜Ê[X™\‘[Š˜[YK˜[˜XÚË›Ý[™ÊJNÂŸB‚™[˜Ý[Ûˆ[X›S[X™\‘[Š˜[YK˜[˜XÚÈH[›Ý[™ÈHßJHÂˆÛÛœÝ˜]ÈH›ØÙ\ÜË™[–Û˜[YWNÂˆYˆ
+˜]ÈOOH[™Yš[™YÝš[™Ê˜]ÊKš[J
+HOOH	ÉÊH™]\›ˆ˜[˜XÚÎÂˆ™]\›ˆ[X™\‘[Š˜[YK˜[˜XÚË›Ý[™ÊNÂŸBƒB™[˜Ý[Ûˆ›ÛÛX[‘[Š˜[YK˜[˜XÚÈH˜[ÙJHÃBˆÛÛœÝ˜]ÈH›ØÙ\ÜË™[–Û˜[YWNÃBˆYˆ
+˜]ÈOH[˜]ÈOOH	ÉÊH™]\›ˆ˜[˜XÚÎÃBˆ™]\›ˆÉÌIË	ÝYIË	ÞY\ÉË	ÛÛ‰×Kš[˜ÛY\Ê˜]Ëš[J
+KÓÝÙ\Ø\ÙJ
+JNÃBŸCBƒB™[˜Ý[Ûˆ\Ý[Š˜[YK˜[˜XÚÈH×JHÃBˆÛÛœÝ˜]ÈH›ØÙ\ÜË™[–Û˜[YWNÃBˆYˆ
+˜]ÈOH[˜]Ëš[J
+HOOH	ÉÊH™]\›ˆË‹‹™˜[˜XÚ×NÃBˆ™]\›ˆ˜]ËœÜ]
+	Ë	ÊK›X\
+
+˜[YJHOˆ˜[YKš[J
+JK™š[\Š›ÛÛX[ŠNÂŸB‚™[˜Ý[ÛˆÜÚ]]™S[X™\“\Ý[Š˜[YK˜[˜XÚÈH×JHÂˆÛÛœÝ˜[Y\ÈH\Ý[Š˜[YK˜[˜XÚË›X\
+Ýš[™ÊJBˆ›X\
+[X™\ŠBˆ™š[\Š
+˜[YJHOˆ[X™\‹š\Ñš[š]J˜[YJH	‰ˆ˜[YHˆ
+NÂˆ™]\›ˆË‹‹›™]ÈÙ]
+˜[Y\ÊWNÂŸB‚™[˜Ý[ÛˆZ[\ÙXÛÛ™\Ý[Š˜[YK˜[˜XÚÔÙXÛÛ™ÈH×JHÂˆÛÛœÝ˜[Y\ÈH\Ý[Š˜[YK˜[˜XÚÔÙXÛÛ™Ë›X\
+Ýš[™ÊJBˆ›X\
+
+˜[YJHOˆ[X™\Š˜[YJJBˆ™š[\Š
+˜[YJHOˆ[X™\‹š\Ñš[š]J˜[YJH	‰ˆ˜[YHˆ
+CBˆ›X\
+
+ÙXÛÛ™ÊHOˆX][˜ÊÙXÛÛ™È
+ˆWÌ
+JNÃBˆ™]\›ˆË‹‹›™]ÈÙ]
+˜[Y\ÊWKœÛÜ
+
+YšYÚ
+HOˆYHšYÚ
+NÃBŸCBƒB™[˜Ý[Ûˆ[š\]YJ˜[Y\ÊHÃBˆ™]\›ˆË‹‹›™]ÈÙ]
+˜[Y\Ë™š[\Š›ÛÛX[ŠJWNÃBŸCBƒB™[˜Ý[Ûˆ]™U˜Y[™ÑÝX\™
+™\]Y\ÝY[˜X›YØY™]SØÚËžT[ŠHÃBˆ™]\›ˆÃBˆ[˜X›Yˆ›ÛÛX[Š™\]Y\ÝY[˜X›Y
+H	‰ˆP›ÛÛX[ŠØY™]SØÚÊKBˆ™\]Y\ÝY[˜X›Yˆ›ÛÛX[Š™\]Y\ÝY[˜X›Y
+KBˆØY™]SØÚÎˆ›ÛÛX[ŠØY™]SØÚÊKBˆžT[Žˆ›ÛÛX[ŠØY™]SØÚÊH›ÛÛX[ŠžT[ŠKBˆNÃBŸCBƒB™[˜Ý[Ûˆ›Ü›X[^™Q[™Ú[
+˜[YJHÃBˆÛÛœÝ˜]ÈHÝš[™Ê˜[YH	ÉÊKš[J
+NÃBˆYˆ
+\˜]ÊH™]\›ˆ	ÉÎÃBˆÛÛœÝÚ]›ÝØÛÛH×–ØK^—VØK^—
+Ë‹WJŽ—×ËÚK\Ý
+˜]ÊHÈ˜]ÈˆÎ‹ËÉÜ˜]ßXÃBˆÛÛœÝ\œÙYH™]ÈT“
+Ú]›ÝØÛÛ
+NÃBˆYˆ
+VÉÚ‰Ë	ÚÎ‰×Kš[˜ÛY\Ê\œÙYœ›ÝØÛÛ
+JHÃBˆ›ÝÈ™]È\Q\œ›ÜŠ[œÝ\ÜYÔ”È[™Ú[›ÝØÛÛˆ	Ü\œÙYœ›ÝØÛÛX
+NÃBˆCBˆ™]\›ˆ\œÙYÔÝš[™Ê
+Kœ™\XÙJ×ÉË	ÉÊNÃBŸCBƒB™[˜Ý[Ûˆ[™Ú[[Š˜[YK˜[˜XÚÈH×JHÃBˆ™]\›ˆ\Ý[Š˜[YK˜[˜XÚÊK›X\
+›Ü›X[^™Q[™Ú[
+K™š[\Š›ÛÛX[ŠNÃBŸCBƒB˜ÛÛœÝ[]\Ñ[™Ú[ÈH[™Ú[[Š	ÒSUT×ÓTÑT”Õ‘PSWÑS‘ÒS•ÉËBˆ›ØÙ\ÜË™[‹’SUT×ÓTÑT”Õ‘PSWÑS‘ÒS•ÈÜ›ØÙ\ÜË™[‹’SUT×ÓTÑT”Õ‘PSWÑS‘ÒS•Hˆ×JNÃB˜ÛÛœÝ[[’\šÑ[™Ú[ÈH[™Ú[[Š	ÐSS’T’×ÑÔ”×ÑS‘ÒS•ÉÊNÃB˜ÛÛœÝ^XÚ][™Ú[ÈH[™Ú[[Š	Ñ“Õ×ÑÔ”×ÑS‘ÒS•ÉÊNÃB˜ÛÛœÝX™[ÛÜÝ[Ù[H›Ü›X[^™PÛÜÝ[Ù[
+Âˆ]›Ü›Q™YTÝˆ[X™\‘[ŠBˆ	Ñ“Õ×ÔU“Ô“WÑ‘QWÔÕ	ËBˆ[X™\‘[Š	Ñ“Õ×ÑQUSÕQS‘×ÐÓÔÕÔÕ	ËKÈZ[ŽˆJKBˆÈZ[ŽˆKBˆ
+KBˆ^TÛ\YÙTÝˆ[X™\‘[Š	Ñ“Õ×Ð•VWÔÓTQÑWÔÕ	ËŒËÈZ[ŽˆJKBˆÙ[Û\YÙTÝˆ[X™\‘[Š	Ñ“Õ×ÔÑSÔÓTQÑWÔÕ	ËŒËÈZ[ŽˆJKBˆšXÙR[\XÝÝˆ[X™\‘[Š	Ñ“Õ×Ô’PÑWÒSTPÕÔÕ	ËŒ‹ÈZ[ŽˆJKBˆ˜\ÙU™YTÛÛˆ[X™\‘[Š	Ñ“Õ×ÐTÑWÕÑ‘QWÔÓÓ	ËŒKÈZ[ŽˆJKBˆš[Üš]Q™YTÛÛˆ[X™\‘[Š	Ñ“Õ×Ô’SÔ’UWÑ‘QWÔÓÓ	ËŒKÈZ[ŽˆJKBˆš]Õ\ÛÛˆ[X™\‘[Š	Ñ“Õ×Ò’U×ÕTÔÓÓ	ËÈZ[ŽˆJKBˆš^YÛÜÝÛÛˆ[X™\‘[Š	Ñ“Õ×Ñ’VQÐÓÔÕÔÓÓ	ËÈZ[ŽˆJKBˆÜÚ][Û”Ú^™TÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÔÒUSÓ—ÔÒV‘WÔÓÓ	ËŒ‹ÈZ[ŽˆŒHJKBˆ[žQ˜Z[\™T˜]TÝˆ[X™\‘[ŠBˆ	Ñ“Õ×ÑS•–WÑRST‘WÔUWÔÕ	ËBˆ[X™\‘[Š	Ñ“Õ×ÑRST‘WÔUWÔÕ	ËÈZ[ŽˆX^ˆLJKBˆÈZ[ŽˆX^ˆLKBˆ
+KBˆ[žQ˜Z[\™PÛÜÝÝˆ[X™\‘[ŠBˆ	Ñ“Õ×ÑS•–WÑRST‘WÐÓÔÕÔÕ	ËBˆ[X™\‘[Š	Ñ“Õ×ÑRST‘WÓÔÔ×ÔÕ	ËKÈZ[ŽˆJKBˆÈZ[ŽˆKBˆ
+KBŸJNÃBƒB˜ÛÛœÝ]™Q[žU™\ÚÛHÃBˆYˆ	Ø˜[[˜ÙY	ËBˆÚYÛ˜[˜\šX[ˆ’SPT–WÕ‘TÒÓÕT’PS•ËSSÑQBˆZ[“™]›ÝÕÌÔÛÛˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÓRS—Ó‘U“Õ×ÕÌ×ÔÓÓ	ËKÈZ[ŽˆJKBˆZ[•[š\]YP^Y\œÕÌÎˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÓRS—Ð•VQT”×ÕÌÉËÈZ[ŽˆJKBŸNÃB˜ÛÛœÝš[X\žU™\ÚÛ›Ùš[\ÈHÃBˆÃBˆYˆ	ØYÙÜ™\ÜÚ]™IËBˆÚYÛ˜[˜\šX[ˆ’SPT–WÕ‘TÒÓÕT’PS•ËQÑÔ‘TÔÒU‘KBˆZ[“™]›ÝÕÌÔÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÐQÑÔ‘TÔÒU‘WÓRS—Ó‘U“Õ×ÕÌ×ÔÓÓ	ËËÈZ[ŽˆJKBˆZ[•[š\]YP^Y\œÕÌÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÐQÑÔ‘TÔÒU‘WÓRS—Ð•VQT”×ÕÌÉËËÈZ[ŽˆJKBˆKBˆ]™Q[žU™\ÚÛBˆÃBˆYˆ	ØÛÛœÙ\˜]]™IËBˆÚYÛ˜[˜\šX[ˆ’SPT–WÕ‘TÒÓÕT’PS•ËÓÓ”ÑT•UU‘KBˆZ[“™]›ÝÕÌÔÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÐÓÓ”ÑT•UU‘WÓRS—Ó‘U“Õ×ÕÌ×ÔÓÓ	ËËÈZ[ŽˆJKBˆZ[•[š\]YP^Y\œÕÌÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÐÓÓ”ÑT•UU‘WÓRS—Ð•VQT”×ÕÌÉËKÈZ[ŽˆJKBˆKB—NÃB˜ÛÛœÝ]™U˜Y[™Ô™\]Y\ÝYH›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÕQS‘×ÑSP“Q	Ë˜[ÙJNÃB‹ËÈØY™]HØÚÈY˜][ÈÈÓˆÛÈ[ˆ^\Ý[™ÈÙ\™\ˆ™[ˆÚ]]™H˜Y[™È[˜X›YB‹ËÈØ[››Ý™\Ý[YHÚYÛš[™ÈY\ˆ\È™\ÙX\˜Ú[Û›HKÐˆ™[X\ÙH\È\ÞYYƒB˜ÛÛœÝ]™U˜Y[™ÔØY™]SØÚÈH›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÕQS‘×ÔÐQ‘UWÓÐÒÉËYJNÃB˜ÛÛœÝÝX\™Y]™U˜Y[™ÈH]™U˜Y[™ÑÝX\™
+Bˆ]™U˜Y[™Ô™\]Y\ÝYBˆ]™U˜Y[™ÔØY™]SØÚËBˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÑ–WÔ•S‰ËYJKBŠNÃB˜ÛÛœÝ™]\™YÚYÝÜÑ[˜X›YH›ÛÛX[‘[Š	Ñ“Õ×Ô‘UT‘QÔÒQÕÔ×ÑSP“Q	Ë˜[ÙJNÃB‹ËÈÛÚÜÈÚ]HÝY™šXÚY[H\™ÙKÛÛœÚ\Ý[H™YØ]]™H›ÜØ\™Ø[\H\™CB‹ËÈ\ØX›Y™Z[™HÙXÛÛ™^XÚ]Ý™\œšYKˆ\È™]™[È[ˆÛÙ\™\ˆ™[ƒB‹ËÈÛÛZ[š[™ÈÝ˜]YÞK\ÜXÚYšXÈ‹‹—ÑSP“Q]YX˜[Y\Èœ›ÛHÚ[[CB‹ËÈ™\Ý\[™È[HY\ˆ[ˆ\Ü˜YKˆ\ÝÜšXØ[›ÝÜÈ[™˜]ÈÛÛXÝ[Ûˆ™[XZ[‹ƒB˜ÛÛœÝ›Ý™[“™YØ]]™TÚYÝÜÑ[˜X›YH›ÛÛX[‘[ŠBˆ	Ñ“Õ×Ô“Õ‘S—Ó‘QÐUU‘WÔÒQÕÔ×ÑSP“Q	ËBˆ˜[ÙKBŠNÃB‹ËÈÛ\ˆÜ›ÝÝ›ÙXÙYH\™ÙKÛÛœÚ\Ý[H™YØ]]™H[žKÙ^]Ü›ÜÜË\›ÙXÝ‚‹ËÈÙY\HÛÛ\]H\ÝÜšXØ[X]š^]Y\žXX›K]Û›HÜ™X]H™]È›ÝÜÈ›ÜˆB‹ËÈMK\ÙXÛÛ™ÛÛ›Û[™H\ÛÛ]Y›ÜØ\™]X[]HÛÚÜÈ[›\ÜÈ[ˆÜ\˜]Ü‚‹ËÈ^XÚ]H™KY[˜X›\ÈH[^\š[Y[ˆH™]È›YÈ\È\ÙYÛÈ[ˆÛ\ˆÙ\™\‚‹ËÈ™[ˆØ[››ÝÚ[[H™\ÝÜ™HH™]\™Y^\š[Y[Y\ˆH›Ü›X[ÛÙH\Ü˜YK‚˜ÛÛœÝÛ\‘Ü›ÝÝ[X]š^[˜X›YH›ÛÛX[‘[Šˆ	Ñ“Õ×ÒÓT—ÑÔ“ÕÕÑ•SÓPU’VÑSP“Q	Ëˆ˜[ÙKŠNÂ‹ËÈ›ÜØ\™[Û›H]X[]HÛÚÜÈÙ[XÝYÛˆÛÈ›Û‹[Ý™\›\[™ÈZÝ\ˆÚ[™ÝÜË‚‹ËÈ\È[X™\˜][H\Ù\ÈH™]È›YÎˆ[ˆÛÕ“Ó‘×Ñ“ÕÏ]YHÙ\™\ˆÙ][™È]\Ý‹ËÈ›Ý™]š]™HH›Ý™[‹[™YØ]]™HXœÛÛ]KY›ÝÈÛÚÜË‚˜ÛÛœÝÛ\‘Ü›ÝÝ]X[]Q[˜X›YH›ÛÛX[‘[Šˆ	Ñ“Õ×ÒÓT—ÑÔ“ÕÕÔUPSUWÑSP“Q	ËˆYKŠNÂ‹ËÈHš\œÝ“X]š^Ø\È\ÙY[\ÈH]\™K[X™[\ØÛÝ™\žHØ[\H]\Â‹ËÈÛÛœÚ\Ý[H™YØ]]™H\È[ˆ[žH[KˆÙY\ÜÙHÛÚÜYš[š][ÛœÈ™Z[™‹ËÈ[ˆ^XÚ]ÜZ[ˆÚ[HH˜\œ›ÝÙ\ˆŒˆ›ÜØ\™ÛÚÜÝ\ÈHÛX[ˆØ[\K‚˜ÛÛœÝX›XÑ›ÝÓXYYØXÞT›Ùš[\Ñ[˜X›YH›ÛÛX[‘[Šˆ	Ñ“Õ×ÔP“P×Ñ“Õ×ÓPQÓQÐPÖWÔ“Ñ’ST×ÑSP“Q	Ëˆ˜[ÙKŠNÂ‹ËÈËQ”ˆ\È[[[Û˜[H\ÛÛ]Yœ›ÛHH™\ÝÙˆY™XÞXÛH›ÜÔ™X›Ý[™Ë‚‹ËÈÜ\˜]ÜœÈØ[ˆ]\ÙH\ÈÛÛ\]KZX]šY\ˆ›ÜØ\™^\š[Y[Ú]Ý]ÜÚ[™Â‹ËÈHX]\™HÈÛÚÜÈÜˆZ\ˆ\ÝÜšXØ[›ÝÜË‚˜ÛÛœÝZYÜ˜]Y™X›Ý[™Ùœ‘[˜X›YH›ÛÛX[‘[Šˆ	Ñ“Õ×ÓRQÔUQÔ‘P“ÕS‘ÑÑ”—ÑSP“Q	ËˆYKŠNÂƒB‹ËÈÛ™HÚ\™Y˜[˜XÚÈÙY\È]™\žH™\ÙX\˜Ú[Û›HÝ˜]YÞHÛˆHØ[YHXÛÛ›ÛZXÃB‹ËÈØØ[KˆHÝ˜]YÞK\ÜXÚYšXÈ[š\›Û›Y[˜\šXX›HX^HÝ[Ý™\œšYH]ƒB˜ÛÛœÝY˜][ÚYÝÔÜÚ][Û”ÛÛH[X™\‘[Š	Ñ“Õ×ÔÒQÕ×ÑQUSÔÔÒUSÓ—ÔÓÓ	ËKÃBˆZ[ŽˆŒKBŸJNÃBƒB‹ËÈÛ\Þ[Y[ÈÛÜYYŒH[È]™\žHÝ˜]YÞK\ÜXÚYšXÈ˜\šXX›Kˆ™X]B‹ËÈ]^XÝ›Ü›Y\ˆY˜][\È[š\š]YÛÈH›Ü›X[ÛÙH\Ü˜YH™X[H[Ý™\ÃB‹ËÈ]™\žHÚYÝÈÈHÚ\™YHÓÓY˜][ˆÝ\ˆ^XÚ]Ý\ÝÛHÚ^™\È™[XZ[ƒB‹ËÈ˜[YÈÙ][™ÈHÚ\™YY˜][]Ù[ˆÈŒHÝ[ÜÈ[ÚYÝÜÈ˜XÚËƒB™[˜Ý[ÛˆÚYÝÔÜÚ][Û‘[Š˜[YJHÃBˆÛÛœÝ˜]ÈH›ØÙ\ÜË™[–Û˜[YWNÃBˆYˆ
+˜]ÈOH[˜]ÈOOH	ÉÈ[X™\Š˜]ÊHOOHŒJH™]\›ˆY˜][ÚYÝÔÜÚ][Û”ÛÛÃBˆ™]\›ˆ[X™\‘[Š˜[YKY˜][ÚYÝÔÜÚ][Û”ÛÛÈZ[ŽˆŒHJNÃBŸCBƒB‹ËÈ]™HÝ˜]YÚY\È™]š[Ý\ÛHÚ\YÚ]ŒHÓÓ[™[ˆHÓÓY˜][Ë‚‹ËÈ™X]›Ý\ÝÜšXØ[˜[Y\È\È[š\š]YÛÈ[ˆ^\Ý[™ÈÙ\™\ˆ[Ý™\ÈÈB‹ËÈÝ\œ™[ŒHÓÓY˜][ÛˆH›Ü›X[ÛÙH\Ü˜YKˆÝ\ˆ˜[Y\È™[XZ[ˆ^XÚ]‹ËÈÜ\˜]ÜˆÝ™\œšY\Ë‚™[˜Ý[Ûˆ]™TÜÚ][Û‘[Š˜[YK˜[˜XÚÈHŒKYØXÞS˜[YHH[
+HÂˆÛÛœÝ˜]ÈH›ØÙ\ÜË™[–Û˜[YWHÏÈ
+YØXÞS˜[YHÈ›ØÙ\ÜË™[–ÛYØXÞS˜[YWHˆ[™Yš[™Y
+NÂˆYˆ
+˜]ÈOH[˜]ÈOOH	ÉÈÌŒKWKš[˜ÛY\Ê[X™\Š˜]ÊJJH™]\›ˆ˜[˜XÚÎÂˆÛÛœÝ˜[YHH[X™\Š˜]ÊNÃBˆ™]\›ˆ[X™\‹š\Ñš[š]J˜[YJHÈX]›X^
+ŒK˜[YJHˆ˜[˜XÚÎÃBŸCBƒB™[˜Ý[Ûˆš[Üš]Q™YSZXÜ›Ó[\ÜÊš[Üš]Q™YTÛÛÛÛ\]U[š][Z]
+HÃBˆYˆ
+Jš[Üš]Q™YTÛÛˆ
+HJÛÛ\]U[š][Z]ˆ
+JH™]\›ˆÃBˆËÈHÓÓHYNH[\ÜÈ[™H[\ÜHYMˆZXÜ›Ë[[\ÜËƒBˆ™]\›ˆX]˜ÙZ[
+
+š[Üš]Q™YTÛÛ
+ˆYLMJHÈÛÛ\]U[š][Z]
+NÃBŸCBƒB‹ËÈ›ÜØ\™[Û›Hš\œÝ\[˜XÚÈ[žH^\š[Y[Ëˆ\ÙH›Ùš[\È\™HÛÛœÝ[YYžCB‹ËÈ›ÝHØœÙ\™\ˆ
+Ø]\Ø[™Y™\™[˜ÙH]XÝ[ÛŠH[™ÚYÝÈˆ
+Ú[][]Y[žJKƒB‹ËÈÙY\Z\ˆQÈ[[]]X›HÛÈ™\Ý[È™]™\ˆY\™ÙHÚ]H\ÝÜšXØ[ËIHÜ›Ý\ËƒB˜ÛÛœÝ][˜ÚY\[˜XÚÔ›Ùš[\ÈHÃBˆÃBˆYˆ	ÑQTÑLÔŒÉËBˆÛÚÜYˆ	Ñ‘LÔŒ×ÍTÉËBˆX™[ˆ	Ñ‘LTŒÈ0­È9fçº.*LL	HÈ9cãyo.LÉHÈ9ê,ùk¦Œyéä‰ËBˆ[˜XÚÔÝˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑLÔŒ×ÔSPÒ×ÔÕ	ËLÃBˆZ[ŽˆŒKX^ˆLBˆJKBˆ™X›Ý[™Ýˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑLÔŒ×Ô‘P“ÕS‘ÔÕ	ËËÈZ[ŽˆJKBˆÝÔÝX›S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓUSÒÑQTÑLÔŒ×ÓÕ×ÔÕP“WÓTÉËLÈZ[ŽˆJKBˆKBˆÃBˆYˆ	ÑQTÑL—ÍWÔŒÉËBˆÛÚÜYˆ	Ñ‘L—ÍWÔŒ×ÍTÉËBˆX™[ˆ	Ñ‘L‹KTŒÈ0­È9fçº.*LL‹IHÈ9cãyo.LÉHÈ9ê,ùk¦Œyéä‰ËBˆ[˜XÚÔÝˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑL—ÍWÔŒ×ÔSPÒ×ÔÕ	ËL‹KÃBˆZ[ŽˆŒKX^ˆLBˆJKBˆ™X›Ý[™Ýˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑL—ÍWÔŒ×Ô‘P“ÕS‘ÔÕ	ËËÈZ[ŽˆJKBˆÝÔÝX›S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓUSÒÑQTÑL—ÍWÔŒ×ÓÕ×ÔÕP“WÓTÉËLÈZ[ŽˆJKBˆKBˆÃBˆYˆ	ÑQTÑL—ÍWÔIËBˆÛÚÜYˆ	Ñ‘L—ÍWÔWÍTÉËBˆX™[ˆ	Ñ‘L‹KTH0­È9fçº.*LL‹IHÈ9cãyo.MIHÈ9ê,ùk¦Œyéä‰ËBˆ[˜XÚÔÝˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑL—ÍWÔWÔSPÒ×ÔÕ	ËL‹KÃBˆZ[ŽˆŒKX^ˆLBˆJKBˆ™X›Ý[™Ýˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑL—ÍWÔWÔ‘P“ÕS‘ÔÕ	ËKÈZ[ŽˆJKBˆÝÔÝX›S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓUSÒÑQTÑL—ÍWÔWÓÕ×ÔÕP“WÓTÉËWÌÈZ[ŽˆJKBˆKBˆÃBˆYˆ	ÑQTÑMWÔIËBˆÛÚÜYˆ	Ñ‘MWÔWÍTÉËBˆX™[ˆ	Ñ‘MKTH0­È9fçº.*LMIHÈ9cãyo.MIHÈ9ê,ùk¦Œyéä‰ËBˆ[˜XÚÔÝˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑMWÔWÔSPÒ×ÔÕ	ËMKÃBˆZ[ŽˆŒKX^ˆLBˆJKBˆ™X›Ý[™Ýˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÑMWÔWÔ‘P“ÕS‘ÔÕ	ËKÈZ[ŽˆJKBˆÝÔÝX›S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓUSÒÑQTÑMWÔWÓÕ×ÔÕP“WÓTÉËWÌÈZ[ŽˆJKBˆKB—K›X\
+
+›Ùš[JHOˆ
+ÃBˆ‹‹œ›Ùš[KBˆZ[“™]Ð^Y\œÎˆ[YÙ\‘[Š	Ñ“Õ×ÓUSÒÑQTÓRS—Ó‘U×Ð•VQT”ÉË‹ÈZ[ŽˆJKBˆ›ÝÕÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓUSÒÑQTÑ“Õ×ÕÒS‘Õ×ÓTÉËWÌÈZ[ŽˆLJKBˆZ[•Ú[™ÝÓ™]›ÝÔÛÛˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÓRS—ÕÒS‘Õ×Ó‘UÑ“Õ×ÔÓÓ	ËŒKÈZ[ŽˆJKBˆX^[˜XÚÔÝˆ[X™\‘[Š	Ñ“Õ×ÓUSÒÑQTÓPVÔSPÒ×ÔÕ	ËKÃBˆZ[ŽˆŒKX^ˆLBˆJKBŸJJNÃBƒB˜ÛÛœÝL™“™X\’YÚ™\ÚÛÈHØš™XÝ™œ™Y^™JÂˆZ[YÙS\ÎˆŒÌˆX^YÙS\ÎˆÌˆZ[Ý\œ™[[\[ÙTÝˆLˆX^Ý\œ™[[\[ÙTÝˆMLˆZ[”XZÒ[\[ÙTÝˆKˆZ[”[˜XÚÔÝˆKˆX^[˜XÚÔÝˆMKˆZ[”™X›Ý[™ÝˆËˆZ[“™]›ÝÌLÔÛÛˆKˆZ[“™]›ÝÌÜÔÛÛˆŒKˆZ[^Y\œÌLÎˆLˆZ[^Y\œÌÜÎˆ‹ˆX^\™Ù\Ý^Y\”Ú\™TÝˆKˆZ[^TÜYY˜][ÎˆKŒKˆZ[“™]›ÝÐXØÙ[\˜][ÛŽˆˆX^Ù[XÙ[\˜][Û”˜][ÎˆKŒKˆZ[’Û\‘Y™\Ú[Û’[™^ˆˆX^\Ý[X]Y[\XÝTÛÛÝˆKŸJNÂ‚‹ËÈ™]\™Y™\ÙX\˜Ú]ÈÝ^H]Y\žXX›H›Üˆ\ÝÜšXØ[[˜[\Ú\Ë][ˆÛÙ\™\‚‹ËÈ™[ˆ]\Ý›ÝÚ[[H™[Ü[ˆ[Kˆ™[Ü[š[™È™\]Z\™\È\È^XÚ]X\Ý\ˆØ]B‹ËÈ\ÈÙ[\ÈH[™]šYX[Ý˜]YÞHÝÚ]Ú‚˜ÛÛœÝ™]\™Y™\ÙX\˜Ú™[Ü[‘[˜X›YH›ÛÛX[‘[Šˆ	Ñ“Õ×Ô‘UT‘QÔ‘TÑPTÒÔ‘SÔS—ÑSP“Q	Ëˆ˜[ÙKŠNÂ‚‹ËÈ]HÜÝ[ZYÜ˜][ÛˆÝXš[^˜][Ûˆ
+ÊH\È[[[Û˜[H\ÛÛ]Yœ›ÛHB‹ËÈ™]\™YL‘ˆ[žHX]š^ˆL‘‹SÐ”È[™XYHÙY\ÈZYÚZ[]\ÈÙˆØ]\Ø[‹ËÈ[\ÝØ\Û˜\ÚÝËÛÈ\ÙH[^YYÛÛ›ÛÈY›È”ÈØ[ËˆHMLÂ‹ËÈÛÚÜ\ÈHš[X\žH›ÜØ\™\ÝÈNÌÌÌÈ\™HÜ\œÙHÛÛ›ÛË‚˜ÛÛœÝÕ\™Ù]Û\˜[˜ÙS\ÈH[YÙ\‘[Š	Ñ“Õ×Ó×ÕT‘ÑUÕÓTSÑWÓTÉË×ÌÂˆZ[ŽˆLˆX^ˆMWÌŸJNÂ˜ÛÛœÝÔÜÚ][Û”Ú^™TÛÛH[X™\‘[Š	Ñ“Õ×Ó×ÔÔÒUSÓ—ÔÓÓ	ËKÂˆZ[ŽˆŒKˆX^ˆLŸJNÂ˜ÛÛœÝÕ™\ÚÛÈH
+\™Ù]YÙS\ÊHOˆ
+ÂˆZ[YÙS\Îˆ\™Ù]YÙS\ÈHÕ\™Ù]Û\˜[˜ÙS\ËˆX^YÙS\Îˆ\™Ù]YÙS\È
+ÈÕ\™Ù]Û\˜[˜ÙS\ËˆX^ØœÙ\˜][Û“YÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×Ó×ÓPVÓÐ”ÑT•USÓ—ÓQ×ÓTÉË×ÌÂˆZ[ŽˆLˆX^ˆÌÌˆJKˆZ[Ý\œ™[[\[ÙTÝˆLLˆX^Ý\œ™[[\[ÙTÝˆLÌˆZ[”XZÒ[\[ÙTÝˆLLˆZ[”[˜XÚÔÝˆLLˆX^[˜XÚÔÝˆLˆZ[”™X›Ý[™ÝˆLLˆX^™X›Ý[™ÝˆLÌˆZ[“™]›ÝÌLÔÛÛˆ[X™\‘[Š	Ñ“Õ×Ó×ÓRS—Ó‘UÑ“Õ×ÌL×ÔÓÓ	ËÂˆZ[ŽˆLLÌˆX^ˆLÌˆJKˆZ[“™]›ÝÌÜÔÛÛˆLLÌˆZ[^Y\œÌLÎˆ[YÙ\‘[Š	Ñ“Õ×Ó×ÓRS—Ð•VQT”×ÌLÉËËÂˆZ[ŽˆˆX^ˆLÌˆJKˆZ[^Y\œÌÜÎˆˆX^\™Ù\Ý^Y\”Ú\™TÝˆ[X™\‘[Š	Ñ“Õ×Ó×ÓPVÕÔWÔÒT‘WÔÕ	ËLÂˆZ[ŽˆˆX^ˆLˆJKˆZ[^TÜYY˜][ÎˆLWÌˆZ[“™]›ÝÐXØÙ[\˜][ÛŽˆ[X™\‘[Š	Ñ“Õ×Ó×ÓRS—Ó‘UÑ“Õ×ÐPÐÑSTUSÓ‰ËŒKÂˆZ[ŽˆLLÌˆX^ˆLÌˆJKˆX^Ù[XÙ[\˜][Û”˜][ÎˆWÌÌÌˆZ[’Û\‘Y™\Ú[Û’[™^ˆLLÌˆZ[”][ÝT™\Ù\™TÛÛˆˆX^\Ý[X]Y[\XÝTÛÛÝˆ[X™\‘[Š	Ñ“Õ×Ó×ÓPVÒSTPÕÌTÓÓÔÕ	ËMKÂˆZ[ŽˆˆX^ˆLˆJKŸJNÂ˜ÛÛœÝÑ[žU\™Ù]ÈHÂˆÉÓËQML	ËMLÌ	Ñ“Õ×Ó×ÌMLÑSP“Q	ËÌÌÌŒÌLŒÌWKˆÉÓËQN	ËNÌ	Ñ“Õ×Ó×ÌNÑSP“Q	ËÌÌÌWKˆÉÓËQ	ËÌ	Ñ“Õ×Ó×ÌÑSP“Q	ËÌÌÌWKˆÉÓËQÌ	ËÌÌ	Ñ“Õ×Ó×ÌÌÑSP“Q	ËÌÌÌWK—NÂ˜ÛÛœÝÐÛÚÜÈHÑ[žU\™Ù]Ë™›]X\
+
+Âˆ™Yš^\™Ù]YÙS\Ë[˜X›Y[‹ÛË—JHOˆÛË›X\
+
+X^Û\ÊHOˆ
+ÂˆYˆ	Ü™Yš^KV	ÛX^Û\ÈÈWÌXˆX™[ˆ]HÝXš[^˜][Ûˆ	Ý\™Ù]YÙS\ÈÈWÌ\ÈÈš^Y	ÛX^Û\ÈÈWÌ\Øˆ[˜X›Yˆ›ÛÛX[‘[Š[˜X›Y[‹YJKˆÝYS[ÙNˆ	ÓUWÔÔÕÓRQÔUSÓ—ÔÕP’SVUSÓ‰ËˆÛÛ™š\›X][Û“[ÙNˆ	ÒSSQQPUIËˆÜÚ][Û”Ú^™TÛÛˆÔÜÚ][Û”Ú^™TÛÛˆ[žQ[^S\ÎˆŒˆ[žU[Y[Ý]\Îˆ—Ìˆ^][^S\ÎˆŒˆ^][Y[Ý]\Îˆ—ÌˆX^[žTšXÙR[\ÝˆMKˆX^™YØ]]™Q[žR[\ÝˆÌˆ\™ÝÜÝˆLˆX^Û\Ëˆ™\ÚÛÎˆÕ™\ÚÛÊ\™Ù]YÙS\ÊKŸJJJNÂ‚‹ËÈH^\Ý[™ÈËPÎ]™HœšYÙH[X™\˜][HÙY\È]ÈMIH[žK[[Ý™HÝX\™‚‹ËÈ\ÙH™]È›ÜØ\™[Û›HÛÚÜÈYX\Ý\™HÛÈY™™\™[ÛÝ[\™˜XÝX[ÈÚ]Ý]‹ËÈÚ[™Ú[™ËÚYÛš[™ÈÜˆÝX›Z][™È[žH]™HÜ™\Ž‚‹ËÈJHØZ]›ÜˆHš\œÝ^XÝ]X›H[\ÝØ\\HY\ˆÜ˜YX][ÛŽÈ[™‹ËÈŠHXØÙ\Ù[XÝYMÌ	HÝ\™H™\šXÚ[™È˜[™ÈÛ›HY\ˆHœ™\ÚX›XÈ•VK‚˜ÛÛœÝÜ˜YX][Û”™[^Y[žTÚYÝÑ[˜X›YH›ÛÛX[‘[Šˆ	Ñ“Õ×ÑÔQPUSÓ—ÐPÐÑSÔ‘SVQÑS•–WÔÒQÕ×ÑSP“Q	ËˆYKŠNÂ˜ÛÛœÝÜ˜YX][Û”™[^YØ\XÚ]TÛÛÈHÜÚ]]™S[X™\“\Ý[Šˆ	Ñ“Õ×ÑÔQPUSÓ—ÐPÐÑSÔ‘SVQÐÐTPÒUWÔÓÓÉËˆÌŒKWKŠNÂ˜ÛÛœÝÜ˜YX][Û”™[^Y[žT›Ùš[\ÈHÜ˜YX][Û”™[^Y[žTÚYÝÑ[˜X›YÈÂˆ‹‹–ÌŒLK™›]X\
+
+[™Ù™‘[^S\ÊHOˆ
+ˆÍŒÌLŒÌK›X\
+
+[›™\“X^Û\ÊHOˆ
+ÂˆYˆ×ÐÎÒÉÚ[™Ù™‘[^S\ßWÖ	Ü[›™\“X^Û\ÈÈWÌXˆX™[ˆËPÎRÉÚ[™Ù™‘[^S\ßH0­È9«åy.&¹d#”[\ÝØ\9£©yb¦ÈÈ9fî¹k¦‰Ü[›™\“X^Û\ÈÈWÌyéä˜ˆÝYQÜ›Ý\ˆ	Ó×ÐÎÔÔÕÑÔQPUSÓ—ÒS‘Ñ‘‰Ëˆ[ÙNˆ	ÐÕT•‘WÓRSTÕÓ‘IËˆ™\ÚÛÝˆˆ™XÙ[Ú[™ÝÓ\ÎˆWÌˆZ[Ý\™Q[TÝˆKˆZ[^Y\œÎˆ‹ˆX^Ù[ˆˆ™\]Z\™S›ÐÜ™X]Ü”Ù[ˆYKˆZYÜ˜][Û’[™Ù™ŽˆYKˆ[™Ù™“]™TÝ˜]YÞRYˆ[™Ù™‘[^S\ÈOOHL	‰ˆ[›™\“X^Û\ÈOOHŒÌˆÈ	ÙÜ˜YX][Û—ØXØÙ[Û×ØÎÚÍLÞŒÜ™XÛÝ™\žWÛ]™IÂˆˆ[ˆ]™PœšYÙPØ\XÚ]TÛÛˆKˆØ\XÚ]P]Ø\™Q^]ˆYKˆØ\XÚ]TÛÛÎˆÜ˜YX][Û”™[^YØ\XÚ]TÛÛËˆÛÜ™Q^]ÝˆˆÜÝZYÜ˜][Û‘[žQØ]NˆÂˆÚ[™ÝÓ\Îˆ[™Ù™‘[^S\ËˆËÈÙY\Hš\œÝ^XÝ]X›HÜÝY[^H˜YH[ˆHØ]\Ø[Û˜\ÚÝ‚ˆ]˜[X]P]š[ˆYKˆØ\\™UÚ[™ÝÓ\ÎˆLÌˆZ[^Y\œÎˆKˆZ[“™]›ÝÔÛÛˆˆX^Ù[^T˜][ÎˆKˆX^˜]ÙÝÛ”ÝˆŒˆX^X\šÙ][Ý™TÝˆMKˆX^Ù[’[\XÝÝˆLˆKˆ[›™\‘^][ÙNˆ	Ñ’VQÒÓ	Ëˆ[›™\“X^Û\ËˆJJBˆ
+JKˆ‹‹–ÂˆÉÑVLŒ	ËŒKˆÉÓÑ‘ŒŒ	ËŒKˆK›X\
+
+ÜÙ\ÜÚ[Û’YÙ\ÜÚ[Û”Ý\Ý\ÜÝÙ\ÜÚ[Û‘[™Ý\ÜÝJHOˆ
+ÂˆYˆ×ÐÎÒÍLÖŒÉÜÙ\ÜÚ[Û’YXˆX™[ˆËPÎRÍLIÜÙ\ÜÚ[Û’YH0­È[\ÝØ\9£©yb¦ÈÈ9fî¹k¦Œ9éäˆÈ9c%ù.«9¥í¹«­yb!¹l`˜ˆÝYQÜ›Ý\ˆ	Ó×ÐÎÔÔÕÑÔQPUSÓ—ÒS‘Ñ‘—ÕSQIËˆ[ÙNˆ	ÐÕT•‘WÓRSTÕÓ‘IËˆ™\ÚÛÝˆˆ™XÙ[Ú[™ÝÓ\ÎˆWÌˆZ[Ý\™Q[TÝˆKˆZ[^Y\œÎˆ‹ˆX^Ù[ˆˆ™\]Z\™S›ÐÜ™X]Ü”Ù[ˆYKˆZYÜ˜][Û’[™Ù™ŽˆYKˆØ\XÚ]P]Ø\™Q^]ˆYKˆØ\XÚ]TÛÛÎˆÜ˜YX][Û”™[^YØ\XÚ]TÛÛËˆÙ\ÜÚ[Û”Ý\Ý\ÜÝˆÙ\ÜÚ[Û‘[™Ý\ÜÝˆÛÜ™Q^]ÝˆˆÜÝZYÜ˜][Û‘[žQØ]NˆÂˆÚ[™ÝÓ\ÎˆLˆ]˜[X]P]š[ˆYKˆØ\\™UÚ[™ÝÓ\ÎˆLÌˆZ[^Y\œÎˆKˆZ[“™]›ÝÔÛÛˆˆX^Ù[^T˜][ÎˆKˆX^˜]ÙÝÛ”ÝˆŒˆX^X\šÙ][Ý™TÝˆMKˆX^Ù[’[\XÝÝˆLˆKˆ[›™\‘^][ÙNˆ	Ñ’VQÒÓ	Ëˆ[›™\“X^Û\ÎˆŒÌˆJJKˆ‹‹–ÖÍLKÍLŒKÍŒÌWK™›]X\
+
+ÛZ[”ÝX^ÝJHOˆ
+ˆÍŒÌLŒÌK›X\
+
+[›™\“X^Û\ÊHOˆ
+ÂˆYˆ×ÐÎÒ‰ÛZ[”ÝWÉÛX^ÝWÖ	Ü[›™\“X^Û\ÈÈWÌXˆX™[ˆËPÎR‰ÛZ[”ÝKIÛX^ÝH0­ÈÝ\™ya¬¹aîÉÛZ[”ÝIx $ÉÛX^ÝIHÈ9¥¬•Vyèkº+©È9fî¹k¦‰Ü[›™\“X^Û\ÈÈWÌyéä˜ˆÝYQÜ›Ý\ˆ	Ó×ÐÎÐÕT•‘WÒ•STÐS‘	Ëˆ[ÙNˆ	ÐÕT•‘WÓRSTÕÓ‘IËˆ™\ÚÛÝˆˆ™XÙ[Ú[™ÝÓ\ÎˆWÌˆZ[Ý\™Q[TÝˆKˆZ[^Y\œÎˆ‹ˆX^Ù[ˆˆ™\]Z\™S›ÐÜ™X]Ü”Ù[ˆYKˆØ\XÚ]P]Ø\™Q^]ˆYKˆØ\XÚ]TÛÛÎˆÜ˜YX][Û”™[^YØ\XÚ]TÛÛËˆ[žTšXÙR[\˜[™ˆÂˆZ[”ÝˆX^ÝˆZ[”ÜÝÚYÛ˜[^Y\œÎˆKˆZ[”ÜÝÚYÛ˜[™]›ÝÔÛÛˆˆX^ÜÝÚYÛ˜[Ù[ˆˆKˆÛÜ™Q^]Ýˆˆ[›™\‘^][ÙNˆ	Ñ’VQÒÓ	Ëˆ[›™\“X^Û\ËˆJJBˆ
+JK—Hˆ×NÂ‚˜ÛÛœÝÛÛ™šYÈHÂˆ[\ˆÂˆ›ÙÜ˜[RYˆ	Í‘QŽœ™XÝQÞ›ÛŽÝMÎ™ÒÝX’ŒMM]P‘]Ñ”	Ëˆ[[T›ÙÜ˜[RYˆ	ÜSSP˜^M›ØÙRY’’Ð”’ÔQ‘ÕÜTÝÓ[L‘“Y–PIËBˆÜÛÛZ[ˆ	ÔÛÌLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL‰ËBˆÚÙ[‘XÚ[X[Îˆ‹BˆKBƒBˆÝ™X[NˆÃBˆ[™Ú[Îˆ[š\]YJ^XÚ][™Ú[Ë›[™ÝˆBˆÈ^XÚ][™Ú[ÃBˆˆË‹‹š[]\Ñ[™Ú[Ë‹‹˜[[’\šÑ[™Ú[×JKBˆ[]\Ñ[™Ú[Îˆ™]ÈÙ]
+[]\Ñ[™Ú[ÊKBˆ[]\ÕÚÙ[Žˆ›ØÙ\ÜË™[‹‘“Õ×ÑÔ”×ÕÒÑSƒBˆ›ØÙ\ÜË™[‹’SUT×ÓTÑT”Õ‘PSWÕÒÑSƒBˆ›ØÙ\ÜË™[‹’SUT×ÐTWÒÑVCBˆ	ÉËBˆ[[’\šÑ[™Ú[Îˆ™]ÈÙ]
+[[’\šÑ[™Ú[ÊKBˆ[[’\šÕÚÙ[Žˆ›ØÙ\ÜË™[‹SS’T’×ÑÔ”×ÕÒÑSˆ	ÉËBˆ™XÛÛ›™XÝZ[“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÕ‘PSWÔ‘PÓÓ“‘PÕÓRS—ÓTÉËWÌÈZ[ŽˆLJKBˆ™XÛÛ›™XÝX^\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÕ‘PSWÔ‘PÓÓ“‘PÕÓPVÓTÉËÌÌÈZ[ŽˆWÌJKBˆÝ[U[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÕ‘PSWÔÕSWÕSQSÕUÓTÉËMWÌÈZ[ŽˆWÌJKBˆÝ[PÚXÚÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÕ‘PSWÔÕSWÐÒPÒ×ÓTÉË—ÌÈZ[ŽˆLJKBˆY\\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÕ‘PSWÑQTÕÓTÉËÌÌÈZ[ŽˆLÌJKBˆY\X^ˆ[YÙ\‘[Š	Ñ“Õ×ÔÕ‘PSWÑQTÓPV	ËLÌÈZ[ŽˆWÌJKBˆKBƒBˆÝ˜]YÞNˆÃBˆY™™\“\Îˆ[YÙ\‘[Š	Ñ“Õ×Ð•Q‘‘T—ÓTÉËL
+ˆŒÌÈZ[ŽˆŒÌJKBˆXÝ]š]UÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÐPÕU’UWÕÒS‘Õ×ÓTÉËWÌÈZ[ŽˆWÌJKBˆXÝ]š]SZ[•›Û[YTÛÛˆ[X™\‘[Š	Ñ“Õ×ÐPÕU’UWÓRS—Õ“ÓSQWÔÓÓ	ËËÈZ[ŽˆJKBˆXÝ]š]SZ[•ÛÝ[ˆ[YÙ\‘[Š	Ñ“Õ×ÐPÕU’UWÓRS—ÕÐÓÕS•	ËL‹ÈZ[ŽˆHJKBˆXÝ]š]SZ[•[š\]YUØ[]Îˆ[YÙ\‘[Š	Ñ“Õ×ÐPÕU’UWÓRS—ÕS’TUQWÕÐSUÉËÈZ[ŽˆHJKBˆÚYÛ˜[Ú[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÕÒS‘Õ×ÓTÉË—ÌÈZ[ŽˆLJKBˆZ[“™]›ÝÕÌÔÛÛˆ[X™\‘[Š	Ñ“Õ×ÓRS—Ó‘UÕÌ×ÔÓÓ	ËKÈZ[ŽˆJKBˆZ[“™]›ÝÑ[TÛÛˆ[X™\‘[Š	Ñ“Õ×ÓRS—Ó‘UÑSWÔÓÓ	ËŒKÈZ[ŽˆJKBˆZ[XØÙ[\˜][Û”˜][Îˆ[X™\‘[Š	Ñ“Õ×ÓRS—ÐPÐÑSÔUSÉËKŒ‹ÈZ[ŽˆHJKBˆ˜][Ñ›ÛÜ”ÛÛˆ[X™\‘[Š	Ñ“Õ×ÔUS×Ñ“ÓÔ—ÔÓÓ	ËŒKÈZ[ŽˆŒHJKBˆÚYÛ˜[ÛÛÛÝÛ“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÐÓÓÓÕÓ—ÓTÉËÈZ[ŽˆJKBˆØ[™Y]RYS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÐÐS‘QUWÒQWÓTÉËMWÌÈZ[Žˆ—ÌJKBˆš[X\žU™\ÚÛ›Ùš[\ËBˆKBƒBˆX™[ÎˆÂˆÜš^›ÛœÔÙXÛÛ™ÎˆÌK‹ËKLMKŒÌŒKBˆ^Ý\œÚ[Û”ÙXÛÛ™ÎˆÍKLÌKBˆX^ØœÙ\˜][Û“YÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓP‘SÓPVÓÐ”ÑT•USÓ—ÓQ×ÓTÉË—ÌÈZ[ŽˆJKBˆÛÜÝ[Ù[ˆX™[ÛÜÝ[Ù[BˆÛÛ™šYÝ\™Y˜Y[™ÐÛÜÝÝˆÛÜÝœ™XZÙÝÛŠX™[ÛÜÝ[Ù[
+K™]\›Z[š\ÝXÐÛÜÝÝBˆKBƒBˆ˜XÚÝ\ÝˆÃBˆ^XÝ][Û‘[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÐPÒÕTÕÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKBˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÐPÒÕTÕÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKBˆ^]^XÝ][Û‘[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÐPÒÕTÕÑVUÑSVWÓTÉËŒÈZ[ŽˆJKBˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÐPÒÕTÕÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKBˆ›Ñ^]ÜÜÔÝˆ[X›S[X™\‘[Š	Ñ“Õ×ÐPÒÕTÕÓ“×ÑVUÓÔÔ×ÔÕ	Ë[ÈZ[ŽˆJKˆÚYÛ˜[ÛÛÛÝÛ“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÐPÒÕTÕÔÒQÓSÐÓÓÓÕÓ—ÓTÉËWÌÈZ[ŽˆJKBˆÚ[™ÛTÜÚ][Û”\“Z[ˆ›ÛÛX[‘[Š	Ñ“Õ×ÐPÒÕTÕÔÒS‘ÓWÔÔÒUSÓ—ÔT—ÓRS•	ËYJKBˆKBƒBˆÛX\Ø[]Îˆ\Ý[Š	Ñ“Õ×ÔÓPT•ÕÐSUÉËÃBˆ	ÐšM™Q’X–QSŽØÖÝÙ]ž–žS›RÒP˜Ý™]ÙžY	ËBˆ	ÍÞYMÎ^–UÔÞQLŒ•VU[ÎžS[T]QUÔÌÙÌP‘š	ËBˆJKBƒBˆ]™U˜Y[™ÎˆÃBˆ‹‹™ÝX\™Y]™U˜Y[™ËBˆœÕ\›ˆ›ØÙ\ÜË™[‹‘“Õ×Ô”×ÕT“	ÉËˆÛÛ^˜[˜XÚÔœÕ\›ˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÐÓÓ•VÑSPÒ×Ô”×ÕT“	ÉËˆš]˜]RÙ^Nˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÔ’UUWÒÑVH	ÉËBˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÓPVÔÒQÓSÐQÑWÓTÉËWÍLÈZ[ŽˆLJKˆX^ÛÛ˜Ý\œ™[ÜÚ][ÛœÎˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÓPVÔÔÒUSÓ”ÉËLÈZ[ŽˆKX^ˆŒJKˆX^ÛÛ˜Ý\œ™[ÜÚ][ÛœÔ\“Z[ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓPVÐÓÓÕT”‘S•ÔÔÒUSÓ”×ÔT—ÓRS•	ËˆËˆÈZ[ŽˆKX^ˆLKˆ
+KˆZ[•Ø[]™\Ù\™TÛÛˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÓRS—ÕÐSUÔ‘TÑT•‘WÔÓÓ	ËŒKÈZ[ŽˆJKˆZ[ÛÛÛÝÛ“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÓRS•ÐÓÓÓÕÓ—ÓTÉËL
+ˆŒÌÈZ[ŽˆJKˆ˜Z[Y[žPÛÛÛÝÛ“\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÑRSQÑS•–WÐÓÓÓÕÓ—ÓTÉËÌÌÈZ[ŽˆKˆ
+Kˆ˜Z[Y[žUÚ[™ÝÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÑRSQÑS•–WÕÒS‘Õ×ÓTÉËH
+ˆŒÌÈZ[ŽˆHKˆ
+KˆX^˜Z[Y[šY\Ô\“Z[ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓPVÑRSQÑS•’QT×ÔT—ÓRS•	Ë‹ÈZ[ŽˆKX^ˆŒKˆ
+Kˆ[Z[ØÚÔ™XÚXÚÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÒSÓRS•ÓÐÒ×Ô‘PÒPÒ×ÓTÉËŒÌÈZ[ŽˆWÌKˆ
+Kˆ[Z[ØÚÔ™XÚXÚÐ˜]Úˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÒSÓRS•ÓÐÒ×Ô‘PÒPÒ×ÐUÒ	ËLÈZ[ŽˆKX^ˆLKˆ
+KˆX^[žTšXÙR[\Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÓPVÑS•–WÔ’PÑWÒ•STÔÕ	ËLÃBˆZ[ŽˆBˆX^ˆLBˆJKBˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËLÃBˆZ[ŽˆBˆX^ˆLBˆJKBˆ^TÛ\YÙTÝˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÐ•VWÔÓTQÑWÔÕ	ËLÈZ[ŽˆŒKX^ˆLJKBˆÙ[Û\YÙTÝˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÑSÔÓTQÑWÔÕ	ËMKÈZ[ŽˆŒKX^ˆLJKBˆÛÛ\]U[š][Z]ˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÐÓÓTUWÕS’UÓSRU	ËLÌÃBˆZ[ŽˆLÌBˆX^ˆWÍÌBˆJKBˆš[Üš]Q™YTÛÛˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔ’SÔ’UWÑ‘QWÔÓÓ	ËŒKÈZ[ŽˆJKBˆËÈH˜[œØXÝ[ÛˆÝ™X[H\È›ØÙ\ÜÙY[]™[ˆ][ÝHYØZ[œÝHØ[YH™]Ù\ÝšY]ËBˆËÈ]™]Z[ˆÛÛ™š\›YY[]™[š[˜[]H›ÜˆÜÚ][ÛˆÝ]H[™™XÛÛ˜Ú[X][Û‹ƒBˆ™XYÛÛ[Z]Y[ˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÔ‘PQÐÓÓSRUQS•	Ü›ØÙ\ÜÙY	ËBˆÛÛ™š\›X][ÛÛÛ[Z]Y[ˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÐÓÓ‘’T“PUSÓ—ÐÓÓSRUQS•Bˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÐÓÓSRUQS•Bˆ	ØÛÛ™š\›YY	ËBˆÛÛ^ÛÝ™]žPÛÝ[ˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÐÓÓ•VÔÓÕÔ‘U’QTÉË‹ÂˆZ[ŽˆBˆX^ˆLBˆJKBˆÛÛ^ÛÝ™]žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÐÓÓ•VÔÓÕÔ‘U–WÑSVWÓTÉËLÂˆZ[ŽˆBˆX^ˆLBˆJKBˆËÈ˜XÚÝØ\™XÛÛ\]X›H[X\ÈÛÛœÝ[YYžHÛ\ˆ\Ú›Ø\™Ù^ÜÛÙKƒBˆÛÛ[Z]Y[ˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÐÓÓ‘’T“PUSÓ—ÐÓÓSRUQS•Bˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÐÓÓSRUQS•Bˆ	ØÛÛ™š\›YY	ËBˆX^Û\ÎˆMWÌˆ^]™]žPÛÝ[ˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÑVUÔ‘U–WÐÓÕS•	ËLÈZ[ŽˆX^ˆŒJKˆ^]™]žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÑVUÔ‘U–WÑSVWÓTÉËWÌÈZ[ŽˆLJKˆ[Y\™Ù[˜ÞQ^]™]žQ[^S\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÑSQT‘ÑSÖWÑVUÔ‘U–WÑSVWÓTÉËˆLˆÈZ[ŽˆKX^ˆWÌKˆ
+Kˆ[žT™XÛÛ˜Ú[PÛÝ[ˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÑS•–WÔ‘PÓÓÒSWÐÓÕS•	ËKÃBˆZ[ŽˆKBˆX^ˆÌBˆJKBˆ[žT™XÛÛ˜Ú[Q[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÑS•–WÔ‘PÓÓÒSWÑSVWÓTÉËWÌÃBˆZ[ŽˆLBˆX^ˆÌÌBˆJKBˆ^\™Y[žT™[X\ÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÑVT‘QÑS•–WÔ‘SPTÑWÓTÉËL
+ˆŒÌÃBˆZ[ŽˆŒÌBˆX^ˆ
+ˆŒ
+ˆŒÌBˆJKBˆÚ[ÝÚ]Úš[Nˆ›ØÙ\ÜË™[‹‘“Õ×ÓU‘WÒÒSÔÕÒUÒÑ’SH	Ë‹Ù]KÓU‘WÕQS‘×ÑTÐP“Q	ËBˆ[[TšXÙPÛÛ[Z]NˆÃBˆZ[”˜][Îˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÐSSWÔ’PÑWÓRS—ÔUSÉËŒ‹ÈZ[ŽˆŒKX^ˆHJKBˆX^˜][Îˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÐSSWÔ’PÑWÓPVÔUSÉËKÈZ[ŽˆHJKBˆ™\Ù]Y\“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÐSSWÔ’PÑWÔ‘TÑUÓTÉËMWÌÈZ[ŽˆWÌJKBˆKBˆËÈ][\H]™HÝ˜]YÚY\ÈØ[ˆÛÙ^\Ý\™KˆXXÚÛ™HÝÛœÈ]ÈÝÛˆÓÓÚ^™BˆËÈ[™[™\[™[XÚ\Ú[Ûˆ\ÝÜžNÈH™]\™Yš[X\žH]™H[H\È›Ý\ÝY‚ˆÝ˜]YÚY\ÎˆÂˆÂˆYˆ	ØÞXWÛÜ™Ø[šX×Ø\œÝØÛØ—Ù—ØÛÜ™LWÜ[›™\—Û]™IËˆÛÙNˆ	ÐÓÐ‹Q‹PÌKTÍKVLŒ	ËˆX™[ˆ	ÐÖPHÜ™Ø[šXÈ\œÝ0­ÈÓÐ‹QˆÝšXÝÈÓÓ0­ÈKÍÍHÝZ\ˆ[›™\‰Ëˆ[U™\œÚ[ÛŽˆ	ØÞXWÛÜ™Ø[šX×Ø\œÝØÛØ—Ù—ØÛÜ™LWÜ[›™\—Û]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ‰Ëˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ—ÑSP“Q	ËYJKˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ—ÑS•–WÑSP“Q	Ëˆ˜[ÙKˆ
+KˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ—ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ—ÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ—ÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆWÌKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ—ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÐÓÔ‘WÔ•S“‘T‰Ëˆ\™ÝÜÝˆˆÛÜ™PXÝ]˜][Û”ÝˆŒˆÛÜ™Q^]ÝˆKˆ˜Z[[™ÐXÝ]˜][Û”ÝˆŒˆ˜\ÙU˜Z[[™Ñ˜]ÙÝÛ”ÝˆMKˆ˜Z[[™ÕY\œÎˆÂˆÈXÝ]˜][Û”ÝˆL˜]ÙÝÛ”ÝˆŒKˆÈXÝ]˜][Û”ÝˆL˜]ÙÝÛ”ÝˆHKˆKˆX^Û\ÎˆLŒÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÐÓÐ—Ñ—ÐÓÔ‘LWÔÍWÖLŒ	ËˆKˆÂˆYˆ	ØÞXWÛÜ™Ø[šX×Ø\œÝØÛØ—ÙÙš^ÌÛ]™IËˆÛÙNˆ	ÐÓÐ‹QUÌQLVŒ	ËˆX™[ˆ	ÐÖPHÜ™Ø[šXÈ\œÝ0­ÈÓÐ‹QÝšXÝHÓÓ0­È˜\Ý
+È˜Z[[™ÉËˆ[U™\œÚ[ÛŽˆ	ØÞXWÛÜ™Ø[šX×Ø\œÝØÛØ—ÙÙ˜\ÝÝÝ˜Z[[™×Û]™WÝŒÉËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—Ñ	Ëˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÑSP“Q	ËYJKˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÑS•–WÑSP“Q	Ëˆ˜[ÙKˆ
+KˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆWÌKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÕRSS‘ÉËˆZ[’Û\Îˆˆ˜\ÝZÙT›Ùš]Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÑTÕÕÔÕ	ËˆLˆÈZ[ŽˆKˆ
+Kˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÐÖPWÓÔ‘ÐS’P×Ð•T”ÕÐÓÐ—ÑÑTÕÕÕÒS‘Õ×ÓTÉËˆ—ÌˆÈZ[ŽˆKˆ
+Kˆ˜Z[[™ÐXÝ]˜][Û”ÝˆÌˆ˜Z[[™ÔÝÜÝˆLˆ\™ÝÜÝˆŒˆX^Û\ÎˆŒÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÐÓÐ—ÑÕÌÌLÖŒ	ËˆKˆÂˆYˆ	ØšY×ÝÚ[›™\—Üœ—ØWÞLÌMWÛ]™IËˆÛÙNˆ	Ô”‹PKVLLMIËˆX™[ˆ	ÐšYÈÚ[›™\ˆ”‹PH0­ÈLÌMHÛÜ™H
+È[›™\‰Ëˆ[U™\œÚ[ÛŽˆ	ØšY×ÝÚ[›™\—Üœ—ØWÞLÌMWÛ]™WÝŒ‰ËˆÚYÛ˜[ÛÝ\˜ÙNˆ	Ð’Q×ÕÒS“‘T—Ô”—ÐIËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÐ’Q×ÕÒS“‘T—Ô”—ÐWÖLÌMWÑSP“Q	ËYJKˆËÈÙY\HYš[š][ÛˆØYY›Üˆ\ÝÜžH[™[™XYK[Ü[ˆ^]Ë]HÝ[BˆËÈÙ\™\ˆ™[ˆ]\Ý›Ý™[Ü[ˆ\ÈÜÜË[XZÚ[™È]™HÛÚÜ‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÐ’Q×ÕÒS“‘T—Ô”—ÐWÖLÌMWÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÐ’Q×ÕÒS“‘T—Ô”—ÐWÖLÌMWÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÐ’Q×ÕÒS“‘T—Ô”—ÐWÖLÌMWÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÐ’Q×ÕÒS“‘T—Ô”—ÐWÖLÌMWÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	Ô”—ÐÓÔ‘WÔ•S“‘T‰Ëˆ\™ÝÜÝˆMKˆÛÜ™PXÝ]˜][Û”ÝˆŒˆÛÜ™Q^]ÝˆLˆ˜Z[[™ÐXÝ]˜][Û”ÝˆÌˆ˜\ÙU˜Z[[™Ñ˜]ÙÝÛ”ÝˆMKˆ˜Z[[™ÕY\œÎˆÂˆÈXÝ]˜][Û”Ýˆ˜]ÙÝÛ”ÝˆŒKˆÈXÝ]˜][Û”ÝˆML˜]ÙÝÛ”ÝˆHKˆKˆX^Û\ÎˆNÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	Ô”—ÐN–LÌMIËˆKˆÂˆYˆ	ÛZYÜ˜]YÙÙœ—ÌÌÚÌŒÚÌÛ]™IËˆÛÙNˆ	ÑÑ”‹LÌRÌŒRÌ	ËˆX™[ˆ	ÓY™XÞXÛH›ÜÔ™X›Ý[™È0­ÈÑ”—ÌÌÌ9éä¹l/¹.äÉËˆ[U™\œÚ[ÛŽˆ	ÛZYÜ˜]YÙÙœ—ÌÌÚÌŒÚÌÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓRQÔUQÑÑ”—ÌÌÐÓÓ‘’T“QQ	Ëˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓRQÔUQÑÑ”—ÌÌÕŒ—ÑSP“Q	ËYJKˆËÈ\ÝÜšXØ[›ÝÜÈ[™[™XYK[Ü[ˆ^]È™[XZ[ˆ]˜Z[X›K]™]ÂˆËÈ[šY\È\™H\™[ØÚÙYÙ™ˆY\ˆH™YØ]]™H]™KÔ•QÈØ[\K‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Š	Ñ“Õ×ÓU‘WÓRQÔUQÑÑ”—ÌÌÕŒ—ÔÔÒUSÓ—ÔÓÓ	ËŒJKˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑ”—ÌÌÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑ”—ÌÌÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑ”—ÌÌÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÕRS	Ëˆ\™ÝÜÝˆŒˆX^Û\ÎˆÌÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÔÔÕÑÑ”—ÌÌÑÑ”—ÒÌŒÒÌÐÌL	ËˆKˆÂˆYˆ	ÛZYÜ˜]YÙÙLÌÜŒŒ×ÙŒ—ÛÛ›WÙÌ—ÞY×Û]™IËˆÛÙNˆ	ÔÔÕQÑLÌTŒŒËQŒ‹QÌ‹VQÉËˆX™[ˆ	ÓY™XÞXÛH›ÜÔ™X›Ý[™È0­È9ë+9.£9«(y§.¹/&ˆQÉËˆ[U™\œÚ[ÛŽˆ	ÛZYÜ˜]YÙÙLÌÜŒŒ×ÙŒ—ÛÛ›WÙÌ—ÞY×Û]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQÉËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÑSP“Q	ËYJKˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÑS•–WÑSP“Q	ËˆYKˆ
+KˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆËÈH]\ÝÝ™\›\[™ÈØ[\HØ\ÈÚ\œH™YØ]]™Hœ›ÛBˆËÈŒLŒ™ZZš[™È[™ÜÚ]]™HÝ]ÚYH]ˆÙY\\ÈØÛÜYÂˆËÈ\È]™H[NÈ]ÈÛÝ\˜ÙHÚYÝÈ™[XZ[œÈ[ˆ[Y^HÛÛ›Û‚ˆ[žP™ZZš[™ÔÝ\Ý\Žˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÑS•–WÐ‘RR’S‘×ÔÕT•ÒÕT‰ËˆˆÈZ[ŽˆX^ˆKˆ
+Kˆ[žP™ZZš[™Ñ[™Ý\Žˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÑS•–WÐ‘RR’S‘×ÑS‘ÒÕT‰ËˆˆÈZ[ŽˆX^ˆKˆ
+KˆËÈ\œ›ÜˆŒ\ÈHÝ[HSSH][ÝK›ÝHÝ˜]YÞK\[H™Z™XÝ[Û‹‚ˆËÈÛ™H[[YYX]Hœ™\Ú][ÝH\È[ÝÙYÚ[HHÜšYÚ[˜[MIHšXÙBˆËÈÝX\™Ù[‹Z[\XÝÝX\™[™ÚYÛ˜[XYÙH›Ý[™Ý[\K‚ˆ[žT][ÝT™Yœ™\Ú™]žPÛÝ[ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÔUSÕWÔ‘Q”‘TÒÔ‘U–WÐÓÕS•	ËˆKˆÈZ[ŽˆX^ˆHKˆ
+Kˆ[žT][ÝT™Yœ™\ÚX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÔUSÕWÔ‘Q”‘TÒÓPVÔÒQÓSÐQÑWÓTÉËˆ—ÍLˆÈZ[ŽˆLX^ˆLÌKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQ×ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÓQÐPÖIËˆ˜Z[[™ÐXÝ]˜][Û”Ýˆˆ˜Z[[™ÔÝÜÝˆËˆ˜\ÝZÙT›Ùš]ÝˆNˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\ÎˆWÌˆÜÜÐÚXÚÐ]\Îˆ—ÌˆX^Û\ÎˆMWÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÔÔÕÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQÉËˆKˆÂˆYˆ	ÛZYÜ˜]YÙÜÜŒŒ×ÙŒ×ÝŒ—ÞY×Û]™IËˆÛÙNˆ	ÑÔ•TŒŒËQŒËUŒ‹VQÉËˆX™[ˆ	ÓY™XÞXÛH›ÜÔ™X›Ý[™È0­ÈÔ•9bcy."y«(y§.¹/&¹bcyd$HQÉËˆ[U™\œÚ[ÛŽˆ	ÛZYÜ˜]YÙÜÜŒŒ×ÙŒ×ÝŒ—ÞY×Û]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQÉËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÑSP“Q	ËYJKˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÑS•–WÑSP“Q	ËˆYKˆ
+KˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+Kˆ[žT][ÝT™Yœ™\Ú™]žPÛÝ[ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÔUSÕWÔ‘Q”‘TÒÔ‘U–WÐÓÕS•	ËˆKˆÈZ[ŽˆX^ˆHKˆ
+Kˆ[žT][ÝT™Yœ™\ÚX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÔUSÕWÔ‘Q”‘TÒÓPVÔÒQÓSÐQÑWÓTÉËˆ—ÍLˆÈZ[ŽˆLX^ˆLÌKˆ
+KˆX^[šY\Ô\“Z[ˆËˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÖQ×ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÓQÐPÖIËˆ˜Z[[™ÐXÝ]˜][Û”Ýˆˆ˜Z[[™ÔÝÜÝˆËˆ˜\ÝZÙT›Ùš]ÝˆNˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\ÎˆWÌˆÜÜÐÚXÚÐ]\Îˆ—ÌˆX^Û\ÎˆMWÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÔÔÕÑÔ•ÔŒŒ×ÑŒ×ÕŒ—ÑÔ•ÑŒ×ÖQ×ÕŒ‰ËˆKˆÂˆYˆ	ÛZYÜ˜]YÙÙLÌÙWÌÌ—ÜŒÙŒWÙ^XÌWÝŒ—ÜŒ—ÚMWÛ]™IËˆÛÙNˆ	ÑËUŒ‹QVPÌKTŒ‹RMIËˆX™[ˆ	ÓY™XÞXÛH›ÜÔ™X›Ý[™È0­ÈŒ¹cëù¢iú(cŒHÓÓÈŒ‹RM{ï"9`g9«h¹¥¬9o 9.äûï"IËˆ[U™\œÚ[ÛŽˆ	ÛZYÜ˜]YÙÙLÌÙWÌÌ—ÜŒÙŒWÙ^XÌWÝŒ—ÜŒ—ÚMWÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMIËˆ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÑSP“Q	ËˆYKˆ
+KˆËÈÙY\HYš[š][ÛˆØYY›Üˆ\ÝÜšXØ[\Ü^H[™X[˜YÙ[Y[Ù‚ˆËÈ[™XYK[Ü[ˆÜÚ][ÛœË]\›X[™[HÝÜ™]È[šY\Ëˆ\È\ÈBˆËÈÛÙK[]™[ØÚÈÛÈHÝ[H\Þ[Y[[š\›Û›Y[Ø[››Ý™[Ü[ˆ]‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+Kˆ[žT][ÝT™Yœ™\Ú™]žPÛÝ[ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÔUSÕWÔ‘Q”‘TÒÔ‘U–WÐÓÕS•	ËˆKˆÈZ[ŽˆX^ˆHKˆ
+Kˆ[žT][ÝT™Yœ™\ÚX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÔUSÕWÔ‘Q”‘TÒÓPVÔÒQÓSÐQÑWÓTÉËˆ—ÍLˆÈZ[ŽˆLX^ˆLÌKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÓPVÑS•–WÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	Ô’TÒ×ÖQÉËˆ˜Z[[™ÐXÝ]˜][Û”Ýˆˆ˜Z[[™ÔÝÜÝˆËˆ\™ÝÜÝˆMKˆ˜\ÝZÙT›Ùš]ÝˆNˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\ÎˆWÌˆÜÜÐÚXÚÐ]\Îˆ—ÌˆÜÜÐÚXÚÔ™XÛÝ™\žTÝˆKˆX^Û\ÎˆMWÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÔÔÕÑÑLÌÑWÌÌ—ÔŒÑŒWÑVPÌWÕŒ—ÔŒ—ÒMWÌÌTÓÓ	ËˆKˆÂˆYˆ	ÛZYÜ˜]YÙÙWÌÍWÞÛ]™IËˆÛÙNˆ	ÔÔÕQÑKLÍKV	ËˆX™[ˆ	ÓY™XÞXÛH›ÜÔ™X›Ý[™È0­ÈÑKLÍH9fî¹k¦Ž9éä‰Ëˆ[U™\œÚ[ÛŽˆ	ÛZYÜ˜]YÙÙWÌÍWÞÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓRQÔUQÑÑWÌÍWÖ	Ëˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓRQÔUQÑÑWÌÍWÖÑSP“Q	ËYJKˆ[žQ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓRQÔUQÑÑWÌÍWÖÑS•–WÑSP“Q	ËYJKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Š	Ñ“Õ×ÓU‘WÓRQÔUQÑÑWÌÍWÖÔÔÒUSÓ—ÔÓÓ	ËŒJKˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑWÌÍWÖÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑWÌÍWÖÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUQÑÑWÌÍWÖÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	Ñ’VQÒÓ	Ëˆš^YÛ\ÎˆÌˆX^Û\ÎˆÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÔÔÕÑÑWÌÍWÖ	ËˆKˆÂˆYˆ	ÛZYÜ˜][Û—ØÛÛ[Z]WÛX×ØÍWÝL—ÍWÛ]™IËˆÛÙNˆ	ÓKPÍKUL‹IËˆX™[ˆ	ÓZYÜ˜][ÛˆÛÛ[Z]HH0­ÈL9éä¹/çy¢©ÈL‹IËˆ[U™\œÚ[ÛŽˆ	ÛZYÜ˜][Û—ØÛÛ[Z]WÛX×ØÍWÝL—ÍWÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÕL—ÍIËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÕL—ÍWÑSP“Q	ËYJKˆËÈÙY\\ÝÜšXØ[›ÝÜÈ[™[™XYK[Ü[ˆ^]È]˜Z[X›K]È›Ý]ˆËÈHÝ[H›ÙXÝ[Ûˆ™[ˆ™[Ü[ˆHÝ\œ™[H™YØ]]™H]™HÛÚÜ‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÕL—ÍWÕŒ—ÔÔÒUSÓ—ÔÓÓ	ËˆKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÕL—ÍWÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÕL—ÍWÓPVÑS•–WÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÕL—ÍWÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÕRSS‘ÉËˆZ[’Û\ÎˆLÌˆ˜Z[[™ÐXÝ]˜][Û”ÝˆMKˆ˜Z[[™ÔÝÜÝˆL‹Kˆ\™ÝÜÝˆŒˆX^Û\ÎˆNÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÓP×ÐÍWÕL—ÍIËˆKˆÂˆYˆ	ÙÜ˜YX][Û—ØXØÙ[ÛÎLÛMWÜÝZ\ŒLŒÛ]™IËˆÛÙNˆ	ÓÎLSMKTÕRTŒLŒ	ËˆX™[ˆ	ÑÜ˜YX][ÛˆXØÙ[\˜][ÛˆÈ0­ÈÎLMHÕRTŒLŒ	Ëˆ[U™\œÚ[ÛŽˆ	ÙÜ˜YX][Û—ØXØÙ[ÛÎLÛMWÜÝZ\ŒLŒÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÑÔQPUSÓ—ÐPÐÑSÓÎLÓMWÔÕRTŒLŒ	Ëˆ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓÎLÓMWÔÕRTŒLŒÕÑSP“Q	ËˆYKˆ
+Kˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓÎLÓMWÔÕRTŒLŒÕÑS•–WÑSP“Q	ËˆYKˆ
+KˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓÎLÓMWÔÕRTŒLŒÕÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓÎLÓMWÔÕRTŒLŒÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓÎLÓMWÔÕRTŒLŒÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆWÌKˆ
+Kˆ^][ÙNˆ	ÑÔQPUSÓ—ÐÓÔ‘WÔ•S“‘T‰Ëˆ\™ÝÜÝˆÌˆÛÜ™Q^]ÝˆLˆX^™QÜ˜YX][Û’Û\ÎˆH
+ˆŒÌˆX^ÜÝÜ˜YX][Û’Û\ÎˆLŒÌˆX^Û\ÎˆH
+ˆŒÌˆÜÝZYÜ˜][Û‘Ø]NˆÂˆÚ[™ÝÓ\ÎˆWÌˆZ[^Y\œÎˆKˆZ[“™]›ÝÔÛÛˆˆKˆ˜Z[[™ÕY\œÎˆÂˆÈXÝ]˜][Û”ÝˆŒ˜]ÙÝÛ”ÝˆLKˆÈXÝ]˜][Û”Ýˆ˜]ÙÝÛ”ÝˆMHKˆÈXÝ]˜][Û”Ýˆ˜]ÙÝÛ”ÝˆŒKˆÈXÝ]˜][Û”ÝˆML˜]ÙÝÛ”ÝˆHKˆÈXÝ]˜][Û”ÝˆÌ˜]ÙÝÛ”ÝˆÌKˆKˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÓÎLÓMWÔÕRTŒLŒÌL	ËˆKˆÂˆYˆ	ÛZYÜ˜][Û—ØÛÛ[Z]WÛX×ØÍWÙLLŒÛ]™IËˆÛÙNˆ	ÓKPÍKQLLŒ	ËˆX™[ˆ	ÓZYÜ˜][ÛˆÛÛ[Z]HH0­È9fî¹k¦ŒLŒ9éä‰Ëˆ[U™\œÚ[ÛŽˆ	ÛZYÜ˜][Û—ØÛÛ[Z]WÛX×ØÍWÙLLŒÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍIËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÑLLŒÑSP“Q	ËYJKˆËÈ\ÝÜšXØ[\Ü^H[™[™XYK[Ü[ˆ^]ÈÝ^HØYY]\È[BˆËÈ\È›ÈÛ™Ù\ˆ[ÝÙYÈÜ™X]HH™]È]™HÜÚ][Û‹‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÑLLŒÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÑLLŒÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÑLLŒÓPVÑS•–WÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓRQÔUSÓ—ÐÓÓ•S•RUWÓP×ÐÍWÑLLŒÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	Ñ’VQÒÓ	Ëˆš^YÛ\ÎˆLŒÌˆ\™ÝÜÝˆŒˆX^Û\ÎˆLŒÌˆKˆÂˆYˆ	Ü]X[]WÛXY\—Ü[ÜÝšXÝÜ›ÝXÝYÛ]™IËˆÛÙNˆ	ÔSTÕ’PÕT‰ËˆX™[ˆ	Ô]X[]HXY\ˆSÝšXÝ0­È›ÝXÝY[›™\‰Ëˆ[U™\œÚ[ÛŽˆ	Ü]X[]WÛXY\—Ü[ÜÝšXÝÜ›ÝXÝYÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQ	Ëˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÑSP“Q	ËYJKˆËÈ\ÝÜšXØ[›ÝÜÈ[™[™XYK[Ü[ˆ^]È™[XZ[ˆš\ÚX›K]Ý[BˆËÈ›ÙXÝ[Ûˆ™[ˆ˜[Y\È]\Ý›Ý™[Ü[ˆHÝ˜]YÞHÚÜÙH™X[\ÙYˆËÈ•QÈÜÜÙ\È]™\™ÙYX]\šX[Hœ›ÛH]ÈX\šË\šXÙHÚYÝÈ™\Ý[Ë‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÓPVÑS•–WÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^ÚYÝÑ[žR[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÓPVÔÒQÕ×ÒSTPÕÔÕ	ËˆL‹ˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÔUPSUWÔ“ÕPÕQÔ•S“‘T‰Ëˆ\™ÝÜÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÒT‘ÔÕÔÔÕ	ËˆŒˆÈZ[ŽˆŒKX^ˆLKˆ
+KˆÝ™[™ÝXÝ]˜][Û”Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÔÕ‘S‘ÕÔÕ	ËˆŒˆÈZ[ŽˆŒKX^ˆWÌKˆ
+Kˆ›ÔÝ™[™Ý\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÓ“×ÔÕ‘S‘ÕÓTÉËˆÌÌˆÈZ[ŽˆWÌX^ˆH
+ˆŒÌKˆ
+KˆX^Û\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÔ“ÕPÕQÓPVÒÓÓTÉËˆH
+ˆŒÌˆÈZ[ŽˆLÌX^ˆÌ
+ˆŒÌKˆ
+Kˆ›ÝXÝY›ÛÜœÎˆÂˆÈXÝ]˜][Û”ÝˆŒZ[‘›ÛÜ”ÝˆXZÑÚ]™X˜XÚÔÝˆMHKˆÈXÝ]˜][Û”ÝˆLZ[‘›ÛÜ”ÝˆMKXZÑÚ]™X˜XÚÔÝˆHKˆÈXÝ]˜][Û”ÝˆLZ[‘›ÛÜ”ÝˆXZÑÚ]™X˜XÚÔÝˆKˆÈXÝ]˜][Û”ÝˆŒZ[‘›ÛÜ”ÝˆLXZÑÚ]™X˜XÚÔÝˆKˆKˆ]X[]PÜš]\šXNˆÂˆZ[”™]\›ŒLÝˆMˆX^˜]ÙÝÛŒŒÝˆL‹ˆZ[^Y\‘[NˆˆZ[“™]›ÝÑ[TÛÛˆËˆZ[”™][[Û”ÝˆˆX^Ü™X]Ü”Ú\™TÝˆËˆZ[Ý\™TÝˆMKˆX^Ý\™TÝˆLˆX^Ù[^T˜][ÎˆMKˆZ[•š\X[ÛÛ™\Ù\™\ÎˆÌˆKˆKˆÂˆYˆ	Ü]X[]WÛXY\—Ü[ÜÝšXÝÙÝX\™Ü›ÝXÝYÛ]™IËˆÛÙNˆ	ÔSTÕ’PÕQÕPT‘	ËˆX™[ˆ	Ô]X[]HXY\ˆSÝšXÝÝX\™0­È›ÝXÝY[›™\‰Ëˆ[U™\œÚ[ÛŽˆ	Ü]X[]WÛXY\—Ü[ÜÝšXÝÙÝX\™Ü›ÝXÝYÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQ	Ëˆ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÑSP“Q	ËˆYKˆ
+Kˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÑS•–WÑSP“Q	ËˆYKˆ
+KˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÓPVÑS•–WÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^ÚYÝÑ[žR[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÓPVÔÒQÕ×ÒSTPÕÔÕ	ËˆL‹ˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÔUPSUWÔ“ÕPÕQÔ•S“‘T‰Ëˆ\™ÝÜÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÒT‘ÔÕÔÔÕ	ËˆŒˆÈZ[ŽˆŒKX^ˆLKˆ
+KˆÝ™[™ÝXÝ]˜][Û”Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÔÕ‘S‘ÕÔÕ	ËˆŒˆÈZ[ŽˆŒKX^ˆWÌKˆ
+Kˆ›ÔÝ™[™Ý\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÓ“×ÔÕ‘S‘ÕÓTÉËˆÌÌˆÈZ[ŽˆWÌX^ˆH
+ˆŒÌKˆ
+KˆX^Û\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔUPSUWÓPQT—ÔSÔÕ’PÕÑÕPT‘Ô“ÕPÕQÓPVÒÓÓTÉËˆH
+ˆŒÌˆÈZ[ŽˆLÌX^ˆÌ
+ˆŒÌKˆ
+Kˆ›ÝXÝY›ÛÜœÎˆÂˆÈXÝ]˜][Û”ÝˆŒZ[‘›ÛÜ”ÝˆXZÑÚ]™X˜XÚÔÝˆMHKˆÈXÝ]˜][Û”ÝˆLZ[‘›ÛÜ”ÝˆMKXZÑÚ]™X˜XÚÔÝˆHKˆÈXÝ]˜][Û”ÝˆLZ[‘›ÛÜ”ÝˆXZÑÚ]™X˜XÚÔÝˆKˆÈXÝ]˜][Û”ÝˆŒZ[‘›ÛÜ”ÝˆLXZÑÚ]™X˜XÚÔÝˆKˆKˆ]X[]PÜš]\šXNˆÂˆZ[”™]\›ŒLÝˆMˆX^˜]ÙÝÛŒŒÝˆL‹ˆZ[^Y\‘[NˆˆZ[“™]›ÝÑ[TÛÛˆËˆZ[”™][[Û”ÝˆˆX^Ü™X]Ü”Ú\™TÝˆËˆZ[Ý\™TÝˆMKˆX^Ý\™TÝˆLˆX^Ù[^T˜][ÎˆMKˆZ[•š\X[ÛÛ™\Ù\™\ÎˆÌˆ™\]Z\™RX[TYÔš\ÚÎˆYKˆKˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	ÔSÔÕ’PÕÑÕPT‘”SÔ“ÕPÕQ	ËˆKˆÂˆYˆ	Û][˜ÚÜ[˜XÚ×Ù›×Ü˜ŒLÌÌ×Û]™IËˆÛÙNˆ	Ñ‹Q“ËTŒLVÌ	ËˆX™[ˆ	Ó][˜Ú[˜XÚÈˆ0­È“ËTŒL9fî¹k¦ŒÌ9éä‰Ëˆ[U™\œÚ[ÛŽˆ	Û][˜ÚÜ[˜XÚ×Ù›×Ü˜ŒLÌÌ×Û]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÓUSÒÔSPÒ×Ñ“×ÔŒLÌÌÉËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÓUSÒÔSPÒ×Ñ“×ÔŒLÌÌ×ÑSP“Q	ËYJKˆËÈ™]Z[ˆHÝ˜]YÞHYš[š][Ûˆ›Üˆ\ÝÜšXØ[\Ü^H[™ØY™H^]ˆËÈ[™[™Ë]™]™[[ˆÛ\ˆ›ÙXÝ[Ûˆ™[ˆœ›ÛH™[Ü[š[™È]‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÓUSÒÔSPÒ×Ñ“×ÔŒLÌÌ×ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÓUSÒÔSPÒ×Ñ“×ÔŒLÌÌ×ÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓUSÒÔSPÒ×Ñ“×ÔŒLÌÌ×ÓPVÑS•–WÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÓUSÒÔSPÒ×Ñ“×ÔŒLÌÌ×ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	Ñ’VQÒÓ	Ëˆš^YÛ\ÎˆÌÌˆ\™ÝÜÝˆˆX^Û\ÎˆÌÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	Ñ“×ÔŒLÌÌÉËˆKˆÂˆYˆ	ÙÜ˜YX][Û—ØXØÙ[Û×ØÎÙWØŒ—ÜÌÛ˜×Û]™IËˆÛÙNˆ	ÓËPÎQKPŒ‹TÌSÉËˆX™[ˆ	ÑÜ˜YX][ÛˆXØÙ[\˜][ÛˆÈ0­ÈÝ\™NHŒˆÌÉËˆ[U™\œÚ[ÛŽˆ	ÙÜ˜YX][Û—ØXØÙ[Û×ØÎÙWØŒ—ÜÌÛ˜×Û]™WÝ	ËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÑWÐŒ—ÔÌÓÉËˆËÈ^XÝÝ˜]YÞHÙ^\È™]™[[ˆÛÝ\™NØ[˜\žHÙ][™Èœ›ÛBˆËÈÚ[[HÚ[™Ú[™È\È›Û[ÝY[IÜÈ[˜X›[Y[‚ˆ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÑWÐŒ—ÔÌÓ×ÑSP“Q	ËˆYKˆ
+Kˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÑWÐŒ—ÔÌÓ×ÑS•–WÑSP“Q	ËˆYKˆ
+KˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[ŠˆËÈŒÈ[X™\˜][Hž\\ÜÙ\ÈH™]š[Ý\ÈÙ\™\‹\ÚYHŒLH˜[YK‚ˆËÈÚYÝÈ™[XZ[œÈHÓÓÈÛ›HH™X[Ü™\ˆÚ^™H™]\›œÈÈŒHÓÓ‚ˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÑWÐŒ—ÔÌÓ×ÕŒ×ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÑWÐŒ—ÔÌÓ×ÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÑWÐŒ—ÔÌÓ×ÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆWÌKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÑWÐŒ—ÔÌÓ×ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÑÔQPUSÓ—ÐÓÔ‘WÔ•S“‘T‰Ëˆ\™ÝÜÝˆÌˆÛÜ™Q^]ÝˆLˆX^™QÜ˜YX][Û’Û\ÎˆH
+ˆŒÌˆX^ÜÝÜ˜YX][Û’Û\ÎˆH
+ˆŒÌˆX^Û\ÎˆH
+ˆŒÌˆ˜Z[[™ÕY\œÎˆÂˆÈXÝ]˜][Û”ÝˆŒ˜]ÙÝÛ”ÝˆLKˆÈXÝ]˜][Û”Ýˆ˜]ÙÝÛ”ÝˆMHKˆÈXÝ]˜][Û”Ýˆ˜]ÙÝÛ”ÝˆŒKˆÈXÝ]˜][Û”ÝˆML˜]ÙÝÛ”ÝˆHKˆÈXÝ]˜][Û”ÝˆÌ˜]ÙÝÛ”ÝˆÌKˆKˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	Ó×ÐÎÑWÐŒ—ÔÌÓÎŒTÓÓ	ËˆKˆÂˆYˆ	ÙÜ˜YX][Û—ØXØÙ[Û×ØÎÜLÜÝZ\ŒÛ]™IËˆÛÙNˆ	ÓËPÎTLTÕRTŒ	ËˆX™[ˆ	ÑÜ˜YX][ÛˆXØÙ[\˜][ÛˆÈ0­ÈÝ\™N9£ yîëML\ÈÈ9aj9.äúf-¹¨«ùl/¹.äÌ9éä‰Ëˆ[U™\œÚ[ÛŽˆ	ÙÜ˜YX][Û—ØXØÙ[Û×ØÎÜLÜÝZ\ŒÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÔLÔÕRTŒ	Ëˆ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÔLÔÕRTŒÑSP“Q	ËˆYKˆ
+Kˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÔLÔÕRTŒÑS•–WÑSP“Q	ËˆYKˆ
+KˆX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÔLÔÕRTŒÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÔLÔÕRTŒÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÔLÔÕRTŒÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆWÌKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÔLÔÕRTŒÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	ÑÔQPUSÓ—ÐÓÔ‘WÔ•S“‘T‰Ëˆ\™ÝÜÝˆÌˆÛÜ™Q^]ÝˆˆX^™QÜ˜YX][Û’Û\ÎˆH
+ˆŒÌˆX^ÜÝÜ˜YX][Û’Û\ÎˆÌˆX^Û\ÎˆH
+ˆŒÌˆ˜Z[[™ÕY\œÎˆÂˆÈXÝ]˜][Û”ÝˆŒ˜]ÙÝÛ”ÝˆLKˆÈXÝ]˜][Û”Ýˆ˜]ÙÝÛ”ÝˆMHKˆÈXÝ]˜][Û”Ýˆ˜]ÙÝÛ”ÝˆŒKˆÈXÝ]˜][Û”ÝˆML˜]ÙÝÛ”ÝˆHKˆÈXÝ]˜][Û”ÝˆÌ˜]ÙÝÛ”ÝˆÌKˆKˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	Ó×ÐÎÔLÔÕRTŒŒTÓÓ	ËˆKˆÂˆYˆ	ÙÜ˜YX][Û—ØXØÙ[Û×ØÎÚÍLÞŒÜ™XÛÝ™\žWÛ]™IËˆÛÙNˆ	ÓËPÎRÍLVŒT‰ËˆX™[ˆ	ÑÜ˜YX][ÛˆXØÙ[\˜][ÛˆÈ0­È[\ÝØ\L\È™XÛÝ™\žIËˆ[U™\œÚ[ÛŽˆ	ÙÜ˜YX][Û—ØXØÙ[Û×ØÎÚÍLÞŒÜ™XÛÝ™\žWÛ]™WÝŒIËˆÚYÛ˜[ÛÝ\˜ÙNˆ	ÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÒÍLÖŒÔ‘PÓÕ‘T–IËˆ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÒÍLÖŒÔ‘PÓÕ‘T–WÑSP“Q	ËˆYKˆ
+KˆËÈÛÙK[ØÚÙYY\ˆH™YØ]]™H]™HØ[\KˆÙY\HÝ˜]YÞHØYYˆËÈÛ›H›Üˆ\ÝÜšXØ[\Ü^H[™[žHÝ]Ý[™[™ÈÜÚ][Ûˆ^]ÈBˆËÈÝ[HÙ\™\ˆ™[ˆ]\Ý›Ý™[Ü[ˆ™]È[šY\Ë‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÒÍLÖŒÔ‘PÓÕ‘T–WÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ
+KˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÒÍLÖŒÔ‘PÓÕ‘T–WÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÒÍLÖŒÔ‘PÓÕ‘T–WÓPVÑS•–WÒ•STÔÕ	ËˆMKˆÈZ[ŽˆX^ˆWÌKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÒÍLÖŒÔ‘PÓÕ‘T–WÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^ÚYÝÑ[žR[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÑÔQPUSÓ—ÐPÐÑSÓ×ÐÎÒÍLÖŒÔ‘PÓÕ‘T–WÓPVÔÒQÕ×ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ^][ÙNˆ	Ñ’VQÒÓ	Ëˆš^YÛ\ÎˆŒÌˆ\™ÝÜÝˆÌˆX^Û\ÎˆŒÌˆÛÝ\˜ÙTÚYÝÐÛÚÜYˆ	Ó×ÐÎÒÍLÖŒŒTÓÓ	ËˆKˆÂˆYˆ	ÜÜÝÙÙŒÌÍWÜŒWÍWÍWØYÙMŒÞY×ÝŒÉËˆÛÙNˆ	ÑÌŒLÍKTŒKKPMŒUŒÉËˆX™[ˆ	ù«åy.&¹d#¹k¯ynay­ìz-ã9cãyo.H0­ÈQËUŒûï"9`g9«h¹¥¬9o 9.äûï"IËˆ[U™\œÚ[ÛŽˆ	ÜÜÝÛZYÜ˜][Û—ØYÙMŒÙ›ÜŒÌÍWÜ™X›Ý[™WÍWÍWÞY×ÝŒÉËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÑSP“Q	ËYJKˆËÈÙY\HÝ˜]YÞHØYYÛÈ[ˆ[™XYK[Ü[ˆÜÚ][ÛˆÝ[™XÙZ]™\ÂˆËÈ]ÈÜšYÚ[˜[^]X[˜YÙ[Y[Y\ˆ[ˆ\Ü˜YKˆ™]È[šY\È™[XZ[‚ˆËÈÙ™ˆ[›\ÜÈ[ˆÜ\˜]Üˆ^XÚ]H™KY[˜X›\È\È^XÝ[K‚ˆ[žQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÑS•–WÑSP“Q	Ëˆ˜[ÙKˆ
+KˆX\šÙ]ˆ	ÔSTÐSSIËBˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÔÔÒUSÓ—ÔÓÓ	ËBˆ
+KBˆ˜XÚÚ[™ÐYÙS\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÕPÒÒS‘×ÓTÉËBˆŒÌBˆÈZ[ŽˆLÌX^ˆL
+ˆŒÌKBˆ
+KBˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÓPVÔÒQÓSÐQÑWÓTÉËBˆWÍLBˆÈZ[ŽˆLKBˆ
+KBˆÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÕÒS‘Õ×ÓTÉËWÌÃBˆZ[ŽˆLBˆJKBˆ›ÜZ[”Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×Ñ“ÔÓRS—ÔÕ	ËŒÃBˆZ[ŽˆŒKBˆJKBˆ›ÜX^Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×Ñ“ÔÓPVÔÕ	ËÍKÃBˆZ[ŽˆŒKBˆJKBˆ™X›Ý[™Z[”Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×Ô‘P“ÕS‘ÓRS—ÔÕ	ËBˆKKBˆÈZ[ŽˆŒHKBˆ
+KBˆ™X›Ý[™X^Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×Ô‘P“ÕS‘ÓPVÔÕ	ËBˆKBˆÈZ[ŽˆŒHKBˆ
+KBˆ™X›Ý[™[Y[Ý]\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×Ô‘P“ÕS‘ÕSQSÕUÓTÉËBˆWÌBˆÈZ[ŽˆLKBˆ
+KBˆX^[šY\Ô\“Z[ˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÓPVÑS•’QT×ÔT—ÓRS•	ËBˆKBˆÈZ[ŽˆKX^ˆLKBˆ
+KBˆ™Y[žPÛÛÛÝÛ“\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×Ô‘QS•–WÐÓÓÓÕÓ—ÓTÉËBˆWÌBˆÈZ[ŽˆX^ˆL
+ˆŒÌKBˆ
+KBˆX^[žTšXÙR[\Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÓPVÑS•–WÒ•STÔÕ	ËBˆËBˆÈZ[ŽˆX^ˆLKBˆ
+KBˆX^[žTÙ[’[\XÝÝˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËBˆLBˆÈZ[ŽˆX^ˆLKBˆ
+KBˆ˜Z[[™ÐXÝ]˜][Û”Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÕRSS‘×ÐPÕUUSÓ—ÔÕ	ËBˆBˆÈZ[ŽˆŒHKBˆ
+KBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÕRSS‘×ÔÕÔÔÕ	ËBˆËBˆÈZ[ŽˆŒKX^ˆLKBˆ
+KBˆ˜\ÝZÙT›Ùš]Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÑTÕÕÔÕ	ËBˆNBˆÈZ[ŽˆKBˆ
+KBˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÑTÕÕÕÒS‘Õ×ÓTÉËBˆWÌBˆÈZ[ŽˆKBˆ
+KBˆÜÜÐÚXÚÐ]\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÓÔÔ×ÐÒPÒ×ÓTÉËBˆ—ÌBˆÈZ[ŽˆKBˆ
+KBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑŒÌÍWÔŒWÍWÍWÐQÑMŒÖQ×ÕŒ×ÓPVÒÓÓTÉËMWÌÃBˆZ[ŽˆWÌBˆJKBˆKBˆÂˆYˆ	ÜÜÝÙÙWÌÌ—ÜŒ—ÍØYÙLÌÞY×ÝŒ‰ËˆÛÙNˆ	ÑÌKLÌ‹TŒ‹MPLÌUŒ‰ËˆX™[ˆ	ù«åy.&¹d#¹ì¯º`"y­ìz-ã9cãyo.H0­ÈQËUŒ»ï"9`g9«h¹¥¬9o 9.äûï"IËBˆ[U™\œÚ[ÛŽˆ	ÜÜÝÛZYÜ˜][Û—ØYÙLÌÙ›ÜWÌÌ—Ü™X›Ý[™—ÍÞY×ÝŒ‰ËBˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÑSP“Q	ËYJKBˆËÈ™\Ù\™H\ÝÜšXØ[Ý]\ÝXÜÈ[™^]™Z]š[ÜˆÚ]Ý]Z^[™È™]ÃBˆËÈŒÈ[šY\È[ÈH˜\œ›ÝÈŒˆØ[\KƒBˆ[žQ[˜X›Yˆ˜[ÙKBˆX\šÙ]ˆ	ÔSTÐSSIËBˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÖQ×ÔÔÒUSÓ—ÔÓÓ	ËBˆ
+KBˆ˜XÚÚ[™ÐYÙS\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÕPÒÒS‘×ÓTÉËBˆÌÌBˆÈZ[ŽˆLÌX^ˆL
+ˆŒÌKBˆ
+KBˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÓPVÔÒQÓSÐQÑWÓTÉËBˆWÍLBˆÈZ[ŽˆLKBˆ
+KBˆÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÕÒS‘Õ×ÓTÉËWÌÃBˆZ[ŽˆLBˆJKBˆ›ÜZ[”Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—Ñ“ÔÓRS—ÔÕ	ËKÃBˆZ[ŽˆŒKBˆJKBˆ›ÜX^Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—Ñ“ÔÓPVÔÕ	ËÌ‹ÃBˆZ[ŽˆŒKBˆJKBˆ™X›Ý[™Z[”Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—Ô‘P“ÕS‘ÓRS—ÔÕ	ËBˆ‹BˆÈZ[ŽˆŒHKBˆ
+KBˆ™X›Ý[™X^Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—Ô‘P“ÕS‘ÓPVÔÕ	ËBˆBˆÈZ[ŽˆŒHKBˆ
+KBˆ™X›Ý[™[Y[Ý]\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—Ô‘P“ÕS‘ÕSQSÕUÓTÉËBˆWÌBˆÈZ[ŽˆLKBˆ
+KBˆX^[šY\Ô\“Z[ˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÓPVÑS•’QT×ÔT—ÓRS•	ËBˆKBˆÈZ[ŽˆKX^ˆLKBˆ
+KBˆ™Y[žPÛÛÛÝÛ“\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—Ô‘QS•–WÐÓÓÓÕÓ—ÓTÉËBˆWÌBˆÈZ[ŽˆX^ˆL
+ˆŒÌKBˆ
+KBˆËÈX\šÙ][Ý™[Y[[™HÝ˜]YÞIÜÈÝÛˆKTÓÓšXÙH[\XÝ\™H[™\[™[BˆËÈÝX\™Ëˆ[\ÝØ\š\X[][ÝH™\Ù\™\È\™H[˜ÛYY[ˆ›ÝÜÝšXÙ\ËƒBˆX^[žTšXÙR[\Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÓPVÑS•–WÒ•STÔÕ	ËBˆËBˆÈZ[ŽˆX^ˆLKBˆ
+KBˆX^[žTÙ[’[\XÝÝˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËBˆLBˆÈZ[ŽˆX^ˆLKBˆ
+KBˆ˜Z[[™ÐXÝ]˜][Û”Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÕRSS‘×ÐPÕUUSÓ—ÔÕ	ËBˆBˆÈZ[ŽˆŒHKBˆ
+KBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÕRSS‘×ÔÕÔÔÕ	ËBˆËBˆÈZ[ŽˆŒKX^ˆLKBˆ
+KBˆ˜\ÝZÙT›Ùš]Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÑTÕÕÔÕ	ËBˆNBˆÈZ[ŽˆKBˆ
+KBˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÑTÕÕÕÒS‘Õ×ÓTÉËBˆWÌBˆÈZ[ŽˆKBˆ
+KBˆÜÜÐÚXÚÐ]\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÓÔÔ×ÐÒPÒ×ÓTÉËBˆ—ÌBˆÈZ[ŽˆKBˆ
+KBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÌ—ÔŒ—ÍÐQÑLÌÖQ×ÕŒ—ÓPVÒÓÓTÉËMWÌÂˆZ[ŽˆWÌˆJKˆKˆÂˆYˆ	ÜÜÝÙÙWÌÍWÙŒWÞY×Û]™WÝŒIËˆÛÙNˆ	ÑÑKLÍKQŒKVQÉËˆX™[ˆ	ù«åy.&¹d#¹­ìz-ã9cãyo.H0­ÈÑHŒHQÉËˆ[U™\œÚ[ÛŽˆ	ÜÜÝÛZYÜ˜][Û—ÙÙWÌÍWÙš\œÝÞY×Û]™WÝŒIËˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÑSP“Q	ËYJKˆËÈ™\Ù\™HHÛÛ\]H]™HØ[\H[™[žHÝ]Ý[™[™È^][™[™ËˆËÈÚ[H\›X[™[HÝÜ[™È™]È[šY\È›Üˆ\È™\œÚ[Û‹‚ˆ[žQ[˜X›Yˆ˜[ÙKˆX\šÙ]ˆ	ÔSTÐSSIËˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÔÔÒUSÓ—ÔÓÓ	ËˆŒKˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÖQ×ÔÔÒUSÓ—ÔÓÓ	Ëˆ
+Kˆ˜XÚÚ[™ÐYÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÕPÒÒS‘×ÓTÉËLŒÌÂˆZ[ŽˆÌÌˆX^ˆL
+ˆŒÌˆJKˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÓPVÔÒQÓSÐQÑWÓTÉËˆWÍLˆÈZ[ŽˆLKˆ
+KˆÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÕÒS‘Õ×ÓTÉËWÌÂˆZ[ŽˆLˆJKˆ›ÜZ[”Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×Ñ“ÔÓRS—ÔÕ	ËKÂˆZ[ŽˆŒKˆJKˆ›ÜX^Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×Ñ“ÔÓPVÔÕ	ËÍKÂˆZ[ŽˆŒKˆJKˆ™X›Ý[™Z[”Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×Ô‘P“ÕS‘ÓRS—ÔÕ	Ë‹ÂˆZ[ŽˆŒKˆJKˆ™X›Ý[™X^Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×Ô‘P“ÕS‘ÓPVÔÕ	ËKÂˆZ[ŽˆŒKˆJKˆ™X›Ý[™[Y[Ý]\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×Ô‘P“ÕS‘ÕSQSÕUÓTÉËˆWÌˆÈZ[ŽˆLKˆ
+KˆËÈ\È\ÈH›Û[ÝY›Ü›HÙˆHÙ™›[™H™š\œÝ›ÝÈ\ˆZ[ˆ™\Ý[‚ˆËÈHX]ÚYÜÜ[š]H\ÈÛÛœÝ[YY]™[ˆYˆ^XÝ][Ûˆ\È]\ˆ™Z™XÝYˆËÈÜˆ˜Z[ËÛÈ]\ˆ™X›Ý[™ÈØ[››ÝÚ[[HÚ[™ÙHH\ÝYØ[\K‚ˆX^ÚYÛ˜[Ô\“Z[ˆKˆX^[šY\Ô\“Z[ˆKˆ™Y[žPÛÛÛÝÛ“\ÎˆˆX^[žTšXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÓPVÑS•–WÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+KˆX^[žTÙ[’[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÓPVÑS•–WÔÑS—ÒSTPÕÔÕ	ËˆLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ˜Z[[™ÐXÝ]˜][Û”Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÕRSS‘×ÐPÕUUSÓ—ÔÕ	ËˆˆÈZ[ŽˆŒHKˆ
+Kˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÕRSS‘×ÔÕÔÔÕ	ËˆËˆÈZ[ŽˆŒKX^ˆLKˆ
+Kˆ˜\ÝZÙT›Ùš]Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÑTÕÕÔÕ	ËˆNˆÈZ[ŽˆKˆ
+Kˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÑTÕÕÕÒS‘Õ×ÓTÉËˆWÌˆÈZ[ŽˆKˆ
+KˆÜÜÐÚXÚÐ]\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÓÔÔ×ÐÒPÒ×ÓTÉËˆ—ÌˆÈZ[ŽˆKˆ
+KˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑŒWÖQ×ÓPVÒÓÓTÉËMWÌÂˆZ[ŽˆWÌˆJKˆKˆÂˆYˆ	ÜÜÝÙÙWÌÍWÞYÉËˆÛÙNˆ	ÑÑKLÍKVQËUŒIËˆX™[ˆ	ù«åy.&¹d#¹­ìz-ã9cãyo.H0­ÈQûï"9¥éùâb9`g9«h¹¥¬9o 9.äûï"IËBˆ[U™\œÚ[ÛŽˆ	ÜÜÝÛZYÜ˜][Û—ÙÙWÌÍWÞY×Ü™Y[žL—ÝŒ‰ËBˆ[˜X›YˆYKBˆËÈÙY\HYš[š][ÛˆØYYÛÈ\ÝÜšXØ[›ÝÜÈÝ^Hš\ÚX›H[™[žCBˆËÈYØXÞHXÝ]™HÜÚ][ÛˆÝ[\È]ÈÜšYÚ[˜[^][\ÈY\ˆ™\Ý\ƒBˆ[žQ[˜X›Yˆ˜[ÙKBˆX\šÙ]ˆ	ÔSTÐSSIËBˆÜÚ][Û”Ú^™TÛÛˆ]™TÜÚ][Û‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÖQ×ÔÔÒUSÓ—ÔÓÓ	ËŒJKˆ˜XÚÚ[™ÐYÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÕPÒÒS‘×ÓTÉËLŒÌÃBˆZ[ŽˆÌÌBˆX^ˆL
+ˆŒÌBˆJKBˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÓPVÔÒQÓSÐQÑWÓTÉËWÍLÃBˆZ[ŽˆLBˆJKBˆÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÕÒS‘Õ×ÓTÉËWÌÈZ[ŽˆLJKBˆ›ÜZ[”Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑ“ÔÓRS—ÔÕ	ËKÈZ[ŽˆŒHJKBˆ›ÜX^Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑ“ÔÓPVÔÕ	ËÍKÈZ[ŽˆŒHJKBˆ™X›Ý[™Z[”Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÔ‘P“ÕS‘ÓRS—ÔÕ	Ë‹ÈZ[ŽˆŒHJKBˆ™X›Ý[™X^Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÔ‘P“ÕS‘ÓPVÔÕ	ËKÈZ[ŽˆŒHJKBˆ™X›Ý[™[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÔ‘P“ÕS‘ÕSQSÕUÓTÉËWÌÃBˆZ[ŽˆLBˆJKBˆX^[šY\Ô\“Z[ˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÓPVÑS•’QT×ÔT—ÓRS•	ËBˆ‹BˆÈZ[ŽˆKX^ˆLKBˆ
+KBˆ™Y[žPÛÛÛÝÛ“\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÔ‘QS•–WÐÓÓÓÕÓ—ÓTÉËBˆWÌBˆÈZ[ŽˆX^ˆL
+ˆŒÌKBˆ
+KBˆX^[žTšXÙR[\Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÓPVÑS•–WÒ•STÔÕ	ËMKÃBˆZ[ŽˆBˆX^ˆLBˆJKBˆ˜Z[[™ÐXÝ]˜][Û”Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÕRSS‘×ÐPÕUUSÓ—ÔÕ	ËÃBˆZ[ŽˆŒKBˆJKBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÕRSS‘×ÔÕÔÔÕ	ËËÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆ˜\ÝZÙT›Ùš]Ýˆ[X™\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑTÕÕÔÕ	ËNÈZ[ŽˆJKBˆ˜\ÝZÙT›Ùš]Ú[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÑTÕÕÕÒS‘Õ×ÓTÉËWÌÃBˆZ[ŽˆBˆJKBˆÜÜÐÚXÚÐ]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÓÔÔ×ÐÒPÒ×ÓTÉË—ÌÈZ[ŽˆJKBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÓU‘WÔÔÕÑÑWÌÍWÓPVÒÓÓTÉËMWÌÃBˆZ[ŽˆWÌBˆJKBˆKBˆKBˆKBƒBˆËÈ™\ÙX\˜Ú[Û›H^XÝ][Ûˆ]ˆ]™]™\ˆÜ™X]\ÈÜˆÚYÛœÈH˜[œØXÝ[Û‹ƒBˆÚYÛ˜[ÚYÝÎˆÃBˆ[˜X›Yˆ™]\™YÚYÝÜÑ[˜X›Y	‰ˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÑSP“Q	Ë˜[ÙJKBˆ›Ùš[\Îˆš[X\žU™\ÚÛ›Ùš[\ËBˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÓPVÔÒQÓSÐQÑWÓTÉËWÍLÈZ[ŽˆLJKBˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKBˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKBˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÑVUÑSVWÓTÉËŒÈZ[ŽˆJKBˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKBˆX^[žTšXÙR[\Ýˆ[X™\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÓPVÑS•–WÒ•STÔÕ	ËLÃBˆZ[ŽˆBˆX^ˆLBˆJKBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÕRSS‘×ÔÕÔÔÕ	ËËKÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÓPVÒÓÓTÉËŒÌÈZ[ŽˆWÌJKBˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+ÃBˆ‹‹›X™[ÛÜÝ[Ù[BˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÒQÓSÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆJKBˆKBƒBˆËÈ\™XÝš[X\žH›ÝÈ™\ÙX\˜ÚˆXXÚÌ\ÙXÛÛ™ÚYÛ˜[\\ÛÙH\ÈÚ[][]YÛ˜ÙCBˆËÈ\ˆ^]ÛÚÜÈ[ÛÚÜÈÚ\™HHØ[YHŒ\ËY[^YYX\šÙ]š[ƒBˆ›ÝÑš\œÝÚYÝÎˆÃBˆ[˜X›Yˆ™]\™YÚYÝÜÑ[˜X›Y	‰ˆ›ÛÛX[‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÑSP“Q	Ë˜[ÙJKBˆÚYÛ˜[˜\šX[ˆ	Üš[X\žWÌÝÉËBˆ\\ÛÙQØ\\ÎˆÌÌBˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆX^ÚYÛ˜[YÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÓPVÔÒQÓSÐQÑWÓTÉËWÍLÈZ[ŽˆLJKBˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKBˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKBˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÑVUÑSVWÓTÉËŒÈZ[ŽˆJKBˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÓPVÒÓÓTÉËŒÌÈZ[ŽˆWÌJKBˆšYÕÚ[›™\”Ýˆ[X™\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×Ð’Q×ÕÒS“‘T—ÔÕ	ËLÈZ[ŽˆHJKBˆÛÚÜÎˆÃBˆÃBˆYˆ	ÐÍIËBˆX™[ˆ	ÐÍH9fî¹k¦¹£ y§"Myéä‰ËBˆ^][ÙNˆ	Ñ’VQÒÓ	ËBˆš^YÛ\Îˆ[YÙ\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×Ñ’VQÒÓÓTÉËWÌÈZ[ŽˆLJKBˆKBˆÃBˆYˆ	ÐÍÍIËBˆX™[ˆ	ÐÍËH9lì9`/9fç¹¤©ËIIËBˆ^][ÙNˆ	ÕRSS‘ÉËBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÐÍÍWÕRSS‘×ÔÕÔÔÕ	ËËKÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆKBˆÃBˆYˆ	ÐÌLIËBˆX™[ˆ	ÐÌL‹H9lì9`/9fç¹¤©L‹IIËBˆ^][ÙNˆ	ÕRSS‘ÉËBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÐÌLWÕRSS‘×ÔÕÔÔÕ	ËL‹KÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆKBˆKBˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+ÃBˆ‹‹›X™[ÛÜÝ[Ù[BˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×Ñ’T”ÕÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆJKBˆKBƒBˆËÈÛX\Ø[][˜XÚÈKÐˆ™\ÙX\˜Úˆ\È]Û›H™XÛÜ™ÈÚ[][]YBˆËÈÜÚ][ÛœÈ[™™]™\ˆÝÛœÈ[ˆ^XÝ]ÜˆÜˆÚYÛš[™ÈÙ^KƒBˆÛX\[˜XÚÔÚYÝÎˆÂˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÔÒQÕ×ÑSP“Q	Ë˜[ÙJKˆZ[”ÛX\^TÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÓRS—Ð•VWÔÓÓ	ËŒKÈZ[ŽˆŒHJKBˆ\\ÛÙQØ\\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÑTTÓÑWÑÐTÓTÉËÌÌÈZ[ŽˆWÌJKBˆÛÛ™š\›X][Û•Ú[™ÝÓ\Îˆ[YÙ\‘[ŠBˆ	Ñ“Õ×ÔÓPT•ÔSPÒ×ÐÓÓ‘’T“PUSÓ—ÕÒS‘Õ×ÓTÉËBˆMWÌBˆÈZ[ŽˆWÌKBˆ
+KBˆ[˜XÚÔÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÑUÑÕÓ—ÔÕ	Ë‹KÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆ™X›Ý[™Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×Ô‘P“ÕS‘ÔÕ	ËËKÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆZ[”™X›Ý[™^Y\œÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÓRS—Ô‘P“ÕS‘Ð•VQT”ÉËKÈZ[ŽˆHJKBˆX^[žUœÔÛX\^TÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÓPVÑS•–WÕ”×ÔÓPT•ÔÕ	Ë‹ÃBˆZ[ŽˆBˆX^ˆLBˆJKBˆX^[žTšXÙR[\Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÓPVÐÓÓ‘’T“WÒ•STÔÕ	ËLÃBˆZ[ŽˆBˆX^ˆLBˆJKBˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKBˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKBˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÑVUÑSVWÓTÉËŒÈZ[ŽˆJKBˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÓPVÒÓÓTÉËŒÌÈZ[ŽˆWÌJKBˆšYÕÚ[›™\”Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×Ð’Q×ÕÒS“‘T—ÔÕ	ËLÈZ[ŽˆHJKBˆÛÚÜÎˆÃBˆÃBˆYˆ	ÐIËBˆX™[ˆ	ÐH0­È˜Z[[™ÈËIIËBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÐWÕRSS‘×ÔÕÔÔÕ	ËËKÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆKBˆÃBˆYˆ	Ð‰ËBˆX™[ˆ	Ðˆ0­È˜Z[[™ÈL‹IIËBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×Ð—ÕRSS‘×ÔÕÔÔÕ	ËL‹KÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆKBˆKBˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+ÃBˆ‹‹›X™[ÛÜÝ[Ù[BˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÔSPÒ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆJKBˆKBƒBˆËÈ\ÛÛ]YYHÛX\Ø[]ÔSˆ™\ÙX\˜Úˆ\È]\È]ÈÝÛˆX›H[™BˆËÈ™]™\ˆÚYÛœÈÜˆÙ[™ÈH˜[œØXÝ[ÛŽÈ^\Ý[™ÈÚYÝÈÝ˜]YÚY\È\™H[˜Ú[™ÙYƒBˆÛX\Ü[”ÚYÝÎˆÃBˆ[˜X›Yˆ™]\™YÚYÝÜÑ[˜X›Y	‰ˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑSP“Q	Ë˜[ÙJKBˆZ[”ÛX\Ü[”ÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÓRS—ÔÓÓ	ËKÈZ[ŽˆŒHJKBˆ™P^UÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×Ô‘P•VWÕÒS‘Õ×ÓTÉË—ÌÃBˆZ[ŽˆLBˆJKBˆZ[”™P^Y\œÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÓRS—Ô‘P•VWÐ•VQT”ÉË‹ÈZ[ŽˆJKBˆX^[žTšXÙR[\Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÓPVÑS•–WÒ•STÔÕ	ËLÃBˆZ[ŽˆBˆX^ˆLBˆJKBˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKBˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKBˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑVUÑSVWÓTÉËŒÈZ[ŽˆJKBˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKBˆšYÕÚ[›™\”Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×Ð’Q×ÕÒS“‘T—ÔÕ	ËLÈZ[ŽˆHJKBˆÛÚÜÎˆÃBˆÃBˆYˆ	Ñ	ËBˆX™[ˆ	Ñ0­È9ç'ÓÔS¹fî¹k¦yéä‰ËBˆ^][ÙNˆ	Ñ’VQÒÓ	ËBˆš^YÛ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑÒÓÓTÉËWÌÈZ[ŽˆLJKBˆ›ÛÝÔÛX\^]ˆ˜[ÙKBˆKBˆÃBˆYˆ	ÑIËBˆX™[ˆ	ÑH0­È9níº/çù¯à9­.ùéîùbª9«h¹æâ	ËBˆ^][ÙNˆ	ÑSVQQÕRSS‘ÉËBˆ\™ÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑWÒT‘ÔÕÔÔÕ	ËL‹KÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆ˜Z[[™ÐXÝ]˜][Û”Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑWÕRSS‘×ÐPÕUUSÓ—ÔÕ	ËBˆŒBˆÈZ[ŽˆX^ˆWÌKBˆ
+KBˆ˜Z[[™ÔÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑWÕRSS‘×ÔÕÔÔÕ	ËMKÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÑWÓPVÒÓÓTÉËŒÌÃBˆZ[ŽˆWÌBˆJKBˆ›ÛÝÔÛX\^]ˆ˜[ÙKBˆKBˆÃBˆYˆ	Ñ‰ËBˆX™[ˆ	Ñˆ0­È:-çúf£ÔÛX\9aãù.äËù®!y.äÉËBˆ^][ÙNˆ	ÔÓPT•Ñ“ÓÕÉËBˆ\™ÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×Ñ—ÒT‘ÔÕÔÔÕ	ËL‹KÃBˆZ[ŽˆŒKBˆX^ˆLBˆJKBˆX^Û\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×Ñ—ÓPVÒÓÓTÉËNÌÃBˆZ[ŽˆWÌBˆJKBˆ›ÛÝÔÛX\^]ˆYKBˆKBˆKBˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+ÃBˆ‹‹›X™[ÛÜÝ[Ù[BˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÓÔS—ÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆJKBˆKBƒBˆËÈ›ÜØ\™[Û›HÛÛ™š\›X][Ûˆ™\ÙX\˜ÚˆHš[X\žH›ÝÈÚYÛ˜[\ÈÛ›H[YÚX›CBˆËÈY\ˆH[Ûš]Ü™YØ[]Ü[œÈHØ[YHZ[È[žH\È[ˆÚ[][]YÛƒBˆËÈHš\œÝ]\ˆ›Û™[™ÈÝ\™H˜YKˆ\È[[[Û˜[HÙ\È›Ý™]\ÙHCBˆËÈ™]›ÜÜXÝ]™HÛX\ÜÚYÛ˜[ØÛÛ™š\›X][ÛœÈX™[\È[ˆX\›Y\ˆ[žHšXÙKƒBˆ›ÝÔÛX\ÛÛ™š\›TÚYÝÎˆÂˆËÈHÛÛ\]Y›ÜØ\™Ø[\H™[XZ[™Y™YØ]]™KˆÙY\HX›KÐTH›Ü‚ˆËÈ\ÝÜšXØ[[˜[\Ú\Ë]™\]Z\™HH^XÚ]›Ý™[‹[™YØ]]™HÝ™\œšYBˆËÈ™Y›Ü™H\È™]\™Y^\š[Y[Ø[ˆÜ™X]H[Ü™HÜÚ][ÛœË‚ˆ[˜X›Yˆ›Ý™[“™YØ]]™TÚYÝÜÑ[˜X›Yˆ	‰ˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÑSP“Q	ËYJKˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKBˆZ[”ÛX\Ü[”ÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÓRS—ÓÔS—ÔÓÓ	ËŒKÈZ[ŽˆJKBˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKBˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKBˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÑVUÑSVWÓTÉËŒÈZ[ŽˆJKBˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKBˆX^[žTšXÙR[\Ýˆ[X™\‘[ŠBˆ	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÓPVÑS•–WÒ•STÔÕ	ËBˆLBˆÈZ[ŽˆX^ˆLKBˆ
+KBˆšYÕÚ[›™\”Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×Ð’Q×ÕÒS“‘T—ÔÕ	ËLÈZ[ŽˆHJKBˆÛÚÜÎˆÃBˆÃBˆYˆ	ÓWÑIËBˆX™[ˆ	ÓKQH0­ÈÛX\ÔSˆÚ][ˆ\ÈÈš^Y\ÉËBˆX^ÛÛ™š\›X][Û‘[^S\ÎˆWÌBˆ^]ÛXÞNˆ	Ñ’VQÒÓ	ËBˆš^YÛ\ÎˆWÌBˆKBˆÃBˆYˆ	ÓMWÑIËBˆX™[ˆ	ÓMKQH0­ÈÛX\ÔSˆÚ][ˆM\ÈÈš^Y\ÉËBˆX^ÛÛ™š\›X][Û‘[^S\ÎˆMWÌBˆ^]ÛXÞNˆ	Ñ’VQÒÓ	ËBˆš^YÛ\ÎˆWÌBˆKBˆÃBˆYˆ	ÓWÕMIËBˆX™[ˆ	ÓKUMH0­ÈÛX\ÔSˆÚ][ˆ\ÈÈ˜Z[[™ÈMIIËBˆX^ÛÛ™š\›X][Û‘[^S\ÎˆWÌBˆ^]ÛXÞNˆ	ÕRSS‘×ÔÕÔ	ËBˆ˜Z[[™ÐXÝ]˜][Û”ÝˆLBˆ˜Z[[™Ñ˜]ÙÝÛ”ÝˆMKBˆ\™ÝÜÝˆKBˆZ[’Û\ÎˆWÌBˆX^Û\ÎˆŒÌBˆKBˆÃBˆYˆ	ÓMWÕŒ	ËBˆX™[ˆ	ÓMKUŒ0­ÈÛX\ÔSˆÚ][ˆM\ÈÈ˜Z[[™ÈŒ	IËBˆX^ÛÛ™š\›X][Û‘[^S\ÎˆMWÌBˆ^]ÛXÞNˆ	ÕRSS‘×ÔÕÔ	ËBˆ˜Z[[™ÐXÝ]˜][Û”ÝˆŒBˆ˜Z[[™Ñ˜]ÙÝÛ”ÝˆŒBˆ\™ÝÜÝˆÌBˆZ[’Û\Îˆ—ÌBˆX^Û\ÎˆLŒÌBˆKBˆKBˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+Âˆ‹‹›X™[ÛÜÝ[Ù[ˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ‘’T“WÔÒQÕ×ÔÔÒUSÓ—ÔÓÓ	ÊKˆJKˆK‚ˆËÈÝšXÝH›ÜØ\™[Û›HX›XË]˜YHØœÙ\™\‹ˆHØÛÜ™H\ØÜšX™\ÈBˆËÈÝËX[\›˜][Û‹Û™K\ÚYYÝZ\‹\Ý\]\›ˆÙY[ˆ™Y›Ü™HX[žH\™XÝ•QÜË‚ˆËÈ]\™›Ü›\È›È”ÈØ[Ëˆ[[žKXØ\X›H]™H[™ÚYÝÈÝ˜]YÚY\È\ÙBˆËÈHØ[YH›ÜØ\™[Û›HÝX\™ˆ]™H[žH™XYÈY[[ÜžHØXÚHÛ›H[™˜Z[ÈÜ[‹‚ˆ™Q[žTYÔš\ÚÎˆÂˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÑSP“Q	ËYJKˆÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÕÒS‘Õ×ÓTÉËMWÌÈZ[ŽˆWÌJKˆÝ]T™][[Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Ô‘US•SÓ—ÓTÉËŒÌÂˆZ[ŽˆMWÌˆJKˆÝÙY\[\˜[\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÔÕÑQTÓTÉËWÌÈZ[ŽˆWÌJKˆX^]™[Ô\“Z[ˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓPVÑU‘S•ÉËM‹ÈZ[ŽˆÌˆJKˆØXÚSX^YÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÐÐPÒWÓPVÐQÑWÓTÉËWÌÂˆZ[ŽˆLX^ˆLÌˆJKˆZ[•˜Y\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓRS—ÕQTÉËLÈZ[ŽˆÈJKˆZ[^TÚ\™TÝˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓRS—Ð•VWÔÒT‘WÔÕ	ËNÂˆZ[ŽˆX^ˆLˆJKˆZ[ÛÛœÙXÝ]]™P^\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓRS—Ð•VWÔÕ‘PRÉËMÈZ[ŽˆˆJKˆX^ÚYP[\›˜][Û”Ýˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓPVÐST“USÓ—ÔÕ	ËÌÂˆZ[ŽˆX^ˆLˆJKˆZ[•\XÚÔÚ\™TÝˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓRS—ÕTPÒ×ÔÕ	ËMKÂˆZ[ŽˆX^ˆLˆJKˆZ[”™]\›”Ýˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓRS—Ô‘UT“—ÔÕ	ËÌÈZ[ŽˆJKˆZ[‘›YÜÎˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÓRS—Ñ“QÔÉËKÈZ[ŽˆKX^ˆHJKˆ™\XØ[œ˜YÚ[SZ[”™]\›”Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Õ‘T•PÐSÓRS—Ô‘UT“—ÔÕ	ËLÈZ[ŽˆKˆ
+Kˆ™\XØ[œ˜YÚ[SZ[^R[\XÝÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Õ‘T•PÐSÓRS—Ð•VWÒSTPÕÔÕ	ËLÈZ[ŽˆKˆ
+Kˆ™\XØ[œ˜YÚ[SZ[•Ø[]Ú\™TÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Õ‘T•PÐSÓRS—ÕÐSUÕÔÒT‘WÔÕ	ËÈZ[ŽˆX^ˆLKˆ
+KˆÜ\œÙPœ™XYZ[^\Ô\^Y\Žˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×ÔÔT”ÑWÓRS—Ð•VT×ÔT—Ð•VQT‰Ë‹ÈZ[ŽˆHKˆ
+KˆÚ\ÙT™\X]YZ[”™]\›”Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Ô‘TPUÓRS—Ô‘UT“—ÔÕ	ËÌÈZ[ŽˆKˆ
+KˆÚ\ÙT™\X]YZ[”Ú^™TÚ\™TÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Ô‘TPUÓRS—ÔÒV‘WÔÒT‘WÔÕ	ËMKÈZ[ŽˆX^ˆLKˆ
+Kˆ™ZZš[™Ôš\ÚÕÚ[™ÝÑ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Ð‘RR’S‘×ÕÒS‘Õ×ÑSP“Q	ËYKˆ
+Kˆ™ZZš[™Ôš\ÚÔÝ\Ý\Žˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Ð‘RR’S‘×ÔÕT•ÒÕT‰ËM‹ÈZ[ŽˆX^ˆŒÈKˆ
+Kˆ™ZZš[™Ôš\ÚÑ[™Ý\Žˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Ð‘RR’S‘×ÑS‘ÒÕT‰ËŒÈZ[ŽˆX^ˆŒÈKˆ
+Kˆ™ZZš[™Ôš\ÚÓZ[‘›YÜÎˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ô’TÒ×Ð‘RR’S‘×ÓRS—Ñ“QÔÉËÈZ[ŽˆKX^ˆHKˆ
+KˆËÈ›ÜØ\™[Û›HX™[È›ÜˆH˜Z[\™H[ÙH]HÚ\ÝÜØ[››ÝˆËÈ›ÝXÝYØZ[œÝˆÛ™HÈ™YHX›XÈÙ[ÈÛÛ\ÙHHÛÛ™Y›Ü™HBˆËÈ™^[™\[™[˜YHÛÛ™š\›\È]HÝÙ\ˆšXÙH\œÚ\ÝYˆ\ÙBˆËÈX™[ÈÛÜœ™XÝÚYÝÈØ\XÚ]HXØÛÝ[[™ÎÈ^H\™H›Ý[žH›ØÚÙ\œË‚ˆÛY™‘[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÐÓQ‘—ÑSP“Q	ËYJKˆÛY™•Ú[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÐÓQ‘—ÕÒS‘Õ×ÓTÉË—ÌÂˆZ[ŽˆLX^ˆLÌˆJKˆÛY™“X^Ù[Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÐÓQ‘—ÓPVÔÑSÉËËÂˆZ[ŽˆKX^ˆLˆJKˆÛY™“Z[‘›ÜÝˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÐÓQ‘—ÓRS—Ñ“ÔÔÕ	ËLÂˆZ[ŽˆŒX^ˆNKˆJKˆÛY™”\œÚ\ÝX^˜][ÔÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÐÓQ‘—ÔT”ÒTÕÓPVÔUS×ÔÕ	ËÍKÈZ[ŽˆKX^ˆLKˆ
+KˆÛY™”Z\’YÛ›Ü™S\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÐÓQ‘—ÔRT—ÒQÓ“Ô‘WÓTÉËLÂˆZ[ŽˆX^ˆWÌˆJKˆÛÝÔYÓZ[‘\˜][Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÔÓÕ×ÓRS—ÑTUSÓ—ÓTÉËLÌÂˆZ[ŽˆWÌX^ˆLŒÌˆJKˆËÈ\Ý[X]HÝÈ]XÚÙˆHš\ÚX›HÚÙ[ˆ[™[ÜžHH\™Ù\ÝØœÙ\™YˆËÈØ[]ÈÛÝ[[\[ˆÚ[][]HÝ\ˆKTÓÓ^]Y\ˆ[Kˆ\È\Ù\ÂˆËÈH^\Ý[™È›Ý[™Y[‹[Y[[ÜžH]™[š[™È[™˜YH™\Ù\™\ÈÛ›K‚ˆ[\Xš[]Q[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÑSTP’SUWÑSP“Q	ËYJKˆ[\Xš[]TÜÚ][Û”ÛÛˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÑSTP’SUWÔÔÒUSÓ—ÔÓÓ	ËKÂˆZ[ŽˆŒKX^ˆLˆJKˆ[\ÜT™\Ù\™UØ\›”Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÑSTÕÔWÔ‘TÑT•‘WÕÐT“—ÔÕ	ËKÈZ[ŽˆX^ˆWÌKˆ
+Kˆ[\ÜÔ™\Ù\™UØ\›”Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÑSTÕÔ×Ô‘TÑT•‘WÕÐT“—ÔÕ	ËLÈZ[ŽˆX^ˆWÌKˆ
+KˆËÈZ\™YÛÝ[\™˜XÝX[Û›Nˆ]˜[X]HÛÈ™KYš\œÝXÛY™ˆš[\œÈÛˆ]™\žBˆËÈ[žHÜÜ[š]H]HÝ\œ™[ÝX\™\ÜÙ\Ëˆ›È[žH\È›ØÚÙY[™ˆËÈ›È”ËÔÔS]HÛÚÝ\\ÈYYÈHÝ]‚ˆš\œÝÛY™ÛÝ[\™˜XÝX[[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐÓÕS•T‘PÕPSÑSP“Q	ËYKˆ
+Kˆš\œÝÛY™’Üš^›Û“\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÒÔ’V“Ó—ÓTÉËÌÌÈZ[ŽˆWÌX^ˆLŒÌKˆ
+Kˆš\œÝÛY™“X^[™[™Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÓPVÔS‘S‘ÉËLÌÈZ[ŽˆLX^ˆLÌKˆ
+Kˆš\œÝÛY™]Y]›\Ú\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐUQUÑ“TÒÓTÉËWÌÈZ[ŽˆLX^ˆLÌKˆ
+Kˆš\œÝÛY™‘Y™™XÝ]™P^Y\œÓX^ˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÑQ‘‘PÕU‘WÐ•VQT”×ÓPV	ËËÈZ[ŽˆKX^ˆLKˆ
+Kˆš\œÝÛY™’ÌUÜTÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÒÌWÕÔWÔÕ	ËMKÈZ[ŽˆX^ˆWÌKˆ
+Kˆš\œÝÛY™’ÌUÜÔÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÒÌWÕÔ×ÔÕ	ËÍKÈZ[ŽˆX^ˆWÌKˆ
+Kˆš\œÝÛY™’Ì•ÜTÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÒÌ—ÕÔWÔÕ	ËŒÈZ[ŽˆX^ˆWÌKˆ
+Kˆš\œÝÛY™’Ì•ÜÔÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÒÌ—ÕÔ×ÔÕ	ËÍKÈZ[ŽˆX^ˆWÌKˆ
+KˆËÈY™XÞXÛK\ÜXÚYšXÈZ\™Y™\ÙX\˜Úˆ\ÙH›Ý[™\šY\È[™[\ÝØ\ˆËÈÛÛ˜Ù[˜][Û‹Ü™XÛÝ™\žHÚXÚÜÈÛ›HX™[ÛÝ[\™˜XÝX[ÛÚÜÎÈ^HÂˆËÈ›ÝÚ[™ÙHH[š]™\œØ[]™HÝX\™[[›ÜØ\™™XÚ\Ú[Ûˆ\È›Ý™[‹‚ˆš\œÝÛY™“Y™XÞXÛQ[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÓQ‘PÖPÓWÑSP“Q	ËYKˆ
+Kˆš\œÝÛY™“][˜ÚX^YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÓUSÒÓPVÐQÑWÓTÉËWÌˆÈZ[ŽˆLX^ˆÌÌKˆ
+Kˆš\œÝÛY™Ý\™QX\›SX^YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐÕT•‘WÑPT“WÓPVÐQÑWÓTÉËÌÌˆÈZ[ŽˆWÌX^ˆÌÌKˆ
+Kˆš\œÝÛY™Ý\™SZYÜ˜][Û“Z[”Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐÕT•‘WÓRQÔUSÓ—ÓRS—ÔÕ	ËˆÈZ[ŽˆX^ˆLKˆ
+Kˆš\œÝÛY™[[QX\›SX^YÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐSSWÑPT“WÓPVÐQÑWÓTÉËLÌˆÈZ[ŽˆLX^ˆLŒÌKˆ
+Kˆš\œÝÛY™[[RÌUÜÔ™XÛÝ™\žSX^Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐSSWÒÌWÕÔ×Ô‘PÓÕ‘T–WÓPVÔÕ	ËLˆÈZ[ŽˆX^ˆLKˆ
+Kˆš\œÝÛY™[[RÌ•ÜÔ™XÛÝ™\žSX^Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐSSWÒÌ—ÕÔ×Ô‘PÓÕ‘T–WÓPVÔÕ	ËˆÈZ[ŽˆX^ˆLKˆ
+Kˆš\œÝÛY™[[RÌUØ[]^UÚ\™TÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐSSWÒÌWÕÐSUÐ•VWÕÔÒT‘WÔÕ	ËLˆÈZ[ŽˆX^ˆLKˆ
+Kˆš\œÝÛY™[[RÌ•Ø[]^UÚ\™TÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐSSWÒÌ—ÕÐSUÐ•VWÕÔÒT‘WÔÕ	ËŒˆÈZ[ŽˆX^ˆLKˆ
+KˆËÈÝYÙK\ÜXÚYšXÈ›ÜØ\™Ø[™Y]\È\š]™Yœ›ÛH[™\[™[\ÝÜšXØ[ˆËÈ\\ÛÙ\Ëˆ^H\™H]Y]X™[ÈÛ›Nˆ›È]™KÔÚYÝÈ[žH™Z™XÝ[Ûˆ[™ˆËÈ›ÈY][Û˜[”ÈÜˆ]X˜\ÙHÛÚÝ\\È[ÝÙYÛˆH[žH]‚ˆš\œÝÛY™Ý\™S]PØ[™Y]T™XÛÝ™\žSX^Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐÕT•‘WÓUWÐÐS‘QUWÔ‘PÓÕ‘T–WÓPVÔÕ	Ë‹ˆÈZ[ŽˆX^ˆLKˆ
+Kˆš\œÝÛY™Ý\™SZYÜ˜][ÛØ[™Y]UØ[]^UÚ\™TÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐÕT•‘WÓRQÔUSÓ—ÐÐS‘QUWÕÐSUÐ•VWÕÔÒT‘WÔÕ	ËÌˆÈZ[ŽˆX^ˆLKˆ
+Kˆš\œÝÛY™[[QX\›PØ[™Y]T™XÛÝ™\žSX^Ýˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐSSWÑPT“WÐÐS‘QUWÔ‘PÓÕ‘T–WÓPVÔÕ	ËŒˆÈZ[ŽˆX^ˆLKˆ
+Kˆš\œÝÛY™[[QX\›PØ[™Y]UØ[]^UÚ\™TÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×Ñ’T”ÕÐÓQ‘—ÐSSWÑPT“WÐÐS‘QUWÕÐSUÐ•VWÕÔÒT‘WÔÕ	ËKˆÈZ[ŽˆX^ˆLKˆ
+KˆËÈX\›ˆ™\X]Y][˜ÚÜYÈ˜[Z[Y\Èœ›ÛHX›XÈ˜Y\ÈÛ›Kˆ›Ý\ˆ\™ÙBˆËÈ^\È[ˆHÝX‹ML\È\œÝ›Ü›HH[\]NÈY\ˆ][\]Hš\ÚX›BˆËÈÛÛ\Ù\Ë]\ˆZ[ÈÚ]HØ[YH[[Ý[Ý[Z[™È™XÝÜˆÜˆ]X\ÝÛÂˆËÈX\›™YØ[]È\™H›ØÚÙYÚ]Ý]™\]Z\š[™ÈH˜]]™HL]˜YHØ[\K‚ˆÜ›ÜÜÓZ[[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÐÔ“ÔÔ×ÓRS•ÑSP“Q	ËYJKˆ[\]UÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕSTUWÕÒS‘Õ×ÓTÉËWÌÂˆZ[ŽˆLX^ˆÌÌˆJKˆ[\]S\™ÙP^SZ[”ÛÛˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕSTUWÓT‘ÑWÐ•VWÓRS—ÔÓÓ	ËKÂˆZ[ŽˆŒKˆJKˆ[\]SZ[“\™ÙP^\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕSTUWÓRS—ÓT‘ÑWÐ•VTÉËÂˆZ[Žˆ‹X^ˆM‹ˆJKˆ[\]SX^\™ÙP^\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕSTUWÓPVÓT‘ÑWÐ•VTÉË‹ÂˆZ[Žˆ‹X^ˆÌ‹ˆJKˆ[\]SZ[•Ý[^TÛÛˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕSTUWÓRS—ÕÕSÐ•VWÔÓÓ	ËÂˆZ[ŽˆKˆJKˆ[\]SX^\œÝÜ[“\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕSTUWÓPVÐ•T”ÕÔÔS—ÓTÉËLÂˆZ[ŽˆLX^ˆWÌˆJKˆ[\]TÚ^™PXÚÙ]ÛÛˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕSTUWÔÒV‘WÐ•PÒÑUÔÓÓ	ËŒKÂˆZ[ŽˆŒKX^ˆLˆJKˆÞXÐÛÛ\ÙTÝˆ[X™\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×ÐÓÓTÑWÔÕ	ËŒÂˆZ[ŽˆŒX^ˆLˆJKˆÞXÐÛÛ\ÙUÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×ÐÓÓTÑWÕÒS‘Õ×ÓTÉËÌÌÂˆZ[ŽˆWÌX^ˆLŒÌˆJKˆÞXÔ™][[Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×Ô‘US•SÓ—ÓTÉË—ÍÌÂˆZ[ŽˆŒÌX^ˆÈ
+ˆ—ÍÌˆJKˆÞXÓY[[ÜžT]ˆ›ØÙ\ÜË™[‹‘“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×ÓQSSÔ–WÔUˆ	Ë‹Ù]KÜ™KY[žK\YË]ÞXË[Y[[ÜžKšœÛÛ‰ËˆÞXÔ\œÚ\Ý[\˜[\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×ÔT”ÒTÕÒS•T•SÓTÉËWÌÈZ[ŽˆWÌX^ˆŒÌKˆ
+KˆÞXÐ[[Ý[Û\˜[˜ÙTÝˆ[X™\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×ÐSSÕS•ÕÓTSÑWÔÕ	Ë‹ÈZ[ŽˆX^ˆLKˆ
+KˆÞXÐ\œÝÛ\˜[˜ÙS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×Ð•T”ÕÕÓTSÑWÓTÉËLÈZ[ŽˆX^ˆWÌKˆ
+KˆÞXÕØ[]Ý™\›\Z[Žˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÕÖP×ÕÐSUÓÕ‘T“TÓRS‰Ë‹ÂˆZ[ŽˆKX^ˆM‹ˆJKˆX^ÞXÕØ[]Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÓPVÕÖP×ÕÐSUÉËÌM‹ÂˆZ[ŽˆX^ˆWÍLÍ‹ˆJKˆX^ÞXÕ[\]\Îˆ[YÙ\‘[Š	Ñ“Õ×Ô‘WÑS•–WÔ•Q×ÓPVÕÖP×ÕSTUTÉËWÌÂˆZ[ŽˆÌ‹X^ˆM—ÌÎˆJKˆK‚ˆËÈ[™\[™[Ø]\Ø[ÝYH\š]™Yœ›ÛHHØœÙ\™Y™Z]š[ÜˆÙˆÛÛœÚ\Ý[BˆËÈ›Ùš]X›HØ[]Ëˆ]™]™\ˆÚYÛœÈ˜[œØXÝ[ÛœÈ[™™]™\ˆ™]\Ù\ÈH]\™BˆËÈÛX\ÔSˆ\È[ˆX\›Y\ˆš[šXÙK‚ˆÛX\ZÙQX\›TÚYÝÎˆÂˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÔÒQÕ×ÑSP“Q	Ë˜[ÙJKˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÔÔÒUSÓ—ÔÓÓ	ÊKˆÝ]UÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÔÕUWÕÒS‘Õ×ÓTÉËWÌÈZ[ŽˆWÌJKˆÝ]T™][[Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÔÕUWÔ‘US•SÓ—ÓTÉËÌÂˆZ[ŽˆÌÌˆJKˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÑVUÑSVWÓTÉËŒÈZ[ŽˆJKˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKˆX^[žTšXÙR[\Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓPVÑS•–WÒ•STÔÕ	ËMKÂˆZ[ŽˆX^ˆLˆJKˆX^[žTšXÙQ›ÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓPVÑS•–WÑ“ÔÔÕ	ËÌÂˆZ[ŽˆX^ˆLˆJKˆX^Ý\™TÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓPVÐÕT•‘WÔÕ	ËÈZ[ŽˆX^ˆLJKˆX^YÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓPVÐQÑWÓTÉËLÌÈZ[ŽˆLJKˆX^™]\›\ÔÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓPVÔ‘UT“—ÍT×ÔÕ	ËLÂˆZ[ŽˆLLX^ˆWÌˆJKˆZ[“™]›ÝÍ\Îˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓRS—Ó‘U“Õ×ÍT×ÔÓÓ	ËÈZ[ŽˆLWÌJKˆZ[”ÛX\Ü[”ÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓRS—ÔÓPT•ÓÔS—ÔÓÓ	ËŒKÈZ[ŽˆJKˆÛX\ÛÛ™š\›X][Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÐÓÓ‘’T“PUSÓ—ÓTÉËWÌÈZ[ŽˆLJKˆÛ\Ý\‘Y\\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÐÓTÕT—ÑQTÓTÉËWÌÈZ[ŽˆJKˆY™\ÚÛÔÝˆÍLLŒKˆYœ˜XÝ[ÛŽˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÐQÑ”PÕSÓ‰ËŒÈZ[ŽˆX^ˆHJKˆ\™ÝÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÒT‘ÔÕÔÔÕ	ËŒÈZ[ŽˆŒKX^ˆLJKˆ›ÔÝ™[™Ý\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓ“×ÔÕ‘S‘ÕÓTÉËWÌÈZ[ŽˆWÌJKˆ›ÔÝ™[™ÝY™TÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÓ“×ÔÕ‘S‘ÕÓQ‘WÔÕ	ËLÂˆZ[ŽˆX^ˆWÌˆJKˆ›ÝÑXØ^S™]›ÝÌ\Îˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÑ“Õ×ÑPÐVWÓ‘U“Õ×ÌTÉËLKÂˆZ[ŽˆLWÌˆJKˆ›ÝÑXØ^TÙ[\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÑ“Õ×ÑPÐVWÔÑSÕÌTÉËËÂˆZ[ŽˆKˆJKˆš[Üš]UØ[]Îˆ\Ý[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÔ’SÔ’UWÕÐSUÉËÂˆ	ÐÞXQLUžœ˜Z”ÚÜ[MUœÙÝžTÌ”[Sš•Qœ’Ò’ØMMÉËˆ	ÍÍM›P[ÙÙT•ŒÝ”ÕÞQ™]^YŽÔ‘^™ÞžÎUYIËˆ	Ì™™ÍTQYQÜž““ÜÝ›šV›MZS™ÝÕÎÚÔM™ŒÜž™‰Ëˆ	Ø\™[”œÓŒ[S–U™[Ò•ÕœÕÙVYVTŽUUQÓ\ÐÑÜU	Ëˆ	ÐšM™Q’X–QSŽØÖÝÙ]ž–žS›RÒP˜Ý™]ÙžY	ËˆJKˆØ[]Û\Ý\œÎˆÞÂˆYˆ	ÑŽWÑRP×ÐÓTÕT‰ËˆØ[]ÎˆÂˆ	ÑŽ^•Q’[Ô[”ÌV]ÍÕTŽ]Ø]•M\ž’ÍØS	Ëˆ	ÑZXÖ•Q•œ]˜œ˜ØÜÍÌVÙ‘Ù^^”ÑØœSQ–ššÙIËˆKˆWKˆ[žT›Ùš[\ÎˆÂˆÂˆYˆ	ÔÓPT•ÑT‘PÕ	ËX™[ˆ	ÔÛX\ÔSˆÈÝ\™OMÈ›ÈÚ\ÙIËˆÛÝ\˜ÙU\Nˆ	ÔÓPT•ÓÔS‰Ë™\]Z\™PYÙNˆ˜[ÙK™\]Z\™Q›ÝÐÛÛ™š\›X][ÛŽˆ˜[ÙKˆKˆÂˆYˆ	ÔÓPT•ÔÕ’PÕ	ËX™[ˆ	ÔÛX\ÔSˆÈQÑOLLÈÈš[Üˆ›ÝÏM\ÉËˆÛÝ\˜ÙU\Nˆ	ÔÓPT•ÓÔS‰Ë™\]Z\™PYÙNˆYK™\]Z\™Q›ÝÐÛÛ™š\›X][ÛŽˆYKˆKˆÂˆYˆ	Ñ“Õ×Ô‘QPÕ	ËX™[ˆ	Ôš[X\žH˜[šÈH™YXÝ]™H[žHÈ]\ˆÛX\X™[	ËˆÛÝ\˜ÙU\Nˆ	Ñ“Õ×Ô‘QPÕ	Ë™\]Z\™PYÙNˆYK™\]Z\™Q›ÝÐÛÛ™š\›X][ÛŽˆ˜[ÙKˆKˆKˆY›Ùš[\ÎˆÂˆÈYˆ	ÐTÑIËX™[ˆ	Ó›ÈY	Ë™\ÚÛÔÝˆ×KYœ˜XÝ[ÛŽˆKˆÂˆYˆ	ÔTSRQ	ËX™[ˆ	ÐY	H]
+ÍLÊÎÊÌLŒ	IËˆ™\ÚÛÔÝˆÍLLŒKˆYœ˜XÝ[ÛŽˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÐQÑ”PÕSÓ‰ËŒÂˆZ[ŽˆX^ˆKˆJKˆKˆKˆ^]›Ùš[\ÎˆÂˆÂˆYˆ	ÑMLÕL‰ËX™[ˆ	ÊÍL	HÙ[	K[›™\ˆ˜Z[L‰IËˆXÝ]˜][Û”ÝˆLÙ[œ˜XÝ[ÛŽˆ˜Z[[™ÔÝÜÝˆL‹ˆX^Û\ÎˆNÌ›ÝÑXØ^Q^]ˆ˜[ÙKˆKˆÂˆYˆ	ÑMÍWÕMIËX™[ˆ	ÊÍÍIHÙ[L	K[›™\ˆ˜Z[MIIËˆXÝ]˜][Û”ÝˆÍKÙ[œ˜XÝ[ÛŽˆK˜Z[[™ÔÝÜÝˆMKˆX^Û\ÎˆNÌ›ÝÑXØ^Q^]ˆ˜[ÙKˆKˆÂˆYˆ	ÑLLÑ“ÕÉËX™[ˆ	ÊÌL	HÙ[	K›ÝÈXØ^HÜˆ˜Z[Œ	IËˆXÝ]˜][Û”ÝˆLÙ[œ˜XÝ[ÛŽˆ˜Z[[™ÔÝÜÝˆŒˆX^Û\ÎˆNÌ›ÝÑXØ^Q^]ˆYKˆKˆÂˆYˆ	Ñ’VŒÒŒ	ËX™[ˆ	ËLŒ	H\™ÝÜÈÝ\Ú\ÙHš^YŒÉËˆ[ÙNˆ	Ñ’VQÒÓ	Ë\™ÝÜÝˆŒX^Û\ÎˆŒÌˆ[ÝÙYY›Ùš[RYÎˆÉÐTÑI×KˆKˆÂˆYˆ	Ñ’VLŒÒŒ	ËX™[ˆ	ËLŒ	H\™ÝÜÈÝ\Ú\ÙHš^YLŒÉËˆ[ÙNˆ	Ñ’VQÒÓ	Ë\™ÝÜÝˆŒX^Û\ÎˆLŒÌˆ[ÝÙYY›Ùš[RYÎˆÉÐTÑI×KˆKˆKˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+Âˆ‹‹›X™[ÛÜÝ[Ù[ˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÓRÑWÑPT“WÔÔÒUSÓ—ÔÓÓ	ÊKˆJKˆK‚ˆËÈÝšXÝHØ]\Ø[][K]Ø[]™\ÛÛ˜[˜ÙHÝYKˆHÚYÛ˜[^\ÝÈÛ›HÚ[ˆBˆËÈÙXÛÛ™Üˆ\™\Ý[˜Ý[Ûš]Ü™YØ[]•VH\ÈXÝX[H™Y[ˆØœÙ\™Y‚ˆËÈHÚYÛ˜[šXÙH\È™]™\ˆ™X]Y\ÈHš[ˆ]™\žHÛÚÜØZ]È›ÜˆBˆËÈš\œÝÛÛ\\˜X›HX\šÙ]˜YHY\ˆHÛÛ™šYÝ\™Y^XÝ][Ûˆ[^K‚ˆÛX\™\ÛÛ˜[˜ÙTÚYÝÎˆÂˆ[˜X›Yˆ›Ý™[“™YØ]]™TÚYÝÜÑ[˜X›Yˆ	‰ˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÔÒQÕ×ÑSP“Q	Ë˜[ÙJKˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÔÔÒUSÓ—ÔÓÓ	ÊKˆ™X]\™UÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÑ‘PUT‘WÕÒS‘Õ×ÓTÉËWÌÂˆZ[ŽˆWÌˆJKˆÝ]T™][[Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÔÕUWÔ‘US•SÓ—ÓTÉËL
+ˆŒÌÂˆZ[ŽˆŒÌˆJKˆ\\ÛÙPÛÛÛÝÛ“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÑTTÓÑWÐÓÓÓÕÓ—ÓTÉËŒÌÂˆZ[ŽˆWÌˆJKˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÑVUÑSVWÓTÉËŒÈZ[ŽˆJKˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKˆX^[žTšXÙR[\Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÓPVÑS•–WÒ•STÔÕ	ËMKÂˆZ[ŽˆX^ˆWÌˆJKˆX^[žTšXÙQ›ÜÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÓPVÑS•–WÑ“ÔÔÕ	ËÌÂˆZ[ŽˆX^ˆLˆJKˆX^Ü›ÜÜÓX\šÙ]šXÙR[\Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÓPVÐÔ“ÔÔ×ÓPT’ÑUÒ•STÔÕ	ËˆLˆÈZ[ŽˆX^ˆWÌKˆ
+Kˆ[žT›Ùš[\ÎˆÂˆÂˆYˆ	ÔÔ—ÔŒ	ËˆX™[ˆ	ÔÔ‹TŒ0­ÈˆÛX\Ø[]È\È˜\Ù[[™IËˆ™\ÛÛ˜[˜ÙUÚ[™ÝÓ\ÎˆWÌˆ™\]Z\™YØ[]Îˆ‹ˆKˆÂˆYˆ	ÔÔ—ÔŒIËˆX™[ˆ	ÔÔ‹TŒH0­ÈˆØ[]Í\È
+ÈX›XÈ^Y\œÌŒ
+È^Q›ÝÌMH
+ÈÜOLIIËˆ™\ÛÛ˜[˜ÙUÚ[™ÝÓ\ÎˆWÌˆ™\]Z\™YØ[]Îˆ‹ˆZ[”X›XÐ^Y\œÍ\ÎˆŒˆZ[”X›XÐ^Q›ÝÍ\ÔÛÛˆMKˆX^\™Ù\Ý^Y\”Ú\™TÝˆKˆKˆÂˆYˆ	ÔÔ—ÔŒ‰ËˆX™[ˆ	ÔÔ‹TŒˆ0­ÈÈØ[]ÍŒÈ
+ÈX›XÈ^Y\œÌŒ
+ÈÜOLŒ	IËˆ™\ÛÛ˜[˜ÙUÚ[™ÝÓ\ÎˆŒÌˆ™\]Z\™YØ[]ÎˆËˆZ[”X›XÐ^Y\œÍ\ÎˆŒˆX^\™Ù\Ý^Y\”Ú\™TÝˆŒˆKˆÂˆYˆ	ÔÔ—ÔŒÉËˆX™[ˆ	ÔÔ‹TŒÈ0­ÈˆØ[]ÍŒÈ
+È™KYÜ˜YQÑL\È
+ÈÝ\™MŒN
+È^Y\œÌŒ	Ëˆ™\ÛÛ˜[˜ÙUÚ[™ÝÓ\ÎˆŒÌˆ™\]Z\™YØ[]Îˆ‹ˆZ[”X›XÐ^Y\œÍ\ÎˆŒˆ™\]Z\™T™QÜ˜YX][ÛŽˆYKˆ™\]Z\™YX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆX^YÙS\ÎˆWÌˆZ[Ý\™TÝˆŒˆX^Ý\™TÝˆˆKˆÂˆYˆ	ÔÔ—ÔŒ×ÑÕPT‘	ËˆX™[ˆ	ÔÔ‹TŒËQÕPT‘0­ÈŒÈ
+È9ak9alz+¨¹cey­`T•Qú/áù®é	Ëˆ™\ÛÛ˜[˜ÙUÚ[™ÝÓ\ÎˆŒÌˆ™\]Z\™YØ[]Îˆ‹ˆZ[”X›XÐ^Y\œÍ\ÎˆŒˆ™\]Z\™T™QÜ˜YX][ÛŽˆYKˆ™\]Z\™YX\šÙ]ˆ	ÔSTÐ“Ó‘S‘×ÐÕT•‘IËˆX^YÙS\ÎˆWÌˆZ[Ý\™TÝˆŒˆX^Ý\™TÝˆˆ™\]Z\™RX[TYÔš\ÚÎˆYKˆKˆKˆ^]›Ùš[\ÎˆÌŒÌK™›]X\
+
+\™ÝÜÝ
+HOˆ
+ˆÍŒLŒNK›X\
+
+ÛÙXÛÛ™ÊHOˆ
+ÂˆYˆ	Ú\™ÝÜÝWÕ	ÚÛÙXÛÛ™ßXˆX™[ˆ\™ÝÜ	Ú\™ÝÜÝIHÈš^Y	ÚÛÙXÛÛ™ß\Øˆ\™ÝÜÝˆX^Û\ÎˆÛÙXÛÛ™È
+ˆWÌˆJJBˆ
+JKˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+Âˆ‹‹›X™[ÛÜÝ[Ù[ˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•Ô‘TÓÓSÑWÔÔÒUSÓ—ÔÓÓ	ÊKˆJKˆK‚ˆËÈ™\œÚ[Û™Y›ÜØ\™[Û›HØ[]™YÚ\ÝžKˆ™]ÈØ[]È\™H›ÛZ[˜]Yœ›ÛBˆËÈX\›H^Y\œÈÙˆÜ˜YX]YÚÙ[œË™YY™\X]YÙYY]ÚÙ[ˆ]šY[˜ÙK[™ˆËÈ™XÛÛYH[YÚX›HÛ›HY\ˆH[^KˆH\ØÛÝ™\žHÚÙ[ˆ]Ù[ˆ\È^ÛYYˆËÈœ›ÛHÜ˜Y[™ÈÛÈH™YÚ\ÝžHØ[››ÝÜ˜YHÛˆ]ÈÝÛˆÙ[XÝ[ÛˆØ[\K‚ˆÛX\Ø[]™YÚ\ÝžNˆÂˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔ‘QÒTÕ–WÑSP“Q	ËYJKˆ\ØÛÝ™\žQ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑTÐÓÕ‘T–WÑSP“Q	ËYJKˆ\ØÛÝ™\žSZ[”ÙYYZ[Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑTÐÓÕ‘T–WÓRS—ÔÑQQÉË‹ÈZ[ŽˆHJKˆ\ØÛÝ™\žSZ[^TÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑTÐÓÕ‘T–WÓRS—Ð•VWÔÓÓ	ËŒ‹ÈZ[ŽˆJKˆ\ØÛÝ™\žSX^X\›P^Y\œÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑTÐÓÕ‘T–WÓPVÐ•VQT”ÉËKÂˆZ[ŽˆKX^ˆLˆJKˆ\ØÛÝ™\žSX^Ý\™TÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑTÐÓÕ‘T–WÓPVÐÕT•‘WÔÕ	ËÂˆZ[ŽˆX^ˆLˆJKˆ\ØÛÝ™\žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑTÐÓÕ‘T–WÑSVWÓTÉË
+ˆŒ
+ˆŒÌÂˆZ[ŽˆˆJKˆYÙPÚXÚÑ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÐÒPÒ×ÑSP“Q	ËYJKˆYÙTœÕ\›ˆ›ØÙ\ÜË™[‹‘“Õ×ÔÓPT•ÕÐSUÐQÑWÔ”×ÕT“›ØÙ\ÜË™[‹‘“Õ×Ô”×ÕT“	ÉËˆYÙR\™™Z™XÝ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÒT‘Ô‘R‘PÕÓTÉËÈ
+ˆ
+ˆŒ
+ˆŒÌÂˆZ[ŽˆˆJKˆYÙSZ[•›ÝS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÓRS—Õ“ÕWÓTÉËÌ
+ˆ
+ˆŒ
+ˆŒÌÂˆZ[Žˆ
+ˆŒ
+ˆŒÌˆJKˆYÙT™]žS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÔ‘U–WÓTÉË
+ˆŒ
+ˆŒÌÂˆZ[Žˆ
+ˆŒ
+ˆŒÌˆJKˆYÙTœÕ[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÔ”×ÕSQSÕUÓTÉËLÌÂˆZ[ŽˆWÌX^ˆŒÌˆJKˆYÙTœÔYÙTÚ^™Nˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÔ”×ÔQÑWÔÒV‘IËWÌÂˆZ[ŽˆKX^ˆWÌˆJKˆYÙTœÔYÙ\Ô\ÚXÚÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÔ”×ÔQÑT×ÔT—ÐÒPÒÉË‹ÂˆZ[ŽˆKX^ˆŒˆJKˆYÙPÚXÚÐÛÛ˜Ý\œ™[˜ÞNˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÐÒPÒ×ÐÓÓÕT”‘SÖIËKÂˆZ[ŽˆKX^ˆKˆJKˆ]™[[Ûš]Üš[™Ô™\]Z\™\Ô™\ÛÛ™YYÙNˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÑU‘S•ÓSÓ’UÔ’S‘×Ô‘TURT‘T×Ô‘TÓÓ‘QÐQÑIËYKˆ
+KˆYÙTÙYYž\\ÜÎˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐQÑWÔÑQQÐ–TTÔÉË˜[ÙJKˆ›Ø]Q[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔ“ÑÐUWÑSP“Q	ËYJKˆ›Ú[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔ“ÕÒS‘Õ×ÓTÉË
+ˆŒ
+ˆŒÌÂˆZ[Žˆ
+ˆŒ
+ˆŒÌˆJKˆ›Z[ÛÜÙYÜÚ][ÛœÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔ“ÓRS—ÐÓÔÑQ	ËKÂˆZ[ŽˆKX^ˆWÌˆJKˆ›Z[”™X[^™YÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔ“ÓRS—Ô‘PSV‘QÔÓÓ	ËÂˆZ[ŽˆˆJKˆ›Z[Ø\][™]\›”Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔ“ÓRS—Ô‘UT“—ÔÕ	ËÂˆZ[ŽˆˆJKˆ›Û˜\ÚÝØXÚS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔ“ÐÐPÒWÓTÉËMH
+ˆŒÌÂˆZ[ŽˆMH
+ˆŒÌX^ˆ
+ˆŒ
+ˆŒÌˆJKˆ›Ý[™ÔÛ˜\ÚÝ™Yœ™\Ú\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÕ“ÕS‘×ÔÓTÒÕÔ‘Q”‘TÒÓTÉËMH
+ˆŒÌˆÈZ[ŽˆŒÌX^ˆ
+ˆŒ
+ˆŒÌKˆ
+Kˆ\ÝÙY[•Üš]R[\˜[\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÓTÕÔÑQS—ÕÔ’UWÒS•T•SÓTÉËMH
+ˆŒÌˆÈZ[ŽˆŒÌX^ˆ
+ˆŒ
+ˆŒÌKˆ
+KˆXÝX[]™[˜XÚÙš[˜]ÚÚ^™Nˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐPÕPSÐPÒÑ’SÐUÒÔÒV‘IËLˆÈZ[ŽˆLX^ˆWÌKˆ
+KˆXÝX[]™[˜XÚÙš[[\˜[\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐPÕPSÐPÒÑ’SÒS•T•SÓTÉËWÌˆÈZ[ŽˆWÌX^ˆŒÌKˆ
+KˆËÈ[Û\Ý\‹ÙÜ˜YHXZ[[˜[˜ÙHÜ›ÝÜÈÚ]H\ÝÜšXØ[Ø[]YÙ\‹‚ˆËÈÙY\]Ù™ˆH™X[[YH›ÙH]™[ÛÜÛÈ[™Ý™X[HØ[˜XÚÜÈÂˆËÈ›Ý]\ÙHÚ[HÔS]H\™›Ü›\È][KY^HØØ[œË‚ˆXZ[[˜[˜ÙUÛÜšÙ\‘[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÓPRS•SSÑWÕÓÔ’ÑT—ÑSP“Q	ËYKˆ
+KˆXZ[[˜[˜ÙUÛÜšÙ\•[Y[Ý]\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÓPRS•SSÑWÕÓÔ’ÑT—ÕSQSÕUÓTÉËL
+ˆŒÌˆÈZ[ŽˆŒÌX^ˆŒ
+ˆŒÌKˆ
+KˆÜ˜YQ\T™Yœ™\ÚZ[“\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÑÔQWÑT•WÔ‘Q”‘TÒÓRS—ÓTÉËMH
+ˆŒÌˆÈZ[ŽˆMH
+ˆŒÌX^ˆ
+ˆŒ
+ˆŒÌKˆ
+KˆÛ\Ý\ÛÝ[ØXÚS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÐÓÕS•ÐÐPÒWÓTÉËMH
+ˆŒÌˆÈZ[ŽˆMH
+ˆŒÌX^ˆ
+ˆŒ
+ˆŒÌKˆ
+Kˆ\ÝÜžP˜XÚÙš[[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÐPÒÑ’SÑSP“Q	ËYKˆ
+Kˆ\ÝÜžTœÕ\›ˆ›ØÙ\ÜË™[‹‘“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÔ”×ÕT“ˆ›ØÙ\ÜË™[‹‘“Õ×Ô”×ÕT“	ÉËˆ\ÝÜžUÚ[™ÝÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÕÒS‘Õ×ÓTÉËŒ
+ˆ
+ˆŒ
+ˆŒÌˆÈZ[ŽˆÈ
+ˆ
+ˆŒ
+ˆŒÌKˆ
+Kˆ\ÝÜžUØ\›]\\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÕÐT“UTÓTÉËÌ
+ˆ
+ˆŒ
+ˆŒÌˆÈZ[ŽˆKˆ
+Kˆ\ÝÜžR[š]X[[[˜X›Yˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÒS’UPSÐSÑSP“Q	ËYKˆ
+Kˆ\ÝÜžQZ[UØ[][Z]ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÑRSWÕÐSUÓSRU	ËLÈZ[ŽˆKX^ˆLÌKˆ
+Kˆ\ÝÜžPÛÛ˜Ý\œ™[˜ÞNˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÐÓÓÕT”‘SÖIËKÈZ[ŽˆKX^ˆHKˆ
+Kˆ\ÝÜžTYÙTÚ^™Nˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÔQÑWÔÒV‘IËWÌÈZ[ŽˆKX^ˆWÌKˆ
+Kˆ\ÝÜžSX^YÙ\Ô\•Ø[]ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÓPVÔQÑT×ÔT—ÕÐSU	ËLÈZ[ŽˆKX^ˆLÌKˆ
+Kˆ\ÝÜžTœÕ[Y[Ý]\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÔ”×ÕSQSÕUÓTÉËŒÌÈZ[ŽˆWÌX^ˆLŒÌKˆ
+Kˆ\ÝÜžT™]žS\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÔ‘U–WÓTÉË
+ˆŒ
+ˆŒÌˆÈZ[Žˆ
+ˆŒ
+ˆŒÌKˆ
+Kˆ\ÝÜžPÜ™Y]Ô\”YÙNˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÐÔ‘QU×ÔT—ÔQÑIËLÈZ[ŽˆKX^ˆLÌKˆ
+Kˆ\ÝÜžQZ[PÜ™Y][Z]ˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒTÕÔ–WÑRSWÐÔ‘QUÓSRU	ËLÌˆÈZ[ŽˆWÌX^ˆLÌÌKˆ
+Kˆ[]MŒ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑSUWÍŒÑSP“Q	ËYJKˆ[]MŒÚ[™ÝÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÑSUWÍŒÕÒS‘Õ×ÓTÉËŒ
+ˆ
+ˆŒ
+ˆŒÌˆÈZ[ŽˆÈ
+ˆ
+ˆŒ
+ˆŒÌKˆ
+Kˆ[]MŒZ[”™X[^™YÛÛˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÑSUWÍŒÓRS—Ô‘PSV‘QÔÓÓ	ËŒÈZ[ŽˆKˆ
+KˆÛ\Ý\]]Ñ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÐUU×ÑSP“Q	ËYJKˆÛ\Ý\“ØœÙ\˜][Û“\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÓÐ”ÑT•USÓ—ÓTÉËLˆ
+ˆŒ
+ˆŒÌˆÈZ[ŽˆŒ
+ˆŒÌKˆ
+KˆÛ\Ý\”™Yœ™\Ú\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—Ô‘Q”‘TÒÓTÉËŒ
+ˆŒÌÂˆZ[ŽˆŒ
+ˆŒÌˆJKˆÛ\Ý\“ÛÚØ˜XÚÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÓÓÒÐPÒ×ÓTÉËÈ
+ˆ
+ˆŒ
+ˆŒÌˆÈZ[ŽˆLˆ
+ˆŒ
+ˆŒÌKˆ
+KˆÛ\Ý\“Z[‘\Ý[˜ÝZ[Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÓRS—ÓRS•ÉËËÂˆZ[ŽˆKX^ˆWÌˆJKˆÛ\Ý\”Þ[˜ÕÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÔÖS×ÕÒS‘Õ×ÓTÉËWÌÂˆZ[ŽˆLX^ˆŒÌˆJKˆÛ\Ý\[[Ý[Û\˜[˜ÙTÝˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÐSSÕS•ÕÓTSÑWÔÕ	ËMKˆÈZ[ŽˆX^ˆLKˆ
+KˆÛ\Ý\“Z[ÛÜœ™[]YZ[Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÓRS—ÐÓÔ”‘SUQÓRS•ÉË‹ˆÈZ[ŽˆKX^ˆLKˆ
+KˆÛ\Ý\“Z[ÛÜœ™[][Û”Ýˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐÓTÕT—ÓRS—ÐÓÔ”‘SUSÓ—ÔÕ	ËLˆÈZ[ŽˆX^ˆLKˆ
+Kˆ]]Õ›ÝT™\]Z\™\ÐXÝ]™Nˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐUU×Õ“ÕWÔ‘TURT‘T×ÐPÕU‘IËYJKˆ]]Õ›ÝT™\]Z\™\ÒÛ›ÝÛÛ\Ý\Žˆ›ÛÛX[‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÐUU×Õ“ÕWÔ‘TURT‘T×ÒÓ“ÕÓ—ÐÓTÕT‰ËYKˆ
+KˆÜ˜YT™Yœ™\Ú\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑÔQWÔ‘Q”‘TÒÓTÉË
+ˆŒ
+ˆŒÌÂˆZ[ŽˆŒÌˆJKˆÛÚØ˜XÚÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑÔQWÓÓÒÐPÒ×ÓTÉËŒ
+ˆ
+ˆŒ
+ˆŒÌÂˆZ[ŽˆÈ
+ˆ
+ˆŒ
+ˆŒÌˆJKˆX™[ÜÚ][Û”ÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓP‘SÔÔÒUSÓ—ÔÓÓ	ÊKˆX™[[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓP‘SÑS•–WÑSVWÓTÉËWÌÈZ[ŽˆJKˆX™[[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓP‘SÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKˆX™[Ü˜XÙS\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓP‘SÑÔPÑWÓTÉËLÌÈZ[ŽˆJKˆÛÜT™]\›’Üš^›Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐÓÔWÒÔ’V“Ó—ÓTÉËÌÌÂˆZ[ŽˆWÌˆJKˆÙ[XÝ[Û’Üš^›Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔÑSPÕSÓ—ÒÔ’V“Ó—ÓTÉËÌÌÂˆZ[ŽˆÌÌˆJKˆ›Ñ^]™]\›”Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓ“×ÑVUÔ‘UT“—ÔÕ	ËLLÂˆZ[ŽˆLLX^ˆˆJKˆX^›Ñ^]˜]TÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓPVÓ“×ÑVUÔUWÔÕ	ËŒÂˆZ[ŽˆX^ˆLˆJKˆX^Ü›ÜÜÓX\šÙ][\Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓPVÐÔ“ÔÔ×ÓPT’ÑUÒ•STÔÕ	ËLÂˆZ[ŽˆX^ˆLÌˆJKˆÙ[XÝ[Û“Z[”Ø[\\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÔÑSPÕSÓ—ÓRS—ÔÐSTTÉËÌÈZ[ŽˆHJKˆÛÜSZ[”Ø[\\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÐÓÔWÓRS—ÔÐSTTÉËÌÈZ[ŽˆHJKˆÛ[™ÓZ[”Ø[\\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÒÓS‘×ÓRS—ÔÐSTTÉËÌÈZ[ŽˆHJKˆZ[XÝ]™Q^\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓRS—ÐPÕU‘WÑVTÉËËÈZ[ŽˆHJKˆZ[‘Ü˜YX][Û“Yˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓRS—ÑÔQÓQ•	ËKKÈZ[ŽˆJKˆZ[šYÍLYˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓRS—Ð’QÍLÓQ•	ËKKÈZ[ŽˆJKˆZ[”Ù[XÝ[Û“Yˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓRS—ÔÑSPÕSÓ—Ð—ÓQ•	ËKŒKÈZ[ŽˆJKˆZ[ÛÜTŽˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓRS—ÐÓÔWÔ‰ËKŒ‹ÈZ[ŽˆJKˆZ[”ÜÚ]]™UÚ[™ÝÔÝˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓRS—ÔÔÒUU‘WÕÒS‘Õ×ÔÕ	ËÌÂˆZ[ŽˆX^ˆLˆJKˆX^ÜT›Ùš]Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓPVÕÔWÔ“Ñ’UÔÕ	ËÍKÂˆZ[ŽˆX^ˆLˆJKˆÛ[™ÐšYÕÚ[›™\”Ýˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÒÓS‘×Ð’Q×ÕÒS“‘T—ÔÕ	ËLÂˆZ[ŽˆˆJKˆÛ[™ÓZ[”[›™\•\YÝˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒÓS‘×ÓRS—Ô•S“‘T—ÕTQ•ÔÕ	ËŒÈZ[ŽˆKˆ
+KˆÛ[™ÓZ[šYÕÚ[›™\”˜]TÝˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•ÕÐSUÒÓS‘×ÓRS—Ð’Q×ÕÒS“‘T—ÔUWÔÕ	ËLÈZ[ŽˆX^ˆLKˆ
+KˆÜ˜YPÛÛ™š\›X][Û”[œÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÑÔQWÐÓÓ‘’T“PUSÓ—Ô•S”ÉË‹ÂˆZ[ŽˆKX^ˆLˆJKˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+Âˆ‹‹›X™[ÛÜÝ[Ù[ˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÕÐSUÓP‘SÔÔÒUSÓ—ÔÓÓ	ÊKˆJKˆK‚ˆËÈ‘PKSÐ”ÈŒŽˆÛX\]Ø[]ÛÛœÙ[œÝ\È\ÈHØ]\Ø[Ø[™Y]HšYÙÙ\‹ˆBˆËÈ™KYÜ˜YX][ÛˆØÛÝ]\ÈÜ[Û˜[Ü˜YX][Ûˆ]\Ý™H›ÛÝÙYžH[™\[™[ˆËÈX›XÈSSH›ÝÈ™Y›Ü™HØØ[[™Ë[™HÛ™Ë]Z[\›HÙ[ÈHÛÜ™HÚ[BˆËÈ™]Z[š[™ÈH˜Z[[™È[›™\‹ˆ•QÈÝ]]\È™XÛÜ™Y\ÈHX™[Û›K‚ˆÛX\Ø[]ÛÛœÙ[œÝ\Ñ›ÝÔ[›™\”ÚYÝÎˆÂˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÔÒQÕ×ÑSP“Q	ËYJKˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÔÔÒUSÓ—ÔÓÓ	ÊKˆ›Ø˜][Û•›ÝUÙZYÚˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—Ô“ÐUSÓ—ÕÑRQÒ	ËKÂˆZ[ŽˆX^ˆKˆJKˆ[™›Ü˜ÙPQÜ˜YPY\Û\Ý\œÎˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÑS‘“ÔÑWÐWÐQ•T—ÐÓTÕT”ÉËL‹ÈZ[ŽˆHKˆ
+KˆÝ]T™][[Û“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÔÕUWÔ‘US•SÓ—ÓTÉË
+ˆŒ
+ˆŒÌÂˆZ[ŽˆŒÌˆJKˆ\\ÛÙPÛÛÛÝÛ“\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÑTTÓÑWÐÓÓÓÕÓ—ÓTÉËÌ
+ˆŒÌÂˆZ[ŽˆWÌˆJKˆ[žQ[^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÑS•–WÑSVWÓTÉËŒÈZ[ŽˆJKˆ[žU[Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÑS•–WÕSQSÕUÓTÉË—ÌÈZ[ŽˆHJKˆ^][^S\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÑVUÑSVWÓTÉËŒÈZ[ŽˆJKˆ^][Y[Ý]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÑVUÕSQSÕUÓTÉËWÌÈZ[ŽˆHJKˆX^ØÛÝ]ØZ]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÓPVÔÐÓÕUÕÐRUÓTÉËMH
+ˆŒÌÂˆZ[ŽˆÌÌˆJKˆX^›ÝÕØZ]\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÓPVÑ“Õ×ÕÐRUÓTÉËˆ
+ˆŒÌÂˆZ[ŽˆLÌˆJKˆ›ÝÕÚ[™ÝÓ\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—Ñ“Õ×ÕÒS‘Õ×ÓTÉËŒÌÂˆZ[Žˆ—ÌˆJKˆZ[‘›ÝÓ™]ÛÛˆ[X™\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÓRS—Ñ“Õ×Ó‘UÔÓÓ	ËŒKÈZ[ŽˆJKˆZ[‘›ÝÐ^Y\œÎˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÓRS—Ñ“Õ×Ð•VQT”ÉËËÈZ[ŽˆHJKˆZ[‘›ÝÐ^Uˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÓRS—Ñ“Õ×Ð•VWÕ	ËËÈZ[ŽˆHJKˆÝšXÝZ[‘›ÝÓ™]ÛÛˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÔÕ’PÕÓRS—Ñ“Õ×Ó‘UÔÓÓ	ËKÈZ[ŽˆKˆ
+KˆÝšXÝZ[‘›ÝÓ™]Ú\™TÝˆ[X™\‘[Šˆ	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÔÕ’PÕÓRS—Ñ“Õ×Ó‘UÔÒT‘WÔÕ	ËËÈZ[ŽˆX^ˆLKˆ
+KˆÝšXÝX^›ÝÐÛÛ™š\›X][Û‘[^S\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÔÕ’PÕÓPVÑ“Õ×ÐÓÓ‘’T“WÑSVWÓTÉËÌÌÈZ[ŽˆWÌKˆ
+Kˆ[˜[ZXÕ™\ÚÛÎˆÂˆÈX^[YÚX›PÛ\Ý\œÎˆLÜ™[˜\žNˆ‹Ý›Û™ÎˆÈKˆÈX^[YÚX›PÛ\Ý\œÎˆKÜ™[˜\žNˆËÝ›Û™ÎˆHKˆÈX^[YÚX›PÛ\Ý\œÎˆLÜ™[˜\žNˆÝ›Û™ÎˆÈKˆÈX^[YÚX›PÛ\Ý\œÎˆ[X™\‹“PVÔÐQ‘WÒS•QÑT‹Ü™[˜\žNˆ‹Ý›Û™ÎˆLKˆKˆ[žT›Ùš[\ÎˆÂˆÂˆYˆ	ÔÔÕÑ“ÕÉËX™[ˆ	ù«åy.&¹d#¹ak9aly­`yèkº+©	ËÝ™[™Ýˆ	ÓÔ‘ST–IËˆÛÛœÙ[œÝ\ÕÚ[™ÝÓ\ÎˆNÌØÛÝ]œ˜XÝ[ÛŽˆˆZ[”Ù[XÝ[ÛPÛ\Ý\œÎˆ‹Z[•ÙZYÚYØÛÜ™T˜][ÎˆKˆKˆÂˆYˆ	ÔÐÓÕUMWÑ“ÕÉËX™[ˆ	ù«åy.&¹bcLMIz+åy.äÈ
+È9«åy.&¹d#¹ak9aly­`yb¨9.äÉËÝ™[™Ýˆ	ÓÔ‘ST–IËˆÛÛœÙ[œÝ\ÕÚ[™ÝÓ\ÎˆNÌØÛÝ]œ˜XÝ[ÛŽˆŒMKˆZ[”Ù[XÝ[ÛPÛ\Ý\œÎˆ‹Z[•ÙZYÚYØÛÜ™T˜][ÎˆKˆKˆÂˆYˆ	ÔÔÕÑ“Õ×ÔÕ’PÕ	ËX™[ˆ	ù«åy.&¹d#¹o.¹ak9aly­`yèkº+©	ËÝ™[™Ýˆ	ÓÔ‘ST–IËˆÛÛœÙ[œÝ\ÕÚ[™ÝÓ\ÎˆNÌØÛÝ]œ˜XÝ[ÛŽˆ›ÝÑØ]Nˆ	ÔÕ’PÕ	ËˆZ[”Ù[XÝ[ÛPÛ\Ý\œÎˆ‹Z[•ÙZYÚYØÛÜ™T˜][ÎˆKˆKˆÂˆYˆ	ÔÐÓÕUMWÑ“Õ×ÔÕ’PÕ	ËX™[ˆ	ù«åy.&¹bcLMIz+åy.äÈ
+È9o.¹ak9aly­`yb¨9.äÉËÝ™[™Ýˆ	ÓÔ‘ST–IËˆÛÛœÙ[œÝ\ÕÚ[™ÝÓ\ÎˆNÌØÛÝ]œ˜XÝ[ÛŽˆŒMK›ÝÑØ]Nˆ	ÔÕ’PÕ	ËˆZ[”Ù[XÝ[ÛPÛ\Ý\œÎˆ‹Z[•ÙZYÚYØÛÜ™T˜][ÎˆKˆKˆÂˆYˆ	ÔÕ“Ó‘ÌWÑ“ÕÉËX™[ˆ	ùo.¹alz+á¹«åy.&¹bcLIz+åy.äÈ
+È9«åy.&¹d#¹ak9aly­`yb¨9.äÉËÝ™[™Ýˆ	ÔÕ“Ó‘ÉËˆÛÛœÙ[œÝ\ÕÚ[™ÝÓ\ÎˆÌÌØÛÝ]œ˜XÝ[ÛŽˆŒK›ÝÑØ]Nˆ	ÔÕ’PÕ	ËˆZ[”Ù[XÝ[ÛPÛ\Ý\œÎˆËZ[•ÙZYÚYØÛÜ™T˜][Îˆ‹ˆKˆKˆ^]›Ùš[\ÎˆÂˆÂˆYˆ	Ñ’VLŒÒŒ	ËX™[ˆ	ùfî¹k¦ŒLŒ9éä¹kîyáiÉË[ÙNˆ	Ñ’VQÒÓ	Ëˆš^YÛ\ÎˆLŒÌX^Û\ÎˆLŒÌ\™ÝÜÝˆŒˆKˆÂˆYˆ	ÐÓÔ‘NÔ•S“‘T’	ËX™[ˆ	ÊÌÌ	yceŽ	y¨.9oàù.äûï#9/fy.äÌÌ	yfç¹¤©:` 9aî‰Ëˆ[ÙNˆ	ÐÓÔ‘WÔ•S“‘T‰ËÛÜ™PXÝ]˜][Û”ÝˆÌÛÜ™Qœ˜XÝ[ÛŽˆŽˆ[›™\•˜Z[ÝˆÌX^Û\Îˆˆ
+ˆŒ
+ˆŒÌ\™ÝÜÝˆŒˆKˆÂˆYˆ	ÐÓÔ‘NÔ•S“‘T’ÔÔÌŒ	ËˆX™[ˆ	ÔØÛÝ]9lì9`/9/çy¢©
+È
+ÌÌ	yceŽ	y¨.9oàù.äûï#9/fy.äÌÌ	yfç¹¤©:` 9aî‰Ëˆ[ÙNˆ	ÐÓÔ‘WÔ•S“‘T‰ËÛÜ™PXÝ]˜][Û”ÝˆÌÛÜ™Qœ˜XÝ[ÛŽˆŽˆ[›™\•˜Z[ÝˆÌX^Û\Îˆˆ
+ˆŒ
+ˆŒÌ\™ÝÜÝˆŒˆØÛÝ]›ÝXÝXÝ]˜][Û”ÝˆÌØÛÝ]›ÝXÝ˜Z[ÝˆŒˆØÛÝ]›ÝXÝ›ÛÜ”ÝˆKˆKˆKˆÛÜÝ[Ù[ˆ›Ü›X[^™PÛÜÝ[Ù[
+Âˆ‹‹›X™[ÛÜÝ[Ù[ˆÜÚ][Û”Ú^™TÛÛˆÚYÝÔÜÚ][Û‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÕŒ—ÔÔÒUSÓ—ÔÓÓ	ÊKˆJKˆK‚ˆËÈ›ÜØ\™[Û›HKÐˆ^Y\ŽˆÙY\]™\žHÛÝ\˜ÙHÚYÝÈÛÚÜ[ÝXÚY[‚ˆËÈYX\Ý\™HH^XÝØ[YHÚ[][]Yš[ÈÛ›HÚ[ˆH]X[YšYY™YÚ\ÝžBˆËÈÛÛœÙ[œÝ\È^\ÝY™Y›Ü™HHÛÝ\˜ÙHÚYÛ˜[ˆ]ØœÙ\™\È\œÚ\ÝY›ÝÜËˆËÈÙ\È›Ý\XØ]H^XÝ][ÛˆÝ]K[™Ø[ˆ™]™\ˆÙ[™H˜[œØXÝ[Û‹‚ˆÛX\Ø[]ÛÛœÙ[œÝ\ÓÝ™\›^NˆÂˆ[˜X›Yˆ›ÛÛX[‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÓÕ‘T“VWÑSP“Q	ËYJKˆØ]UÚ[™ÝÓ\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÓÕ‘T“VWÕÒS‘Õ×ÓTÉËMH
+ˆŒÌÈZ[ŽˆŒÌKˆ
+KˆØ]Qš[˜[^™Q[^S\Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÓÕ‘T“VWÑ’SSV‘WÑSVWÓTÉËŒÌÈZ[ŽˆWÌKˆ
+KˆÞ[˜Ó\Îˆ[YÙ\‘[Š	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÓÕ‘T“VWÔÖS×ÓTÉËWÌÈZ[ŽˆWÌJKˆX^›ÝÜÔ\”Þ[˜Îˆ[YÙ\‘[Šˆ	Ñ“Õ×ÔÓPT•ÐÓÓ”ÑS”ÕT×ÓÕ‘T“VWÓPVÔ“ÕÔ×ÔT—ÔÖSÉË—ÌˆÈZ[ŽˆLX^ˆŒÌKˆ
+Kˆ›Ùš[\ÎˆÂˆÂˆYˆ	ÔÕÐ×Ñ×ÑÑLÌÔŒŒ×ÑŒ—ÑÌ—ÖQÉËˆX™[ˆ	ÑÈ0­ÈÑLÌŒŒÈŒˆÌˆQÈ
+ÈÛX\9alz+á‰ËˆÛÝ\˜ÙNˆ	ÓRQÔUQÑ“ÔÔ‘P“ÕS‘	ËˆÛÝ\˜ÙPÛÚÜYˆ	ÔÔÕÑÑLÌÔŒŒ×ÑŒ—ÓÓ“WÑÌ—ÖQÉËˆKˆÂˆYˆ	ÔÕÐ×Ñ×ÑÑWÌÍWÖ	ËˆX™[ˆ	ÑÈ0­ÈÑKLÍH
+ÈÛX\9alz+á‰ËˆÛÝ\˜ÙNˆ	ÓRQÔUQÑ“ÔÔ‘P“ÕS‘	ËˆÛÝ\˜ÙPÛÚÜYˆ	ÔÔÕÑÑWÌÍWÖ	ËˆKˆÂˆYˆ	ÔÕÐ×Ó×ÐÎÑWÐŒ—ÔÌÓÉËˆX™[ˆ	ÓÈ0­ÈÎHŒˆÌÈ
+ÈÛX\9alz+á‰ËˆÛÝ\˜ÙNˆ	ÑÔQPUSÓ—ÐPÐÑSTUSÓ‰ËˆÛÝ\˜ÙPÛÚÜYˆ	Ó×ÐÎÑWÐŒ—ÔÌÓÎŒTÓÓ	ËˆKˆÂˆYˆ	ÔÕÐ×ÓÎLÓMWöãnø¶‰žËkºwµçy¥}‰ÕÉÍÑ}½‰}™}½É”ÈÕ}ÉÕ¹¹•É}±¥Ù”œ°(€€€€€€€±¥Ù•á¥ÑAÉ½™¥±•%è€=IÈÕ}HÜÕ}`ÄÈÀœ°(€€€€€€€•á±ÕÍ¥Ù•É½ÕÀè€=	}MQI%Pœ°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl%`ÌÀœ°€=IÈÕ}HÜÕ}`ÄÈÀt°(€€€€€€€µ¥¹•5Ìè€É|ÀÀÀ°µ…á•5Ìè€ÄÁ|ÀÀÀ°µ…áÕÉÙ•AÐè¹Õ±°°(€€€€€€€µ¥¹	Õå•ÉÌÕÌè€ÄÀ°µ¥¹9•Ñ±½ÜÕÍM½°è€Ü°(€€€€€€€µ¥¹	ÕåQáM¡…É•AÐè€ÜÀ°µ…á	ÕåQáM¡…É•AÐè€äÔ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÉÍAÐè€À°µ…áI•ÑÕÉ¸ÉÍAÐè€ÐÀ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÕÍAÐè¹Õ±°°µ…áI•ÑÕÉ¸ÕÍAÐè¹Õ±°°(€€€€€€€µ…áI•ÑÕÉ¸ÄÕÍAÐè¹Õ±°°µ¥¹É…Ý‘½Ý¸ÄÕÍAÐè€È°(€€€€€ô°(€€€€€€¼¼½ÉÝ…Éµ½¹±ä•á•ÕÑ¥½¸½µÁ…É…Ñ½È™½È=µ¸%Ð‘•±¥‰•É…Ñ•±ä­••ÁÌ(€€€€€€¼¼Ñ¡”Í…µ”ÁÕ‰±¥Œµ™±½ÜÍ¥¹…°‰ÕÐÉ•ÁÉ½‘Õ•ÌÑ¡”É•Ñ¥É•±¥Ù”É½ÕÑ”Ì(€€€€€€¼¼€À¸ÄM=0Í¥é”°€Ä¸ÕÌ™É•Í¡¹•ÍÌÝ¥¹‘½Ü…¹ÍÑÉ¥Ñ•È©ÕµÀ½¥µÁ…Ð±¥µ¥ÑÌ¸(€€€€€€¼¼%Ð¹•Ù•È•µ¥ÑÌ„±¥Ù”Í¥¹…°…¹‘½•Ì¹½Ð…±Ñ•ÈÑ¡”½É¥¥¹…°€ÄM=0(€€€€€€¼¼=µ½¡½ÉÐ½È…¹ä¡¥ÍÑ½É¥…°É½Ü¸(€€€€€ì(€€€€€€€¥è€=	}}1HÀÄœ°(€€€€€€€±…‰•°è€=µµ1HÀÄƒ
+Ü€À¸ÄM=0±¥Ù”µ•á•ÕÑ¥½¸É•Á±…äœ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è‰½½±•…¹¹Ø 1=]}e}=I9%}	UIMQ}1%Y}IA1e}9	1œ°ÑÉÕ”¤°(€€€€€€€±¥Ù•I•Á±…äèÑÉÕ”°(€€€€€€€•á±ÕÍ¥Ù•É½ÕÀè€=	}}1%Y}IA1dœ°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl=IÈÕ}HÜÕ}`ÄÈÀt°(€€€€€€€Á½Í¥Ñ¥½¹M¥é•M½°è¹Õµ‰•É¹Ø 1=]}e}=I9%}	UIMQ}1%Y}IA1e}A=M%Q%=9}M=0œ°€À¸Ä°ì(€€€€€€€€€µ¥¸è€À¸ÀÀÄ°µ…àè€ÄÀÀ°(€€€€€€€ô¤°(€€€€€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}e}=I9%}	UIMQ}1%Y}IA1e}9QIe}1e}5Lœ°€ÈÀÀ°ì(€€€€€€€€€µ¥¸è€À°µ…àè€ÄÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}e}=I9%}	UIMQ}1%Y}IA1e}9QIe}Q%5=UQ}5Lœ°€Å|ÔÀÀ°ì(€€€€€€€€€µ¥¸è€Ä°µ…àè€ÌÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}e}=I9%}	UIMQ}1%Y}IA1e}5a}9QIe})U5A}APœ°€ÄÔ°(€€€€€€€€€ìµ¥¸è€À°µ…àè€Å|ÀÀÀô°(€€€€€€€€¤°(€€€€€€€µ…á¹ÑÉåAÉ¥•É½ÁAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}e}=I9%}	UIMQ}1%Y}IA1e}5a}9QIe}I=A}APœ°€ÌÔ°(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€¤°(€€€€€€€µ…á¹ÑÉå%µÁ…ÑAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}e}=I9%}	UIMQ}1%Y}IA1e}5a}9QIe}%5AQ}APœ°€ÄÀ°(€€€€€€€€€ìµ¥¸è€À°µ…àè€Å|ÀÀÀô°(€€€€€€€€¤°(€€€€€€€µ¥¹•5Ìè€É|ÀÀÀ°µ…á•5Ìè€ÄÁ|ÀÀÀ°µ…áÕÉÙ•AÐè¹Õ±°°(€€€€€€€µ¥¹	Õå•ÉÌÕÌè€ÄÀ°µ¥¹9•Ñ±½ÜÕÍM½°è€Ü°(€€€€€€€µ¥¹	ÕåQáM¡…É•AÐè€ÜÀ°µ…á	ÕåQáM¡…É•AÐè€äÔ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÉÍAÐè€À°µ…áI•ÑÕÉ¸ÉÍAÐè€ÐÀ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÕÍAÐè¹Õ±°°µ…áI•ÑÕÉ¸ÕÍAÐè¹Õ±°°(€€€€€€€µ…áI•ÑÕÉ¸ÄÕÍAÐè¹Õ±°°µ¥¹É…Ý‘½Ý¸ÄÕÍAÐè€È°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€=	}œ°(€€€€€€€±…‰•°è€=µƒ
+ÜÍÑÉ¥Ð€ÔM=0½É…¹¥ŒÁÕ±±‰…¬œ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•èÑÉÕ”°(€€€€€€€±¥Ù•MÑÉ…Ñ•å%è€å…}½É…¹¥}‰ÕÉÍÑ}½‰}‘}™¥àÌÁ}±¥Ù”œ°(€€€€€€€•á±ÕÍ¥Ù•É½ÕÀè€=	}MQI%Pœ°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl%`ÌÀœ°€=IÈÕ}HÜÕ}`ÄÈÀt°(€€€€€€€µ¥¹•5Ìè€É|ÀÀÀ°µ…á•5Ìè€ÄÁ|ÀÀÀ°µ…áÕÉÙ•AÐè¹Õ±°°(€€€€€€€µ¥¹	Õå•ÉÌÕÌè€ÄÀ°µ¥¹9•Ñ±½ÜÕÍM½°è€Ô°(€€€€€€€µ¥¹	ÕåQáM¡…É•AÐè€ÜÀ°µ…á	ÕåQáM¡…É•AÐè€äÔ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÉÍAÐè€À°µ…áI•ÑÕÉ¸ÉÍAÐè€ÐÀ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÕÍAÐè¹Õ±°°µ…áI•ÑÕÉ¸ÕÍAÐè¹Õ±°°(€€€€€€€µ…áI•ÑÕÉ¸ÄÕÍAÐè¹Õ±°°µ¥¹É…Ý‘½Ý¸ÄÕÍAÐè€È°(€€€€€ô°(€€€t°(€€€•á¥ÑAÉ½™¥±•Ìèl(€€€€€ì(€€€€€€€¥è€%9XÄÁ}`ÌÀœ°(€€€€€€€±…‰•°è€™¥ÉÍÐ€ÄÁÌÍÑÉÕÑÕÉ”¥¹Ù…±¥‘…Ñ¥½¸€¼µ…à€ÌÁÌœ°(€€€€€€€µ…á!½±‘5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€ÍÑÉÕÑÕÉ•%¹Ù…±¥‘…Ñ¥½¹¹…‰±•èÑÉÕ”°(€€€€€€€µ¥¹%¹Ù…±¥‘…Ñ¥½¹!½±‘5Ìè€Å|ÀÀÀ°(€€€€€€€¥¹Ù…±¥‘…Ñ¥½¹]¥¹‘½Ý5Ìè€ÄÁ|ÀÀÀ°(€€€€€€€¥¹Ù…±¥‘…Ñ¥½¹É…Ý‘½Ý¹AÐè€à°(€€€€€€€µ…á%¹Ù…±¥‘…Ñ¥½¹I•ÑÕÉ¸ÉÍAÐè€À°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€%`ÈÀœ°(€€€€€€€±…‰•°è€™¥á•€ÈÁÌ½¹ÑÉ½°œ°(€€€€€€€µ…á!½±‘5Ìè€ÈÁ|ÀÀÀ°(€€€€€€€ÍÑÉÕÑÕÉ•%¹Ù…±¥‘…Ñ¥½¹¹…‰±•è™…±Í”°(€€€€€€€µ¥¹%¹Ù…±¥‘…Ñ¥½¹!½±‘5Ìè€À°(€€€€€€€¥¹Ù…±¥‘…Ñ¥½¹]¥¹‘½Ý5Ìè€À°(€€€€€€€¥¹Ù…±¥‘…Ñ¥½¹É…Ý‘½Ý¹AÐè€À°(€€€€€€€µ…á%¹Ù…±¥‘…Ñ¥½¹I•ÑÕÉ¸ÉÍAÐè€À°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€%`ÌÀœ°(€€€€€€€±…‰•°è€™¥á•€ÌÁÌÉ¥¡ÐµÑ…¥°½¹ÑÉ½°œ°(€€€€€€€µ½‘”è€%a}!=1œ°(€€€€€€€µ…á!½±‘5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€ÍÑÉÕÑÕÉ•%¹Ù…±¥‘…Ñ¥½¹¹…‰±•è™…±Í”°(€€€€€€€µ¥¹%¹Ù…±¥‘…Ñ¥½¹!½±‘5Ìè€À°(€€€€€€€¥¹Ù…±¥‘…Ñ¥½¹]¥¹‘½Ý5Ìè€À°(€€€€€€€¥¹Ù…±¥‘…Ñ¥½¹É…Ý‘½Ý¹AÐè€À°(€€€€€€€µ…á%¹Ù…±¥‘…Ñ¥½¹I•ÑÕÉ¸ÉÍAÐè€À°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€1=]}`ØÀœ°(€€€€€€€±…‰•°è€œÕÌÁÉ½Ñ•Ñ¥½¸€¼€Èµ½˜´Ì™±½Ü™…‘”€¼µ…à€ØÁÌœ°(€€€€€€€µ½‘”è€1=]}œ°(€€€€€€€µ¥¹!½±‘5Ìè€Õ|ÀÀÀ°(€€€€€€€µ…á!½±‘5Ìè€ØÁ|ÀÀÀ°(€€€€€€€µ¥¹…‘•Y½Ñ•Ìè€È°(€€€€€€€µ¥¹M•±±	Õå±½ÝI…Ñ¥¼è€À¸à°(€€€€€€€µ…á	Õå•ÉI•Ñ•¹Ñ¥½¹I…Ñ¥¼è€À¸Ô°(€€€€€€€ÍÑÉÕÑÕÉ•%¹Ù…±¥‘…Ñ¥½¹¹…‰±•è™…±Í”°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€PÌÁ|ÄÁ}`ØÀœ°(€€€€€€€±…‰•°è€œ´ÈÀ”ÍÑ½À€¼€¬ÌÀ”…Ñ¥Ù…Ñ¥½¸€¼€ÄÀ”‘É…Ý‘½Ý¸€¼µ…à€ØÁÌœ°(€€€€€€€µ½‘”è€QI%1%9œ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°(€€€€€€€µ¥¹!½±‘5Ìè€À°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÌÀ°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÀ°(€€€€€€€µ…á!½±‘5Ìè€ØÁ|ÀÀÀ°(€€€€€€€ÍÑÉÕÑÕÉ•%¹Ù…±¥‘…Ñ¥½¹¹…‰±•è™…±Í”°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€=IÈÕ}HÜÕ}`ÄÈÀœ°(€€€€€€€±…‰•°è€œ¬ÈÀ”Í•±°€ÈÔ”€¼€ÜÔ”ÍÑ…¥ÈÉÕ¹¹•È€¼µ…à€ÄÈÁÌœ°(€€€€€€€µ½‘”è€=I}IU99Hœ°(€€€€€€€½É•Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°(€€€€€€€½É•]•¥¡ÑAÐè€ÈÔ°(€€€€€€€µ…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°(€€€€€€€ÑÉ…¥±¥¹Q¥•ÉÌèl(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°‘É…Ý‘½Ý¹AÐè€ÄÔô°(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÔÀ°‘É…Ý‘½Ý¹AÐè€ÈÀô°(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÄÀÀ°‘É…Ý‘½Ý¹AÐè€ÈÔô°(€€€€€€€t°(€€€€€€€ÍÑÉÕÑÕÉ•%¹Ù…±¥‘…Ñ¥½¹¹…‰±•è™…±Í”°(€€€€€ô°(€€€t°(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}e}=I9%}	UIMQ}A=M%Q%=9}M=0œ¤°(€€€ô¤°(€ô°((€€¼¼½ÉÝ…Éµ½¹±äÙ…±¥‘…Ñ¥½¸½˜Ñ¡”•…É±äÁÕÉ”µ‰Õä½‰Í•ÉÙ…Ñ¥½¸¸Q¡•Í”(€€¼¼½¡½ÉÑÌ¹•Ù•È•µ¥Ð±¥Ù”Í¥¹…±Ì¸5¥ÍÍ¥¹œ•á•ÕÑ…‰±”•á¥ÑÌÍÑ…ä9=}a%P(€€¼¼…¹…É”•á±Õ‘•™É½´É•ÑÕÉ¸ÍÑ…Ñ¥ÍÑ¥Ì¥¹ÍÑ•…½˜‰•½µ¥¹œ€´ÄÀÀ”¸(€•…É±åAÕÉ•	Õå	ÕÉÍÑM¡…‘½Üèì(€€€•¹…‰±•è‰½½±•…¹¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}M!=]}9	1œ°ÑÉÕ”¤°(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}A=M%Q%=9}M=0œ¤°(€€€™•…ÑÕÉ•]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}QUI}]%9=]}5Lœ°€Í|ÀÀÀ°ì(€€€€€µ¥¸è€Í|ÀÀÀ°µ…àè€ÄÁ|ÀÀÀ°(€€€ô¤°(€€€µ…áQÉ…‘•ÍA•É5¥¹Ðè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}QIM}AI}5%9Pœ°€ÄÈà°ì(€€€€€µ¥¸è€ÌÈ°µ…àè€ÔÄÈ°(€€€ô¤°(€€€ÍÑ…Ñ•I•Ñ•¹Ñ¥½¹5Ìè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}MQQ}IQ9Q%=9}5Lœ°€ÄÈÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ÌÁ|ÀÀÀ°µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ìµ¥¸è€Äô¤°(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}a%Q}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ìµ¥¸è€Äô¤°(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}9QIe})U5A}APœ°€ÄÔ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€µ…á¹ÑÉåAÉ¥•É½ÁAÐè¹Õµ‰•É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}9QIe}I=A}APœ°€ÌÔ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€µ…á¹ÑÉå%µÁ…ÑAÐè¹Õµ‰•É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}9QIe}%5AQ}APœ°€ÄÔ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€‰…Í”èì(€€€€€µ…á•5Ìè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}}5Lœ°€ÄÁ|ÀÀÀ°ìµ¥¸è€Å|ÀÀÀô¤°(€€€€€µ…áÕÉÙ•AÐè¹Õµ‰•É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}UIY}APœ°€ÔÀ°ì(€€€€€€€µ¥¸è€Ä°µ…àè€ÄÀÀ°(€€€€€ô¤°(€€€€€µ¥¹9•Ñ±½ÜÍÍM½°è¹Õµ‰•É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5%9}9Q1=]|ÍM}M=0œ°€Ì°ì(€€€€€€€µ¥¸è€À°(€€€€€ô¤°(€€€€€µ…á9•Ñ±½ÜÍÍM½°è¹Õµ‰•É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}9Q1=]|ÍM}M=0œ°€Ô°ì(€€€€€€€µ¥¸è€À°(€€€€€ô¤°(€€€€€µ¥¹	Õå•ÉÌÍÌè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5%9}	UeIM|ÍLœ°€È°ìµ¥¸è€Äô¤°(€€€€€µ…á	Õå•ÉÌÍÌè¥¹Ñ••É¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}5a}	UeIM|ÍLœ°€Ð°ìµ¥¸è€Äô¤°(€€€€€µ…áM•±±QàÍÌè€À°(€€€ô°(€€€½¹™¥Éµ…Ñ¥½¹èì(€€€€€µ¥¹•±…å5Ìè€ÌÀÀ°µ…á•±…å5Ìè€ÔÀÀ°µ¥¹•±Ñ…	Õå•ÉÌè€Ä°(€€€€€µ¥¹•±Ñ…9•Ñ±½ÝM½°è€À¸Ô°µ…á)ÕµÁAÐè€ÄÀ°(€€€ô°(€€€½¹™¥Éµ…Ñ¥½¹èì(€€€€€µ¥¹•±…å5Ìè€Å|ÀÀÀ°µ…á•±…å5Ìè€Í|ÀÀÀ°(€€€€€µ¥¹É…Ý‘½Ý¹AÐè€Ì°µ…áÉ…Ý‘½Ý¹AÐè€à°(€€€€€µ¥¹I•±…¥µAÐè€Ä°µ…áI•±…¥µAÐè€È°(€€€€€µ…áM¥¹±•M•±±M½°è€À¸Ô°µ…áM•±±M¡…É•AÐè€ÌÔ°(€€€ô°(€€€•¹ÑÉåAÉ½™¥±•Ìèl(€€€€€ì¥è€	}œ°±…‰•°è€µƒ
+Ü¥µµ•‘¥…Ñ”ÁÕÉ”µ‰Õä‰ÕÉÍÐœ°¹•Ý¹ÑÉ¥•Í¹…‰±•èÑÉÕ”ô°(€€€€€ì¥è€	}œ°±…‰•°è€µƒ
+Ü€ÌÀÀ´ÔÀÁµÌ½¹Ñ¥¹Õ…Ñ¥½¸œ°¹•Ý¹ÑÉ¥•Í¹…‰±•èÑÉÕ”ô°(€€€€€ì¥è€	}œ°±…‰•°è€µƒ
+Ü€Ä´ÍÌÁÕ±±‰…¬É•±…¥´œ°¹•Ý¹ÑÉ¥•Í¹…‰±•èÑÉÕ”ô°(€€€t°(€€€•á¥ÑAÉ½™¥±•Ìèl(€€€€€ì¥è€%`Ôœ°±…‰•°è€™¥á•€ÕÌœ°µ…á!½±‘5Ìè€Õ|ÀÀÀô°(€€€€€ì¥è€%`ÈÀœ°±…‰•°è€™¥á•€ÈÁÌœ°µ…á!½±‘5Ìè€ÈÁ|ÀÀÀô°(€€€€€ì¥è€%`ÌÀœ°±…‰•°è€™¥á•€ÌÁÌœ°µ…á!½±‘5Ìè€ÌÁ|ÀÀÀô°(€€€t°(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}I1e}AUI}	Ue}	UIMQ}A=M%Q%=9}M=0œ¤°(€€€ô¤°(€ô°((€€¼¼%¹‘•Á•¹‘•¹Ð•…É±ä	½¹‘¥¹œÕÉÙ”É•Í•…É ‘•É¥Ù•™É½´Ñ¡”½É¥¥¹…°e(€€¼¼¡åÁ½Ñ¡•Í¥Ì¸Q¡¥ÌÉ•Ñ¥É•,µ…ÑÉ¥à¥Ì­•ÁÐÍ•Á…É…Ñ”Í¼¥ÑÌ¡¥ÍÑ½É¥…°É½ÝÌ(€€¼¼¹•Ù•Èµ¥àÝ¥Ñ Ñ¡”¹•Ü½µÁ±•Ñ•µÍ±½ÐM•áÁ•É¥µ•¹Ð¸(€å……É±åAåÉ…µ¥‘M¡…‘½Üèì(€€€•¹…‰±•èÁÉ½Ù•¹9•…Ñ¥Ù•M¡…‘½ÝÍ¹…‰±•4(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}e}I1e}AeI5%}M!=]}9	1œ°™…±Í”¤°4(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}e}I1e}AeI5%}A=M%Q%=9}M=0œ¤°4(€€€ÍÑ…Ñ•]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}MQQ}]%9=]}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€É|ÀÀÀ°4(€€€€€µ…àè€ÌÁ|ÀÀÀ°4(€€€ô¤°4(€€€ÍÑ…Ñ•I•Ñ•¹Ñ¥½¹5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}MQQ}IQ9Q%=9}5Lœ°€ÈÐÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€ÌÁ|ÀÀÀ°4(€€€€€µ…àè€ÄÔ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}a%Q}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}e}I1e}AeI5%}5a}9QIe})U5A}APœ°€ÄÔ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€…‘‘MÑ•ÁAÐè¹Õµ‰•É¹Ø 1=]}e}I1e}AeI5%}}MQA}APœ°€ÄÔ°ì4(€€€€€µ¥¸è€À¸Ä°4(€€€€€µ…àè€ÔÀÀ°4(€€€ô¤°4(€€€…‘‘É…Ñ¥½¸è¹Õµ‰•É¹Ø 1=]}e}I1e}AeI5%}}IQ%=8œ°€Ä€¼€ÄÈ°ì4(€€€€€µ¥¸è€À¸ÀÀÄ°4(€€€€€µ…àè€Ä°4(€€€ô¤°4(€€€…‘‘½½±‘½Ý¹5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}}==1=]9}5Lœ°€ÈÔÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÌÁ|ÀÀÀ°4(€€€ô¤°4(€€€µ…á‘‘Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}5a}Lœ°€Ø°ìµ¥¸è€À°µ…àè€ÈÀô¤°4(€€€™¥ÉÍÑQ…­•AÉ½™¥ÑAÐè¹Õµ‰•É¹Ø 1=]}e}I1e}AeI5%}Q@Å}APœ°€ÔÀ°ìµ¥¸è€Äô¤°4(€€€Í•½¹‘Q…­•AÉ½™¥ÑAÐè¹Õµ‰•É¹Ø 1=]}e}I1e}AeI5%}Q@É}APœ°€ÄÀÀ°ìµ¥¸è€Äô¤°4(€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}e}I1e}AeI5%}!I}MQ=A}APœ°€ÌÀ°ì4(€€€€€µ¥¸è€À¸Ä°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€¹½MÑÉ•¹Ñ¡5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}9=}MQI9Q!}5Lœ°€ÈÕ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€ô¤°4(€€€¹½MÑÉ•¹Ñ¡5™•AÐè¹Õµ‰•É¹Ø 1=]}e}I1e}AeI5%}9=}MQI9Q!}5}APœ°€ÈÀ°ì4(€€€€€µ¥¸è€À°4(€€€ô¤°4(€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}e}I1e}AeI5%}5a}!=1}5Lœ°€ÄàÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€ô¤°4(€€€•¹ÑÉåAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€,Õ|ÌÀœ°4(€€€€€€€±…‰•°è€,Ô´ÌÀƒ
+Ü€×ŠLÌÁÌ€¼ÕÉÙ”€ÈÃŠLØÀ”œ°4(€€€€€€€µ¥¹•5Ìè€Õ|ÀÀÀ°4(€€€€€€€µ…á•5Ìè€ÌÁ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÈÀ°4(€€€€€€€µ…áÕÉÙ•AÐè€ØÀ°4(€€€€€€€µ¥¹	Õå•ÉÌÕÌè€Ì°4(€€€€€€€µ…á	Õå•ÉÌÕÌè€ÄÐ°4(€€€€€€€µ¥¹9•Ñ±½ÜÕÌè€À¸Ä°4(€€€€€€€µ…á9•Ñ±½ÜÕÌè€ÄÔ°4(€€€€€€€µ…áI•ÑÕÉ¸ÉÍAÐè€ÄÔ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€,Í|ÌÀœ°4(€€€€€€€±…‰•°è€,Ì´ÌÀƒ
+Ü€ÏŠLÌÁÌ€¼ÕÉÙ”€ÈÃŠLØÀ”œ°4(€€€€€€€µ¥¹•5Ìè€Í|ÀÀÀ°4(€€€€€€€µ…á•5Ìè€ÌÁ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÈÀ°4(€€€€€€€µ…áÕÉÙ•AÐè€ØÀ°4(€€€€€€€µ¥¹	Õå•ÉÌÕÌè€È°4(€€€€€€€µ…á	Õå•ÉÌÕÌè€Äà°4(€€€€€€€µ¥¹9•Ñ±½ÜÕÌè€À°4(€€€€€€€µ…á9•Ñ±½ÜÕÌè€ÈÀ°4(€€€€€€€µ…áI•ÑÕÉ¸ÉÍAÐè€ÈÔ°4(€€€€€ô°4(€€€t°4(€€€•á¥ÑAÉ½™¥±•Ìèl4(€€€€€ì¥è€PÈÀœ°±…‰•°è€IÕ¹¹•ÈÁ•…¬‘É…Ý‘½Ý¸€ÈÀ”œ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÈÀô°4(€€€€€ì¥è€PÌÀœ°±…‰•°è€IÕ¹¹•ÈÁ•…¬‘É…Ý‘½Ý¸€ÌÀ”œ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÌÀô°4(€€€t°4(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}e}I1e}AeI5%}A=M%Q%=9}M=0œ¤°4(€€€ô¤°4(€ô°4(4(€€¼¼%¹‘•Á•¹‘•¹ÐÁÉ”µµ¥É…Ñ¥½¸	½¹‘¥¹œÕÉÙ”µ½µ•¹ÑÕ´É•Í•…É ¸%Ð•Ù…±Õ…Ñ•Ì4(€€¼¼…ÕÍ…°½É‘•Èµ™±½Ü•‘•Ì…¹Í¥µÕ±…Ñ••á¥ÑÌ½¹±äì¹¼•á•ÕÑ¥½¸Á…Ñ •á¥ÍÑÌ¸4(€‰½¹‘¥¹ÕÉÙ•5½µ•¹ÑÕµM¡…‘½Üèì4(€€€•¹…‰±•èÉ•Ñ¥É•‘M¡…‘½ÝÍ¹…‰±•€˜˜‰½½±•…¹¹Ø 1=]}	=9%9}5=59QU5}M!=]}9	1œ°™…±Í”¤°4(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}	=9%9}5=59QU5}A=M%Q%=9}M=0œ¤°4(€€€ÍÑ…Ñ•]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}MQQ}]%9=]}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€Õ|ÀÀÀ°4(€€€€€µ…àè€ÌÁ|ÀÀÀ°4(€€€ô¤°4(€€€ÍÑ…Ñ•I•Ñ•¹Ñ¥½¹5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}MQQ}IQ9Q%=9}5Lœ°€ØÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Õ|ÀÀÀ°4(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€•Á¥Í½‘•½½±‘½Ý¹5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}A%M=}==1=]9}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}a%Q}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}	=9%9}5=59QU5}5a}9QIe})U5A}APœ°€ÄÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€Í¹…ÁÍ¡½Ñ!½É¥é½¹Í5Ìèµ¥±±¥Í•½¹‘1¥ÍÑ¹Ø 4(€€€€€€1=]}	=9%9}5=59QU5}M9AM!=Q}M=9Lœ°4(€€€€€lÄ°€È°€Ì°€Ô°€à°€ÄÀ°€ÈÀ°€ÌÁt°4(€€€€¤°4(€€€µ…áM¹…ÁÍ¡½Ñ1…5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}5a}M9AM!=Q}1}5Lœ°€É|ÀÀÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÌÁ|ÀÀÀ°4(€€€ô¤°4(€€€™±½Ýá¥Ñ9•Ñ±½ÝM½°è¹Õµ‰•É¹Ø 1=]}	=9%9}5=59QU5}1=]}a%Q}9Q}M=0œ°€À¤°4(€€€™±½Ýá¥Ñ5…á	ÕåQá•°è¹Õµ‰•É¹Ø 1=]}	=9%9}5=59QU5}1=]}a%Q}	Ue}Qa}0œ°€À¤°4(€€€™±½Ýá¥Ñ5¥¹M•±±M½°è¹Õµ‰•É¹Ø 1=]}	=9%9}5=59QU5}1=]}a%Q}5%9}M11}M=0œ°€À¸Ô°ì4(€€€€€µ¥¸è€À°4(€€€ô¤°4(€€€‰¥]¥¹¹•ÉAÐè¹Õµ‰•É¹Ø 1=]}	=9%9}5=59QU5}	%}]%99I}APœ°€ÔÀ°ìµ¥¸è€Äô¤°4(€€€•¹ÑÉåAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€ Àœ°4(€€€€€€€±…‰•°è€ Àƒ
+Ü1¥™•å±—¢º‹–6WšÖ–~ëžêüœ°4(€€€€€€€µ¥¹•5Ìè€ÄÁ|ÀÀÀ°4(€€€€€€€µ…á•5Ìè€ØÁ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÐÀ°4(€€€€€€€µ…áÕÉÙ•AÐè€ÄÀÀ°4(€€€€€€€µ¥¹9•Ñ±½ÜÅÌè€Ô°4(€€€€€€€µ¥¹±½Ý•°ÅÌè€Ä¸Ô°4(€€€€€€€µ¥¹	Õå•ÉÌÅÌè€Ô°4(€€€€€€€µ¥¹	ÕåQàÅÌè€Ô°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€ Äœ°4(€€€€€€€±…‰•°è€ Äƒ
+Üƒ’æÃ–6W¦–ê›–*ƒ¦|œ°4(€€€€€€€µ¥¹•5Ìè€ÄÁ|ÀÀÀ°4(€€€€€€€µ…á•5Ìè€ØÁ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÐÀ°4(€€€€€€€µ…áÕÉÙ•AÐè€ÄÀÀ°4(€€€€€€€µ¥¹9•Ñ±½ÜÅÌè€Ô°4(€€€€€€€µ¥¹±½Ý•°ÅÌè€Ä¸Ô°4(€€€€€€€µ¥¹	Õå•ÉÌÅÌè€Ô°4(€€€€€€€µ¥¹	ÕåQàÅÌè€Ô°4(€€€€€€€µ¥¹	ÕåQá•°ÅÌè€Ø°4(€€€€€€€µ…áQ½ÀÅM¡…É•AÐè€ÔÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€ Èœ°4(€€€€€€€±…‰•°è€ Èƒ
+ÜƒšZÃ’æÃ–ºÛ¢Ö¦G–"šVŒœ°4(€€€€€€€µ¥¹•5Ìè€ÄÁ|ÀÀÀ°4(€€€€€€€µ…á•5Ìè€ØÁ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÐÀ°4(€€€€€€€µ…áÕÉÙ•AÐè€ÄÀÀ°4(€€€€€€€µ¥¹9•Ñ±½ÜÅÌè€Ô°4(€€€€€€€µ¥¹±½Ý•°ÅÌè€Ä¸Ô°4(€€€€€€€µ¥¹	Õå•ÉÌÅÌè€Ô°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌÅÌè€Ð°4(€€€€€€€µ¥¹	ÕåQàÅÌè€Ô°4(€€€€€€€µ…áQ½ÀÅM¡…É•AÐè€ÌÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€ Ìœ°4(€€€€€€€±…‰•°è€ Ìƒ
+Üƒ–6[–:/¢†Ã–?¢ö³š6ˆœ°4(€€€€€€€µ¥¹•5Ìè€ÄÁ|ÀÀÀ°4(€€€€€€€µ…á•5Ìè€ÄàÁ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÐÀ°4(€€€€€€€µ…áÕÉÙ•AÐè€ÄÀÀ°4(€€€€€€€µ¥¹9•Ñ±½ÜÅÌè€Ì°4(€€€€€€€µ¥¹±½Ý•°ÅÌè€Ä¸Ô°4(€€€€€€€µ¥¹	Õå•ÉÌÅÌè€Ô°4(€€€€€€€µ¥¹	ÕåQàÅÌè€Ô°4(€€€€€€€µ¥¹AÉ¥½ÉM•±±M½°ÅÌè€À¸Ô°4(€€€€€€€µ…áM•±±•…åI…Ñ¥¼è€À¸ÈÔ°4(€€€€€ô°4(€€€t°4(€€€•á¥ÑAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€`Ìœ°4(€€€€€€€±…‰•°è€`Ìƒ
+Üƒ–në–ºkš2šr$ÏžžHœ°4(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°4(€€€€€€€™¥á•‘!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}%a}!=1}5Lœ°€Í|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€ÈÔÀ°4(€€€€€€€ô¤°4(€€€€€€€µ…á!½±‘5Ìè€Í|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aœ°4(€€€€€€€±…‰•°è€aƒ
+Üƒ¢º‹–6WšÖ–>7¢ö°€¼€ÄÃžžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€1=]}IYIM0œ°4(€€€€€€€µ¥¹!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}1=]}5%9}!=1}5Lœ°€ÔÀÀ°ìµ¥¸è€Àô¤°4(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}1=]}5a}!=1}5Lœ°€ÄÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aPœ°4(€€€€€€€±…‰•°è€aPƒ
+Ü€¬ÄÀ—šþšÒì€¼ƒ–n{šJÜ¸Ô”€¼€ÌÃžžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€]%99I}QI%0œ°4(€€€€€€€µ¥¹!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}QI%1}5%9}!=1}5Lœ°€ÔÀÀ°ìµ¥¸è€Àô¤°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}	=9%9}5=59QU5}QI%1}Q%YQ%=9}APœ°4(€€€€€€€€€€ÄÀ°4(€€€€€€€€€ìµ¥¸è€À¸Ä°µ…àè€Å|ÀÀÀô°4(€€€€€€€€¤°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}	=9%9}5=59QU5}QI%1}MQ=A}APœ°€Ü¸Ô°ì4(€€€€€€€€€µ¥¸è€À¸Ä°4(€€€€€€€€€µ…àè€ÄÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}	=9%9}5=59QU5}QI%1}5a}!=1}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€ô°4(€€€t°4(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}	=9%9}5=59QU5}A=M%Q%=9}M=0œ¤°4(€€€ô¤°4(€ô°4(4(€€¼¼É…‘Õ…Ñ¥½¸ÁÉ½‰…‰¥±¥Ñä¥ÌÕÍ•½¹±ä…Ì„¡½±½•á¥Ð½Ù•É±…ä½¸…¸•…É±¥•È4(€€¼¼AÉ¥µ…Éä±½Ü•¹ÑÉä¸%Ð¹•Ù•È½Á•¹Ì„™É•Í Á½Í¥Ñ¥½¸…‰½Ù”Ñ¡”½¹™¥ÕÉ•4(€€¼¼ÕÉÙ”•¥±¥¹œ…¹¹•Ù•È½Ý¹Ì„Í¥¹•È½ÈÑÉ…¹Í…Ñ¥½¸•á•ÕÑ½È¸4(€É…‘Õ…Ñ¥½¹!½±‘M¡…‘½Üèì4(€€€•¹…‰±•èÉ•Ñ¥É•‘M¡…‘½ÝÍ¹…‰±•€˜˜‰½½±•…¹¹Ø 1=]}IUQ%=9}!=1}M!=]}9	1œ°™…±Í”¤°4(€€€Í¥¹…±Y…É¥…¹Ðè€ÁÉ¥µ…Éå|ÍÜœ°4(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}IUQ%=9}!=1}A=M%Q%=9}M=0œ¤°4(€€€µ…áM¥¹…±1…Ñ•¹å5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}5a}M%91}1Q9e}5Lœ°€Å|ÔÀÀ°ì4(€€€€€µ¥¸è€ÄÀÀ°4(€€€ô¤°4(€€€µ…áM¥¹…±ÕÉÙ•AÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}!=1}5a}9QIe}UIY}APœ°€ÜÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…áQ½­•¹•5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}5a}Q=-9}}5Lœ°€ÄÀ€¨€ØÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€ÍÑ…Ñ•I•Ñ•¹Ñ¥½¹5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}MQQ}IQ9Q%=9}5Lœ°€ÄÀ€¨€ØÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Õ|ÀÀÀ°4(€€€€€µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}a%Q}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}!=1}5a}9QIe})U5A}APœ°€ÄÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}!=1}!I}MQ=A}APœ°€ÌÀ°ì4(€€€€€µ¥¸è€À¸Ä°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€½¹ÑÉ½±QÉ…¥±¥¹MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}!=1}$Á}QI%1%9}MQ=A}APœ°€Ü¸Ô°ì4(€€€€€µ¥¸è€À¸Ä°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€½¹ÑÉ½±5…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}$Á}5a}!=1}5Lœ°€ØÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€ô¤°4(€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}5a}!=1}5Lœ°€ÄÈÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€ô¤°4(€€€™¥ÉÍÑ¡•­Á½¥¹ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}IUQ%=9}!=1}%IMQ}!-A=%9Q}Q%5=UQ}5Lœ°4(€€€€€€ÈÁ|ÀÀÀ°4(€€€€€ìµ¥¸è€Å|ÀÀÀô°4(€€€€¤°4(€€€ÍÑ•ÁQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}MQA}Q%5=UQ}5Lœ°€Í|ÀÀÀ°ì4(€€€€€µ¥¸è€ÈÔÀ°4(€€€ô¤°4(€€€É…‘Õ…Ñ¥½¹Q¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}IUQ%=9}Q%5=UQ}5Lœ°€ÄÕ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€ô¤°4(€€€…µµá¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}$É}55}a%Q}1e}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€À°4(€€€ô¤°4(€€€‰É¥‘•5¥¹	Õå•ÉÌÔè¥¹Ñ••É¹Ø 1=]}IUQ%=9}!=1}$É}5%9}	UeIM|ÕLœ°€ÄÈ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€‰É¥‘•5…áÕµÕ±…Ñ¥Ù•QÉ…‘•Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}IUQ%=9}!=1}$É}5a}U5U1Q%Y}QILœ°4(€€€€€€ÈÀ°4(€€€€€ìµ¥¸è€Äô°4(€€€€¤°4(€€€¡•­Á½¥¹ÑÌèlÜÀ°€àÀ°€àÔ°€äÀ°€äÔ°€äÝt°4(€€€¡•­Á½¥¹ÑIÕ±•Ìèl4(€€€€€ì4(€€€€€€€Ñ¡É•Í¡½±‘AÐè€ÜÀ°4(€€€€€€€µ¥¹9•Ñ±½ÜÕM½°è€À°4(€€€€€€€µ¥¹	Õå•ÉÌÔè€Ì°4(€€€€€€€µ…áM•±±M½°Ôè€Ä°4(€€€€€€€µ¥¹ÕÉÙ••±Ñ„Ôè€Ô°4(€€€€€ô°4(€€€€€ì4(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÀ°4(€€€€€€€µ¥¹9•Ñ±½ÜÕM½°è€À°4(€€€€€€€µ¥¹	Õå•ÉÌÔè€Ä°4(€€€€€€€µ…áM•±±M½°Ôè¹Õ±°°4(€€€€€€€µ¥¹ÕÉÙ••±Ñ„Ôè€Ô°4(€€€€€ô°4(€€€€€ì4(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÔ°4(€€€€€€€µ¥¹9•Ñ±½ÜÕM½°è€À°4(€€€€€€€µ¥¹	Õå•ÉÌÔè€Ä°4(€€€€€€€µ…áM•±±M½°Ôè¹Õ±°°4(€€€€€€€µ¥¹ÕÉÙ••±Ñ„Ôè€Ô°4(€€€€€ô°4(€€€€€ì4(€€€€€€€Ñ¡É•Í¡½±‘AÐè€äÀ°4(€€€€€€€µ¥¹9•Ñ±½ÜÕM½°è€À°4(€€€€€€€µ¥¹	Õå•ÉÌÔè€Ð°4(€€€€€€€µ…áM•±±M½°Ôè¹Õ±°°4(€€€€€€€µ¥¹ÕÉÙ••±Ñ„Ôè€Ô°4(€€€€€ô°4(€€€€€ì4(€€€€€€€Ñ¡É•Í¡½±‘AÐè€äÔ°4(€€€€€€€µ¥¹9•Ñ±½ÜÕM½°è€À°4(€€€€€€€µ¥¹	Õå•ÉÌÔè€Ð°4(€€€€€€€µ…áM•±±M½°Ôè¹Õ±°°4(€€€€€€€µ¥¹ÕÉÙ••±Ñ„Ôè€Ô°4(€€€€€ô°4(€€€t°4(€€€½¡½ÉÑÌèl4(€€€€€ì4(€€€€€€€¥è€$Àœ°4(€€€€€€€±…‰•°è€$Àƒ
+Ü…É±ä¹ÑÉçžžï–*£š¶‹žn#–¾çžœœ°4(€€€€€€€•á¥Ñ5½‘”è€=9QI=1}QI%1%9œ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€$Äœ°4(€€€€€€€±…‰•°è€$Äƒ
+Üƒššž:šŽš~—ž
+ä€¼€äÜ—š¾W’âk–&7¦–èœ°4(€€€€€€€•á¥Ñ5½‘”è€AI}I}!-A=%9QLœ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€$Èœ°4(€€€€€€€±…‰•°è€$Èƒ
+Üƒ’â—š‚óššž:šŽš~—ž
+ä€¼ƒž¦ÿ¢Ú+š¾W’âhœ°4(€€€€€€€•á¥Ñ5½‘”è€Q!I=U!}IUQ%=8œ°4(€€€€€ô°4(€€€t°4(€€€‰¥]¥¹¹•ÉAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}!=1}	%}]%99I}APœ°€ÔÀ°ìµ¥¸è€Äô¤°4(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}IUQ%=9}!=1}A=M%Q%=9}M=0œ¤°4(€€€ô¤°4(€ô°4(4(€€¼¼1¥™•å±”½Ù•ÉÍ½±µÉ•‰½Õ¹É•Í•…É ¸AÉ”µµ¥É…Ñ¥½¸ÕÉÙ”ÑÉ…‘•Ì…¹Ñ¡”4(€€¼¼Á½ÍÐµµ¥É…Ñ¥½¸AÕµÁMÝ…ÀÍÕ‰ÍÉ¥ÁÑ¥½¸ÕÍ”Í•Á…É…Ñ”½¡½ÉÑÌìÁÉ½™¥±•Ì‰•±½Ü4(€€¼¼…É”½ÉÑ¡½½¹…°½¹±¥¹”•áÁ•É¥µ•¹ÑÌ…¹¹•Ù•ÈÉ•…Ñ”½ÈÍ¥¸„ÑÉ…¹Í…Ñ¥½¸¸4(€µ¥É…Ñ•‘É½ÁI•‰½Õ¹‘M¡…‘½Üèì(€€€•¹…‰±•è‰½½±•…¹¹Ø 1=]}5%IQ}I	=U9}M!=]}9	1œ°ÑÉÕ”¤°(€€€™É¹…‰±•èµ¥É…Ñ•‘I•‰½Õ¹‘™É¹…‰±•°(€€€€¼¼½¡½ÉÐµ±•Ù•°É•Ñ¥É•µ•¹Ð­••ÁÌÑ¡”ÕÍ•™Õ°½D½H½¹ÑÉ½±ÌÉÕ¹¹¥¹œÝ¡¥±”(€€€€¼¼ÍÑ½ÁÁ¥¹œ½¹±äÑ¡”É•Á•…Ñ•‘±ä¹•…Ñ¥Ù”½µ‰¥¹…Ñ¥½¹Ì¸AÉ•™¥àµ…Ñ¡¥¹œ…±Í¼(€€€€¼¼½Ù•ÉÌÑ¡•¥È…Á…¥ÑäÍÕ™™¥á•Ì€¡™½È•á…µÁ±”|Á@ÅM=0…¹|ÅM=0¤¸(€€€É•Ñ¥É•‘½¡½ÉÑAÉ•™¥á•Ìèl(€€€€€€A=MQ}ÈÕ|ÌÕ}IU}UI}PÈÁ|ÈÑ|œ°(€€€€€€A=MQ}ÈÕ|ÌÕ}`Ìœ°(€€€€€€A=MQ}ÈÕ|ÌÕ}a1œ°(€€€€€€A=MQ}ÈÕ|ÌÕ}aÈÔœ°(€€€€€€A=MQ}ÈÕ|ÌÕ}aÔÀœ°(€€€€€€A=MQ}ÌÁ}HÈÍ}Å|œ°(€€€€€€A=MQ}ÌÁ}HÈÍ}Í|œ°(€€€€€€A=MQ}ÌÁ}HÈÍ}Å}Å}ÔÁ} ØÀœ°(€€€€€€A=MQ}ÌÁ}HÈÍ}Å}Å}ÜÕ} ÌÀœ°(€€€€€€A=MQ}ÌÁ}ÈÕ|ÌÉ}HÈÑ}Å|ÀÑ|ÈÑ}XÉ}Q%5}HÉ} ÄÔœ°(€€€t°(€€€±¥™•å±•MÑ…•Ìèl4(€€€€€ì¥è€A=MQ}5%IQ%=8œ°±…‰•°è€Ÿš¾W’âk–B8œ°µ…É­•Ðè€AU5A}54œô°4(€€€t°4(€€€ÍÑ…Ñ•I•Ñ•¹Ñ¥½¹5Ìè¥¹Ñ••É¹Ø 1=]}I	=U9}QQ=I}MQQ}IQ9Q%=9}5Lœ°€ØÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Õ|ÀÀÀ°4(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€ÑÉ…­¥¹•5Ìè5…Ñ ¹µ¥¸ ÄÈÁ|ÀÀÀ°¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}QI-%9}5Lœ°€ÄÈÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ÌÁ|ÀÀÀ°(€€€€€µ…àè€ÌÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤¤°(€€€€¼¼-••À±¥¡ÑÝ•¥¡ÐÁ½ÍÐµµ¥É…Ñ¥½¸½‰Í•ÉÙ…Ñ¥½¸…±¥Ù”™½È½™™±¥¹”±…‰•±Ì…¹(€€€€¼¼±…Ñ•ÈµÍÑ…”É•Í•…É ¸%¹‘¥Ù¥‘Õ…°•¹ÑÉäÁÉ½™¥±•ÌÉ•Ñ…¥¸Ñ¡•¥È½Ý¸µÕ (€€€€¼¼Í¡½ÉÑ•È…ÕÍ…°…”…Ñ•Ì€¡Ñ¡”‘¥É•Ðµ‘ÕµÀ½¡½ÉÐÉ•µ…¥¹Ì€ðôÌÀÍ•½¹‘Ì¤¸(€€€½‰Í•ÉÙ…Ñ¥½¹•5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}5%IQ}I	=U9}=	MIYQ%=9}5Lœ°(€€€€€€ÌÀ€¨€ØÁ|ÀÀÀ°(€€€€€ìµ¥¸è€ÄÈÁ|ÀÀÀ°µ…àè€ØÀ€¨€ØÁ|ÀÀÀô°(€€€€¤°(€€€€¼¼½µÁ±•Ñ¥½¸…¹AÕµÁMÝ…Àµ¥É…Ñ¥½¸…É”Í•Á…É…Ñ”•Ù•¹ÑÌ¸-••À½µÁ±•Ñ•(€€€€¼¼5¥¹ÑÌÍÕ‰ÍÉ¥‰•±½¹œ•¹½Õ Ñ¼½‰Í•ÉÙ”„‘•±…å•µ¥É…Ñ¥½¸½™¥ÉÍÐ54(€€€€¼¼ÑÉ…‘”°Ý¥Ñ¡½ÕÐ•áÑ•¹‘¥¹œ…¹äÁÉ½™¥±”ÌÁ½ÍÐµµ¥É…Ñ¥½¸•¹ÑÉä…”…Ñ”¸(€€€Á•¹‘¥¹5¥É…Ñ¥½¹QÉ…­¥¹5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}5%IQ}I	=U9}A9%9}5%IQ%=9}5Lœ°(€€€€€€È€¨€ØÀ€¨€ØÁ|ÀÀÀ°(€€€€€ìµ¥¸è€ÌÀ€¨€ØÁ|ÀÀÀ°µ…àè€Ø€¨€ØÀ€¨€ØÁ|ÀÀÀô°(€€€€¤°(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}5%IQ}I	=U9}A=M%Q%=9}M=0œ¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ì(€€€€€µ¥¸è€Ä°(€€€ô¤°(€€€™…ÍÑ±½Ý5…áQÉ…‘•ÍA•É5¥¹Ðè¥¹Ñ••É¹Ø (€€€€€€1=]}5%IQ}I	=U9}I}5a}QIM}AI}5%9Pœ°(€€€€€€ÔÄÈ°(€€€€€ìµ¥¸è€ÌÈ°µ…àè€ÄÁ|ÀÀÀô°(€€€€¤°(€€€™…ÍÑ±½ÝMÝ••Á5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}5%IQ}I	=U9}I}M]A}5Lœ°(€€€€€€Õ|ÀÀÀ°(€€€€€ìµ¥¸è€Å|ÀÀÀ°µ…àè€ØÁ|ÀÀÀô°(€€€€¤°(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}a%Q}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}5a}9QIe})U5A}APœ°€ÄÔ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€µ…áA±…ÕÍ¥‰±•I•ÑÕÉ¹AÐè¹Õµ‰•É¹Ø (€€€€€€1=]}5%IQ}I	=U9}5a}A1UM%	1}IQUI9}APœ°(€€€€€€Å|ÀÀÀ°(€€€€€ìµ¥¸è€ÄÀ°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€…µµAÉ¥•½¹Ñ¥¹Õ¥Ñäèì4(€€€€€µ¥¹I…Ñ¥¼è¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}55}AI%}5%9}IQ%<œ°€À¸È°ì4(€€€€€€€µ¥¸è€À¸ÀÀÀÄ°4(€€€€€€€µ…àè€Ä°4(€€€€€ô¤°4(€€€€€µ…áI…Ñ¥¼è¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}55}AI%}5a}IQ%<œ°€Ô°ì4(€€€€€€€µ¥¸è€Ä°4(€€€€€ô¤°4(€€€€€É•Í•Ñ™Ñ•É5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}55}AI%}IMQ}5Lœ°€ÄÕ|ÀÀÀ°ì4(€€€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€ô¤°4(€€€€€½¹™¥Éµ…Ñ¥½¹QÉ…‘•Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€1=]}5%IQ}I	=U9}55}AI%}=9%I5Q%=9}QILœ°4(€€€€€€€€È°4(€€€€€€€ìµ¥¸è€È°µ…àè€ÄÀô°4(€€€€€€¤°4(€€€€€½¹™¥Éµ…Ñ¥½¹]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€1=]}5%IQ}I	=U9}55}AI%}=9%I5Q%=9}]%9=]}5Lœ°4(€€€€€€€€É|ÀÀÀ°4(€€€€€€€ìµ¥¸è€ÄÀÀ°µ…àè€ÌÁ|ÀÀÀô°4(€€€€€€¤°4(€€€€€½¹™¥Éµ…Ñ¥½¹Q½±•É…¹•AÐè¹Õµ‰•É¹Ø 4(€€€€€€€€1=]}5%IQ}I	=U9}55}AI%}=9%I5Q%=9}Q=1I9}APœ°4(€€€€€€€€ÈÀ°4(€€€€€€€ìµ¥¸è€À¸Ä°µ…àè€ÄÀÀô°4(€€€€€€¤°4(€€€ô°4(€€€‰¥]¥¹¹•ÉAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}	%}]%99I}APœ°€ÔÀ°ìµ¥¸è€Äô¤°4(€€€•¹ÑÉåAÉ½™¥±•Ìèl4(€€€€€ì(€€€€€€€¥è€ÈÕ|ÌÔœ°(€€€€€€€±…‰•°è€ŸšÞÇ¢Þ0È×ŠLÌÔ”œ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°4(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°4(€€€€€€€‘É½Á5…áAÐè€ÌÔ°4(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ô°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€±¥Ù•á¥ÑMÑÉ…Ñ•¥•Ìèì(€€€€€€€€€`àè€µ¥É…Ñ•‘}ÈÕ|ÌÕ}àá}±¥Ù”œ°(€€€€€€€ô°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÈÕ|ÌÕ}IU}UI}10œ°(€€€€€€€±…‰•°è€µIUµ10ƒ
+ÜƒšÞÇ¢Þ3–>7–òä€¬ƒ–³–Ç¢º‹–6WšÖIU¢þšîœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ô°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€É•ÅÕ¥É•!•…±Ñ¡åIÕI¥Í¬èÑÉÕ”°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl`àœ°€a1t°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±ÌèlÀ¸Ä°€Åt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÈÕ|ÌÕ}IU}UI}PÈÁ|ÈÐœ°(€€€€€€€±…‰•°è€µIUµPÈÀ´ÈÐƒ
+ÜIU¢þšî€¬ƒ–2_’ê°ÈÃŠLÈÓš^Øœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ô°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€É•ÅÕ¥É•!•…±Ñ¡åIÕI¥Í¬èÑÉÕ”°(€€€€€€€‰•¥©¥¹!½ÕÉI…¹•ÌèmlÈÀ°€ÈÑut°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl`àœ°€a1t°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±ÌèlÀ¸Ä°€Åt°(€€€€€ô°(€€€€€ì4(€€€€€€€¥è€ÌÁ}HÈÍ}Äœ°4(€€€€€€€±…‰•°è€Ÿš¾W’âk–B8ÌÃžžK–ƒ
+Üƒ–>7–òäÈ—ŠLÌ”ƒ
+Üƒš¾=5¥¹Ó¦š[š²„œ°4(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°4(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°4(€€€€€€€‘É½Á5…áAÐè€ÌÔ°4(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°4(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°4(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°4(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°4(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°4(€€€€€ô°4(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}Ìœ°(€€€€€€€±…‰•°è€Ÿš¾W’âk–B8ÌÃžžK–ƒ
+Üƒ–>7–òäÈ—ŠLÌ”ƒ
+Üƒš¾=5¥¹Ó–&7’â'š²„œ°4(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°4(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°4(€€€€€€€‘É½Á5…áAÐè€ÌÔ°4(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°4(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°4(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°4(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°4(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ì°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}Å}aœ°(€€€€€€€±…‰•°è€µaƒ
+Ü€ÌÃžžK––>7–òäÈ—ŠLÌ”ƒ
+Üƒ¦š[š²„ƒ
+Üƒ–’k–ºç¦?žr–º{–Ë–ìœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèla}a1t°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±Ìè±¥ÍÑ¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}a}A%Qe}M=1Lœ°(€€€€€€€€€lœÀ¸ÀÔœ°€œÀ¸Äœ°€œÀ¸ÈÔœ°€œÀ¸Ôœ°€œÄt°(€€€€€€€€¤¹µ…À¡9Õµ‰•È¤¹™¥±Ñ•È ¡Ù…±Õ”¤€ôø9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ù…±Õ”¤€˜˜Ù…±Õ”€ø€À¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}Å}aDœ°(€€€€€€€±…‰•°è€µaDƒ
+Üƒ¦š[š²‡–>7–òä€¬ƒ–>¿š&Ÿ¢†3–ºç¦<¿’îßš‚ó¢Ò£¦<œ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè€Ô°(€€€€€€€µ…á¹ÑÉå%µÁ…ÑAÐè€Ì°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlÅaE}`àœ°€ÅaE}`ÌÀœ°€ÅaE}`ØÀt°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±ÌèlÀ¸Ä°€À¸Ô°€Åt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}É}=91dœ°(€€€€€€€±…‰•°è€µÈƒ
+Ü€ÌÃžžK––>7–òäÈ—ŠLÌ”ƒ
+Üƒ–>«–>[ž²³’ê3š²‡šrë’òhœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ¥¹M¥¹…±=É‘¥¹…°è€È°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€È°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlÉ}a1œ°€É}a1} ÈÁ}]t°(€€€€€€€±¥Ù•á¥ÑMÑÉ…Ñ•¥•Ìèì(€€€€€€€€€É}a1è€µ¥É…Ñ•‘}”ÌÁ}ÈÈÍ}˜É}½¹±å}œÉ}á±•}±¥Ù”œ°(€€€€€€€ô°(€€€€€ô°(€€€€€ì(€€€€€€€€¼¼9•Ü%Ì¥¹Ñ•¹Ñ¥½¹…±±ä…Ù½¥Ñ¡”É•Ñ¥É•A=MQ}ÌÁ}HÈÍ}Í|¨ÁÉ•™¥à¸(€€€€€€€€¼¼Q¡•äÉ•…Ñ”±•…¸™½ÉÝ…ÉÍ…µÁ±•ÌÝ¥Ñ¡½ÕÐÉ•ÝÉ¥Ñ¥¹œ¡¥ÍÑ½É¥…°É½ÝÌ¸(€€€€€€€¥è€IQ}HÈÍ}Í}XÈœ°(€€€€€€€±…‰•°è€µIPµÌµXÈƒ
+Ü€ÌÃžžK––>7–òäÈ—ŠLÌ”ƒ
+Üƒ–&7’â'š²‡–&7–BGš‚ßšr°œ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è‰½½±•…¹¹Ø 1=]}5%IQ}I	=U9}IQ}HÈÍ}Í}XÉ}9	1œ°ÑÉÕ”¤°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ì°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlIQ}Í}a1}XÈt°(€€€€€€€±¥Ù•á¥ÑMÑÉ…Ñ•¥•Ìèì(€€€€€€€€€IQ}Í}a1}XÈè€µ¥É…Ñ•‘}ÉÑ}ÈÈÍ}˜Í}ØÉ}á±•}±¥Ù”œ°(€€€€€€€ô°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€IQ}HÈÍ}É}=91e}XÈœ°(€€€€€€€±…‰•°è€µIPµÈµXÈƒ
+Ü€ÌÃžžK––>7–òäÈ—ŠLÌ”ƒ
+Üƒ–>«–>[ž²³’ê3š²‡–&7–BGš‚ßšr°œ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è‰½½±•…¹¹Ø 1=]}5%IQ}I	=U9}IQ}HÈÍ}É}XÉ}9	1œ°ÑÉÕ”¤°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ¥¹M¥¹…±=É‘¥¹…°è€È°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€È°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlIQ}É}a1}XÈt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}Í}aœ°(€€€€€€€±…‰•°è€µÌµaƒ
+Üƒ–&7’â'š²‡šrë’òhƒ
+Üƒžr–ºy57–ºç¦?–Ë–ìœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ì°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlÍa}a1t°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±Ìè±¥ÍÑ¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}ÈÍ}a}A%Qe}M=1Lœ°(€€€€€€€€€lœÀ¸ÀÔœ°€œÀ¸Äœ°€œÀ¸ÈÔœ°€œÀ¸Ôœ°€œÄt°(€€€€€€€€¤¹µ…À¡9Õµ‰•È¤¹™¥±Ñ•È ¡Ù…±Õ”¤€ôø9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ù…±Õ”¤€˜˜Ù…±Õ”€ø€À¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}É}=91e}aœ°(€€€€€€€±…‰•°è€µÈµaƒ
+Üƒ–>«–>[ž²³’ê3š²‡šrë’òhƒ
+Üƒžr–ºy57–ºç¦?–Ë–ìœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ¥¹M¥¹…±=É‘¥¹…°è€È°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€È°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlÉa}a1t°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±Ìè±¥ÍÑ¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}ÈÍ}a}A%Qe}M=1Lœ°(€€€€€€€€€lœÀ¸ÀÔœ°€œÀ¸Äœ°€œÀ¸ÈÔœ°€œÀ¸Ôœ°€œÄt°(€€€€€€€€¤¹µ…À¡9Õµ‰•È¤¹™¥±Ñ•È ¡Ù…±Õ”¤€ôø9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ù…±Õ”¤€˜˜Ù…±Õ”€ø€À¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}Å}9%!Pœ°(€€€€€€€±…‰•°è€µQ%5–’s¦^Ðƒ
+Ü€ÄàèÀÃŠLÀàèÀÀƒ
+Üƒ¦š[š²„œ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€‰•¥©¥¹!½ÕÉI…¹•ÌèmlÀ°€át°lÄà°€ÈÑut°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlQ%5}a1t°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}HÈÍ}Å}dœ°(€€€€€€€±…‰•°è€µQ%5žf÷–’¤ƒ
+Ü€ÀàèÀÃŠLÄàèÀÀƒ
+Üƒ¦š[š²‡–¾çžœœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€‰•¥©¥¹!½ÕÉI…¹•Ìèmlà°€Äáut°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlQ%5}a1t°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}ÈÕ|ÌÉ}HÈÑ}Äœ°(€€€€€€€±…‰•°è€XÈƒ
+Üƒš¾W’âk–B8ÌÃžžK–ƒ
+Üƒ¢Þ0ÈÔ—ŠLÌÈ”ƒ
+Üƒ–>7–òäÈ—ŠLÐ”ƒ
+Üƒ¦š[š²„œ°4(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°4(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°4(€€€€€€€‘É½Á5…áAÐè€ÌÈ°4(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°4(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ð°4(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°4(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°4(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°4(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}XÉ}5a}9QIe})U5A}APœ°4(€€€€€€€€€€Ì°4(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}ÈÕ|ÌÉ}HÈÑ}Å}aÄœ°(€€€€€€€±…‰•°è€XÈµaÄƒ
+Ü€À¸Ä¼ÄM=3š&Ÿ¢†3–ºç¦?–¾çžœƒ
+ÜHÈµ ÄÔœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÈ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ð°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}XÉ}5a}9QIe})U5A}APœ°(€€€€€€€€€€Ì°(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€¤°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlXÉ}HÉ} ÄÔt°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±ÌèlÀ¸Ä°€Åt°(€€€€€€€±¥Ù•A½Í¥Ñ¥½¹M½°è€À¸Ä°(€€€€€€€±¥Ù•á¥ÑMÑÉ…Ñ•¥•Ìèì(€€€€€€€€€XÉ}HÉ} ÄÔè€µ¥É…Ñ•‘}”ÌÁ}ÈÕ|ÌÉ}ÈÈÑ}˜Å}•á•ŒÀÅ}ØÉ}ÈÉ} ÄÕ}±¥Ù”œ°(€€€€€€€ô°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}ÈÕ|ÌÉ}HÈÑ}Å|ÀÑ|ÈÐœ°(€€€€€€€±…‰•°è€XÈµQ%5ƒ
+Ü€ÀÐèÀÃŠLÈÐèÀÀƒ
+Üƒ¢Þ0ÈÔ—ŠLÌÈ”ƒ
+Üƒ–>7–òäÈ—ŠLÐ”ƒ
+Üƒ¦š[š²„œ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÈ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ð°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€‰•¥©¥¹!½ÕÉI…¹•ÌèmlÐ°€ÈÑut°(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}XÉ}5a}9QIe})U5A}APœ°(€€€€€€€€€€Ì°(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€¤°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlXÉ}Q%5}HÉ} ÄÔt°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±ÌèlÀ¸Ä°€À¸Ô°€Åt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}ÈÕ|ÌÉ}HÈÍ}Å}MPÈÀÀœ°(€€€€€€€±…‰•°è€Dƒ
+ÜÁ½ÍÐµÉ…€ðôÌÁÌƒ
+Ü‘É½ÀÈÔ´ÌÈ”ƒ
+ÜÉ•‰½Õ¹È´Ì”Ý¥Ñ¡¥¸ÈÀÁµÌƒ
+Ü™¥ÉÍÐœ°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÈ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ì°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…áI•‰½Õ¹‘É½µ1½Ý5Ìè€ÈÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}E}5a}9QIe})U5A}APœ°(€€€€€€€€€€Ô°(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€¤°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlE}a1t°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±Ìè±¥ÍÑ¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}E}A%Qe}M=1Lœ°(€€€€€€€€€lœÀ¸ÀÔœ°€œÀ¸ÈÔœ°€œÀ¸Ôœ°€œÄt°(€€€€€€€€¤¹µ…À¡9Õµ‰•È¤¹™¥±Ñ•È ¡Ù…±Õ”¤€ôø9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ù…±Õ”¤€˜˜Ù…±Õ”€ø€À¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÌÁ}U5@Õ}9É}4Èœ°(€€€€€€€±…‰•°è€µU5@µ9ƒ
+Üƒš¾W’âk–B8ÌÃžžK–ƒ
+Ü€øôÔM=3ž‚ã–6Tƒ
+Ü€ËžžK–’â/’âž²Sžr–º{’æÃ–6Tƒ
+Üƒš¾=5¥¹Óšr–’hËš²„œ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è‰½½±•…¹¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}U5A}9aQ}	Ue}9	1œ°(€€€€€€€€€ÑÉÕ”°(€€€€€€€€¤°(€€€€€€€Í¥¹…±5½‘”è€U5A}9aQ}	Udœ°(€€€€€€€Ý¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}U5A}]%9=]}5Lœ°€Å|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€ÈÔÀ°(€€€€€€€€€µ…àè€Õ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€‘É½Á5¥¹AÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}U5A}5%9}I=A}APœ°€ÄÔ°ì(€€€€€€€€€µ¥¸è€Ä°(€€€€€€€€€µ…àè€ÄÀÀ°(€€€€€€€ô¤°(€€€€€€€‘É½Á5…áAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}U5A}5a}I=A}APœ°€ÔÔ°ì(€€€€€€€€€µ¥¸è€Ä°(€€€€€€€€€µ…àè€ÄÀÀ°(€€€€€€€ô¤°(€€€€€€€µ¥¹ÕµÁM½°è¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}U5A}5%9}M=0œ°€Ô°ì(€€€€€€€€€µ¥¸è€À¸ÀÄ°(€€€€€€€€€µ…àè€ÄÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€¹•áÑ	Õå]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}U5A}9aQ}	Ue}]%9=]}5Lœ°(€€€€€€€€€€É|ÀÀÀ°(€€€€€€€€€ìµ¥¸è€ÄÀÀ°µ…àè€ÄÁ|ÀÀÀô°(€€€€€€€€¤°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€À°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Å|ÀÀÀ°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€É|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€È°(€€€€€€€É••¹ÑÉå½½±‘½Ý¹5Ìè€É|ÀÀÀ°(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}U5A}5a}9QIe})U5A}APœ°(€€€€€€€€€€ÄÔ°(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€¤°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl}U5A}9	}`àt°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±ÌèlÅt°(€€€€€€€€¼¼½ÉÝ…É½µÁ…É¥Í½¸½¹±äèÉ•½ÉÑ¡”±¥™•å±”µ…Ý…É”Õ…É‘•¥Í¥½¸°(€€€€€€€€¼¼‰ÕÐ‘¼¹½Ð‰±½¬½È…‘±…Ñ•¹äÑ¼Ñ¡¥Ì¹•Ü…ÕÍ…°•¹ÑÉä½¡½ÉÐ¸(€€€€€€€ÉÕÕ…É‘5½‘”è€1	1}=91dœ°(€€€€€ô°(€€€€€€¸¸¸¡µ¥É…Ñ•‘I•‰½Õ¹‘™É¹…‰±•€ül(€€€€€€€lI|ÌÀÀœ°€ÌÀÁt°(€€€€€€€lI|ØÀÀœ°€ØÀÁt°(€€€€€€€lI|ÄÀÀÀœ°€Å|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°½¹™¥Éµ…Ñ¥½¹5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€€¼¼-••ÀI|ÌÀÀ…ÌÑ¡”µ•…ÍÕÉ•™…ÍÐÁ…Ñ ¸Q¡”€ØÀÀ¼ÄÀÀÁµÌÙ…É¥…¹ÑÌ(€€€€€€€€¼¼É•µ…¥¸ÅÕ•Éå…‰±”‰ÕÐÍÑ½ÀÁÉ½‘Õ¥¹œ¹•ÜÁ½Í¥Ñ¥½¹Ì…™Ñ•È„(€€€€€€€€¼¼Á•ÉÍ¥ÍÑ•¹Ñ±ä¹•…Ñ¥Ù”™½ÉÝ…ÉÍ…µÁ±”¸(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è¥€ôôô€I|ÌÀÀœ°(€€€€€€€±¥Ù•MÑÉ…Ñ•å%è¥€ôôô€I|ÌÀÀœ€ü€µ¥É…Ñ•‘}™É|ÌÀÁ}¡ÌÈÁ} ÌÁ}±¥Ù”œ€è¹Õ±°°(€€€€€€€±…‰•°èµHƒ
+Üƒ–þ¯¦–>7¢ö³–îÛžî´ƒ
+Ü€‘í½¹™¥Éµ…Ñ¥½¹5ÍõµÏž†»¢º‘€°(€€€€€€€Ý¥¹‘½Ý5Ìè€Å|ÀÀÀ°(€€€€€€€‘É½Á5¥¹AÐè€ÈÔ°(€€€€€€€‘É½Á5…áAÐè€ÌÔ°(€€€€€€€É•‰½Õ¹‘5¥¹AÐè€È°(€€€€€€€É•‰½Õ¹‘5…áAÐè€Ô°(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€€€µ…á1¥™•å±••5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€µ…áM¥¹…±ÍA•É5¥¹Ðè€Ä°(€€€€€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}I}5a}9QIe})U5A}APœ°(€€€€€€€€€€ÄÔ°(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€¤°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlI}`àœ°€I}`ÄÔœ°€I}!LÈÁ} ÌÀt°(€€€€€€€…Á…¥ÑåÝ…É”èÑÉÕ”°(€€€€€€€Á½Í¥Ñ¥½¹M½±Ìè±¥ÍÑ¹Ø (€€€€€€€€€€1=]}5%IQ}I	=U9}I}A%Qe}M=1Lœ°(€€€€€€€€€lœÀ¸ÀÔœ°€œÀ¸Ät°(€€€€€€€€¤¹µ…À¡9Õµ‰•È¤¹™¥±Ñ•È ¡Ù…±Õ”¤€ôø9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ù…±Õ”¤€˜˜Ù…±Õ”€ø€À¤°(€€€€€€€™…ÍÑ½¹™¥Éµ…Ñ¥½¸èì(€€€€€€€€€½¹™¥Éµ…Ñ¥½¹5Ì°(€€€€€€€€€µ¥¹AÉ¥•½¹Ñ¥¹Õ…Ñ¥½¹AÐè¹Õµ‰•É¹Ø (€€€€€€€€€€€€1=]}5%IQ}I	=U9}I}5%9}=9Q%9UQ%=9}APœ°(€€€€€€€€€€€€Ä°(€€€€€€€€€€€ìµ¥¸è€´ÄÀÀ°µ…àè€ÄÀÀô°(€€€€€€€€€€¤°(€€€€€€€€€µ¥¹	ÕåQàè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}I}5%9}	Ue}Q`œ°€È°ì(€€€€€€€€€€€µ¥¸è€Ä°(€€€€€€€€€€€µ…àè€ÄÀÀ°(€€€€€€€€€ô¤°(€€€€€€€€€µ¥¹U¹¥ÅÕ•	Õå•ÉÌè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}I}5%9}	UeILœ°€È°ì(€€€€€€€€€€€µ¥¸è€Ä°(€€€€€€€€€€€µ…àè€ÄÀÀ°(€€€€€€€€€ô¤°(€€€€€€€€€µ¥¹9•Ñ±½ÝM½°è¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}I}5%9}9Q}1=]}M=0œ°€À¸Ô°ì(€€€€€€€€€€€µ¥¸è€´Å|ÀÀÀ°(€€€€€€€€€€€µ…àè€Å|ÀÀÀ°(€€€€€€€€€ô¤°(€€€€€€€€€µ¥¹9•Ñ±½Ý•±•É…Ñ¥½¹M½°è¹Õµ‰•É¹Ø (€€€€€€€€€€€€1=]}5%IQ}I	=U9}I}5%9}9Q}1=]}1}M=0œ°(€€€€€€€€€€€€À°(€€€€€€€€€€€ìµ¥¸è€´Å|ÀÀÀ°µ…àè€Å|ÀÀÀô°(€€€€€€€€€€¤°(€€€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è¹Õµ‰•É¹Ø (€€€€€€€€€€€€1=]}5%IQ}I	=U9}I}5a}M11}	Ue}IQ%<œ°(€€€€€€€€€€€€À¸Ô°(€€€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€€€¤°(€€€€€€€€€µ…áQ½Á	Õå•ÉM¡…É•AÐè¹Õµ‰•É¹Ø (€€€€€€€€€€€€1=]}5%IQ}I	=U9}I}5a}Q=A}	UeI}M!I}APœ°(€€€€€€€€€€€€ØÀ°(€€€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€€€¤°(€€€€€€€€€µ…áI½Õ¹‘QÉ¥Á%µÁ…ÑAÐè¹Õµ‰•É¹Ø (€€€€€€€€€€€€1=]}5%IQ}I	=U9}I}5a}I=U9}QI%A}%5AQ}APœ°(€€€€€€€€€€€€Ô°(€€€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€€€€€¤°(€€€€€€€ô°(€€€€€ô¤¤€èmt¤°(€€€t°(€€€•á¥ÑAÉ½™¥±•Ìèl(€€€€€ì(€€€€€€€¥è€}U5A}9	}`àœ°(€€€€€€€±…‰•°è€µU5@µ9ƒ
+Üƒ–në–ºkš2šr$ãžžHœ°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}U5@Õ}9É}4Èt°(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€™¥á•‘!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}U5A}!=1}5Lœ°€á|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€ÈÔÀ°(€€€€€€€€€µ…àè€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€`Ìœ°(€€€€€€€±…‰•°è€Ÿ–në–ºkš2šr$ÏžžHœ°4(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°4(€€€€€€€™¥á•‘!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}!=1|ÍM}5Lœ°€Í|ÀÀÀ°ìµ¥¸è€ÈÔÀô¤°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€`àœ°4(€€€€€€€±…‰•°è€Ÿ–në–ºkš2šr$ãžžHœ°4(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°4(€€€€€€€™¥á•‘!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}!=1|áM}5Lœ°€á|ÀÀÀ°ìµ¥¸è€ÈÔÀô¤°4(€€€€€ô°4(€€€€€ì(€€€€€€€¥è€a1œ°(€€€€€€€±…‰•°è€Ÿš^Ÿž& €¬à—šþšÒì€¼ƒ–n{šJÌ”€¼€Ä×žžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€1dœ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}QI%1%9}Q%YQ%=9}APœ°4(€€€€€€€€€€à°4(€€€€€€€€€ìµ¥¸è€À¸Ä°µ…àè€Å|ÀÀÀô°4(€€€€€€€€¤°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}1e}QI%1%9}MQ=A}APœ°€Ì°ì4(€€€€€€€€€µ¥¸è€À¸Ä°4(€€€€€€€€€µ…àè€ÄÀÀ°4(€€€€€€€ô¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}1e}MQ}QA}APœ°€Äà°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€€€µ…àè€Å|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}MQ}QA}]%9=]}5Lœ°4(€€€€€€€€€€Õ|ÀÀÀ°4(€€€€€€€€€ìµ¥¸è€Àô°4(€€€€€€€€¤°4(€€€€€€€±½ÍÍ¡•­Ñ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}1e}1=MM}!-}5Lœ°€Ù|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€ô¤°4(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}1e}5a}!=1}5Lœ°€ÄÕ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€ô°4(€€€€€€¸¸¹l(€€€€€€€la}a1œ°lÌÁ}HÈÍ}Å}at°€Ÿ–ºç¦?šž~”a1t°(€€€€€€€lÉ}a1œ°lÌÁ}HÈÍ}É}=91dt°€Ÿž²³’ê3š²‡šrë’òha1t°(€€€€€€€lIQ}Í}a1}XÈœ°lIQ}HÈÍ}Í}XÈt°€Ÿ–&7’â'š²‡šrë’òk–&7–BDa1t°(€€€€€€€lIQ}É}a1}XÈœ°lIQ}HÈÍ}É}=91e}XÈt°€Ÿž²³’ê3š²‡šrë’òk–&7–BDa1t°(€€€€€€€lÍa}a1œ°lÌÁ}HÈÍ}Í}at°€Ÿ–&7’â'š²‡šrë’òk–ºç¦?šž~”a1t°(€€€€€€€lÉa}a1œ°lÌÁ}HÈÍ}É}=91e}at°€Ÿž²³’ê3š²‡šrë’òk–ºç¦?šž~”a1t°(€€€€€€€lQ%5}a1œ°lÌÁ}HÈÍ}Å}9%!Pœ°€ÌÁ}HÈÍ}Å}dt°€Ÿ–"š^ÛšºÔa1t°(€€€€€t¹µ…À ¡m¥°•¹ÑÉåAÉ½™¥±•%‘Ì°±…‰•±t¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘Ì°(€€€€€€€•á¥Ñ5½‘”è€1dœ°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­Ñ5Ìè€Ù|ÀÀÀ°(€€€€€€€µ…á!½±‘5Ìè€ÄÕ|ÀÀÀ°(€€€€€ô¤¤°(€€€€€ì(€€€€€€€¥è€É}a1} ÈÁ}]œ°(€€€€€€€±…‰•°è€Ÿž²³’ê3š²‡šrë’òha1€¬€ÈÀ—ž†³š¶‹š6¾ò#–&7–BG¾ò$œ°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}HÈÍ}É}=91dt°(€€€€€€€•á¥Ñ5½‘”è€I%M-}a1œ°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­Ñ5Ìè€Ù|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­I•½Ù•ÉåAÐè€Ä°(€€€€€€€µ…á!½±‘5Ìè€ÄÕ|ÀÀÀ°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€E}a1œ°(€€€€€€€±…‰•°è€D™…ÍÐµÉ•‰½Õ¹…Á…¥Ñäa1œ°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}ÈÕ|ÌÉ}HÈÍ}Å}MPÈÀÀt°(€€€€€€€•á¥Ñ5½‘”è€1dœ°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­Ñ5Ìè€Ù|ÀÀÀ°(€€€€€€€µ…á!½±‘5Ìè€ÄÕ|ÀÀÀ°(€€€€€ô°(€€€€€€¸¸¹l(€€€€€€€lÅaE}`àœ°€á|ÀÀÁt°(€€€€€€€lÅaE}`ÌÀœ°€ÌÁ|ÀÀÁt°(€€€€€€€lÅaE}`ØÀœ°€ØÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°™¥á•‘!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+ÜµaG–ºç¦?šž~—–në–ºkš2šr%€°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}HÈÍ}Å}aDt°(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€™¥á•‘!½±‘5Ì°(€€€€€ô¤¤°(€€€€€€¸¸¸¡µ¥É…Ñ•‘I•‰½Õ¹‘™É¹…‰±•€ümì(€€€€€€€¥è€I}`àœ°(€€€€€€€±…‰•°è€µHƒ
+Üƒ–në–ºkš2šr$ãžžHœ°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlI|ÌÀÀœ°€I|ØÀÀœ°€I|ÄÀÀÀt°(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€™¥á•‘!½±‘5Ìè€á|ÀÀÀ°(€€€€€ô°ì(€€€€€€€¥è€I}`ÄÔœ°(€€€€€€€±…‰•°è€µHƒ
+Üƒ–në–ºkš2šr$Ä×žžHœ°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlI|ÌÀÀœ°€I|ØÀÀœ°€I|ÄÀÀÀt°(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€™¥á•‘!½±‘5Ìè€ÄÕ|ÀÀÀ°(€€€€€ô°ì(€€€€€€€¥è€I}!LÈÁ} ÌÀœ°(€€€€€€€±…‰•°è€µHƒ
+Üƒž†³š¶‹š6|ÈÀ”€¼ƒšr¦VüÌÃžžHœ°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlI|ÌÀÀœ°€I|ØÀÀœ°€I|ÄÀÀÀt°(€€€€€€€•á¥Ñ5½‘”è€Q%0œ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€Å|ÀÀÀ°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÀÀ°(€€€€€€€µ…á!½±‘5Ìè€ÌÁ|ÀÀÀ°(€€€€€õt€èmt¤°(€€€€€€¸¸¹l(€€€€€€€lÅ}É} Øœ°€É|ÀÀÀ°€Ùt°(€€€€€€€lÅ}É} àœ°€É|ÀÀÀ°€át°(€€€€€€€lÅ}Í} àœ°€Í|ÀÀÀ°€át°(€€€€€t¹µ…À ¡m¥°±½ÍÍ¡•­Ñ5Ì°¡…É‘MÑ½ÁAÑt¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+ÜÇš^§šr–òÇ–*ÿ¦–é€°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}HÈÍ}Ät°(€€€€€€€•á¥Ñ5½‘”è€I%M-}a1œ°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°(€€€€€€€¡…É‘MÑ½ÁAÐ°(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­Ñ5Ì°(€€€€€€€±½ÍÍ¡•­I•½Ù•ÉåAÐè€Ä°(€€€€€€€µ…á!½±‘5Ìè€ÄÕ|ÀÀÀ°(€€€€€ô¤¤°(€€€€€€¸¸¹l(€€€€€€€lÅ}ÜÕ} ÌÀœ°€ÜÔ°€ÌÁ|ÀÀÁt°(€€€€€€€lÅ}ÔÁ} ØÀœ°€ÔÀ°€ØÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°½É•]•¥¡ÑAÐ°ÉÕ¹¹•É!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+ÜÇš‚ã–þa1€¬ƒ–Âû’îM€°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}HÈÍ}Ät°(€€€€€€€•á¥Ñ5½‘”è€	19}a1}IU99I}I%M,œ°(€€€€€€€½É•]•¥¡ÑAÐ°(€€€€€€€ÉÕ¹¹•É!½±‘5Ì°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÄÔ°(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­Ñ5Ìè€Ù|ÀÀÀ°(€€€€€ô¤¤°(€€€€€€¸¸¹l(€€€€€€€lÅ}MQ%I} ØÀœ°€ØÁ|ÀÀÁt°(€€€€€€€lÅ}MQ%I} ÄÈÀœ°€ÄÈÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°µ…á!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+ÜÇ–"žêŸžžï–*£š¶‹žn!€°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}HÈÍ}Ät°(€€€€€€€•á¥Ñ5½‘”è€MQ%I}QI%1%9œ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÄÔ°(€€€€€€€µ…á!½±‘5Ì°(€€€€€€€ÑÉ…¥±¥¹Q¥•ÉÌèl(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°ÍÑ½ÁAÐè€àô°(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÐÀ°ÍÑ½ÁAÐè€ÄÈô°(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€àÀ°ÍÑ½ÁAÐè€Äàô°(€€€€€€€t°(€€€€€ô¤¤°(€€€€€ì(€€€€€€€¥è€aÔÀœ°(€€€€€€€±…‰•°è€œÔÀ”a1½É”€¬€ÔÀ”™¥á•´áÌÉÕ¹¹•Èœ°4(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÈÕ|ÌÔt°4(€€€€€€€•á¥Ñ5½‘”è€	19}a1}`àœ°4(€€€€€€€½É•]•¥¡ÑAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}	19|ÔÁ}=I}]%!Q}APœ°€ÔÀ°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€€€µ…àè€ÄÀÀ°4(€€€€€€€ô¤°4(€€€€€€€ÉÕ¹¹•É!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}	19}IU99I}!=1}5Lœ°€á|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€ÈÔÀ°4(€€€€€€€ô¤°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}QI%1%9}Q%YQ%=9}APœ°€à°ìµ¥¸è€À¸Äô°4(€€€€€€€€¤°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}QI%1%9}MQ=A}APœ°€Ì°ìµ¥¸è€À¸Ä°µ…àè€ÄÀÀô°4(€€€€€€€€¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}1e}MQ}QA}APœ°€Äà°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€ô¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}MQ}QA}]%9=]}5Lœ°€Õ|ÀÀÀ°ìµ¥¸è€Àô°4(€€€€€€€€¤°4(€€€€€€€±½ÍÍ¡•­Ñ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}1e}1=MM}!-}5Lœ°€Ù|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€ô¤°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aÈÔœ°4(€€€€€€€±…‰•°è€œÈÔ”a1½É”€¬€ÜÔ”™¥á•´áÌÉÕ¹¹•Èœ°4(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÈÕ|ÌÔt°4(€€€€€€€•á¥Ñ5½‘”è€	19}a1}`àœ°4(€€€€€€€½É•]•¥¡ÑAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}	19|ÈÕ}=I}]%!Q}APœ°€ÈÔ°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€€€µ…àè€ÄÀÀ°4(€€€€€€€ô¤°4(€€€€€€€ÉÕ¹¹•É!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}	19}IU99I}!=1}5Lœ°€á|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€ÈÔÀ°4(€€€€€€€ô¤°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}QI%1%9}Q%YQ%=9}APœ°€à°ìµ¥¸è€À¸Äô°4(€€€€€€€€¤°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}QI%1%9}MQ=A}APœ°€Ì°ìµ¥¸è€À¸Ä°µ…àè€ÄÀÀô°4(€€€€€€€€¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}1e}MQ}QA}APœ°€Äà°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€ô¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}MQ}QA}]%9=]}5Lœ°€Õ|ÀÀÀ°ìµ¥¸è€Àô°4(€€€€€€€€¤°4(€€€€€€€±½ÍÍ¡•­Ñ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}1e}1=MM}!-}5Lœ°€Ù|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€ô¤°4(€€€€€ô°4(€€€€€€¸¸¹l(€€€€€€€lXÉ}HÉ} ÄÀœ°€ÄÁt°(€€€€€€€lXÉ}HÉ} ÄÔœ°€ÄÕt°(€€€€€t¹µ…À ¡m¥°™…±±‰…­!…É‘MÑ½ÁAÑt¤€ôø€¡ì4(€€€€€€€¥°4(€€€€€€€±…‰•°è€‘í¥‘ôð€ËžžK–òÇ–*ÿšŽš~”€¼ƒž†³š¶‹š6|‘í™…±±‰…­!…É‘MÑ½ÁAÑô•€°4(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘Ìè¥€ôôô€XÉ}HÉ} ÄÔœ(€€€€€€€€€€ülÌÁ}ÈÕ|ÌÉ}HÈÑ}Äœ°€ÌÁ}ÈÕ|ÌÉ}HÈÑ}Å}aÄt(€€€€€€€€€€èlÌÁ}ÈÕ|ÌÉ}HÈÑ}Ät°(€€€€€€€•á¥Ñ5½‘”è€I%M-}a1œ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°4(€€€€€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€1=]}5%IQ}I	=U9}XÉ}!I}MQ=A|‘í™…±±‰…­!…É‘MÑ½ÁAÑõ}AQ€°4(€€€€€€€€€™…±±‰…­!…É‘MÑ½ÁAÐ°4(€€€€€€€€€ìµ¥¸è€À¸Ä°µ…àè€ÄÀÀô°4(€€€€€€€€¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°4(€€€€€€€±½ÍÍ¡•­Ñ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}XÉ}1=MM}!-}5Lœ°€É|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€ô¤°4(€€€€€€€±½ÍÍ¡•­I•½Ù•ÉåAÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}XÉ}5a}I=YIe}I=5}1=]}APœ°4(€€€€€€€€€€Ä°4(€€€€€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°4(€€€€€€€€¤°4(€€€€€€€µ…á!½±‘5Ìè€ÄÕ|ÀÀÀ°(€€€€€ô¤¤°(€€€€€ì(€€€€€€€¥è€XÉ}Q%5}HÉ} ÄÔœ°(€€€€€€€±…‰•°è€XÈµQ%5ð€ÀÐèÀÃŠLÈÐèÀÀ€¼€ËžžK–òÇ–*ÿšŽš~”€¼ƒž†³š¶‹š6|ÄÔ”œ°(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}ÈÕ|ÌÉ}HÈÑ}Å|ÀÑ|ÈÐt°(€€€€€€€•á¥Ñ5½‘”è€I%M-}a1œ°(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÄÔ°(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­Ñ5Ìè€É|ÀÀÀ°(€€€€€€€±½ÍÍ¡•­I•½Ù•ÉåAÐè€Ä°(€€€€€€€µ…á!½±‘5Ìè€ÄÕ|ÀÀÀ°(€€€€€ô°(€€€€€€¸¸¹l4(€€€€€€€lXÉ}ÜÕ} ÈÀœ°€ÈÁ|ÀÀÁt°4(€€€€€€€lXÉ}ÜÕ} ØÀœ°€ØÁ|ÀÀÁt°4(€€€€€t¹µ…À ¡m¥°™…±±‰…­IÕ¹¹•É!½±‘5Ít¤€ôø€¡ì4(€€€€€€€¥°4(€€€€€€€±…‰•°è€‘í¥‘ôð€ÈÔ”a1½É”€¬€ÜÔ”ÉÕ¹¹•É€°4(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÌÁ}ÈÕ|ÌÉ}HÈÑ}Ät°4(€€€€€€€•á¥Ñ5½‘”è€	19}a1}IU99Hœ°4(€€€€€€€½É•]•¥¡ÑAÐè€ÈÔ°4(€€€€€€€ÉÕ¹¹•É!½±‘5Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€€1=]}5%IQ}I	=U9|‘í¥‘õ}IU99I}!=1}5M€°4(€€€€€€€€€™…±±‰…­IÕ¹¹•É!½±‘5Ì°4(€€€€€€€€€ìµ¥¸è€ÈÔÀô°4(€€€€€€€€¤°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€à°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€Ì°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè€Äà°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°4(€€€€€€€±½ÍÍ¡•­Ñ5Ìè€Ù|ÀÀÀ°4(€€€€€ô¤¤°4(€€€€€€¸¸¹l4(€€€€€€€laHÍ} ÄÈœ°€Í|ÀÀÀ°€ÄÉt°4(€€€€€€€laHÍ} ÄÔœ°€Í|ÀÀÀ°€ÄÕt°4(€€€€€€€laHÑ} ÄÈœ°€Ñ|ÀÀÀ°€ÄÉt°4(€€€€€€€laHÑ} ÄÔœ°€Ñ|ÀÀÀ°€ÄÕt°4(€€€€€t¹µ…À ¡m¥°™…±±‰…­1½ÍÍ¡•­5Ì°™…±±‰…­!…É‘MÑ½ÁAÑt¤€ôø€¡ì4(€€€€€€€¥°4(€€€€€€€±…‰•°è€‘í¥‘ôð•…É±äÝ•…¬µÍÑ…Ñ”•á¥Ñ€°4(€€€€€€€•¹ÑÉåAÉ½™¥±•%‘ÌèlÈÕ|ÌÔt°4(€€€€€€€•á¥Ñ5½‘”è€I%M-}a1œ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}QI%1%9}Q%YQ%=9}APœ°€à°ìµ¥¸è€À¸Äô°4(€€€€€€€€¤°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}QI%1%9}MQ=A}APœ°€Ì°ìµ¥¸è€À¸Ä°µ…àè€ÄÀÀô°4(€€€€€€€€¤°4(€€€€€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø¡1=]}5%IQ}I	=U9}I%M-}!I}MQ=A|‘í™…±±‰…­!…É‘MÑ½ÁAÑõ}AQ€°4(€€€€€€€€€™…±±‰…­!…É‘MÑ½ÁAÐ°ìµ¥¸è€À¸Ä°µ…àè€ÄÀÀô¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥ÑAÐè¹Õµ‰•É¹Ø 1=]}5%IQ}I	=U9}1e}MQ}QA}APœ°€Äà°ì4(€€€€€€€€€µ¥¸è€À°4(€€€€€€€ô¤°4(€€€€€€€™…ÍÑQ…­•AÉ½™¥Ñ]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}1e}MQ}QA}]%9=]}5Lœ°€Õ|ÀÀÀ°ìµ¥¸è€Àô°4(€€€€€€€€¤°4(€€€€€€€±½ÍÍ¡•­Ñ5Ìè¥¹Ñ••É¹Ø 4(€€€€€€€€€1=]}5%IQ}I	=U9}I%M-}!-|‘í™…±±‰…­1½ÍÍ¡•­5Ì€¼€Å|ÀÀÁõM}5M€°4(€€€€€€€€€™…±±‰…­1½ÍÍ¡•­5Ì°4(€€€€€€€€€ìµ¥¸è€Àô°4(€€€€€€€€¤°4(€€€€€€€±½ÍÍ¡•­I•½Ù•ÉåAÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}5%IQ}I	=U9}I%M-}5a}I=YIe}I=5}1=]}APœ°€Ä°ìµ¥¸è€À°µ…àè€ÄÀÀô°4(€€€€€€€€¤°4(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ}I	=U9}1e}5a}!=1}5Lœ°€ÄÕ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€ô¤¤°4(€€€t°4(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}5%IQ}I	=U9}A=M%Q%=9}M=0œ¤°4(€€€ô¤°4(€ô°4(4(€€¼¼%¹‘•Á•¹‘•¹ÐÁ½ÍÐµµ¥É…Ñ¥½¸½¹Ñ¥¹Õ…Ñ¥½¸ÍÑÕ‘ä¸Q¡”•¹ÑÉäÑ¡É•Í¡½±‘ÌÝ•É”4(€€¼¼Í•±•Ñ•™É½´Ñ¡”¡É½¹½±½¥…°µ¥É…Ñ¥½¸µ½¡½ÉÐ‰…­Ñ•ÍÐì•Ù•Éä•á¥Ð¥Ì4(€€¼¼ÍÑ½É•…Ì„Í•Á…É…Ñ”½¡½ÉÐÍ¼±½¹œµ¡½±Ý¥¹¹•È…ÁÑÕÉ”ÍÑ…åÌ…Õ‘¥Ñ…‰±”¸4(€µ¥É…Ñ¥½¹½¹Ñ¥¹Õ¥ÑåM¡…‘½Üèì(€€€•¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}M!=]}9	1œ°™…±Í”¤°(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}A=M%Q%=9}M=0œ¤°4(€€€½¹™¥Éµ]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}=9%I5}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°µ…àè€ÄÕ|ÀÀÀ°4(€€€ô¤°4(€€€‘•Ñ•Ñ¥½¹•…‘±¥¹•5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}QQ%=9}5Lœ°€ÄÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ÌÁ|ÀÀÀ°4(€€€ô¤°4(€€€™±½Ý]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}1=]}]%9=]}5Lœ°€Í|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°µ…àè€ÄÁ|ÀÀÀ°4(€€€ô¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}a%Q}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€Ä°4(€€€ô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}5a}9QIe})U5A}APœ°€ÄÀ°ì4(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€•¹ÑÉåAÉ½™¥±”èì(€€€€€¥è€5}Ôœ°(€€€€€±¥Ù•MÑÉ…Ñ•å%è€µ¥É…Ñ¥½¹}½¹Ñ¥¹Õ¥Ñå}µ}ŒÕ}ÐÄÉ|Õ}±¥Ù”œ°(€€€€€±…‰•°è€5µƒ
+Üƒš¾W’âk–B8×žžK¢Ò£¦?–îÛžî´œ°4(€€€€€µ¥¹	Õå•ÉÌè¥¹Ñ••É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}5%9}	UeILœ°€ÈÀ°ìµ¥¸è€Äô¤°4(€€€€€µ¥¹9•Ñ±½ÝM½°è¹Õµ‰•É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}5%9}9Q}1=]}M=0œ°€Ô°ìµ¥¸è€Àô¤°4(€€€€€µ¥¹I•ÑÕÉ¹AÐè¹Õµ‰•É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}5%9}IQUI9}APœ°€Ô°ìµ¥¸è€´ÄÀÀô¤°4(€€€€€µ…áM•±±	ÕåI…Ñ¥¼è¹Õµ‰•É¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}5a}M11}	Ue}IQ%<œ°€À¸Ø°ì4(€€€€€€€µ¥¸è€À°µ…àè€ÄÀ°4(€€€€€ô¤°4(€€€ô°4(€€€•á¥ÑAÉ½™¥±•Ìèl4(€€€€€ì(€€€€€€€¥è€ØÀœ°±…‰•°è€Ÿ–në–ºhØÃžžHœ°•á¥Ñ5½‘”è€%a}!=1œ°™¥á•‘!½±‘5Ìè€ØÁ|ÀÀÀ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ØÁ|ÀÀÀ°¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÄÈÀœ°±…‰•°è€Ÿ–në–ºhÄÈÃžžHœ°•á¥Ñ5½‘”è€%a}!=1œ°™¥á•‘!½±‘5Ìè€ÄÈÁ|ÀÀÀ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€ô°(€€€€€ì(€€€€€€€€¼¼9•Ü¥É•…Ñ•Ì„±•…¸™½ÉÝ…ÉÍ…µÁ±”…™Ñ•ÈU¹¥Ù•ÉÍ…°IUÕ…ÉÝ…Ì(€€€€€€€€¼¼…ÁÁ±¥•Ñ¼•Ù•ÉäM¡…‘½Ü•¹ÑÉä¸!¥ÍÑ½É¥…°ÄÈÀÉ½ÝÌÉ•µ…¥¸Õ¹¡…¹•¸(€€€€€€€¥è€ÄÈÁ}UI}XÈœ°(€€€€€€€±…‰•°è€Ÿ–në–ºhÄÈÃžžHƒ
+ÜU¹¥Ù•ÉÍ…°IUÕ…Éƒ–&7–BGš‚ßšr°œ°(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€™¥á•‘!½±‘5Ìè€ÄÈÁ|ÀÀÀ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°(€€€€€€€µ…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€PÄÀœ°±…‰•°è€œ×žžK’þwš*€¼€¬ÄÀ—šþšÒì€¼ƒ–n{šJÄÀ”œ°•á¥Ñ5½‘”è€QI%1%9œ°(€€€€€€€µ¥¹!½±‘5Ìè€Õ|ÀÀÀ°ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÄÀ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÀ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€ô°4(€€€€€ì(€€€€€€€¥è€PÄÉ|Ôœ°±…‰•°è€œÄÃžžK’þwš*€¼€¬ÄÔ—šþšÒì€¼ƒ–n{šJÄÈ¸Ô”œ°•á¥Ñ5½‘”è€QI%1%9œ°(€€€€€€€µ¥¹!½±‘5Ìè€ÄÁ|ÀÀÀ°ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÄÔ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÈ¸Ô°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÄàÁ|ÀÀÀ°¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ÄÈÁ}=9YI}XÌœ°(€€€€€€€±…‰•°è€Ÿ–në–ºhÄÈÃžžHƒ
+ÜƒšRÛšVo–&7–BGš‚ßšr°œ°(€€€€€€€•á¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€™¥á•‘!½±‘5Ìè€ÄÈÁ|ÀÀÀ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°(€€€€€€€µ…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è‰½½±•…¹¹Ø (€€€€€€€€€€1=]}5%IQ%=9}=9Q%9U%Qe}ÄÈÁ}=9YI}XÍ}9	1œ°(€€€€€€€€€ÑÉÕ”°(€€€€€€€€¤°(€€€€€ô°4(€€€€€ì(€€€€€€€¥è€1=\œ°±…‰•°è€œÄÃžžK’þwš*€¼€ÏžžK¢º‹–6WšÖ¢ö³–òÄœ°•á¥Ñ5½‘”è€1=]}œ°(€€€€€€€µ¥¹!½±‘5Ìè€ÄÁ|ÀÀÀ°µ¥¹M•±±	ÕåI…Ñ¥¼è€Ä¸È°µ…á9•Ñ±½ÝM½°è€´È°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÄàÁ|ÀÀÀ°¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€ô°4(€€€€€ì(€€€€€€€¥è€IU99Hœ°±…‰•°è€œÄ×žžK’þwš*€¼€¬ÈÀ—šþšÒì€¼ƒ¢«¦–êS–Âû’îLœ°(€€€€€€€•á¥Ñ5½‘”è€AQ%Y}QI%1%9œ°µ¥¹!½±‘5Ìè€ÄÕ|ÀÀÀ°ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÔ°µ…á!½±‘5Ìè€ÌÀÁ|ÀÀÀ°¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€€€ÑÉ…¥±¥¹Q¥•ÉÌèl4(€€€€€€€€€ì‰•±½ÝAÐè€ÔÀ°ÍÑ½ÁAÐè€ÄÈ¸Ôô°4(€€€€€€€€€ì‰•±½ÝAÐè€ÄÀÀ°ÍÑ½ÁAÐè€ÈÀô°4(€€€€€€€€€ì‰•±½ÝAÐè%¹™¥¹¥Ñä°ÍÑ½ÁAÐè€ÈÔô°4(€€€€€€€t°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€ ØÁ|ÄàÀœ°(€€€€€€€±…‰•°è€5µ ƒ
+Ü€ÌÃžžK¢º‹–6WšÖ–"“–ºh€¼ƒ–òÄØÃžžH€¼ƒ–òèÄàÃžžHœ°(€€€€€€€•á¥Ñ5½‘”è€AQ%Y}!=I%i=8œ°(€€€€€€€‘•¥Í¥½¹Ñ5Ìè€ÌÁ|ÀÀÀ°(€€€€€€€Ý•…­!½±‘5Ìè€ØÁ|ÀÀÀ°(€€€€€€€ÍÑÉ½¹!½±‘5Ìè€ÄàÁ|ÀÀÀ°(€€€€€€€µ¥¹MÑÉ½¹9•Ñ±½ÝM½°è€Ä°(€€€€€€€µ…áMÑÉ½¹M•±±	ÕåI…Ñ¥¼è€À¸à°(€€€€€€€µ¥¹MÑÉ½¹	Õå•ÉÌè€Ì°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°(€€€€€€€µ…á!½±‘5Ìè€ÄàÁ|ÀÀÀ°(€€€€€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è™…±Í”°(€€€€€ô°(€€€t°4(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}5%IQ%=9}=9Q%9U%Qe}A=M%Q%=9}M=0œ¤°4(€€€ô¤°4(€ô°4(4(€€¼¼%¹‘•Á•¹‘•¹ÐÁ½ÍÐµµ¥É…Ñ¥½¸É…¹”µÉ•¥µ”É•Í•…É ¸Ù•ÉäÉ…‘Õ…Ñ¥½¸É••¥Ù•Ì4(€€¼¼„Í¡½ÉÐAÕµÁMÝ…À½‰Í•ÉÙ…Ñ¥½¸Ý¥¹‘½Üì½¹±äÅÕ…±¥™¥•½Í¥±±…Ñ¥¹œµ…É­•ÑÌ­••À4(€€¼¼Ñ¡”•áÑ•¹‘•ÍÕ‰ÍÉ¥ÁÑ¥½¸¸Q¡¥ÌÍÕ¥Ñ”¹•Ù•È½Ý¹Ì„Í¥¹•È½È•á•ÕÑ½È¸4(€É…¹•M…±Á•ÉM¡…‘½Üèì4(€€€•¹…‰±•èÁÉ½Ù•¹9•…Ñ¥Ù•M¡…‘½ÝÍ¹…‰±•4(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}I9}M1AI}M!=]}9	1œ°ÑÉÕ”¤°4(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}I9}M1AI}A=M%Q%=9}M=0œ¤°4(€€€¥¹¥Ñ¥…±=‰Í•ÉÙ…Ñ¥½¹5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}%9%Q%1}=	MIYQ%=9}5Lœ°€ÄÈÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€ÌÁ|ÀÀÀ°4(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€µ…áQÉ…­¥¹5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}5a}QI-%9}5Lœ°€ÈÀ€¨€ØÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€ÄÈÁ|ÀÀÀ°4(€€€€€µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€Ý¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}]%9=]}5Lœ°€ØÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€ÄÁ|ÀÀÀ°4(€€€€€µ…àè€Ô€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€É••¹Ñ±½Ý]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}I9Q}1=]}5Lœ°€Å|ÀÀÀ°ì4(€€€€€µ¥¸è€ÈÔÀ°4(€€€€€µ…àè€ÄÁ|ÀÀÀ°4(€€€ô¤°4(€€€É…¹•1½ÍÍ½¹™¥Éµ5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}I9}1=MM}=9%I5}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€µ…àè€Ô€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€Õ¹ÍÕ‰ÍÉ¥‰•É…•5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}U9MU	MI%	}I}5Lœ°€Õ|ÀÀÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€µ¥¹QÉ…‘•Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}5%9}QILœ°€ØÀ°ìµ¥¸è€Ôô¤°4(€€€µ¥¹Y½±Õµ•M½°è¹Õµ‰•É¹Ø 1=]}I9}M1AI}5%9}Y=1U5}M=0œ°€ÈÀ°ìµ¥¸è€Àô¤°4(€€€µ¥¹U¹¥ÅÕ•]…±±•ÑÌè¥¹Ñ••É¹Ø 1=]}I9}M1AI}5%9}U9%EU}]11QLœ°€ÈÀ°ìµ¥¸è€Èô¤°4(€€€µ¥¹	ÕåM¡…É•AÐè¹Õµ‰•É¹Ø 1=]}I9}M1AI}5%9}	Ue}M!I}APœ°€ÌÔ°ì4(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…á	ÕåM¡…É•AÐè¹Õµ‰•É¹Ø 1=]}I9}M1AI}5a}	Ue}M!I}APœ°€ØÔ°ì4(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ¥¹I…¹•AÐè¹Õµ‰•É¹Ø 1=]}I9}M1AI}5%9}I9}APœ°€ÄÈ°ìµ¥¸è€À¸Äô¤°4(€€€µ…á™™¥¥•¹åI…Ñ¥¼è¹Õµ‰•É¹Ø 1=]}I9}M1AI}5a}%%9e}IQ%<œ°€À¸ÌÔ°ì4(€€€€€µ¥¸è€À¸ÀÄ°µ…àè€Ä°4(€€€ô¤°4(€€€µ¥¹5•…¹É½ÍÍ•Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}5%9}59}I=MMLœ°€Ð°ìµ¥¸è€Äô¤°4(€€€µ…áQ½Á]…±±•ÑM¡…É•AÐè¹Õµ‰•É¹Ø 1=]}I9}M1AI}5a}Q=A}]11Q}M!I}APœ°€ÈÔ°ì4(€€€€€µ¥¸è€À¸Ä°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…áQÉ•¹‘AÐè¹Õµ‰•É¹Ø 1=]}I9}M1AI}5a}QI9}APœ°€ÄÈ°ìµ¥¸è€À¸Äô¤°4(€€€µ¥¹I…¹•M½É”è¹Õµ‰•É¹Ø 1=]}I9}M1AI}5%9}I9}M=Iœ°€ØÔ°ì4(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ìµ¥¸è€Äô¤°4(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}I9}M1AI}a%Q}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ìµ¥¸è€Äô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}I9}M1AI}5a}9QIe})U5A}APœ°€Ì°ì4(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…á¹ÑÉåAÉ¥•É½ÁAÐè¹Õµ‰•É¹Ø 1=]}I9}M1AI}5a}9QIe}I=A}APœ°€ÔÀ°ì4(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…á=‰Í•ÉÙ•‘AÉ¥•M…±•I…Ñ¥¼è¹Õµ‰•É¹Ø 4(€€€€€€1=]}I9}M1AI}5a}AI%}M1}IQ%<œ°4(€€€€€€ÄÀÀ°4(€€€€€ìµ¥¸è€È°µ…àè€Å|ÀÀÁ|ÀÀÀô°4(€€€€¤°4(€€€•¹ÑÉåAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€)œ°4(€€€€€€€±…‰•°è€)ƒ
+Ü€Ç>ƒ–?žšì€¬€È”ƒ–>7–òäœ°4(€€€€€€€‘•Ù¥…Ñ¥½¹M¥µ„è€Ä°4(€€€€€€€É•‰½Õ¹‘AÐè€È°4(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Õ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€)œ°4(€€€€€€€±…‰•°è€)ƒ
+Ü€Ä¸×>ƒ–?žšì€¬ƒš¶–šÖ–”œ°4(€€€€€€€‘•Ù¥…Ñ¥½¹M¥µ„è€Ä¸Ô°4(€€€€€€€É•‰½Õ¹‘AÐè€È°4(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Õ|ÀÀÀ°4(€€€€€€€µ¥¹I••¹Ñ9•Ñ±½ÝM½°è€À¸Ä°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€)œ°4(€€€€€€€±…‰•°è€)ƒ
+Üƒ’â/¢ö£–>7–òä€¬ƒ–6[–:/¢†Ã–<œ°4(€€€€€€€‘•Ù¥…Ñ¥½¹M¥µ„è€Ä°4(€€€€€€€É•‰½Õ¹‘AÐè€È°4(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Õ|ÀÀÀ°4(€€€€€€€µ¥¹I••¹Ñ	Õå•ÉÌè€È°4(€€€€€€€µ…áM•±±•…åI…Ñ¥¼è€À¸Ô°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€)\œ°4(€€€€€€€±…‰•°è€)\ƒ
+Ü)šv‡’îÛ¦Šž·–B;’î’ê“šbOž²°È¼ÏšÎˆœ°4(€€€€€€€Ý…ÉµÕÁAÉ½™¥±•%è€)œ°4(€€€€€€€‘•Ù¥…Ñ¥½¹M¥µ„è€Ä¸Ô°4(€€€€€€€É•‰½Õ¹‘AÐè€È°4(€€€€€€€É•‰½Õ¹‘Q¥µ•½ÕÑ5Ìè€Õ|ÀÀÀ°4(€€€€€€€µ¥¹I••¹Ñ9•Ñ±½ÝM½°è€À¸Ä°4(€€€€€€€µ¥¹=ÁÁ½ÉÑÕ¹¥Ñå%¹‘•àè€È°4(€€€€€€€µ…á=ÁÁ½ÉÑÕ¹¥Ñå%¹‘•àè€Ì°4(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl`Øt°4(€€€€€ô°4(€€€t°4(€€€•á¥ÑAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€a4œ°±…‰•°è€a4ƒ
+Üƒ–n{–öK’â·¢öÐœ°•á¥Ñ5½‘”è€5%1%9œ°4(€€€€€€€¡…É‘MÑ½ÁAÐè€à°µ…á!½±‘5Ìè€ÈÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€`Øœ°±…‰•°è€`Øƒ
+Üƒ–në–ºh€¬Ø”œ°•á¥Ñ5½‘”è€Q-}AI=%Pœ°4(€€€€€€€Ñ…­•AÉ½™¥ÑAÐè€Ø°¡…É‘MÑ½ÁAÐè€à°µ…á!½±‘5Ìè€ÈÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aœ°±…‰•°è€aƒ
+Üƒ’â+¢ö£¦–èœ°•á¥Ñ5½‘”è€UAAI}	9œ°4(€€€€€€€¡…É‘MÑ½ÁAÐè€à°µ…á!½±‘5Ìè€ÌÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aœ°±…‰•°è€aƒ
+Üƒ’â·¢öÓ’âS¢Ö¦G–>7¢ö°œ°•á¥Ñ5½‘”è€1=]}IYIM0œ°4(€€€€€€€¡…É‘MÑ½ÁAÐè€à°µ…á!½±‘5Ìè€ÌÁ|ÀÀÀ°4(€€€€€ô°4(€€€t°4(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}I9}M1AI}A=M%Q%=9}M=0œ¤°4(€€€ô¤°4(€ô°4(4(€€¼¼%¹‘•Á•¹‘•¹Ð½‰Í•ÉÙ•µ¡½±‘•ÈµÉ½ÝÑ É•Í•…É ¸€‰!½±‘•ÉÌˆ¡•É”µ•…¹ÌÝ…±±•ÑÌ4(€€¼¼Í••¸‰Õå¥¹œÑ¡É½Õ Ñ¡”…ÁÑÕÉ•AÕµÀÕÉÙ”ÍÑÉ•…´ì¥Ð¥Ì‘•±¥‰•É…Ñ•±ä¹½Ð4(€€¼¼ÁÉ•Í•¹Ñ•…Ì…¸…ÕÑ¡½É¥Ñ…Ñ¥Ù”½¸µ¡…¥¸¡½±‘•È½Õ¹Ð¸4(€¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Üèì(€€€•¹…‰±•è‰½½±•…¹¹Ø 1=]}!=1I}I=]Q!}M!=]}9	1œ°™…±Í”¤°(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}!=1I}I=]Q!}A=M%Q%=9}M=0œ¤°4(€€€Í¹…ÁÍ¡½Ñ!½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€Õ|ÀÀÀ°4(€€€€€µ…àè€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€µ…áM¹…ÁÍ¡½Ñ1…5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}5a}M9AM!=Q}1}5Lœ°€É|ÀÀÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÌÁ|ÀÀÀ°4(€€€ô¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ìµ¥¸è€Äô¤°4(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}a%Q}Q%5=UQ}5Lœ°€ÌÁ|ÀÀÀ°ìµ¥¸è€Äô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}!=1I}I=]Q!}5a}9QIe})U5A}APœ°€ÄÀÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€Å|ÀÀÀ°4(€€€ô¤°4(€€€µ…á¹ÑÉåAÉ¥•É½ÁAÐè¹Õµ‰•É¹Ø 1=]}!=1I}I=]Q!}5a}9QIe}I=A}APœ°€ää°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…áA±…ÕÍ¥‰±•I•ÑÕÉ¹AÐè¹Õµ‰•É¹Ø 4(€€€€€€1=]}!=1I}I=]Q!}5a}A1UM%	1}IQUI9}APœ°4(€€€€€€ÔÀÀ°4(€€€€€ìµ¥¸è€ÄÀ°µ…àè€ÄÀÁ|ÀÀÀô°4(€€€€¤°4(€€€‰¥]¥¹¹•ÉAÐè¹Õµ‰•É¹Ø 1=]}!=1I}I=]Q!}	%}]%99I}APœ°€ÔÀ°ìµ¥¸è€Äô¤°4(€€€•¹ÑÉåAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€!ÄÁ}=A8œ°4(€€€€€€€±…‰•°è€!ÄÀ=Á•¸ƒ
+Ü€ÄÃžžKš^§šr–º÷švûžîœ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}=A9}!=I%i=9}5Lœ°€ÄÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€Ô°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€Ì°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÌÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ä¸Ô°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€äÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÄÁ}1=\ÄÁ}(Èœ°4(€€€€€€€±…‰•°è€8±½Ü‘”€ÄÁÌƒ
+Ü9•Ñ±½ÜøôÄÀƒ
+Ü•¹ÑÉä©ÕµÀ€À´È”œ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}=A9}!=I%i=9}5Lœ°€ÄÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€Ô°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€Ì°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÌÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€ÄÀ°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€äÀ°4(€€€€€€€µ¥¹¹ÑÉå)ÕµÁAÐè€À°4(€€€€€€€µ…á¹ÑÉå)ÕµÁAÐè€È°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÄÁ}1=\ÄÕ}(Èœ°4(€€€€€€€±…‰•°è€8±½Ü‘”€ÄÁÌƒ
+Ü9•Ñ±½ÜøôÄÔƒ
+Ü•¹ÑÉä©ÕµÀ€À´È”œ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}=A9}!=I%i=9}5Lœ°€ÄÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€Ô°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€Ì°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÌÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€ÄÔ°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€äÀ°4(€€€€€€€µ¥¹¹ÑÉå)ÕµÁAÐè€À°4(€€€€€€€µ…á¹ÑÉå)ÕµÁAÐè€È°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÈÁ}	0œ°4(€€€€€€€±…‰•°è€!ÈÀ	…±…¹•ƒ
+Ü€ÈÃžžKš^§šr–v¢†‡žîœ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}I1e}!=I%i=9}5Lœ°€ÈÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€à°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€Ô°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÐÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ì°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÔ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÈÁ}MPœ°4(€€€€€€€±…‰•°è€!ÈÀ…ÍÐƒ
+Ü€ÈÃžžKš^§šr–*ƒ¦žîœ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}I1e}!=I%i=9}5Lœ°€ÈÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€à°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÔÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ô°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÈÁ}EU1%Qe}(Èœ°4(€€€€€€€±…‰•°è€8EÕ…±¥Ñä€ÈÁÌƒ
+Ü	Õå•ÉÌøôÐÀƒ
+ÜÉ•Ñ•¹Ñ¥½¸øôØÀ”ƒ
+Ü•¹ÑÉä©ÕµÀ€À´È”œ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}I1e}!=I%i=9}5Lœ°€ÈÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€ÐÀ°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€Ô°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ØÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ô°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°4(€€€€€€€µ¥¹¹ÑÉå)ÕµÁAÐè€À°4(€€€€€€€µ…á¹ÑÉå)ÕµÁAÐè€È°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÌÁ}	0œ°4(€€€€€€€±…‰•°è€!ÌÀ	…±…¹•ƒ
+ÜƒšZÃ–Š{’æÃ–ºÛŠ&”Ä½Ì€¬ƒžVg–¶cŠ&”ÔÀ”œ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÔÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ô°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°4(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìè¡½±‘•ÉÉ½ÝÑ¡Õ±±5…ÑÉ¥á¹…‰±•€ü¹Õ±°€èl`ÄÕ}%at°(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÌÁ}MPœ°4(€€€€€€€±…‰•°è€!ÌÀ…ÍÐƒ
+ÜƒšZÃ–Š{’æÃ–ºÛŠ&”È½Ì€¬ƒžVg–¶cŠ&”ÜÀ”œ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÈÀ°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÜÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€ÄÀ°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÌÁ}9ÈÁ}9ÈÔœ°4(€€€€€€€±…‰•°è€!ÌÀMÑÉ½¹œƒ
+ÜƒšZÃ–Š{’æÃ–ºÛŠ&”ÈÀ€¬9•Ñ±½ßŠ&”ÈÔœ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÈÀ°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÔÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€ÈÔ°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°4(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìè¡½±‘•ÉÉ½ÝÑ¡Õ±±5…ÑÉ¥á¹…‰±•4(€€€€€€€€€€ü¹Õ±°€èl`ÄÉ}%aœ°€`ÄÕ}%aœ°€`Äá}%aœ°€`ÄÕ}HÈÀt°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€!ÌÁ}IÄÕ}9ÈÔœ°4(€€€€€€€±…‰•°è€!ÌÀMÑÉ½¹œƒ
+Üƒ¢þGžª_’æÃ–ºÛŠ&”ÄÔ€¬9•Ñ±½ßŠ&”ÈÔœ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹I••¹Ñ	Õå•ÉÌè€ÄÔ°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÔÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€ÈÔ°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°4(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìè¡½±‘•ÉÉ½ÝÑ¡Õ±±5…ÑÉ¥á¹…‰±•4(€€€€€€€€€€ü¹Õ±°€èl`ÄÉ}%aœ°€`ÄÕ}%aœ°€`Äá}%aœ°€`ÄÕ}HÈÀt°4(€€€€€ô°4(€€€€€ì(€€€€€€€¥è€!ÌÁ}àÁ}9ÈÔœ°(€€€€€€€±…‰•°è€!ÌÀMÑÉ½¹œƒ
+Ü	Õå•ÉÏŠ&”àÀ€¬9•Ñ±½ßŠ&”ÈÔœ°4(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ¥¹	Õå•ÉÌè€àÀ°4(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÄÀ°4(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÔÀ°4(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€ÈÔ°4(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°4(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìè¡½±‘•ÉÉ½ÝÑ¡Õ±±5…ÑÉ¥á¹…‰±•(€€€€€€€€€€ü¹Õ±°€èl`ÄÉ}%aœ°€`ÄÕ}%aœ°€`Äá}%aœ°€`ÄÕ}HÈÀt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€!ÌÁ}9E}}HÜÕ}ÐÁ|ÜÔœ°(€€€€€€€±…‰•°è€!ÌÀ9Dµƒ
+ÜI•Ñ•¹Ñ¥½¸øôÜÔ”ƒ
+ÜÕÉÙ”€ÐÀ´ÜÔ”œ°(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÄÀ°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÜÔ°(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ô°(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÐÀ°(€€€€€€€µ…áÕÉÙ•AÐè€ÜÔ°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl`ÄÕ}%at°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€!ÌÁ}9E}	}HàÁ}ÐÕ|ÜÀœ°(€€€€€€€±…‰•°è€!ÌÀ9Dµƒ
+ÜI•Ñ•¹Ñ¥½¸øôàÀ”ƒ
+ÜÕÉÙ”€ÐÔ´ÜÀ”œ°(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÄÀ°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€àÀ°(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ô°(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÐÔ°(€€€€€€€µ…áÕÉÙ•AÐè€ÜÀ°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl`ÄÕ}%at°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€!ÌÁ}9E}}A=MQ}A,œ°(€€€€€€€±…‰•°è€!ÌÀ9Dµƒ
+Ü9Dµ€¬Á½ÍÐµÁ•…¬¹•Ð‰Õå¥¹œœ°(€€€€€€€¡½É¥é½¹5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}M9AM!=Q}5Lœ°€ÌÁ|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€µ¥¹	Õå•ÉÌè€ÄÀ°(€€€€€€€µ¥¹9•Ý	Õå•ÉÌè€ÄÀ°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ÜÔ°(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€Ô°(€€€€€€€µ…áQ½ÀÍM¡…É•AÐè€àÀ°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÐÀ°(€€€€€€€µ…áÕÉÙ•AÐè€ÜÔ°(€€€€€€€É•ÅÕ¥É•A½ÍÑA•…­9•ÑA½Í¥Ñ¥Ù”èÑÉÕ”°(€€€€€€€•á¥ÑAÉ½™¥±•%‘Ìèl`ÄÉ}%aœ°€`ÄÕ}%aœ°€`Äá}%at°(€€€€€ô°(€€€t¹™¥±Ñ•È ¡ÁÉ½™¥±”¤€ôø¡½±‘•ÉÉ½ÝÑ¡Õ±±5…ÑÉ¥á¹…‰±•(€€€€€ñðÁÉ½™¥±”¹¥€ôôô€!ÌÁ}	0œ(€€€€€ñð€¡¡½±‘•ÉÉ½ÝÑ¡EÕ…±¥Ñå¹…‰±•€˜˜l(€€€€€€€€!ÌÁ}9E}}HÜÕ}ÐÁ|ÜÔœ°(€€€€€€€€!ÌÁ}9E}	}HàÁ}ÐÕ|ÜÀœ°(€€€€€€€€!ÌÁ}9E}}A=MQ}A,œ°(€€€€€t¹¥¹±Õ‘•Ì¡ÁÉ½™¥±”¹¥¤¤¤°(€€€€¼¼Ù•Éä•á¥Ð¥ÌÉ½ÍÍ•Ý¥Ñ •Ù•Éä•¹ÑÉä…Ì…¸¥¹‘•Á•¹‘•¹Ð½¡½ÉÐ¸-••À4(€€€€¼¼aPÄÕ} ÄÈÀÕ¹¡…¹•Í¼•á¥ÍÑ¥¹œÁÉ½‘ÕÑ¥½¸É½ÝÌÉ•µ…¥¸½µÁ…É…‰±”¸4(€€€•á¥ÑAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€`Õ}%aœ°±…‰•°è€Ÿ–në–ºh×žžHœ°•á¥Ñ5½‘”è€%a}!=1œ°4(€€€€€€€™¥á•‘!½±‘5Ìè€Õ|ÀÀÀ°¡…É‘MÑ½ÁAÐè€ÄÀÀ°µ…á!½±‘5Ìè€Õ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€`ÄÕ}%aœ°±…‰•°è€Ÿ–në–ºhÄ×žžHœ°•á¥Ñ5½‘”è€%a}!=1œ°4(€€€€€€€™¥á•‘!½±‘5Ìè€ÄÕ|ÀÀÀ°¡…É‘MÑ½ÁAÐè€ÄÀÀ°µ…á!½±‘5Ìè€ÄÕ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€`ÄÉ}%aœ°±…‰•°è€Ÿ–në–ºhÄËžžHœ°•á¥Ñ5½‘”è€%a}!=1œ°4(€€€€€€€™¥á•‘!½±‘5Ìè€ÄÉ|ÀÀÀ°¡…É‘MÑ½ÁAÐè€ÄÀÀ°µ…á!½±‘5Ìè€ÄÉ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€`Äá}%aœ°±…‰•°è€Ÿ–në–ºhÄãžžHœ°•á¥Ñ5½‘”è€%a}!=1œ°4(€€€€€€€™¥á•‘!½±‘5Ìè€Äá|ÀÀÀ°¡…É‘MÑ½ÁAÐè€ÄÀÀ°µ…á!½±‘5Ìè€Äá|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€`ÄÕ}HÈÀœ°4(€€€€€€€±…‰•°è€œÄ×žžK–òë–*ÿ–?’îLàÀ”€¼€ÈÀ—–Âû’îLœ°4(€€€€€€€•á¥Ñ5½‘”è€%a}M1}IU99Hœ°4(€€€€€€€™¥á•‘!½±‘5Ìè€ÄÕ|ÀÀÀ°4(€€€€€€€¡…É‘MÑ½ÁAÐè€ÄÀÀ°4(€€€€€€€Í…±•=ÕÑQÉ¥•ÉAÐè€ÈÀ°4(€€€€€€€Í…±•=ÕÑÉ…Ñ¥½¹AÐè€àÀ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÔ°4(€€€€€€€µ…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aPÄÕ} ÄÈÀœ°4(€€€€€€€±…‰•°è€œ¬ÄÔ—šþšÒì€¼ƒ–ÎÃ–ó–n{šJÄÔ”€¼ƒž†³š¶‹š6|ÈÀ”€¼€ÄÈÃžžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€QI%1%9œ°4(€€€€€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}!=1I}I=]Q!}!I}MQ=A}APœ°€ÈÀ°ì4(€€€€€€€€€µ¥¸è€À¸Ä°4(€€€€€€€€€µ…àè€ÄÀÀ°4(€€€€€€€ô¤°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè¹Õµ‰•É¹Ø 4(€€€€€€€€€€1=]}!=1I}I=]Q!}QI%1%9}Q%YQ%=9}APœ°4(€€€€€€€€€€ÄÔ°4(€€€€€€€€€ìµ¥¸è€À¸Ä°µ…àè€Å|ÀÀÀô°4(€€€€€€€€¤°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}!=1I}I=]Q!}QI%1%9}MQ=A}APœ°€ÄÔ°ì4(€€€€€€€€€µ¥¸è€À¸Ä°4(€€€€€€€€€µ…àè€ÄÀÀ°4(€€€€€€€ô¤°4(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}!=1I}I=]Q!}5a}!=1}5Lœ°€ÄÈÁ|ÀÀÀ°ì4(€€€€€€€€€µ¥¸è€Å|ÀÀÀ°4(€€€€€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°4(€€€€€€€ô¤°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aPÈÁ}ÄÁ} ÄàÀœ°±…‰•°è€œ¬ÈÀ—šþšÒì€¼ƒ–n{šJÄÀ”€¼€ÄàÃžžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€QI%1%9œ°¡…É‘MÑ½ÁAÐè€ÈÀ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÀ°µ…á!½±‘5Ìè€ÄàÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aPÌÁ}ÄÕ} ÌÀÀœ°±…‰•°è€œ¬ÌÀ—šþšÒì€¼ƒ–n{šJÄÔ”€¼€ÌÀÃžžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€QI%1%9œ°¡…É‘MÑ½ÁAÐè€ÈÀ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÌÀ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÔ°µ…á!½±‘5Ìè€ÌÀÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aM1|ÔÁ}IU99Hœ°±…‰•°è€œ¬ÌÀ—–?’îLÔÀ”€¼ƒ–Âû’îO–n{šJÈÀ”œ°4(€€€€€€€•á¥Ñ5½‘”è€M1}IU99Hœ°¡…É‘MÑ½ÁAÐè€ÈÀ°4(€€€€€€€Í…±•=ÕÑQÉ¥•ÉAÐè€ÌÀ°Í…±•=ÕÑÉ…Ñ¥½¹AÐè€ÔÀ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÌÀ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÌÀÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€a@ÈÁ|ÔÁ}ÄÕ} ÄÈÀœ°4(€€€€€€€±…‰•°è€œ¬ÈÀ—–?’îLÔÀ”€¼ƒ–Âû’îO–n{šJÄÔ”€¼€ÄÈÃžžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€M1}IU99Hœ°¡…É‘MÑ½ÁAÐè€ÈÀ°4(€€€€€€€Í…±•=ÕÑQÉ¥•ÉAÐè€ÈÀ°Í…±•=ÕÑÉ…Ñ¥½¹AÐè€ÔÀ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÔ°µ…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€a@ÈÁ|ÜÁ}ÈÁ} ÄàÀœ°4(€€€€€€€±…‰•°è€œ¬ÈÀ—–?’îLÜÀ”€¼ƒ–Âû’îO–n{šJÈÀ”€¼€ÄàÃžžK–s–êTœ°4(€€€€€€€•á¥Ñ5½‘”è€M1}IU99Hœ°¡…É‘MÑ½ÁAÐè€ÈÀ°4(€€€€€€€Í…±•=ÕÑQÉ¥•ÉAÐè€ÈÀ°Í…±•=ÕÑÉ…Ñ¥½¹AÐè€ÜÀ°4(€€€€€€€ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°ÑÉ…¥±¥¹MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÄàÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€a@ÌÁ|ÜÁ}MQ%Hœ°4(€€€€€€€±…‰•°è€œ¬ÌÀ—–?’îLÜÀ”€¼ƒ–Âû’îO¦bÛšŠ¿–n{šJœ°4(€€€€€€€•á¥Ñ5½‘”è€M1}AQ%Yœ°¡…É‘MÑ½ÁAÐè€ÈÀ°4(€€€€€€€Í…±•=ÕÑQÉ¥•ÉAÐè€ÌÀ°Í…±•=ÕÑÉ…Ñ¥½¹AÐè€ÜÀ°µ…á!½±‘5Ìè€ÌÀÁ|ÀÀÀ°4(€€€€€€€ÑÉ…¥±¥¹Q¥•ÉÌèl4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÌÀ°‘É…Ý‘½Ý¹AÐè€ÄÔô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ØÀ°‘É…Ý‘½Ý¹AÐè€ÄÔô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÄÀÀ°‘É…Ý‘½Ý¹AÐè€ÈÀô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÈÀÀ°‘É…Ý‘½Ý¹AÐè€ÈÔô°4(€€€€€€€t°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€a1=]|ØÀœ°±…‰•°è€œØÃžžI!½±‘•È¿¢Ö¦GšÖ¢ö³–òÇ¦–èœ°4(€€€€€€€•á¥Ñ5½‘”è€1=]}!,œ°¡…É‘MÑ½ÁAÐè€ÈÀ°4(€€€€€€€™±½Ý¡•­!½É¥é½¹5Ìè€ØÁ|ÀÀÀ°µ¥¹	Õå•ÉY•±½¥ÑåI…Ñ¥¼è€À¸Ô°4(€€€€€€€µ¥¹9•Ñ±½Ý•±Ñ…M½°è€À°ÑÉ…¥±¥¹Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°4(€€€€€€€ÑÉ…¥±¥¹MÑ½ÁAÐè€ÄÔ°µ…á!½±‘5Ìè€ÄàÁ|ÀÀÀ°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aMQ%I}	0œ°±…‰•°è€Ÿ¦bÛšŠ¿–v¢†„€ÈÀ¼ÐÀ¼àÀ¼ÄÔÀ¼ÌÀÀœ°4(€€€€€€€•á¥Ñ5½‘”è€AQ%Y}QI%1%9œ°¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÌØÁ|ÀÀÀ°4(€€€€€€€ÑÉ…¥±¥¹Q¥•ÉÌèl4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°‘É…Ý‘½Ý¹AÐè€ÄÀô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÐÀ°‘É…Ý‘½Ý¹AÐè€ÄÔô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€àÀ°‘É…Ý‘½Ý¹AÐè€ÈÀô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÄÔÀ°‘É…Ý‘½Ý¹AÐè€ÈÔô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÌÀÀ°‘É…Ý‘½Ý¹AÐè€ÌÀô°4(€€€€€€€t°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aMQ%I}1=,œ°±…‰•°è€Ÿ¦bÛšŠ¿’þw–º €ÄÔ¼ÌÀ¼ØÀ¼ÄÈÀœ°4(€€€€€€€•á¥Ñ5½‘”è€AQ%Y}QI%1%9œ°¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÌÀÁ|ÀÀÀ°4(€€€€€€€ÑÉ…¥±¥¹Q¥•ÉÌèl4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÄÔ°‘É…Ý‘½Ý¹AÐè€Ü¸Ôô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÌÀ°‘É…Ý‘½Ý¹AÐè€ÄÀô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ØÀ°‘É…Ý‘½Ý¹AÐè€ÄÔô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÄÈÀ°‘É…Ý‘½Ý¹AÐè€ÈÀô°4(€€€€€€€t°4(€€€€€ô°4(€€€€€ì4(€€€€€€€¥è€aMQ%I}Q%0œ°±…‰•°è€Ÿ¦bÛšŠ¿–Âû’îL€ÈÀ¼ÔÀ¼ÄÀÀ¼ÈÀÀœ°4(€€€€€€€•á¥Ñ5½‘”è€AQ%Y}QI%1%9œ°¡…É‘MÑ½ÁAÐè€ÈÀ°µ…á!½±‘5Ìè€ÌØÁ|ÀÀÀ°4(€€€€€€€ÑÉ…¥±¥¹Q¥•ÉÌèl4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°‘É…Ý‘½Ý¹AÐè€ÄÈ¸Ôô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÔÀ°‘É…Ý‘½Ý¹AÐè€ÈÀô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÄÀÀ°‘É…Ý‘½Ý¹AÐè€ÈÔô°4(€€€€€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÈÀÀ°‘É…Ý‘½Ý¹AÐè€ÌÀô°4(€€€€€€€t°4(€€€€€ô°4(€€€t¹™¥±Ñ•È ¡ÁÉ½™¥±”¤€ôø¡½±‘•ÉÉ½ÝÑ¡Õ±±5…ÑÉ¥á¹…‰±•(€€€€€ñðÁÉ½™¥±”¹¥€ôôô€`ÄÕ}%aœ(€€€€€ñð€¡¡½±‘•ÉÉ½ÝÑ¡EÕ…±¥Ñå¹…‰±•(€€€€€€€€˜˜l`ÄÉ}%aœ°€`Äá}%at¹¥¹±Õ‘•Ì¡ÁÉ½™¥±”¹¥¤¤¤°(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}!=1I}I=]Q!}A=M%Q%=9}M=0œ¤°4(€€€ô¤°4(€ô°4(4(€€¼¼%¹‘•Á•¹‘•¹ÐÑÝ¼µÍÑ…”EÕ…±¥Ñä1•…‘•ÈÉ•Í•…É ¸%Ð½¹ÍÕµ•Ì•á¥ÍÑ¥¹œ€ÄÁÌ¼ÈÁÌ(€€¼¼1…Õ¹ EÕ…±¥ÑäÍ¹…ÁÍ¡½ÑÌ…¹Ñ¡•É•™½É”…‘‘Ì¹¼IA½ÈIAÍÕ‰ÍÉ¥ÁÑ¥½¹Ì¸(€ÅÕ…±¥Ñå1•…‘•ÉM¡…‘½Üèì(€€€•¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}EU1%Qe}1I}M!=]}9	1œ°™…±Í”¤°(€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}EU1%Qe}1I}A=M%Q%=9}M=0œ¤°(€€€Í¹…ÁÍ¡½ÐÄÁ5Ìè€ÄÁ|ÀÀÀ°(€€€Í¹…ÁÍ¡½ÐÈÁ5Ìè€ÈÁ|ÀÀÀ°(€€€µ…áM¹…ÁÍ¡½Ñ1…5Ìè¥¹Ñ••É¹Ø 1=]}EU1%Qe}1I}5a}M9AM!=Q}1}5Lœ°€É|ÀÀÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÌÁ|ÀÀÀ°(€€€ô¤°(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}EU1%Qe}1I}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}EU1%Qe}1I}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ìµ¥¸è€Äô¤°(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}EU1%Qe}1I}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}EU1%Qe}1I}a%Q}Q%5=UQ}5Lœ°€ÌÁ|ÀÀÀ°ìµ¥¸è€Äô¤°(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}EU1%Qe}1I}5a}9QIe})U5A}APœ°€ÈÀ°ì(€€€€€µ¥¸è€À°µ…àè€Å|ÀÀÀ°(€€€ô¤°(€€€µ…á¹ÑÉåAÉ¥•É½ÁAÐè¹Õµ‰•É¹Ø 1=]}EU1%Qe}1I}5a}9QIe}I=A}APœ°€ÈÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}EU1%Qe}1I}!I}MQ=A}APœ°€ÈÀ°ì(€€€€€µ¥¸è€À¸Ä°µ…àè€ÄÀÀ°(€€€ô¤°(€€€ÍÑÉ•¹Ñ¡Ñ¥Ù…Ñ¥½¹AÐè¹Õµ‰•É¹Ø 1=]}EU1%Qe}1I}MQI9Q!}APœ°€ÈÀ°ì(€€€€€µ¥¸è€À¸Ä°µ…àè€Å|ÀÀÀ°(€€€ô¤°(€€€¹½MÑÉ•¹Ñ¡5Ìè¥¹Ñ••É¹Ø 1=]}EU1%Qe}1I}9=}MQI9Q!}5Lœ°€ÌÁ|ÀÀÀ°ì(€€€€€µ¥¸è€Å|ÀÀÀ°µ…àè€Ô€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}EU1%Qe}1I}5a}!=1}5Lœ°€Ô€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÁ|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€µ…áA±…ÕÍ¥‰±•I•ÑÕÉ¹AÐè¹Õµ‰•É¹Ø 1=]}EU1%Qe}1I}5a}A1UM%	1}IQUI9}APœ°€Õ|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÀÀ°µ…àè€ÄÀÁ|ÀÀÀ°(€€€ô¤°(€€€‰¥]¥¹¹•ÉAÐè¹Õµ‰•É¹Ø 1=]}EU1%Qe}1I}	%}]%99I}APœ°€ÄÀÀ°ìµ¥¸è€Äô¤°(€€€•¹ÑÉåAÉ½™¥±•Ìèl(€€€€€ì(€€€€€€€¥è€E1}MQI%Pœ°(€€€€€€€±…‰•°è€E0µ½MÑÉ¥Ðƒ
+ÜI•Ñ•¹Ñ¥½»Š&”àÀ”œ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÄÁAÐè€ÄÐÀ°(€€€€€€€µ…áÉ…Ý‘½Ý¸ÈÁAÐè€ÄÈ°(€€€€€€€µ¥¹	Õå•É•±Ñ„è€à°(€€€€€€€µ¥¹9•Ñ±½Ý•±Ñ…M½°è€Ì°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€àÀ°(€€€€€€€µ…áÉ•…Ñ½ÉM¡…É•AÐè€Ì°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÔÔ°(€€€€€€€µ…áÕÉÙ•AÐè€äÀ°(€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸ÔÔ°(€€€€€€€µ¥¹Y¥ÉÑÕ…±M½±I•Í•ÉÙ•Ìè€ÌÀ°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlE1}	I	10œ°€E1}AI=QQt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€E1}	I=œ°(€€€€€€€±…‰•°è€E0µ	É½…ƒ
+ÜI•Ñ•¹Ñ¥½»Š&”ØÀ”œ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÄÁAÐè€ÄÐÀ°(€€€€€€€µ…áÉ…Ý‘½Ý¸ÈÁAÐè€ÄÈ°(€€€€€€€µ¥¹	Õå•É•±Ñ„è€à°(€€€€€€€µ¥¹9•Ñ±½Ý•±Ñ…M½°è€Ì°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€ØÀ°(€€€€€€€µ…áÉ•…Ñ½ÉM¡…É•AÐè€Ì°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÔÔ°(€€€€€€€µ…áÕÉÙ•AÐè€äÀ°(€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸ÔÔ°(€€€€€€€µ¥¹Y¥ÉÑÕ…±M½±I•Í•ÉÙ•Ìè€ÌÀ°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlE1}	I	10t°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€E1}MQI%Q}UIœ°(€€€€€€€±¥Ù•MÑÉ…Ñ•å%è€ÅÕ…±¥Ñå}±•…‘•É}Å±}ÍÑÉ¥Ñ}Õ…É‘}ÁÉ½Ñ•Ñ•‘}±¥Ù”œ°(€€€€€€€±…‰•°è€E0µUIƒ
+ÜMÑÉ¥Ð€¬ƒ–³–Ç¢º‹–6WšÖIU¢þšîœ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÄÁAÐè€ÄÐÀ°(€€€€€€€µ…áÉ…Ý‘½Ý¸ÈÁAÐè€ÄÈ°(€€€€€€€µ¥¹	Õå•É•±Ñ„è€à°(€€€€€€€µ¥¹9•Ñ±½Ý•±Ñ…M½°è€Ì°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€àÀ°(€€€€€€€µ…áÉ•…Ñ½ÉM¡…É•AÐè€Ì°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÔÔ°(€€€€€€€µ…áÕÉÙ•AÐè€äÀ°(€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸ÔÔ°(€€€€€€€µ¥¹Y¥ÉÑÕ…±M½±I•Í•ÉÙ•Ìè€ÌÀ°(€€€€€€€É•ÅÕ¥É•!•…±Ñ¡åIÕI¥Í¬èÑÉÕ”°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlE1}	I	10œ°€E1}AI=QQt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€E1}MQI%Q}UI}PÀÁ|ÀÐœ°(€€€€€€€±…‰•°è€E0µUIµPÀÀ´ÀÐƒ
+ÜMÑÉ¥Ð½IU¢þšî¿–2_’ê°ÀÃŠLÀÓš^Øœ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÄÁAÐè€ÄÐÀ°(€€€€€€€µ…áÉ…Ý‘½Ý¸ÈÁAÐè€ÄÈ°(€€€€€€€µ¥¹	Õå•É•±Ñ„è€à°(€€€€€€€µ¥¹9•Ñ±½Ý•±Ñ…M½°è€Ì°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€àÀ°(€€€€€€€µ…áÉ•…Ñ½ÉM¡…É•AÐè€Ì°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÔÔ°(€€€€€€€µ…áÕÉÙ•AÐè€äÀ°(€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸ÔÔ°(€€€€€€€µ¥¹Y¥ÉÑÕ…±M½±I•Í•ÉÙ•Ìè€ÌÀ°(€€€€€€€É•ÅÕ¥É•!•…±Ñ¡åIÕI¥Í¬èÑÉÕ”°(€€€€€€€‰•¥©¥¹!½ÕÉI…¹•ÌèmlÀ°€Ñut°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlE1}	I	10œ°€E1}AI=QQt°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€E1}MQI%Q}UI}PÄÙ|ÈÀœ°(€€€€€€€±…‰•°è€E0µUIµPÄØ´ÈÀƒ
+ÜMÑÉ¥Ð½IU¢þšî¿–2_’ê°ÄÛŠLÈÃš^Øœ°(€€€€€€€µ¥¹I•ÑÕÉ¸ÄÁAÐè€ÄÐÀ°(€€€€€€€µ…áÉ…Ý‘½Ý¸ÈÁAÐè€ÄÈ°(€€€€€€€µ¥¹	Õå•É•±Ñ„è€à°(€€€€€€€µ¥¹9•Ñ±½Ý•±Ñ…M½°è€Ì°(€€€€€€€µ¥¹I•Ñ•¹Ñ¥½¹AÐè€àÀ°(€€€€€€€µ…áÉ•…Ñ½ÉM¡…É•AÐè€Ì°(€€€€€€€µ¥¹ÕÉÙ•AÐè€ÔÔ°(€€€€€€€µ…áÕÉÙ•AÐè€äÀ°(€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸ÔÔ°(€€€€€€€µ¥¹Y¥ÉÑÕ…±M½±I•Í•ÉÙ•Ìè€ÌÀ°(€€€€€€€É•ÅÕ¥É•!•…±Ñ¡åIÕI¥Í¬èÑÉÕ”°(€€€€€€€‰•¥©¥¹!½ÕÉI…¹•ÌèmlÄØ°€ÈÁut°(€€€€€€€•á¥ÑAÉ½™¥±•%‘ÌèlE1}	I	10œ°€E1}AI=QQt°(€€€€€ô°(€€€t°(€€€•á¥ÑAÉ½™¥±•Ìèl(€€€€€ì(€€€€€€€¥è€E1}	I	10œ°(€€€€€€€±…‰•°è€	…É‰•±°ƒ
+Ü€¬ÈÀ—–6XÌÌ”€¼€¬ÄÀÀ—–6XÄÜ”€¼€ÔÀ—’þwš*“–Âû’îLœ°(€€€€€€€µ½‘”è€	I	10œ°(€€€€€€€Í…±”ÅQÉ¥•ÉAÐè€ÈÀ°(€€€€€€€Í…±”ÅÉ…Ñ¥½¹AÐè€ÌÌ°(€€€€€€€Í…±”ÉQÉ¥•ÉAÐè€ÄÀÀ°(€€€€€€€Í…±”ÉÉ…Ñ¥½¹AÐè€ÄÜ°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€E1}AI=QQœ°(€€€€€€€±…‰•°è€AÉ½Ñ•Ñ•IÕ¹¹•Èƒ
+Üƒ’â7–"š&ä€¼ƒ¦bÛšŠ¿’þwš*“–Âû’îLœ°(€€€€€€€µ½‘”è€AI=QQ}IU99Hœ°(€€€€€ô°(€€€t°(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°èÍ¡…‘½ÝA½Í¥Ñ¥½¹¹Ø 1=]}EU1%Qe}1I}A=M%Q%=9}M=0œ¤°(€€€ô¤°(€ô°((€€¼¼•…ÑÕÉ”™™•Ñ¥Ù•¹•ÍÌÕ‘¥Ð=‰Í•ÉÙ•È¸Q¡¥Ì™½ÉÝ…Éµ½¹±ä…Õ‘¥Ðµ•…ÍÕÉ•Ì(€€¼¼Ý¡•Ñ¡•È•… •á¥ÍÑ¥¹œÍ¥¹…°™…µ¥±ä…‘‘ÌÁÉ•‘¥Ñ¥Ù”Ù…±Õ”…™Ñ•È„É•…°(€€¼¼€ÄM=0É•Í•ÉÙ”µ¥µÁ…Ðµ½‘•°¸µ	9 ´ÄÈÀ¥Ì…¸¥Í½±…Ñ•M¡…‘½Ü½¡½ÉÐì(€€¼¼¹•¥Ñ¡•ÈÁ…Ñ Í¥¹Ì½ÈÍ•¹‘Ì„ÑÉ…¹Í…Ñ¥½¸¸(€™•…ÑÕÉ•‘•Õ‘¥Ðèì(€€€•¹…‰±•è‰½½±•…¹¹Ø 1=]}QUI}}U%Q}9	1œ°ÑÉÕ”¤°(€€€…¹½¹¥…±M¥¹…±M½ÕÉ”èÁÉ½•ÍÌ¹•¹Ø¹1=]}QUI}}U%Q}9=9%1}M=UI(€€€€€ñð€1=]}1}M%90œ°(€€€Á½Í¥Ñ¥½¹M½°è¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}A=M%Q%=9}M=0œ°€Ä°ìµ¥¸è€À¸ÀÄ°µ…àè€ÄÀÀô¤°(€€€Í…µÁ±•½½±‘½Ý¹5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}QUI}}U%Q}M5A1}==1=]9}5Lœ°(€€€€€€ÌÁ|ÀÀÀ°(€€€€€ìµ¥¸è€Å|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀô°(€€€€¤°(€€€µ…áA•¹‘¥¹œè¥¹Ñ••É¹Ø 1=]}QUI}}U%Q}5a}A9%9œ°€Í|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÀÀ°µ…àè€ÈÁ|ÀÀÀ°(€€€ô¤°(€€€µ…á=‰Í•ÉÙ…Ñ¥½¹1…5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}QUI}}U%Q}5a}=	MIYQ%=9}1}5Lœ°(€€€€€€Í|ÀÀÀ°(€€€€€ìµ¥¸è€ÈÔÀ°µ…àè€ÌÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…Ñ•I•Ñ•¹Ñ¥½¹5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}QUI}}U%Q}MQQ}IQ9Q%=9}5Lœ°(€€€€€€ÌØÁ|ÀÀÀ°(€€€€€ìµ¥¸è€ÌÄÁ|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀô°(€€€€¤°(€€€µ¥¹9•Ñ±½ÝM½°è¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}5%9}9Q1=]}M=0œ°€ÄÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÁ|ÀÀÀ°(€€€ô¤°(€€€µ¥¹±½Ý•±•É…Ñ¥½¹M½°è¹Õµ‰•É¹Ø (€€€€€€1=]}QUI}}U%Q}5%9}1=]}1IQ%=9}M=0œ°(€€€€€€È°(€€€€€ìµ¥¸è€À°µ…àè€ÄÁ|ÀÀÀô°(€€€€¤°(€€€µ¥¹	Õå•ÉÌè¥¹Ñ••É¹Ø 1=]}QUI}}U%Q}5%9}	UeILœ°€Ü°ìµ¥¸è€Ä°µ…àè€ÄÁ|ÀÀÀô¤°(€€€µ¥¹	ÕåM¡…É•AÐè¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}5%9}	Ue}M!I}APœ°€ÜÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€µ…á¹ÑÉå%µÁ…ÑAÐè¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}5a}9QIe}%5AQ}APœ°€ÄÔ°ì(€€€€€µ¥¸è€À°µ…àè€Å|ÀÀÀ°(€€€ô¤°(€€€µ¥¹ÕÉÙ•AÐè¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}5%9}UIY}APœ°€ØÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€µ…áÕÉÙ•AÐè¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}5a}UIY}APœ°€äÔ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€µ¥¹•5Ìè¥¹Ñ••É¹Ø 1=]}QUI}}U%Q}5%9}}5Lœ°€Õ|ÀÀÀ°ì(€€€€€µ¥¸è€À°µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€µ…á•5Ìè¥¹Ñ••É¹Ø 1=]}QUI}}U%Q}5a}}5Lœ°€ÌÀÁ|ÀÀÀ°ì(€€€€€µ¥¸è€Å|ÀÀÀ°µ…àè€ÈÐ€¨€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€‰¹¡¹…‰±•è‰½½±•…¹¹Ø 1=]}QUI}}U%Q}	9!}9	1œ°ÑÉÕ”¤°(€€€‰¹¡5¥¹•5Ìè¥¹Ñ••É¹Ø 1=]}QUI}}U%Q}	9!}5%9}}5Lœ°€ÌÁ|ÀÀÀ°ì(€€€€€µ¥¸è€À°µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€‰¹¡5…á•5Ìè¥¹Ñ••É¹Ø 1=]}QUI}}U%Q}	9!}5a}}5Lœ°€ÄÈÁ|ÀÀÀ°ì(€€€€€µ¥¸è€Å|ÀÀÀ°µ…àè€ÈÐ€¨€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€‰¹¡5¥¹ÕÉÙ•AÐè¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}	9!}5%9}UIY}APœ°€ØÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€‰¹¡5…áÕÉÙ•AÐè¹Õµ‰•É¹Ø 1=]}QUI}}U%Q}	9!}5a}UIY}APœ°€äÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€‰¹¡!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}QUI}}U%Q}	9!}!=1}5Lœ°€ÄÈÁ|ÀÀÀ°ì(€€€€€µ¥¸è€Õ|ÀÀÀ°µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€‰¹¡I½Õ¹‘QÉ¥Á½ÍÑAÐè¹Õµ‰•É¹Ø (€€€€€€1=]}QUI}}U%Q}	9!}I=U9}QI%A}=MQ}APœ°(€€€€€€Ì¸È°(€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€ô°((€€¼¼A½ÍÐµµ¥É…Ñ¥½¸MÕÉÙ¥Ù½È=‰Í•ÉÙ•È€¡A4µMUIX¤¸Ù•Éäµ¥É…Ñ•µ¥¹ÐÉ••¥Ù•Ì(€€¼¼„‰½Õ¹‘•™¥Ù”µµ¥¹ÕÑ”‰…Í•±¥¹”¸=¹±ä±¥ÅÕ¥°…Ñ¥Ù”ÍÕÉÙ¥Ù½ÉÌ½¹Ñ¥¹Õ”Ñ¼(€€¼¼€ÌÀ¼ØÀµ¥¹ÕÑ•Ìì„‘•Ñ•Éµ¥¹¥ÍÑ¥Œ¡½±‘½ÕÐ•ÍÑ¥µ…Ñ•Ì‰¥œµÝ¥¹¹•È™…±Í”¹•…Ñ¥Ù•Ì¸(€€¼¼A…ÍÍ¥¹œ€Õ´…±Í¼½Á•¹Ì¥Í½±…Ñ•…Á…¥Ñäµ…Ý…É”€ÌÀ¼ØÀ¼ÄÈÁÌM¡…‘½ÜÉ½ÝÌ¸%Ð(€€¼¼¹•Ù•È½Á•¹Ì„±¥Ù”Á½Í¥Ñ¥½¸°…±±Ì•áÑÉ„IA•¹‘Á½¥¹ÑÌ°½ÈÍ¥¹Ì¸(€Á½ÍÑ5¥É…Ñ¥½¹MÕÉÙ¥Ù½É=‰Í•ÉÙ•Èèì(€€€•¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}9	1œ°™…±Í”¤°(€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è‰½½±•…¹¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}9]}9QI%M}9	1œ°™…±Í”°(€€€€¤°(€€€Á½Í¥Ñ¥½¹M½°è¹Õµ‰•É¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}A=M%Q%=9}M=0œ°€Ä°ì(€€€€€µ¥¸è€À¸ÀÄ°µ…àè€ÄÀÀ°(€€€ô¤°(€€€‰…Í•±¥¹•MÑ…•5Ìè¥¹Ñ••É¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}	M1%9}5Lœ°€Ô€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ØÁ|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€•áÑ•¹‘•‘MÑ…•5Ìè¥¹Ñ••É¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}aQ9}5Lœ°€ÌÀ€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€Ô€¨€ØÁ|ÀÀÀ°µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€µ…á•5Ìè¥¹Ñ••É¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}5a}}5Lœ°€ØÀ€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ÌÀ€¨€ØÁ|ÀÀÀ°µ…àè€È€¨€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€¥¹…Ñ¥Ù¥Ñå5Ìè¥¹Ñ••É¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}%9Q%Y%Qe}5Lœ°€ÄàÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ÌÁ|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€µ…áÑ¥Ù”è¥¹Ñ••É¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}5a}Q%Yœ°€Í|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÀÀ°µ…àè€ÈÁ|ÀÀÀ°(€€€ô¤°(€€€µ…áQ¡¥ÉÑå5¥¹ÕÑ•MÕÉÙ¥Ù½ÉÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}5a|ÌÁ4œ°€ÔÀÀ°ìµ¥¸è€ÄÀ°µ…àè€ÄÁ|ÀÀÀô°(€€€€¤°(€€€µ…áM¥áÑå5¥¹ÕÑ•MÕÉÙ¥Ù½ÉÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}5a|ØÁ4œ°€ÄÀÀ°ìµ¥¸è€Ô°µ…àè€Õ|ÀÀÀô°(€€€€¤°(€€€¡½±‘½ÕÑAÐè¹Õµ‰•É¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}!=1=UQ}APœ°€ÄÀ°ì(€€€€€µ¥¸è€À°µ…àè€ÄÀÀ°(€€€ô¤°(€€€Í½™Ñ…¥±½¹™¥Éµ…Ñ¥½¹Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}M=Q}%1}=9%I5Q%=9Lœ°€È°ìµ¥¸è€Ä°µ…àè€ÄÀô°(€€€€¤°(€€€Í½™Ñ…¥±½¹™¥Éµ…Ñ¥½¹5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}M=Q}%1}=9%I5Q%=9}5Lœ°€ÌÁ|ÀÀÀ°(€€€€€ìµ¥¸è€Å|ÀÀÀ°µ…àè€ÄÀ€¨€ØÁ|ÀÀÀô°(€€€€¤°(€€€É¥Í­¡•­%¹Ñ•ÉÙ…±5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}I%M-}!-}%9QIY1}5Lœ°€É|ÀÀÀ°(€€€€€ìµ¥¸è€ÔÀÀ°µ…àè€ØÁ|ÀÀÀô°(€€€€¤°(€€€¡…É‘AÉ¥•I•Ñ•¹Ñ¥½¹AÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}!I}AI%}IQ9Q%=9}APœ°€ÄÔ°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€€€¡…É‘á•ÕÑ…‰±•I•½Ù•ÉåAÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}!I}I=YIe}APœ°€ÄÔ°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€€€ÍÑ…”Õ5¥¹A•…­I•Ñ•¹Ñ¥½¹AÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|Õ5}5%9}A-}IQ9Q%=9}APœ°€ÌÀ°(€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€€€ÍÑ…”Õ5¥¹QÉ…‘•ÌØÁÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|Õ5}5%9}QIM|ØÁLœ°€à°ìµ¥¸è€À°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”Õ5¥¹	Õå•ÉÌØÁÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|Õ5}5%9}	UeIM|ØÁLœ°€Ì°ìµ¥¸è€À°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”Õ5¥¹	ÕåQàØÁÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|Õ5}5%9}	UeM|ØÁLœ°€È°ìµ¥¸è€À°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”Õ5¥¹M•±±QàØÁÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|Õ5}5%9}M11M|ØÁLœ°€Ä°ìµ¥¸è€À°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”Õ5¥¹á•ÕÑ…‰±•I•½Ù•ÉåAÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|Õ5}5%9}I=YIe}APœ°€ÈÔ°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€€€ÍÑ…”ÌÁ5¥¹	…Í•±¥¹•I•ÑÕÉ¹AÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|ÌÁ5}5%9}IQUI9}APœ°€´ÄÀ°ìµ¥¸è€´ÄÀÀ°µ…àè€ÄÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”ÌÁ5¥¹A•…­I•Ñ•¹Ñ¥½¹AÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|ÌÁ5}5%9}A-}IQ9Q%=9}APœ°€ÐÔ°(€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€€€ÍÑ…”ÌÁ5¥¹QÉ…‘•ÌÌÀÁÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|ÌÁ5}5%9}QIM|ÌÀÁLœ°€ÄÈ°(€€€€€ìµ¥¸è€À°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”ÌÁ5¥¹	Õå•ÉÌÌÀÁÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|ÌÁ5}5%9}	UeIM|ÌÀÁLœ°€Ô°(€€€€€ìµ¥¸è€À°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”ÌÁ5¥¹9•Ñ±½ÝM½°è¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|ÌÁ5}5%9}9Q1=]}M=0œ°€À°(€€€€€ìµ¥¸è€´ÄÀÁ|ÀÀÀ°µ…àè€ÄÀÁ|ÀÀÀô°(€€€€¤°(€€€ÍÑ…”ÌÁ5¥¹á•ÕÑ…‰±•I•½Ù•ÉåAÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I|ÌÁ5}5%9}I=YIe}APœ°€ÔÀ°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€€€µ…áÙ•¹ÑÍA•É5¥¹Ðè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}5a}Y9QM}AI}5%9Pœ°€ÔÄÈ°(€€€€€ìµ¥¸è€ØÐ°µ…àè€ÄÁ|ÀÀÀô°(€€€€¤°(€€€‘…Í¡‰½…É‘1¥µ¥Ðè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}M!	=I}1%5%Pœ°€É|ÀÀÀ°(€€€€€ìµ¥¸è€ÄÀÀ°µ…àè€ÄÁ|ÀÀÀô°(€€€€¤°(€€€ÑÉ…¹Í¥•¹ÑUÁAÉ¥•I…Ñ¥¼è¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}QI9M%9Q}UA}AI%}IQ%<œ°€ÈÀ°(€€€€€ìµ¥¸è€È°µ…àè€Å|ÀÀÁ|ÀÀÀô°(€€€€¤°(€€€ÁÉ¥•½¹™¥Éµ…Ñ¥½¹]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}AI%}=9%I5Q%=9}]%9=]}5Lœ°€ÔÀÀ°(€€€€€ìµ¥¸è€ÄÀÀ°µ…àè€ØÁ|ÀÀÀô°(€€€€¤°(€€€ÁÉ¥•½¹™¥Éµ…Ñ¥½¹5¥¹A•ÉÍ¥ÍÑ•¹•5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}AI%}=9%I5Q%=9}5%9}AIM%MQ9}5Lœ°€ÄÔÀ°(€€€€€ìµ¥¸è€À°µ…àè€ØÁ|ÀÀÀô°(€€€€¤°(€€€ÁÉ¥•½¹™¥Éµ…Ñ¥½¹Q½±•É…¹•AÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}AI%}=9%I5Q%=9}Q=1I9}APœ°€ÈÔ°(€€€€€ìµ¥¸è€Ä°µ…àè€ÄÀÀô°(€€€€¤°(€€€ÁÉ¥•½¹™¥Éµ…Ñ¥½¹5¥¹]…±±•ÑÌè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}AI%}=9%I5Q%=9}5%9}]11QLœ°€È°(€€€€€ìµ¥¸è€Ä°µ…àè€ÄÀÀô°(€€€€¤°(€€€Í¡…‘½Ý¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}M!=]}9	1œ°™…±Í”¤°(€€€Í¡…‘½ÝÕ±±!½±‘5…ÑÉ¥á¹…‰±•è‰½½±•…¹¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}U11}!=1}5QI%a}9	1œ°™…±Í”°(€€€€¤°(€€€Í¡…‘½Ý!½±‘5Ìè‰½½±•…¹¹Ø 1=]}A=MQ}5%IQ%=9}MUIY%Y=I}U11}!=1}5QI%a}9	1œ°™…±Í”¤(€€€€€€üµ¥±±¥Í•½¹‘1¥ÍÑ¹Ø (€€€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}M!=]}!=1M}M=9Lœ°lÌÀ°€ØÀ°€ÄÈÁt°(€€€€€€¤(€€€€€€èlÌÁ|ÀÀÁt°(€€€Í¡…‘½ÝI½Õ¹‘QÉ¥Á½ÍÑAÐè¹Õµ‰•É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}M!=]}I=U9}QI%A}=MQ}APœ°€Ì¸È°(€€€€€ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€¤°(€€€Í¡…‘½Ý9½á¥ÑÉ…•5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}A=MQ}5%IQ%=9}MUIY%Y=I}M!=]}9=}a%Q}I}5Lœ°€ØÁ|ÀÀÀ°(€€€€€ìµ¥¸è€Å|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀô°(€€€€¤°(€ô°((€€¼¼É…‘Õ…Ñ¥½¸•±•É…Ñ¥½¸M¡…‘½Ü<¸Q¡¥Ì¥Ì…¸¥¹‘•Á•¹‘•¹Ð™½ÉÝ…Éµ½¹±ä(€€¼¼•áÁ•É¥µ•¹Ð‘•É¥Ù•™É½´Ñ¡”¹½¸µ½Ù•É±…ÁÁ¥¹œ¡¥ÍÑ½É¥…°É…‘Õ…Ñ¥½¸ÍÑÕ‘ä¸4(€€¼¼%Ð¹•Ù•ÈÍ¥¹Ì½ÈÍÕ‰µ¥ÑÌ„ÑÉ…¹Í…Ñ¥½¸…¹‘½•Ì¹½ÐÉ•ÕÍ”½±$½¡½ÉÑÌ¸4(€É…‘Õ…Ñ¥½¹•±•É…Ñ¥½¹M¡…‘½Üèì4(€€€•¹…‰±•è‰½½±•…¹¹Ø 1=]}IUQ%=9}1}M!=]}9	1œ°ÑÉÕ”¤°4(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}1}9QIe}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}1}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ìµ¥¸è€Äô¤°4(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}1}a%Q}1e}5Lœ°€ÈÀÀ°ìµ¥¸è€Àô¤°4(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}IUQ%=9}1}a%Q}Q%5=UQ}5Lœ°€ÄÕ|ÀÀÀ°ìµ¥¸è€Äô¤°4(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}1}5a}9QIe})U5A}APœ°€ÄÔ°ì4(€€€€€µ¥¸è€À°µ…àè€Å|ÀÀÀ°4(€€€ô¤°4(€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}1}!I}MQ=A}APœ°€ÌÀ°ì4(€€€€€µ¥¸è€À¸Ä°µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…áAÉ•É…‘Õ…Ñ¥½¹!½±‘5Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}IUQ%=9}1}5a}AI}I}!=1}5Lœ°4(€€€€€€Ô€¨€ØÁ|ÀÀÀ°4(€€€€€ìµ¥¸è€ÄÁ|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀô°4(€€€€¤°4(€€€µ…áA½ÍÑÉ…‘Õ…Ñ¥½¹!½±‘5Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}IUQ%=9}1}5a}A=MQ}I}!=1}5Lœ°4(€€€€€€Ô€¨€ØÁ|ÀÀÀ°4(€€€€€ìµ¥¸è€ÄÁ|ÀÀÀ°µ…àè€ÌÀ€¨€ØÁ|ÀÀÀô°4(€€€€¤°4(€€€½É•á¥ÑAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}1}=I}a%Q}APœ°€ÔÀ°ì4(€€€€€µ¥¸è€Ä°µ…àè€ää°4(€€€ô¤°4(€€€€¼¼M¡…‘½ÜÉ•µ…¥¹Ì„€ÄM=0É•Í•…É µ½‘•°¥¹‘•Á•¹‘•¹Ñ±ä½˜Ñ¡”ÁÉ½µ½Ñ•(€€€€¼¼€À¸ÔM=0±¥Ù”½É‘•È°ÁÉ•Í•ÉÙ¥¹œÑ¡”•Ù•¹ÑÕ…°ÁÉ½‘ÕÑ¥½¸µÍ¥é”…Á…¥ÑäÑ•ÍÐ¸(€€€…Á…¥ÑåM½±Ìè±¥ÍÑ¹Ø 1=]}IUQ%=9}1}XÉ}A%Qe}M=1Lœ°lœÄt¤(€€€€€€¹µ…À¡9Õµ‰•È¤¹™¥±Ñ•È ¡Ù…±Õ”¤€ôø9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ù…±Õ”¤€˜˜Ù…±Õ”€ø€À¤°(€€€•¹ÑÉåAÉ½™¥±•Ìèl4(€€€€€ì4(€€€€€€€¥è€=}MPÄÁ}àÁ}ÈÁ}HÀÜœ°4(€€€€€€€±…‰•°è€œÄÃžžHÕÉÙ—Š&”àÀ€¼	Õå•ÉÏŠ&”ÈÀ€¼M•±°µ	ÕçŠ&À¸Üœ°4(€€€€€€€µ½‘”è€%a|ÄÁLœ°4(€€€€€€€¡½É¥é½¹5Ìè€ÄÁ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ•AÐè€àÀ°4(€€€€€€€µ¥¹	Õå•ÉÌè€ÈÀ°4(€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸Ü°4(€€€€€ô°4(€€€€€ì(€€€€€€€¥è€=}àÁ}Õ}É}LÁ}9œ°(€€€€€€€±¥Ù•MÑÉ…Ñ•å%è€É…‘Õ…Ñ¥½¹}…•±}½}ŒàÁ}Õ}ˆÉ}ÌÁ}¹}±¥Ù”œ°(€€€€€€€±…‰•°è€Ÿ¦š[š²…ÕÉÙ”àÀ€¼ƒ:QÕÉÙ”×Š&”Ô€¼	Õå•ÉÌ×Š&”È€¼€Ã–6[–6T€¼É•…Ñ½Ëšr«–6Xœ°4(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°4(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÀ°4(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°4(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°4(€€€€€€€µ¥¹	Õå•ÉÌè€È°4(€€€€€€€µ…áM•±±Qàè€À°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€ô°(€€€€€€¸¸¹lÄÔ°€ÈÁt¹µ…À ¡¡…É‘MÑ½ÁAÐ¤€ôø€¡ì(€€€€€€€¥è=}àÁ}Õ}É}LÁ}9} ‘í¡…É‘MÑ½ÁAÑõ€°(€€€€€€€±…‰•°è<µàÀµ×š¶‹š6–¾çžœƒ
+Ü ‘í¡…É‘MÑ½ÁAÑô”€¼ƒ–Û’ög¦–ë’â7–>a€°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€È°(€€€€€€€µ…áM•±±Qàè€À°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€¡…É‘MÑ½ÁAÐ°(€€€€€ô¤¤°(€€€€€€¸¸¹lÜÔ°€Üát¹µ…À ¡Ñ¡É•Í¡½±‘AÐ¤€ôø€¡ì(€€€€€€€¥è=}‘íÑ¡É•Í¡½±‘AÑõ}Õ}É}LÁ}9}I1e€°(€€€€€€€±…‰•°è<µ‘íÑ¡É•Í¡½±‘AÑôµI1dƒ
+ÜÕÉÙ”‘íÑ¡É•Í¡½±‘AÑ÷š>C–&7¢ž›–>D€¼ƒ:QÕÉÙ”×Š&”Ô€¼	Õå•ÉÏŠ&”È€¼€Ã–6[–6U€°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€È°(€€€€€€€µ…áM•±±Qàè€À°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€½É•á¥ÑAÐè€ÔÀ°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”è€Q%I}QI%1%9œ°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ìè€ÈÐÁ|ÀÀÀ°(€€€€€ô¤¤°(€€€€€ì(€€€€€€€¥è€=}àÁ}4Õ}!9=}`ØÀœ°(€€€€€€€±…‰•°è€<µàÀµ4Ôµ!9=ƒ
+ÜÕÉÙ”àÃ’þ‡–>ß–B;ž¶'–úš¾W’âh€¼AÕµÁMÝ…Ã¦šX×žžKž†»¢º€¼ƒ–në–ºhØÃžžHœ°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€È°(€€€€€€€µ…áM•±±Qàè€À°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€µ¥É…Ñ¥½¹!…¹‘½™˜èÑÉÕ”°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€½É•á¥ÑAÐè€À°(€€€€€€€Á½ÍÑ5¥É…Ñ¥½¹¹ÑÉå…Ñ”èì(€€€€€€€€€Ý¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€€€µ¥¹	Õå•ÉÌè€Ô°(€€€€€€€€€µ¥¹9•Ñ±½ÝM½°è€À°(€€€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸Ü°(€€€€€€€€€µ…áÉ…Ý‘½Ý¹AÐè€ÈÀ°(€€€€€€€€€µ…á5…É­•Ñ5½Ù•AÐè€ÄÔ°(€€€€€€€€€µ…áM•±™%µÁ…ÑAÐè€ÄÀ°(€€€€€€€ô°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ìè€ØÁ|ÀÀÀ°(€€€€€ô°(€€€€€€¸¸¹l(€€€€€€€l=}àÁ}1%Y}5%}`ÈÀœ°€ÈÁ|ÀÀÁt°(€€€€€€€l=}àÁ}1%Y}5%}`ÌÀœ°€ÌÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°ÉÕ¹¹•É5…á!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+Ü<µàÃ–º{žnc¢þžžïš.Kžîw–B8€¼AÕµÁMÝ…Ã¢«žÛšÖž†»¢º€¼ƒ–në–ºh‘íÉÕ¹¹•É5…á!½±‘5Ì€¼€Å|ÀÀÁ÷žžI€°(€€€€€€€µ½‘”è€1%Y}5%IQ%=9}%1UIœ°(€€€€€€€Í½ÕÉ•1¥Ù•MÑÉ…Ñ•å%è€É…‘Õ…Ñ¥½¹}…•±}½}ŒàÁ}Õ}ˆÉ}ÌÁ}¹}±¥Ù”œ°(€€€€€€€µ¥É…Ñ¥½¹!…¹‘½™˜èÑÉÕ”°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€…Á…¥ÑåM½±ÌèlÅt°(€€€€€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè€É|ÔÀÀ°(€€€€€€€½É•á¥ÑAÐè€À°(€€€€€€€Á½ÍÑ5¥É…Ñ¥½¹¹ÑÉå…Ñ”èì(€€€€€€€€€•¹ÑÉå•±…å5Ìè€ÔÀÀ°(€€€€€€€€€…ÁÑÕÉ•]¥¹‘½Ý5Ìè€Í|ÀÀÀ°(€€€€€€€€€•Ù…±Õ…Ñ•Ñ¥±°èÑÉÕ”°(€€€€€€€€€Ý…¥Ñ½ÉEÕ…±¥™¥…Ñ¥½¸èÑÉÕ”°(€€€€€€€€€µ¥¹QÉ…‘•Ìè€Ì°(€€€€€€€€€µ¥¹	ÕåQàè€È°(€€€€€€€€€µ¥¹	Õå•ÉÌè€È°(€€€€€€€€€µ¥¹9•Ñ±½ÝM½°è€À¸Ä°(€€€€€€€€€µ…áM•±±	ÕåI…Ñ¥¼è€À¸Ô°(€€€€€€€€€µ…á1…É•ÍÑM•±±M½°è€Ä°(€€€€€€€€€µ…áÉ…Ý‘½Ý¹AÐè€ÄÈ°(€€€€€€€€€µ…á5…É­•Ñ5½Ù•AÐè€ÄÔ°(€€€€€€€€€µ…áM•±™%µÁ…ÑAÐè€ÄÀ°(€€€€€€€ô°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”è€%a}!=1œ°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ì°(€€€€€ô¤¤°(€€€€€€¸¸¹l(€€€€€€€l=}àÁ}@ÔÀÁ}MQ%HÈÐÀœ°€ÔÀÀ°€Q%I}QI%1%9œ°€ÈÐÁ|ÀÀÁt°(€€€€€€€l=}àÁ}@ÄÀÀÁ}`ØÀœ°€Å|ÀÀÀ°€%a}!=1œ°€ØÁ|ÀÀÁt°(€€€€€€€l=}àÁ}@ÄÀÀÁ}`ÄÈÀœ°€Å|ÀÀÀ°€%a}!=1œ°€ÄÈÁ|ÀÀÁt°(€€€€€€€l=}àÁ}@ÄÀÀÁ}MQ%HÈÐÀœ°€Å|ÀÀÀ°€Q%I}QI%1%9œ°€ÈÐÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°Á•ÉÍ¥ÍÑ•¹•5Ì°ÉÕ¹¹•Éá¥Ñ5½‘”°ÉÕ¹¹•É5…á!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±¥Ù•MÑÉ…Ñ•å%è¥€ôôô€=}àÁ}@ÔÀÁ}MQ%HÈÐÀœ(€€€€€€€€€€ü€É…‘Õ…Ñ¥½¹}…•±}½}ŒàÁ}ÀÔÀÁ}ÍÑ…¥ÈÈÐÁ}±¥Ù”œ(€€€€€€€€€€è¹Õ±°°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+ÜÕÉÙ”àÃš2žî·ž†»¢º€¼€ÄM=3–>¿š&Ÿ¢†3¦–é€°(€€€€€€€µ½‘”è€UIY}5%1MQ=9}AIM%MQ9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€È°(€€€€€€€µ…áM•±±Qàè€À°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€Á•ÉÍ¥ÍÑ•¹•5Ì°(€€€€€€€µ…áA•ÉÍ¥ÍÑ•¹•M•±±Qàè€À°(€€€€€€€µ…áA•ÉÍ¥ÍÑ•¹•AÕ±±‰…­AÐè€Ô°(€€€€€€€½É•á¥ÑAÐè€À°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ì°(€€€€€ô¤¤°(€€€€€€¸¸¹l(€€€€€€€l<äÁ}4Õ}`ØÀœ°€%a}!=1œ°€ØÁ|ÀÀÁt°(€€€€€€€l<äÁ}4Õ}`ÄÈÀœ°€%a}!=1œ°€ÄÈÁ|ÀÀÁt°(€€€€€€€l<äÁ}4Õ}MQ%HÄÈÀœ°€Q%I}QI%1%9œ°€ÄÈÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°ÉÕ¹¹•Éá¥Ñ5½‘”°ÉÕ¹¹•É5…á!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±¥Ù•MÑÉ…Ñ•å%è¥€ôôô€<äÁ}4Õ}MQ%HÄÈÀœ(€€€€€€€€€€ü€É…‘Õ…Ñ¥½¹}…•±}¼äÁ}´Õ}ÍÑ…¥ÈÄÈÁ}±¥Ù”œ(€€€€€€€€€€è¹Õ±°°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+ÜÕÉÙ”äÀÉ…‘Õ…Ñ¥½¸ÁÉ½‰…‰¥±¥Ñä€¬™¥ÉÍÐAÕµÁMÝ…À€ÕÌ…Ñ•€°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€äÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€Ä°(€€€€€€€µ…áM•±±Qàè€Ä°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€½É•á¥ÑAÐè€ÔÀ°(€€€€€€€Á½ÍÑ5¥É…Ñ¥½¹…Ñ”èì(€€€€€€€€€Ý¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€€€µ¥¹	Õå•ÉÌè€ÈÔ°(€€€€€€€€€µ¥¹9•Ñ±½ÝM½°è€À°(€€€€€€€ô°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ì°(€€€€€ô¤¤°(€€€€€€¸¸¹l(€€€€€€€l<äÁ}DÜÁ}ÌÁ}`ØÀœ°€%a}!=1œ°€ØÁ|ÀÀÁt°(€€€€€€€l<äÁ}DÜÁ}ÌÁ}MQ%HÄÈÀœ°€Q%I}QI%1%9œ°€ÄÈÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°ÉÕ¹¹•Éá¥Ñ5½‘”°ÉÕ¹¹•É5…á!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°è€‘í¥‘ôƒ
+ÜÕÉÙ”äÀ€¼	Õå•ÉÌ×Š&”Ì€¼9•Ñ±½Ü×Š&”ÜÀ€¼ƒ:QÕÉÙ”×Š&”ÌÀƒ
+Ü™½ÉÝ…Éµ½¹±å€°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€äÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€ÌÀ°(€€€€€€€µ¥¹	Õå•ÉÌè€Ì°(€€€€€€€µ¥¹9•Ñ±½ÝM½°è€ÜÀ°(€€€€€€€µ…áM•±±Qàè€Ä°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€½É•á¥ÑAÐè€ÔÀ°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€Á½ÍÑ5¥É…Ñ¥½¹…Ñ”èì(€€€€€€€€€Ý¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€€€µ¥¹	Õå•ÉÌè€ÈÔ°(€€€€€€€€€µ¥¹9•Ñ±½ÝM½°è€À°(€€€€€€€ô°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ì°(€€€€€ô¤¤°(€€€€€ì(€€€€€€€¥è€<äÁ}dÀàÄá}MQ%HÄÈÀœ°(€€€€€€€±…‰•°è€<äÀµd´ÀàÄàƒ
+Üƒ–2_’ê³š^Û¦^ÐÀãŠLÄãž
+ä€¼ƒš^<äÃ–—–rè€¼ƒ¦bÛšŠ¼ÄÈÃžžHœ°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€äÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€Ä°(€€€€€€€µ…áM•±±Qàè€Ä°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€Í•ÍÍ¥½¹MÑ…ÉÑ!½ÕÉÍÐè€à°(€€€€€€€Í•ÍÍ¥½¹¹‘!½ÕÉÍÐè€Äà°(€€€€€€€½É•á¥ÑAÐè€ÔÀ°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€Á½ÍÑ5¥É…Ñ¥½¹…Ñ”èì(€€€€€€€€€Ý¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€€€µ¥¹	Õå•ÉÌè€ÈÔ°(€€€€€€€€€µ¥¹9•Ñ±½ÝM½°è€À°(€€€€€€€ô°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”è€Q%I}QI%1%9œ°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ìè€ÄÈÁ|ÀÀÀ°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€=}àÁ}dÄÈÄá}MQ%HÈÐÀœ°(€€€€€€€±…‰•°è€<µàÀµd´ÄÈÄàƒ
+Üƒ–2_’ê³š^Û¦^ÐÄËŠLÄãž
+ä€¼ƒš^ÕÉÙ”àÃ–—–rè€¼ƒ¦bÛšŠ¼ÈÐÃžžHœ°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€È°(€€€€€€€µ…áM•±±Qàè€À°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€Í•ÍÍ¥½¹MÑ…ÉÑ!½ÕÉÍÐè€ÄÈ°(€€€€€€€Í•ÍÍ¥½¹¹‘!½ÕÉÍÐè€Äà°(€€€€€€€½É•á¥ÑAÐè€ÔÀ°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”è€Q%I}QI%1%9œ°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ìè€ÈÐÁ|ÀÀÀ°(€€€€€ô°(€€€€€€¸¸¹l(€€€€€€€l=}àÁ}9%!PÀÀÀÑ}MQ%HÈÐÀœ°€<µàÀµ9%!P´ÀÀÀÐœ°€À°€Ñt°(€€€€€€€l=}àÁ}Y9%9ÈÀÈÑ}MQ%HÈÐÀœ°€<µàÀµY9%9´ÈÀÈÐœ°€ÈÀ°€ÈÑt°(€€€€€t¹µ…À ¡m¥°±…‰•±AÉ•™¥à°Í•ÍÍ¥½¹MÑ…ÉÑ!½ÕÉÍÐ°Í•ÍÍ¥½¹¹‘!½ÕÉÍÑt¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°è€‘í±…‰•±AÉ•™¥áôƒ
+Üƒ–2_’ê³š^ÛšºÔ€¼ƒš^ÕÉÙ”àÃ–—–rè€¼ƒ¦bÛšŠ¼ÈÐÃžžI€°(€€€€€€€µ½‘”è€UIY}5%1MQ=9œ°(€€€€€€€Ñ¡É•Í¡½±‘AÐè€àÀ°(€€€€€€€É••¹Ñ]¥¹‘½Ý5Ìè€Õ|ÀÀÀ°(€€€€€€€µ¥¹ÕÉÙ••±Ñ…AÐè€Ô°(€€€€€€€µ¥¹	Õå•ÉÌè€È°(€€€€€€€µ…áM•±±Qàè€À°(€€€€€€€É•ÅÕ¥É•9½É•…Ñ½ÉM•±°èÑÉÕ”°(€€€€€€€Í•ÍÍ¥½¹MÑ…ÉÑ!½ÕÉÍÐ°(€€€€€€€Í•ÍÍ¥½¹¹‘!½ÕÉÍÐ°(€€€€€€€½É•á¥ÑAÐè€ÔÀ°(€€€€€€€…Á…¥ÑåÝ…É•á¥ÐèÑÉÕ”°(€€€€€€€ÉÕ¹¹•Éá¥Ñ5½‘”è€Q%I}QI%1%9œ°(€€€€€€€ÉÕ¹¹•É5…á!½±‘5Ìè€ÈÐÁ|ÀÀÀ°(€€€€€ô¤¤°(€€€€€€¸¸¹É…‘Õ…Ñ¥½¹I•±…á•‘¹ÑÉåAÉ½™¥±•Ì°(€€€t°(€€€ÑÉ…¥±¥¹Q¥•ÉÌèl(€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÈÀ°‘É…Ý‘½Ý¹AÐè€ÄÀô°(€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÐÀ°‘É…Ý‘½Ý¹AÐè€ÄÔô°4(€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€àÀ°‘É…Ý‘½Ý¹AÐè€ÈÀô°4(€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÄÔÀ°‘É…Ý‘½Ý¹AÐè€ÈÔô°4(€€€€€ì…Ñ¥Ù…Ñ¥½¹AÐè€ÌÀÀ°‘É…Ý‘½Ý¹AÐè€ÌÀô°4(€€€t°4(€€€‰¥]¥¹¹•ÉAÐè¹Õµ‰•É¹Ø 1=]}IUQ%=9}1}	%}]%99I}APœ°€ÔÀ°ìµ¥¸è€Äô¤°4(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì4(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°4(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°è€Ä°4(€€€ô¤°4(€ô°4(4(€€¼¼=‰Í•ÉÙ•Èµ½¹±ä1…Õ¹ EÕ…±¥ÑäÉ•Í•…É ¸I•™•É•¹”Á•É•¹Ñ…•Ì±…‰•°µ…É­•Ð4(€€¼¼ÍÑÉÕÑÕÉ”™½È±…Ñ•È…¹…±åÍ¥ÌìÑ¡•ä¹•Ù•È‰•½µ”…¸•¹ÑÉä½È•á•ÕÑ¥½¸ÉÕ±”¸4(€±…Õ¹¡EÕ…±¥Ñå=‰Í•ÉÙ•Èèì(€€€•¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}1U9!}EU1%Qe}=	MIYI}9	1œ°™…±Í”¤°(€€€Í¹…ÁÍ¡½Ñ!½É¥é½¹Í5Ìèµ¥±±¥Í•½¹‘1¥ÍÑ¹Ø 4(€€€€€€1=]}1U9!}EU1%Qe}M9AM!=Q}M=9Lœ°4(€€€€€lÔ°€ÄÀ°€ÈÀ°€ÌÀ°€ØÁt°4(€€€€¤°4(€€€µ…á1…Õ¹¡•5Ìè¥¹Ñ••É¹Ø 1=]}1U9!}EU1%Qe}5a}}5Lœ°€äÁ|ÀÀÀ°ì4(€€€€€µ¥¸è€ÌÁ|ÀÀÀ°4(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°4(€€€ô¤°4(€€€ÁÕµÁI•™•É•¹•AÐè¹Õµ‰•É¹Ø 1=]}1U9!}EU1%Qe}AU5A}II9}APœ°€ÈÔ°ì4(€€€€€µ¥¸è€À¸Ä°4(€€€€€µ…àè€ÄÁ|ÀÀÀ°4(€€€ô¤°4(€€€ÁÕ±±‰…­I•™•É•¹•AÐè¹Õµ‰•É¹Ø 4(€€€€€€1=]}1U9!}EU1%Qe}AU11	-}II9}APœ°4(€€€€€€Ü¸Ô°4(€€€€€ìµ¥¸è€À¸Ä°µ…àè€ÄÀÀô°4(€€€€¤°4(€€€É•‰½Õ¹‘I•™•É•¹•AÐè¹Õµ‰•É¹Ø 4(€€€€€€1=]}1U9!}EU1%Qe}I	=U9}II9}APœ°4(€€€€€€Ì°4(€€€€€ìµ¥¸è€À°µ…àè€Å|ÀÀÀô°4(€€€€¤°4(€€€‘••ÁI•™•É•¹•AÉ½™¥±•Ìè±…Õ¹¡••ÁAÕ±±‰…­AÉ½™¥±•Ì¹µ…À ¡ÁÉ½™¥±”¤€ôø€¡ì€¸¸¹ÁÉ½™¥±”ô¤¤°4(€€€É••¹Ñ	Õå•É]¥¹‘½Ý5Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}1U9!}EU1%Qe}I9Q}	UeI}]%9=]}5Lœ°4(€€€€€€ÄÁ|ÀÀÀ°4(€€€€€ìµ¥¸è€ÔÀÀ°µ…àè€ØÁ|ÀÀÀô°4(€€€€¤°4(€€€É•Ñ•¹Ñ¥½¹±½½ÉAÐè¹Õµ‰•É¹Ø 1=]}1U9!}EU1%Qe}IQ9Q%=9}1==I}APœ°€ÄÀ°ì4(€€€€€µ¥¸è€À°4(€€€€€µ…àè€ÄÀÀ°4(€€€ô¤°4(€€€µ…á=‰Í•ÉÙ…Ñ¥½¹1…5Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}1U9!}EU1%Qe}5a}=	MIYQ%=9}1}5Lœ°4(€€€€€€É|ÀÀÀ°4(€€€€€ìµ¥¸è€À°µ…àè€ÌÁ|ÀÀÀô°4(€€€€¤°4(€€€µ…É­•ÑI•¥µ•1½½­‰…­5Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}1U9!}5I-Q}I%5}1==-	-}5Lœ°4(€€€€€€ÌÀ€¨€ØÁ|ÀÀÀ°4(€€€€€ìµ¥¸è€Ô€¨€ØÁ|ÀÀÀ°µ…àè€Ø€¨€ØÀ€¨€ØÁ|ÀÀÀô°4(€€€€¤°4(€€€µ…É­•ÑI•¥µ•M•ÑÑ±•µ•¹Ñ1…5Ìè¥¹Ñ••É¹Ø 4(€€€€€€1=]}1U9!}5I-Q}I%5}MQQ159Q}1}5Lœ°4(€€€€€€ØÁ|ÀÀÀ°4(€€€€€ìµ¥¸è€ØÁ|ÀÀÀ°µ…àè€ÄÀ€¨€ØÁ|ÀÀÀô°4(€€€€¤°4(€€€µ…É­•ÑI•¥µ•…¡•5Ìè¥¹Ñ••É¹Ø (€€€€€€1=]}1U9!}5I-Q}I%5}!}5Lœ°(€€€€€€Õ|ÀÀÀ°(€€€€€ìµ¥¸è€Å|ÀÀÀ°µ…àè€ØÁ|ÀÀÀô°(€€€€¤°(€ô°((€€¼¼4Éµ=	L½±±•ÑÌ…ÕÍ…°Á½ÍÐµµ¥É…Ñ¥½¸Í•½¹µ±•œ•Ù¥‘•¹”½¹±ä¸%Ð¡…Ì(€€¼¼¹¼Á½Í¥Ñ¥½¸µ½‘•°°•á•ÕÑ¥½¸…±±‰…¬°IA•¹É¥¡µ•¹Ð½ÈÑÉ…¹Í…Ñ¥½¸Á…Ñ ¸(€µ¥É…Ñ¥½¹M•½¹‘1•=‰Í•ÉÙ•Èèì(€€€•¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}4É}=	MIYI}9	1œ°™…±Í”¤°(€€€µ…á•5Ìè¥¹Ñ••É¹Ø 1=]}4É}=	MIYI}5a}}5Lœ°€ÐàÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ØÁ|ÀÀÀ°(€€€€€µ…àè€ÌÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€Í¹…ÁÍ¡½Ñ%¹Ñ•ÉÙ…±5Ìè¥¹Ñ••É¹Ø 1=]}4É}=	MIYI}M9AM!=Q}%9QIY1}5Lœ°€Å|ÀÀÀ°ì(€€€€€µ¥¸è€ÈÔÀ°(€€€€€µ…àè€ÄÁ|ÀÀÀ°(€€€ô¤°(€€€É•ÍÑ½É•É…•5Ìè¥¹Ñ••É¹Ø 1=]}4É}=	MIYI}IMQ=I}I}5Lœ°€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€ÁÕ±±‰…­ÉµAÐè¹Õµ‰•É¹Ø 1=]}4É}=	MIYI}AU11	-}I5}APœ°€à°ì(€€€€€µ¥¸è€À¸Ä°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€É•‰½Õ¹‘I•™•É•¹•AÐè¹Õµ‰•É¹Ø 1=]}4É}=	MIYI}I	=U9}II9}APœ°€Ì°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€É•Ñ•¹Ñ¥½¹±½½ÉAÐè¹Õµ‰•É¹Ø 1=]}4É}=	MIYI}IQ9Q%=9}1==I}APœ°€ÈÀ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€•™™•Ñ¥Ù•	Õå5¥¹M½°è¹Õµ‰•É¹Ø 1=]}4É}=	MIYI}Q%Y}	Ue}5%9}M=0œ°€À¸ÀÈ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€ô°((€€¼¼I•Ñ¥É”Ñ¡”½±4ÉÁ½Í¥Ñ¥½¸½¡½ÉÑÌ…™Ñ•ÈÑ¡”¹•…Ñ¥Ù”™½ÉÝ…ÉÍ…µÁ±”¸(€€¼¼I•ÕÍ”Ñ¡”¥¹‘•Á•¹‘•¹Ð•¥¡Ðµµ¥¹ÕÑ”4Éµ=	LÑ…Á”™½È„Í•Á…É…Ñ•±ä¹…µ•(€€¼¼±…Ñ”µÍÑ…‰¥±¥é…Ñ¥½¸µ…ÑÉ¥àì½±4ÉÉ½ÝÌÉ•µ…¥¸Õ¹Ñ½Õ¡•…¹ÅÕ•Éå…‰±”¸(€µ¥É…Ñ¥½¹M•½¹‘1•M¡…‘½Üèì(€€€•¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€˜˜‰½½±•…¹¹Ø 1=]}1AM}M!=]}9	1œ°™…±Í”¤°(€€€¹•Ý¹ÑÉ¥•Í¹…‰±•è‰½½±•…¹¹Ø 1=]}1AM}M!=]}9]}9QI%M}9	1œ°™…±Í”¤°(€€€ÍÑÉ…Ñ•å9…µ”è€1…Ñ”A½ÍÐµ5¥É…Ñ¥½¸MÑ…‰¥±¥é…Ñ¥½¸1ALœ°(€€€€¼¼1…‰•±ÌÑ¡”‰É½…Á½ÍÐµµ¥É…Ñ¥½¸Ñ…Á”™½ÈM¡…‘½ÜÉ•Í•…É ½¹±ä¸Q¡¥Ì(€€€€¼¼½‰©•Ð¥Ì¹½Ð½¹ÍÕµ•‰ä1¥Ù•QÉ…‘¥¹5…¹…•È½È…¹ä±¥Ù”ÍÑÉ…Ñ•ä¸(€€€µ…É­•ÑI•¥µ”èì(€€€€€•¹…‰±•èÉ•Ñ¥É•‘I•Í•…É¡I•½Á•¹¹…‰±•(€€€€€€€€˜˜‰½½±•…¹¹Ø 1=]}4É}5I-Q}I%5}M!=]}9	1œ°™…±Í”¤°(€€€€€µ…ÑÕÉ¥Ñå•5Ìè¥¹Ñ••É¹Ø 1=]}4É}5I-Q}I%5}5QUI%Qe}5Lœ°€ÄÈÁ|ÀÀÀ°ì(€€€€€€€µ¥¸è€ÄÁ|ÀÀÀ°µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€€€ô¤°(€€€€€±½½­‰…­5Ìè¥¹Ñ••É¹Ø 1=]}4É}5I-Q}I%5}1==-	-}5Lœ°€ÄÀ€¨€ØÁ|ÀÀÀ°ì(€€€€€€€µ¥¸è€ØÁ|ÀÀÀ°µ…àè€Ø€¨€ØÀ€¨€ØÁ|ÀÀÀ°(€€€€€ô¤°(€€€€€µ¥¹5¥¹ÑÌè¥¹Ñ••É¹Ø 1=]}4É}5I-Q}I%5}5%9}5%9QLœ°€ÄÈ°ì(€€€€€€€µ¥¸è€Ì°µ…àè€Å|ÀÀÀ°(€€€€€ô¤°(€€€€€µ¥¹A½Í¥Ñ¥Ù•I•ÑÕÉ¹I…Ñ•AÐè¹Õµ‰•É¹Ø (€€€€€€€€1=]}4É}5I-Q}I%5}5%9}A=M%Q%Y}IQUI9}IQ}APœ°€ÔÀ°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€¤°(€€€€€µ…áIÕ½±±…ÁÍ•I…Ñ•AÐè¹Õµ‰•É¹Ø (€€€€€€€€1=]}4É}5I-Q}I%5}5a}IU}IQ}APœ°€ÄÔ°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€¤°(€€€€€µ¥¹A½Í¥Ñ¥Ù•9•Ñ±½ÝI…Ñ•AÐè¹Õµ‰•É¹Ø (€€€€€€€€1=]}4É}5I-Q}I%5}5%9}A=M%Q%Y}1=]}IQ}APœ°€ÔÔ°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€¤°(€€€€€µ…á5•‘¥…¹ÍÑ¥µ…Ñ•‘%µÁ…ÐÅM½±AÐè¹Õµ‰•É¹Ø (€€€€€€€€1=]}4É}5I-Q}I%5}5a}5%9}%5AQ|ÅM=1}APœ°€Ô°ìµ¥¸è€À°µ…àè€ÄÀÀô°(€€€€€€¤°(€€€ô°(€€€½¡½ÉÑ%è€4Éµ9 ÄÀµUIµœ°(€€€Á½Í¥Ñ¥½¹M¥é•M½°è¹Õµ‰•É¹Ø 1=]}4É}9I}!%!}UI}	}A=M%Q%=9}M=0œ°€Ä°ì(€€€€€µ¥¸è€À¸ÀÄ°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€•¹ÑÉå•±…å5Ìè¥¹Ñ••É¹Ø 1=]}4É}9I}!%!}UI}	}9QIe}1e}5Lœ°€ÈÀÀ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÁ|ÀÀÀ°(€€€ô¤°(€€€•¹ÑÉåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}4É}9I}!%!}UI}	}9QIe}Q%5=UQ}5Lœ°€É|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÀÀ°(€€€€€µ…àè€ÌÁ|ÀÀÀ°(€€€ô¤°(€€€•á¥Ñ•±…å5Ìè¥¹Ñ••É¹Ø 1=]}4É}9I}!%!}UI}	}a%Q}1e}5Lœ°€ÈÀÀ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÁ|ÀÀÀ°(€€€ô¤°(€€€•á¥ÑQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}4É}9I}!%!}UI}	}a%Q}Q%5=UQ}5Lœ°€É|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÀÀ°(€€€€€µ…àè€ÌÁ|ÀÀÀ°(€€€ô¤°(€€€µ…á¹ÑÉåAÉ¥•)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}4É}9I}!%!}UI}	}5a}9QIe})U5A}APœ°€ÄÔ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€Å|ÀÀÀ°(€€€ô¤°(€€€µ…á9•…Ñ¥Ù•¹ÑÉå)ÕµÁAÐè¹Õµ‰•É¹Ø 1=]}4É}9I}!%!}UI}	}5a}9QIe}I=A}APœ°€ÌÀ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€€¼¼AÕµÁMÝ…ÀÑ½­•¸…¹¹½Ð…ÕÍ…±±äÉ•ÁÉ¥”‰ä¡Õ¹‘É•‘Ì½˜Ñ¥µ•Ì‰•ÑÝ••¸(€€€€¼¼…‘©…•¹Ð½‰Í•ÉÙ…Ñ¥½¹Ì¥¸Ñ¡¥ÌÍ¡½ÉÐÍÑÕ‘ä¸MÕ É½ÝÌ…É”É•Í•ÉÙ”½‘•¥µ…°(€€€€¼¼Í…±”‘¥Í½¹Ñ¥¹Õ¥Ñ¥•Ì…¹µÕÍÐ¹½Ð‰•½µ”¥…¹Ð5½ÈA¹0Ý¥¹¹•ÉÌ¸(€€€µ…á=‰Í•ÉÙ•‘AÉ¥•I…Ñ¥¼è¹Õµ‰•É¹Ø 1=]}4É}5a}=	MIY}AI%}IQ%<œ°€ÄÀÀ°ì(€€€€€µ¥¸è€È°(€€€€€µ…àè€Å|ÀÀÁ|ÀÀÀ°(€€€ô¤°(€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}4É}9I}!%!}UI}	}!I}MQ=A}APœ°€ÄÔ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}4É}9I}!%!}UI}	}5a}!=1}5Lœ°€ÄÁ|ÀÀÀ°ì(€€€€€µ¥¸è€Å|ÀÀÀ°(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€Ñ¡É•Í¡½±‘Ìèì€¸¸¹´É™9•…É!¥¡Q¡É•Í¡½±‘Ìô°(€€€½¡½ÉÑÌèl(€€€€€ì(€€€€€€€¥è€4Éµ9 ÄÀµUIµœ°(€€€€€€€±…‰•°è€9•…Èµ¡¥ €ÄÁÌ•¹ÑÉä½¹ÑÉ½°œ°(€€€€€€€•¹…‰±•è™…±Í”°(€€€€€€€ÍÑÕ‘å5½‘”è€9QIe}=9QI=0œ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5½‘”è€%55%Qœ°(€€€€€€€¡…É‘MÑ½ÁAÐè¹Õµ‰•É¹Ø 1=]}4É}9I}!%!}UI}	}!I}MQ=A}APœ°€ÄÔ°ì(€€€€€€€€€µ¥¸è€À°(€€€€€€€€€µ…àè€ÄÀÀ°(€€€€€€€ô¤°(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}4É}9I}!%!}UI}	}5a}!=1}5Lœ°€ÄÁ|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€Å|ÀÀÀ°(€€€€€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€4Éµ!=1´ÄÈÀœ°(€€€€€€€±…‰•°è€M…µ”µ•¹ÑÉä™¥á•€ÄÈÁÌ¡½±•áÑ•¹Í¥½¸œ°(€€€€€€€•¹…‰±•è™…±Í”°(€€€€€€€ÍÑÕ‘å5½‘”è€M5}9QIe}!=1}aQ9M%=8œ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5½‘”è€%55%Qœ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÄÀÀ°(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}4É}!=1|ÄÈÁ}5Lœ°€ÄÈÁ|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€ÄÁ|ÀÀÀ°(€€€€€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€4Éµ!=1´ÈÐÀœ°(€€€€€€€±…‰•°è€M…µ”µ•¹ÑÉä™¥á•€ÈÐÁÌÉ¥¡ÐµÑ…¥°•áÑ•¹Í¥½¸œ°(€€€€€€€•¹…‰±•è™…±Í”°(€€€€€€€ÍÑÕ‘å5½‘”è€M5}9QIe}!=1}aQ9M%=8œ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5½‘”è€%55%Qœ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÄÀÀ°(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}4É}!=1|ÈÐÁ}5Lœ°€ÈÐÁ|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€ÄÁ|ÀÀÀ°(€€€€€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€4Éµ!=1´ÈÐÀµ ÈÀœ°(€€€€€€€±…‰•°è€M…µ”µ•¹ÑÉä€ÈÐÁÌ•áÑ•¹Í¥½¸Ý¥Ñ €ÈÀ”µ…É¬ÍÑ½Àœ°(€€€€€€€•¹…‰±•è™…±Í”°(€€€€€€€ÍÑÕ‘å5½‘”è€M5}9QIe}!=1}aQ9M%=8œ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5½‘”è€%55%Qœ°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÈÀ°(€€€€€€€µ…á!½±‘5Ìè¥¹Ñ••É¹Ø 1=]}4É}!=1|ÈÐÁ} ÈÁ}5Lœ°€ÈÐÁ|ÀÀÀ°ì(€€€€€€€€€µ¥¸è€ÄÁ|ÀÀÀ°(€€€€€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€4ÉµÈµ ÄÀœ°(€€€€€€€±…‰•°è€QÝ¼µÍ¹…ÁÍ¡½ÐÁ•ÉÍ¥ÍÑ•¹”™¥±Ñ•È€¼½É¥¥¹…°€ÄÁÌ•á¥Ðœ°(€€€€€€€•¹…‰±•è™…±Í”°(€€€€€€€ÍÑÕ‘å5½‘”è€=9%I5}%1QHœ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5½‘”è€Q]=}M9AM!=Q}AIM%MQ9œ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5¥¹…Á5Ìè¥¹Ñ••É¹Ø 1=]}4É}=9%I5}5%9}A}5Lœ°€ÔÀÀ°ì(€€€€€€€€€µ¥¸è€ÄÀÀ°(€€€€€€€€€µ…àè€Õ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5…á…Á5Ìè¥¹Ñ••É¹Ø 1=]}4É}=9%I5}5a}A}5Lœ°€É|ÔÀÀ°ì(€€€€€€€€€µ¥¸è€ÔÀÀ°(€€€€€€€€€µ…àè€ÄÁ|ÀÀÀ°(€€€€€€€ô¤°(€€€€€€€µ…áM•±±••±•É…Ñ¥½¹%¹É•…Í”è¹Õµ‰•É¹Ø (€€€€€€€€€€1=]}4É}=9%I5}5a}M11}1}%9IMœ°€À¸Ä°ìµ¥¸è€À°µ…àè€ÄÀô°(€€€€€€€€¤°(€€€€€€€¡…É‘MÑ½ÁAÐè€ÄÔ°(€€€€€€€µ…á!½±‘5Ìè€ÄÁ|ÀÀÀ°(€€€€€ô°(€€€€€€¸¸¹l(€€€€€€€l4ÉµMMHµQI0µ`ØÀœ°€MMH½¹ÑÉ½°€¼™¥á•€ØÁÌœ°™…±Í”°€ÄÀÀ°€ØÁ|ÀÀÁt°(€€€€€€€l4ÉµMMHµ5Iµ`ØÀœ°€MMH€¬5IÉ••¸€¼™¥á•€ØÁÌœ°ÑÉÕ”°€ÄÀÀ°€ØÁ|ÀÀÁt°(€€€€€€€l4ÉµMMHµ5Iµ`ÄÈÀœ°€MMH€¬5IÉ••¸€¼™¥á•€ÄÈÁÌœ°ÑÉÕ”°€ÄÀÀ°€ÄÈÁ|ÀÀÁt°(€€€€€€€l4ÉµMMHµ5IµHÄÈÀµ ÈÀœ°€MMH€¬5IÉ••¸€¼ ÈÀ€¼€ÄÈÁÌœ°ÑÉÕ”°€ÈÀ°€ÄÈÁ|ÀÀÁt°(€€€€€€€l4ÉµMMHµ5IµHÈÐÀµ ÈÀœ°€MMH€¬5IÉ••¸€¼ ÈÀ€¼€ÈÐÁÌÉ¥¡ÐÑ…¥°œ°ÑÉÕ”°€ÈÀ°€ÈÐÁ|ÀÀÁt°(€€€€€t¹µ…À ¡m¥°±…‰•°°É•ÅÕ¥É•É••¹I•¥µ”°¡…É‘MÑ½ÁAÐ°µ…á!½±‘5Ít¤€ôø€¡ì(€€€€€€€¥°(€€€€€€€±…‰•°°(€€€€€€€•¹…‰±•è™…±Í”°(€€€€€€€ÍÑÕ‘å5½‘”èÉ•ÅÕ¥É•É••¹I•¥µ”(€€€€€€€€€€ü€M11}MQIMM}I=YIe}5I-Q}I%5œ(€€€€€€€€€€è€M11}MQIMM}I=YIe}=9QI=0œ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5½‘”è€Q]=}M9AM!=Q}AIM%MQ9œ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5¥¹…Á5Ìè€ÔÀÀ°(€€€€€€€½¹™¥Éµ…Ñ¥½¹5…á…Á5Ìè€É|ÔÀÀ°(€€€€€€€µ…áM•±±••±•É…Ñ¥½¹%¹É•…Í”è€À¸ÄÔ°(€€€€€€€É•ÅÕ¥É•É••¹I•¥µ”°(€€€€€€€¡…É‘MÑ½ÁAÐ°(€€€€€€€µ…á!½±‘5Ì°(€€€€€€€Ñ¡É•Í¡½±‘Ìèì(€€€€€€€€€µ¥¹•5Ìè€ÄÁ|ÀÀÀ°(€€€€€€€€€µ…á•5Ìè€äÁ|ÀÀÀ°(€€€€€€€€€µ¥¹ÕÉÉ•¹Ñ%µÁÕ±Í•AÐè€ÈÀ°(€€€€€€€€€µ…áÕÉÉ•¹Ñ%µÁÕ±Í•AÐè€ÄÀÀ°(€€€€€€€€€µ¥¹A•…­%µÁÕ±Í•AÐè€ÈÀ°(€€€€€€€€€µ¥¹AÕ±±‰…­AÐè€ÄÀ°(€€€€€€€€€µ…áAÕ±±‰…­AÐè€ÌÀ°(€€€€€€€€€µ¥¹I•‰½Õ¹‘AÐè€Ì°(€€€€€€€€€µ…áI•‰½Õ¹‘AÐè€ÄÔ°(€€€€€€€€€µ¥¹9•Ñ±½ÜÄÁÍM½°è€Ä°(€€€€€€€€€µ¥¹9•Ñ±½ÜÍÍM½°è€À¸Ô°(€€€€€€€€€µ¥¹	Õå•ÉÌÄÁÌè€à°(€€€€€€€€€µ¥¹	Õå•ÉÌÍÌè€Ä°(€€€€€€€€€µ…á1…É•ÍÑ	Õå•ÉM¡…É•AÐè€ÐÀ°(€€€€€€€€€µ¥¹	ÕåMÁ••‘I…Ñ¥¼è€À°(€€€€€€€€€µ¥¹9•Ñ±½Ý•±•É…Ñ¥½¸è€´Å|ÀÀÀ°(€€€€€€€€€µ…áM•±±••±•É…Ñ¥½¹I…Ñ¥¼è€À¸à°(€€€€€€€€€µ¥¹!½±‘•É¥™™ÕÍ¥½¹%¹‘•àè€´ÄÁ|ÀÀÀ°(€€€€€€€€€µ¥¹EÕ½Ñ•I•Í•ÉÙ•M½°è€ÈÀ°(€€€€€€€€€µ…áÍÑ¥µ…Ñ•‘%µÁ…ÐÅM½±AÐè€Ô°(€€€€€€€ô°(€€€€€ô¤¤°(€€€€€€¸¸¹±ÁÍ½¡½ÉÑÌ°(€€€t°(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°è€Ä°(€€€ô¤°(€ô°((€€¼¼½ÉÝ…Éµ½¹±äÑ¡•½É•Ñ¥…°Í…µ”µÍ±½Ð‰…­ÉÕ¸ÍÑÕ‘ä¸Q¡¥Ì½‰Í•ÉÙ•È¹•Ù•È(€€¼¼Í¥¹Ì½ÈÍ•¹‘Ì„ÑÉ…¹Í…Ñ¥½¸¸%Ðµ•…ÍÕÉ•ÌÝ¡•Ñ¡•È„±…É”AÕµÁMÝ…ÀÍ•±°(€€¼¼¥Ì™½±±½Ý•‰ä„‰Õä¥¸Ñ¡”Í…µ”Í±½Ð…¹ÁÉ¥•ÌÑ¡”¡åÁ½Ñ¡•Ñ¥…°€À¸ÄM=0(€€¼¼É½Õ¹ÑÉ¥À™É½´Ñ¡”Í•±°•Ù•¹ÐÌÁ½ÍÐµÑÉ…‘”É•Í•ÉÙ•Ì¸(€Í…µ•M±½ÑÕµÁ	…­ÉÕ¹M¡…‘½Üèì(€€€€¼¼Q¡”½µÁ±•Ñ•µÍ±½Ð•áÁ½ÉÐÁÉ½‘Õ•é•É¼Ý¥¹¹•ÉÌ…É½ÍÌ•Ù•ÉäÑ•ÍÑ•(€€€€¼¼¡½É¥é½¸¸-••ÀÑ¡”¡¥ÍÑ½É¥…°Ñ…‰±”½A$‰ÕÐÍÑ½À•¹•É…Ñ¥¹œ¹•ÜÉ½ÝÌ¸(€€€€¼¼Q¡¥Ì¥Ì¥¹Ñ•¹Ñ¥½¹…±±ä¡…Éµ‘¥Í…‰±•è…¸½±Í•ÉÙ•È€¹•¹ØõÑÉÕ”µÕÍÐ¹½Ð(€€€€¼¼Í¥±•¹Ñ±äÉ•…Ñ¥Ù…Ñ”„É•Ñ¥É•ÍÑÉ…Ñ•ä…™Ñ•È…¸½É‘¥¹…Éä½‘”ÕÁ‘…Ñ”¸(€€€É•Ñ¥É•èÑÉÕ”°(€€€•¹…‰±•è™…±Í”°(€€€Á½Í¥Ñ¥½¹M¥é•M½°è¹Õµ‰•É¹Ø 1=]}M5}M1=Q}U5A}	-IU9}A=M%Q%=9}M=0œ°€À¸Ä°ì(€€€€€µ¥¸è€À¸ÀÄ°(€€€€€µ…àè€ÄÀ°(€€€ô¤°(€€€ÑÉ…­¥¹•5Ìè¥¹Ñ••É¹Ø 1=]}M5}M1=Q}U5A}	-IU9}QI-%9}}5Lœ°€ÄÔ€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ØÁ|ÀÀÀ°(€€€€€µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€ÍÑ…Ñ•I•Ñ•¹Ñ¥½¹5Ìè¥¹Ñ••É¹Ø 1=]}M5}M1=Q}U5A}	-IU9}MQQ}IQ9Q%=9}5Lœ°€ÈÀ€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ØÁ|ÀÀÀ°(€€€€€µ…àè€È€¨€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€•Á¥Í½‘•½½±‘½Ý¹5Ìè¥¹Ñ••É¹Ø 1=]}M5}M1=Q}U5A}	-IU9}A%M=}==1=]9}5Lœ°€ÄÁ|ÀÀÀ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ÄÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€•á¥ÑÉ…•5Ìè¥¹Ñ••É¹Ø 1=]}M5}M1=Q}U5A}	-IU9}a%Q}I}5Lœ°€É|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÀÀ°(€€€€€µ…àè€ÌÁ|ÀÀÀ°(€€€ô¤°(€€€µ…áÁ¥Í½‘•ÍA•É5¥¹Ðè¥¹Ñ••É¹Ø 1=]}M5}M1=Q}U5A}	-IU9}5a}A%M=M}AI}5%9Pœ°€ÈÀ°ì(€€€€€µ¥¸è€Ä°(€€€€€µ…àè€ÄÀÀ°(€€€ô¤°(€€€•¹ÑÉåAÉ½™¥±•Ìèl(€€€€€ì(€€€€€€€¥è€M	HµLÄÀµÄÔœ°(€€€€€€€±…‰•°è€M•±°øôÄÀM=0€¼‘É½ÀøôÄÔ”œ°(€€€€€€€µ¥¹M•±±M½°è€ÄÀ°(€€€€€€€µ¥¹É½ÁAÐè€ÄÔ°(€€€€€€€µ…áÉ½ÁAÐè€ÜÀ°(€€€€€€€µ¥¹EÕ½Ñ•I•Í•ÉÙ•M½°è€Ô°(€€€€€€€µ…á¹ÑÉå%µÁ…ÑAÐè€ÄÈ°(€€€€€ô°(€€€€€ì(€€€€€€€¥è€M	HµLÈÀµÈÀœ°(€€€€€€€±…‰•°è€M•±°øôÈÀM=0€¼‘É½ÀøôÈÀ”œ°(€€€€€€€µ¥¹M•±±M½°è€ÈÀ°(€€€€€€€µ¥¹É½ÁAÐè€ÈÀ°(€€€€€€€µ…áÉ½ÁAÐè€ÜÀ°(€€€€€€€µ¥¹EÕ½Ñ•I•Í•ÉÙ•M½°è€Ô°(€€€€€€€µ…á¹ÑÉå%µÁ…ÑAÐè€ÄÈ°(€€€€€ô°(€€€t°(€€€•á¥ÑAÉ½™¥±•Ìèl(€€€€€ì¥è€ ÈÔÀœ°±…‰•°è€™¥á•€ÈÔÁµÌœ°­¥¹è€%aœ°¡½±‘5Ìè€ÈÔÀô°(€€€€€ì¥è€ ÔÀÀœ°±…‰•°è€™¥á•€ÔÀÁµÌœ°­¥¹è€%aœ°¡½±‘5Ìè€ÔÀÀô°(€€€€€ì¥è€ ÄÀÀÀœ°±…‰•°è€™¥á•€ÅÌœ°­¥¹è€%aœ°¡½±‘5Ìè€Å|ÀÀÀô°(€€€€€ì¥è€ ÈÀÀÀœ°±…‰•°è€™¥á•€ÉÌœ°­¥¹è€%aœ°¡½±‘5Ìè€É|ÀÀÀô°(€€€€€ì(€€€€€€€¥è€Q@àµ ÈÀÀÀœ°(€€€€€€€±…‰•°è€œ¬à”½È™¥á•€ÉÌœ°(€€€€€€€­¥¹è€Q-}=I}%aœ°(€€€€€€€Ñ…­•AÉ½™¥ÑAÐè€à°(€€€€€€€µ…á!½±‘5Ìè€É|ÀÀÀ°(€€€€€ô°(€€€t°(€€€½ÍÑ5½‘•°è¹½Éµ…±¥é•½ÍÑ5½‘•°¡ì(€€€€€€¸¸¹±…‰•±½ÍÑ5½‘•°°(€€€€€Á½Í¥Ñ¥½¹M¥é•M½°è¹Õµ‰•É¹Ø 1=]}M5}M1=Q}U5A}	-IU9}A=M%Q%=9}M=0œ°€À¸Ä°ì(€€€€€€€µ¥¸è€À¸ÀÄ°(€€€€€€€µ…àè€ÄÀ°(€€€€€ô¤°(€€€ô¤°(€ô°((€ÍÑ½É…”èì(€€€‘‰A…Ñ èÁÉ½•ÍÌ¹•¹Ø¹1=]}	}AQ ñð€œ¸½‘…Ñ„½™±½ÜµÉ•Í•…É ¹‘ˆœ°(€€€É…ÝI•Ñ•¹Ñ¥½¹!½ÕÉÌè¹Õµ‰•É¹Ø 1=]}I]}IQ9Q%=9}!=UILœ°€Ðà°ìµ¥¸è€ÈÐô¤°(€€€…É¡¥Ù•¥ÈèÁÉ½•ÍÌ¹•¹Ø¹1=]}I!%Y}%Hñð€œ¸½‘…Ñ„½…É¡¥Ù”œ°(€€€‰ÕÍåQ¥µ•½ÕÑ5Ìè¥¹Ñ••É¹Ø 1=]}	}	UMe}Q%5=UQ}5Lœ°€Õ|ÀÀÀ°ì(€€€€€µ¥¸è€ÔÀ°(€€€€€µ…àè€ÌÁ|ÀÀÀ°(€€€ô¤°(€€€ÝÉ¥Ñ•I•ÑÉå5¥¹5Ìè¥¹Ñ••É¹Ø 1=]}	}]I%Q}IQIe}5%9}5Lœ°€ÈÔÀ°ì(€€€€€µ¥¸è€ÔÀ°(€€€€€µ…àè€ÄÁ|ÀÀÀ°(€€€ô¤°(€€€ÝÉ¥Ñ•I•ÑÉå5…á5Ìè¥¹Ñ••É¹Ø 1=]}	}]I%Q}IQIe}5a}5Lœ°€ÌÁ|ÀÀÀ°ì(€€€€€µ¥¸è€Å|ÀÀÀ°(€€€€€µ…àè€Ô€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€µ…áA•¹‘¥¹QÉ…‘•Ìè¥¹Ñ••É¹Ø 1=]}	}5a}A9%9}QILœ°€ÈÔÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ÄÁ|ÀÀÀ°(€€€€€µ…àè€Õ|ÀÀÁ|ÀÀÀ°(€€€ô¤°(€€€™±ÕÍ¡5Ìè¥¹Ñ••É¹Ø 1=]}	}1UM!}5Lœ°€ÈÔÀ°ìµ¥¸è€ÈÔô¤°(€€€™±ÕÍ¡5…àè¥¹Ñ••É¹Ø 1=]}	}1UM!}5`œ°€Å|ÀÀÀ°ìµ¥¸è€ÄÀô¤°(€€€¡•…±Ñ¡I•™É•Í¡5Ìè¥¹Ñ••É¹Ø 1=]}	}!1Q!}IIM!}5Lœ°€ÄÔ€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€ØÁ|ÀÀÀ°(€€€€€µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€€€ÍÑ…ÉÑÕÁI•Á±…å…¡•5Ìè¥¹Ñ••É¹Ø 1=]}MQIQUA}IA1e}!}5Lœ°€ÄÔ€¨€ØÁ|ÀÀÀ°ì(€€€€€µ¥¸è€À°(€€€€€µ…àè€ØÀ€¨€ØÁ|ÀÀÀ°(€€€ô¤°(€ô°(4(€Í•ÉÙ•Èèì4(€€€Á½ÉÐè¥¹Ñ••É¹Ø 1=]}M!	=I}A=IPœ°€ÌÀÀÄ°ìµ¥¸è€Ä°µ…àè€ØÕ|ÔÌÔô¤°4(€€€¡½ÍÐèÁÉ½•ÍÌ¹•¹Ø¹1=]}	%9}!=MPñð€œÀ¸À¸À¸Àœ°4(€ô°4)ôì4(4(¼¼M½±…¹„É•ÅÕ•ÍÑÌÁÉ¥½É¥ÑäÁÉ¥”Á•ÈT°Ý¡¥±”½Á•É…Ñ½ÉÌÉ•…Í½¸…‰½ÕÐÑ¡”Ñ½Ñ…°4(¼¼™•”Á•ÈÑÉ…¹Í…Ñ¥½¸¸•É¥Ù”½¹”Í¡…É•‰Õä½Í•±°TÁÉ¥”™É½´Ñ¡”M=0Ñ…É•Ð¸4)½¹™¥œ¹±¥Ù•QÉ…‘¥¹œ¹ÁÉ¥½É¥Ñå••5¥É½1…µÁ½ÉÑÌ€ôÁÉ¥½É¥Ñå••5¥É½1…µÁ½ÉÑÌ 4(€½¹™¥œ¹±¥Ù•QÉ…‘¥¹œ¹ÁÉ¥½É¥Ñå••M½°°4(€½¹™¥œ¹±¥Ù•QÉ…‘¥¹œ¹½µÁÕÑ•U¹¥Ñ1¥µ¥Ð°4(¤ì4(4)™Õ¹Ñ¥½¸ÍÑÉ•…µQ½­•¹½È¡•¹‘Á½¥¹Ð¤ì4(€¥˜€¡½¹™¥œ¹ÍÑÉ•…´¹…±±•¹!…É­¹‘Á½¥¹ÑÌ¹¡…Ì¡•¹‘Á½¥¹Ð¤¤É•ÑÕÉ¸½¹™¥œ¹ÍÑÉ•…´¹…±±•¹!…É­Q½­•¸ñðÕ¹‘•™¥¹•ì4(€É•ÑÕÉ¸½¹™¥œ¹ÍÑÉ•…´¹¡•±¥ÕÍQ½­•¸ñðÕ¹‘•™¥¹•ì4)ô4(4)™Õ¹Ñ¥½¸Ù…±¥‘…Ñ•½¹™¥œ ¤ì4(€½¹ÍÐ•ÉÉ½ÉÌ€ômtì4(€¥˜€¡½¹™¥œ¹ÍÑÉ•…´¹•¹‘Á½¥¹ÑÌ¹±•¹Ñ €ôôô€À¤ì4(€€€•ÉÉ½ÉÌ¹ÁÕÍ  5¥ÍÍ¥¹œ1=]}IA}9A=%9QL½È!1%UM}1MIMQI5}9A=%9P¡L¤œ¤ì4(€ô4(€¥˜€¡½¹™¥œ¹ÍÑÉ…Ñ•ä¹Í¥¹…±]¥¹‘½Ý5Ì€¨€Ì€ø½¹™¥œ¹ÍÑÉ…Ñ•ä¹‰Õ™™•É5Ì¤ì4(€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}	UI}5LµÕÍÐ½Ù•È…±°Ñ¡É•”Í¥¹…°Ý¥¹‘½ÝÌœ¤ì4(€ô4(€¥˜€¡½¹™¥œ¹±…Õ¹¡EÕ…±¥Ñå=‰Í•ÉÙ•È¹Í¹…ÁÍ¡½Ñ!½É¥é½¹Í5Ì¹±•¹Ñ €ôôô€À¤ì4(€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}1U9!}EU1%Qe}M9AM!=Q}M=9LµÕÍÐ½¹Ñ…¥¸…Ð±•…ÍÐ½¹”Ù…±Õ”œ¤ì4(€ô4(€¥˜€¡½¹™¥œ¹¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Ü¹•¹…‰±•€˜˜€…½¹™¥œ¹±…Õ¹¡EÕ…±¥Ñå=‰Í•ÉÙ•È¹•¹…‰±•¤ì4(€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}1U9!}EU1%Qe}=	MIYI}9	1µÕÍÐ‰”ÑÉÕ”Ý¡•¸!½±‘•ÈÉ½ÝÑ ¥Ì•¹…‰±•œ¤ì4(€ô4(€½¹ÍÐ¡½±‘•ÉÉ½ÝÑ¡!½É¥é½¹Ì€ô¹•ÜM•Ð¡l4(€€€€¸¸¹½¹™¥œ¹¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¹µ…À ¡ÁÉ½™¥±”¤€ôø€ 4(€€€€€ÁÉ½™¥±”¹¡½É¥é½¹5Ìñð½¹™¥œ¹¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Ü¹Í¹…ÁÍ¡½Ñ!½É¥é½¹5Ì4(€€€€¤¤°4(€€€€¸¸¹½¹™¥œ¹¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì4(€€€€€€¹µ…À ¡ÁÉ½™¥±”¤€ôøÁÉ½™¥±”¹™±½Ý¡•­!½É¥é½¹5Ì¤¹™¥±Ñ•È¡	½½±•…¸¤°4(€t¤ì4(€¥˜€¡½¹™¥œ¹¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Ü¹•¹…‰±•4(€€€€˜˜l¸¸¹¡½±‘•ÉÉ½ÝÑ¡!½É¥é½¹Ít¹Í½µ” ¡¡½É¥é½¹5Ì¤€ôø€ 4(€€€€€€…½¹™¥œ¹±…Õ¹¡EÕ…±¥Ñå=‰Í•ÉÙ•È¹Í¹…ÁÍ¡½Ñ!½É¥é½¹Í5Ì¹¥¹±Õ‘•Ì¡¡½É¥é½¹5Ì¤4(€€€€¤¤¤ì4(€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}1U9!}EU1%Qe}M9AM!=Q}M=9LµÕÍÐ¥¹±Õ‘”…±°!½±‘•ÈÉ½ÝÑ ¡½É¥é½¹Ìœ¤ì4(€ô4(€½¹ÍÐ¡½±‘•ÉÉ½ÝÑ¡á¥Ñ%‘Ì€ô¹•ÜM•Ð 4(€€€½¹™¥œ¹¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì¹µ…À ¡ÁÉ½™¥±”¤€ôøÁÉ½™¥±”¹¥¤°4(€€¤ì4(€™½È€¡½¹ÍÐÁÉ½™¥±”½˜½¹™¥œ¹¡½±‘•ÉÉ½ÝÑ¡M¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¤ì(€€€™½È€¡½¹ÍÐ•á¥ÑAÉ½™¥±•%½˜ÁÉ½™¥±”¹•á¥ÑAÉ½™¥±•%‘Ìñðmt¤ì4(€€€€€¥˜€ …¡½±‘•ÉÉ½ÝÑ¡á¥Ñ%‘Ì¹¡…Ì¡•á¥ÑAÉ½™¥±•%¤¤ì4(€€€€€€€•ÉÉ½ÉÌ¹ÁÕÍ ¡!½±‘•ÈÉ½ÝÑ •¹ÑÉä€‘íÁÉ½™¥±”¹¥‘ôÉ•™•É•¹•Ìµ¥ÍÍ¥¹œ•á¥Ð€‘í•á¥ÑAÉ½™¥±•%‘õ€¤ì4(€€€€€ô4(€€€ô(€ô(€¥˜€¡½¹™¥œ¹ÅÕ…±¥Ñå1•…‘•ÉM¡…‘½Ü¹•¹…‰±•€˜˜€…½¹™¥œ¹±…Õ¹¡EÕ…±¥Ñå=‰Í•ÉÙ•È¹•¹…‰±•¤ì(€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}1U9!}EU1%Qe}=	MIYI}9	1µÕÍÐ‰”ÑÉÕ”Ý¡•¸EÕ…±¥Ñä1•…‘•È¥Ì•¹…‰±•œ¤ì(€ô(€¥˜€¡½¹™¥œ¹ÅÕ…±¥Ñå1•…‘•ÉM¡…‘½Ü¹•¹…‰±•(€€€€˜˜€…m½¹™¥œ¹ÅÕ…±¥Ñå1•…‘•ÉM¡…‘½Ü¹Í¹…ÁÍ¡½ÐÄÁ5Ì°½¹™¥œ¹ÅÕ…±¥Ñå1•…‘•ÉM¡…‘½Ü¹Í¹…ÁÍ¡½ÐÈÁ5Ít(€€€€€€¹•Ù•Éä ¡¡½É¥é½¹5Ì¤€ôø½¹™¥œ¹±…Õ¹¡EÕ…±¥Ñå=‰Í•ÉÙ•È¹Í¹…ÁÍ¡½Ñ!½É¥é½¹Í5Ì¹¥¹±Õ‘•Ì¡¡½É¥é½¹5Ì¤¤¤ì(€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}1U9!}EU1%Qe}M9AM!=Q}M=9LµÕÍÐ¥¹±Õ‘”€ÄÀ…¹€ÈÀ™½ÈEÕ…±¥Ñä1•…‘•Èœ¤ì(€ô(€½¹ÍÐÅÕ…±¥Ñå1•…‘•Éá¥Ñ%‘Ì€ô¹•ÜM•Ð (€€€½¹™¥œ¹ÅÕ…±¥Ñå1•…‘•ÉM¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì¹µ…À ¡ÁÉ½™¥±”¤€ôøÁÉ½™¥±”¹¥¤°(€€¤ì(€™½È€¡½¹ÍÐÁÉ½™¥±”½˜½¹™¥œ¹ÅÕ…±¥Ñå1•…‘•ÉM¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¤ì(€€€™½È€¡½¹ÍÐ•á¥ÑAÉ½™¥±•%½˜ÁÉ½™¥±”¹•á¥ÑAÉ½™¥±•%‘Ìñðmt¤ì(€€€€€¥˜€ …ÅÕ…±¥Ñå1•…‘•Éá¥Ñ%‘Ì¹¡…Ì¡•á¥ÑAÉ½™¥±•%¤¤ì(€€€€€€€•ÉÉ½ÉÌ¹ÁÕÍ ¡EÕ…±¥Ñä1•…‘•È•¹ÑÉä€‘íÁÉ½™¥±”¹¥‘ôÉ•™•É•¹•Ìµ¥ÍÍ¥¹œ•á¥Ð€‘í•á¥ÑAÉ½™¥±•%‘õ€¤ì(€€€€€ô(€€€ô(€ô(€¥˜€¡½¹™¥œ¹‰¥]¥¹¹•ÉM¡…‘½Ü¹•¹…‰±•¤ì(€€€¥˜€¡½¹™¥œ¹‰¥]¥¹¹•ÉM¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¹±•¹Ñ €ôôô€À¤ì(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  	¥œ]¥¹¹•ÈM¡…‘½ÜÉ•ÅÕ¥É•Ì…Ð±•…ÍÐ½¹”•¹ÑÉäÁÉ½™¥±”œ¤ì(€€€ô(€€€¥˜€¡½¹™¥œ¹‰¥]¥¹¹•ÉM¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì¹±•¹Ñ €ôôô€À¤ì(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  	¥œ]¥¹¹•ÈM¡…‘½ÜÉ•ÅÕ¥É•Ì…Ð±•…ÍÐ½¹”•á¥ÐÁÉ½™¥±”œ¤ì(€€€ô(€€€½¹ÍÐ‰¥]¥¹¹•É¹ÑÉå%‘Ì€ô¹•ÜM•Ð¡½¹™¥œ¹‰¥]¥¹¹•ÉM¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¹µ…À ¡É½Ü¤€ôøÉ½Ü¹¥¤¤ì(€€€½¹ÍÐ‰¥]¥¹¹•Éá¥Ñ%‘Ì€ô¹•ÜM•Ð¡½¹™¥œ¹‰¥]¥¹¹•ÉM¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì¹µ…À ¡É½Ü¤€ôøÉ½Ü¹¥¤¤ì(€€€¥˜€¡‰¥]¥¹¹•É¹ÑÉå%‘Ì¹Í¥é”€„ôô½¹™¥œ¹‰¥]¥¹¹•ÉM¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¹±•¹Ñ ¤ì(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  	¥œ]¥¹¹•ÈM¡…‘½Ü•¹ÑÉäÁÉ½™¥±”¥‘ÌµÕÍÐ‰”Õ¹¥ÅÕ”œ¤ì(€€€ô(€€€¥˜€¡‰¥]¥¹¹•Éá¥Ñ%‘Ì¹Í¥é”€„ôô½¹™¥œ¹‰¥]¥¹¹•ÉM¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì¹±•¹Ñ ¤ì(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  	¥œ]¥¹¹•ÈM¡…‘½Ü•á¥ÐÁÉ½™¥±”¥‘ÌµÕÍÐ‰”Õ¹¥ÅÕ”œ¤ì(€€€ô(€ô(€¥˜€¡½¹™¥œ¹Í…µ•M±½ÑÕµÁ	…­ÉÕ¹M¡…‘½Ü¹•¹…‰±•¤ì(€€€½¹ÍÐ•¹ÑÉå%‘Ì€ô¹•ÜM•Ð (€€€€€½¹™¥œ¹Í…µ•M±½ÑÕµÁ	…­ÉÕ¹M¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¹µ…À ¡ÁÉ½™¥±”¤€ôøÁÉ½™¥±”¹¥¤°(€€€€¤ì(€€€½¹ÍÐ•á¥Ñ%‘Ì€ô¹•ÜM•Ð (€€€€€½¹™¥œ¹Í…µ•M±½ÑÕµÁ	…­ÉÕ¹M¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì¹µ…À ¡ÁÉ½™¥±”¤€ôøÁÉ½™¥±”¹¥¤°(€€€€¤ì(€€€¥˜€ …•¹ÑÉå%‘Ì¹Í¥é”ñð•¹ÑÉå%‘Ì¹Í¥é”€„ôô½¹™¥œ¹Í…µ•M±½ÑÕµÁ	…­ÉÕ¹M¡…‘½Ü¹•¹ÑÉåAÉ½™¥±•Ì¹±•¹Ñ ¤ì(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  M…µ”µM±½ÐÕµÀ	…­ÉÕ¸M¡…‘½Ü•¹ÑÉäÁÉ½™¥±”¥‘ÌµÕÍÐ‰”ÁÉ•Í•¹Ð…¹Õ¹¥ÅÕ”œ¤ì(€€€ô(€€€¥˜€ …•á¥Ñ%‘Ì¹Í¥é”ñð•á¥Ñ%‘Ì¹Í¥é”€„ôô½¹™¥œ¹Í…µ•M±½ÑÕµÁ	…­ÉÕ¹M¡…‘½Ü¹•á¥ÑAÉ½™¥±•Ì¹±•¹Ñ ¤ì(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  M…µ”µM±½ÐÕµÀ	…­ÉÕ¸M¡…‘½Ü•á¥ÐÁÉ½™¥±”¥‘ÌµÕÍÐ‰”ÁÉ•Í•¹Ð…¹Õ¹¥ÅÕ”œ¤ì(€€€ô(€ô(€¥˜€¡½¹™¥œ¹‰½¹‘¥¹ÕÉÙ•5½µ•¹ÑÕµM¡…‘½Ü¹Í¹…ÁÍ¡½Ñ!½É¥é½¹Í5Ì¹±•¹Ñ €ôôô€À¤ì(€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}	=9%9}5=59QU5}M9AM!=Q}M=9LµÕÍÐ½¹Ñ…¥¸…Ð±•…ÍÐ½¹”Ù…±Õ”œ¤ì4(€ô4(€¥˜€¡½¹™¥œ¹±¥Ù•QÉ…‘¥¹œ¹•¹…‰±•€˜˜€…½¹™¥œ¹±¥Ù•QÉ…‘¥¹œ¹‘ÉåIÕ¸¤ì4(€€€¥˜€ …½¹™¥œ¹±¥Ù•QÉ…‘¥¹œ¹ÉÁUÉ°¤•ÉÉ½ÉÌ¹ÁÕÍ  1=]}IA}UI0¥ÌÉ•ÅÕ¥É•™½È±¥Ù”ÑÉ…‘¥¹œœ¤ì4(€€€¥˜€ …½¹™¥œ¹±¥Ù•QÉ…‘¥¹œ¹ÁÉ¥Ù…Ñ•-•ä¤ì4(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  1=]}1%Y}AI%YQ}-d¥ÌÉ•ÅÕ¥É•™½È±¥Ù”ÑÉ…‘¥¹œœ¤ì4(€€€ô4(€€€¥˜€ …ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ}I|ÌÀÁ}XÉ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}<äÁ}4Õ}MQ%HÄÈÁ}XÑ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ}ÌÁ}HÈÍ}É}=91e}É}a1}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ}ÌÁ}ÈÕ|ÌÉ}HÈÑ}Å}aÀÅ}XÉ}HÉ} ÄÕ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ}ÈÕ|ÌÕ}`á}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}EU1%Qe}1I}E1}MQI%Q}UI}AI=QQ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}e}=I9%}	UIMQ}=	}}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}e}=I9%}	UIMQ}=	}}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ%=9}=9Q%9U%Qe}5}Õ}PÄÉ|Õ}XÉ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}<äÁ}4Õ}MQ%HÄÈÁ}XÍ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}<äÁ}4Õ}MQ%HÄÈÁ}XÉ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}	%}]%99I}A	I}}`ÔÁ|ÄÕ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ}I|ÌÀÁ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ%=9}=9Q%9U%Qe}5}Õ}PÄÉ|Õ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}<äÁ}4Õ}MQ%HÄÈÁ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}5%IQ%=9}=9Q%9U%Qe}5}Õ}ÄÈÁ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}EU1%Qe}1I}E1}MQI%Q}AI=QQ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}=}àÁ}Õ}É}LÁ}9}XÍ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}=}àÁ}Õ}É}LÁ}9}XÉ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}=}àÁ}Õ}É}LÁ}9}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}IUQ%=9}1}=}àÁ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}A=MQ}ÈÁ|ÌÕ}HÅ|Õ|Õ}ØÁ}a1}XÍ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}A=MQ}ÈÕ|ÌÉ}HÉ|Ñ}ÌÁ}a1}XÉ}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}A=MQ}ÈÕ|ÌÕ}Å}a1}A=M%Q%=9}M=0(€€€€€€˜˜€…ÁÉ½•ÍÌ¹•¹Ø¹1=]}1%Y}A=MQ}ÈÕ|ÌÕ}a1}A=M%Q%=9}M=0¤ì(€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  (€€€€€€€€Ð±•…ÍÐ½¹”…Ñ¥Ù”±¥Ù”ÍÑÉ…Ñ•äA=M%Q%=9}M=0µÕÍÐ‰”•áÁ±¥¥Ñ±äÍ•Ð€¡„ÁÉ•Ù¥½ÕÌa1Í¥é”¥Ì…•ÁÑ•‘ÕÉ¥¹œµ¥É…Ñ¥½¸¤œ°(€€€€€€¤ì(€€€ô4(€ô4(€É•ÑÕÉ¸•ÉÉ½ÉÌì4)ô4(4)µ½‘Õ±”¹•áÁ½ÉÑÌ€ôì4(€½¹™¥œ°4(€¹½Éµ…±¥é•¹‘Á½¥¹Ð°4(€±¥Ù•QÉ…‘¥¹Õ…É°4(€Í¡…‘½ÝA½Í¥Ñ¥½¹¹Ø°4(€±¥Ù•A½Í¥Ñ¥½¹¹Ø°4(€ÁÉ¥½É¥Ñå••5¥É½1…µÁ½ÉÑÌ°4(€Ù…±¥‘…Ñ•½¹™¥œ°4(€ÍÑÉ•…µQ½­•¹½È°4)ôì4(

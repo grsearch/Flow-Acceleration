@@ -749,12 +749,10 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('flowFirst', () => flowFirstShadow.observeTrade(trade));
         labeler.onTrade(trade);
         const registryMonitoringSnapshot = trade.wallet
-          ? smartWalletRegistry.monitoringSnapshot(trade.wallet, trade.timestampMs) : null;
+          ? smartWalletRegistry.cachedMonitoringSnapshot(trade.wallet, trade.timestampMs) : null;
         const isRegistryMonitoredWalletTrade = Boolean(registryMonitoringSnapshot);
         const registryVotingSnapshot = registryMonitoringSnapshot
-          ? smartWalletRegistry.walletSnapshot(
-            trade.wallet, trade.timestampMs, registryMonitoringSnapshot,
-          ) : null;
+          ? smartWalletRegistry.cachedWalletSnapshot(trade.wallet, trade.timestampMs) : null;
         const isRegistryVotingWalletTrade = Boolean(registryVotingSnapshot);
         if (isLegacySmartWalletTrade || isRegistryMonitoredWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);

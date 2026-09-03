@@ -105,6 +105,8 @@ function testFirstAmmMigrationRecoveryAndExactUpgrade() {
   suite.onGraduated(recovered, { source: 'first_amm' });
   assert.strictEqual(suite.health().firstAmmMigrationRecoveries, 1);
   assert.strictEqual(suite.health().lastCompletionToFirstAmmMs, 6_000);
+  assert.strictEqual(suite.health().resolvedMigrationEvents, 1);
+  assert.strictEqual(suite.health().migrationResolutionMode, 'FIRST_AMM_ONLY');
 
   const exactAt = completedAt + 250;
   const exact = store.recordMigration({
@@ -120,6 +122,7 @@ function testFirstAmmMigrationRecoveryAndExactUpgrade() {
   assert.strictEqual(exact.migration_pool, 'exact-chain-pool');
   suite.onGraduated(exact, { source: 'migration' });
   assert.strictEqual(suite.health().migrationEventsObserved, 1);
+  assert.strictEqual(suite.health().migrationResolutionMode, 'CHAIN_AND_FIRST_AMM');
   assert.strictEqual(suite.tracked.get(mint).migratedAt, exactAt);
   assert.strictEqual(suite.tracked.get(mint).migrationSource, MIGRATION_SOURCE.CHAIN_EVENT);
   assert.strictEqual(store.recoverMigrationFromFirstAmmTrade(trade(

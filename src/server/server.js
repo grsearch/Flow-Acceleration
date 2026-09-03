@@ -993,7 +993,13 @@ class ResearchServer {
           graduationEventsObserved: migratedRebound.graduationEventsObserved,
           migrationEventsObserved: migratedRebound.migrationEventsObserved,
           firstAmmMigrationRecoveries: migratedRebound.firstAmmMigrationRecoveries,
+          resolvedMigrationEvents: migratedRebound.resolvedMigrationEvents,
+          migrationResolutionPct: migratedRebound.migrationResolutionPct,
+          migrationResolutionMode: migratedRebound.migrationResolutionMode,
           ammTradesObserved: migratedRebound.ammTradesObserved,
+          missingMigratedAtAmmTrades: migratedRebound.missingMigratedAtAmmTrades,
+          ammMigrationMetadataCoveragePct:
+            migratedRebound.ammMigrationMetadataCoveragePct,
           postMigrationEligibleTrades: migratedRebound.postMigrationEligibleTrades,
           signals: migratedRebound.signals,
           lastAmmTradeObservedAt: migratedRebound.lastAmmTradeObservedAt,

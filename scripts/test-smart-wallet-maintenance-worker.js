@@ -35,6 +35,7 @@ async function main() {
       seedWallets: [],
       seedClusters: [],
       ageCheckEnabled: false,
+      pnlGateEnabled: false,
       historyBackfillEnabled: false,
       clusterAutoEnabled: true,
       maintenanceWorkerEnabled: true,
@@ -89,20 +90,72 @@ async function main() {
     assert.ok(JSON.parse(row.metrics_json).candidateGrades,
       'the background grade refresh must persist its result');
 
+    registry.setCluster({
+      wallet: 'maintenance-worker-wallet',
+      clusterId: 'independent:maintenance-worker-wallet',
+      confidence: 'CONFIRMED',
+      validFrom: now - 1,
+    });
+    registry.setGrades({
+      wallet: 'maintenance-worker-wallet',
+      selectionGrade: 'S_A',
+      copyGrade: 'C_A',
+      holdingGrade: 'H_A',
+      status: 'ACTIVE',
+      effectiveAt: now - 1,
+      metrics: {
+        pnlStatus: 'PNL_PROFITABLE',
+        pnlEligible: true,
+        pnlEligibilityClass: 'ACTIVE_24H',
+        longTermElite: false,
+        actualPnl24h: { closedPositions: 2, realizedPnlSol: 1, capitalReturnPct: 10 },
+        actualPnl7d: { closedPositions: 2, realizedPnlSol: 1, capitalReturnPct: 10 },
+        actualPnl30d: { closedPositions: 2, realizedPnlSol: 1, capitalReturnPct: 10 },
+        actualPnl60d: { closedPositions: 2, realizedPnlSol: 1, capitalReturnPct: 10 },
+      },
+    });
+    assert.strictEqual(
+      registry._refreshWalletEligibilitySnapshot(now, { force: true }),
+      true,
+    );
+
     const exactPnlSnapshot = registry._actualPnlSnapshot;
+    const exactMonitoringSnapshot = registry.monitoringSnapshot;
     registry._actualPnlSnapshot = () => {
-      throw new Error('production cluster counts must not scan 60d PnL on the main thread');
+      throw new Error('cached reads must not scan 60d PnL on the main thread');
     };
+    registry.monitoringSnapshot = () => {
+      throw new Error('cached reads must not query a wallet snapshot on the main thread');
+    };
+    const cachedMonitoring = registry.cachedMonitoringSnapshot(
+      'maintenance-worker-wallet', now,
+    );
+    const cachedVoting = registry.cachedWalletSnapshot('maintenance-worker-wallet', now);
+    assert.strictEqual(cachedMonitoring.wallet, 'maintenance-worker-wallet');
+    assert.strictEqual(cachedVoting.votingEligible, true);
+    assert.strictEqual(cachedVoting.snapshotGeneratedAt, now);
+    const snapshotRefreshes = registry.metrics.eligibilitySnapshotRefreshes;
+    registry.walletEligibilitySnapshotDirty = true;
     assert.deepStrictEqual(registry.activeClusterCounts(now), {
-      eligible: 0,
-      selectionA: 0,
+      eligible: 1,
+      selectionA: 1,
     });
     assert.deepStrictEqual(registry.activeClusterCounts(now + 1), {
-      eligible: 0,
-      selectionA: 0,
+      eligible: 1,
+      selectionA: 1,
     });
+    assert.strictEqual(registry.dashboard(10).wallets[0].voting_eligible, 1);
+    assert.strictEqual(registry.health().votingEligible, 1);
+    assert.strictEqual(registry.metrics.eligibilitySnapshotRefreshes, snapshotRefreshes,
+      'dashboard and health polling must not refresh a dirty snapshot before its TTL');
+    assert.strictEqual(registry.walletEligibilitySnapshotDirty, true);
     registry._actualPnlSnapshot = exactPnlSnapshot;
+    registry.monitoringSnapshot = exactMonitoringSnapshot;
     assert.strictEqual(registry.maintenanceHealth().clusterCountCached, true);
+    assert.strictEqual(
+      registry.maintenanceHealth().clusterCountMode,
+      'MEMORY_VOTING_SNAPSHOT',
+    );
   } finally {
     registry.stop();
     store.close();

@@ -329,7 +329,10 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       || String(event.positionPhase || event.position_phase || '').toUpperCase() !== 'OPEN') return [];
     const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
     const price = tradePrice(event);
-    const snapshot = walletSnapshot || this.registry.walletSnapshot(event.wallet, timestampMs);
+    const snapshot = walletSnapshot
+      || (typeof this.registry.cachedWalletSnapshot === 'function'
+        ? this.registry.cachedWalletSnapshot(event.wallet, timestampMs)
+        : this.registry.walletSnapshot(event.wallet, timestampMs));
     if (!(timestampMs > 0) || !(price > 0) || !snapshot) return [];
     this.metrics.observedSmartOpens += 1;
     const state = this._state(event.mint);
@@ -344,6 +347,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         selectionGrade: snapshot.selectionGrade,
         copyGrade: snapshot.copyGrade,
         holdingGrade: snapshot.holdingGrade,
+        registryVersion: finite(snapshot.registryVersion, 0),
+        snapshotGeneratedAt: finite(snapshot.snapshotGeneratedAt),
+        snapshotExpiresAt: finite(snapshot.snapshotExpiresAt),
         weight: Number.isFinite(snapshot.voteWeight)
           ? snapshot.voteWeight
           : (snapshot.status === 'PROBATION'
@@ -403,8 +409,11 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       side: String(trade.side || '').toUpperCase(),
       wallet: trade.wallet || null,
       solAmount: Math.max(0, finite(trade.solAmount, 0)),
-      registeredWallet: Boolean(trade.wallet
-        && this.registry.monitoringSnapshot(trade.wallet, timestampMs)),
+      registeredWallet: Boolean(trade.wallet && (
+        typeof this.registry.cachedMonitoringSnapshot === 'function'
+          ? this.registry.cachedMonitoringSnapshot(trade.wallet, timestampMs)
+          : this.registry.monitoringSnapshot(trade.wallet, timestampMs)
+      )),
     });
     this._prune(state, timestampMs);
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
@@ -545,7 +554,10 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         copyAClusters: consensus.copyA,
         weightedScore: consensus.weightedScore,
         clusterVotesJson: JSON.stringify(consensus.votes),
-        registryVersion: this.registry.version(),
+        registryVersion: consensus.votes.reduce(
+          (maximum, vote) => Math.max(maximum, finite(vote.registryVersion, 0)),
+          0,
+        ),
         positionSol: this.config.positionSizeSol,
         scoutFraction,
         configuredCostPct: this.costs.deterministicCostPct,
