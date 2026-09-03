@@ -49,6 +49,12 @@ function config() {
       { id: 'EB_A', label: 'immediate baseline', newEntriesEnabled: true },
       { id: 'EB_B', label: '300-500ms confirmation', newEntriesEnabled: true },
       { id: 'EB_C', label: 'pullback reclaim', newEntriesEnabled: true },
+      {
+        id: 'EB_A_SWC_R2_W300', label: 'EB-A + two smart clusters',
+        newEntriesEnabled: true, sourceProfileId: 'EB_A',
+        consensusWindowMs: 300_000, requiredClusters: 2,
+        exitProfileIds: ['FIX20', 'FIX30'],
+      },
     ],
     exitProfiles: [
       { id: 'FIX5', label: 'fixed 5s', maxHoldMs: 5_000 },
@@ -212,9 +218,99 @@ function testIdlePoolUsesPersistedReserveQuote() {
   store.close();
 }
 
+function testCausalSmartWalletConsensusOverlay() {
+  const base = 1_852_000_000_000;
+  const { store, suite, send } = setup(base);
+  const mint = 'EarlyPureBuySmartConsensus111111111111111111';
+  const snapshot = (wallet, clusterId, registryVersion) => ({
+    wallet, clusterId, registryVersion, votingEligible: true,
+    selectionGrade: 'S_B', pnlEligibilityClass: 'ACTIVE_24H',
+    snapshotGeneratedAt: base - 60_000, snapshotExpiresAt: base + 60_000,
+  });
+  suite.onSmartWalletEvent({
+    id: 501, mint, wallet: 'smart-one', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: base - 20_000,
+  }, { walletSnapshot: snapshot('smart-one', 'cluster-one', 41) });
+  suite.onSmartWalletEvent({
+    id: 502, mint, wallet: 'smart-two', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: base - 10_000,
+  }, { walletSnapshot: snapshot('smart-two', 'cluster-two', 42) });
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM smart_wallet_voting_event_snapshots WHERE mint=?
+  `).get(mint).n, 2);
+  const recovered = new EarlyPureBuyBurstShadowSuite({
+    config: config(), store, now: () => base - 1_000,
+  });
+  recovered.start();
+  const restoredConsensus = recovered._smartConsensus(
+    recovered.states.get(mint),
+    base,
+    recovered.entryProfiles.get('EB_A_SWC_R2_W300'),
+  );
+  assert.strictEqual(restoredConsensus.distinctClusters, 2,
+    'a restart must restore the exact causal vote snapshots inside the 300s window');
+  assert.deepStrictEqual(restoredConsensus.votes.map((row) => row.registryVersion), [41, 42]);
+  send({ mint, offset: -500, sol: 1.25, wallet: `${mint}-buyer-1` });
+  send({ mint, offset: -250, sol: 1.25, wallet: `${mint}-buyer-2` });
+  const signal = send({ mint, offset: 0, sol: 1.5, wallet: `${mint}-buyer-3` });
+  assert.strictEqual(signal.signals.length, 5,
+    'EB-A keeps its three controls and adds only the FIX20/FIX30 smart overlay arms');
+  const overlays = store.db.prepare(`
+    SELECT exit_profile_id, features_json
+    FROM early_pure_buy_burst_shadow_positions
+    WHERE mint=? AND entry_profile_id='EB_A_SWC_R2_W300'
+    ORDER BY exit_profile_id
+  `).all(mint);
+  assert.deepStrictEqual(overlays.map((row) => row.exit_profile_id), ['FIX20', 'FIX30']);
+  const consensus = JSON.parse(overlays[0].features_json).smartConsensus;
+  assert.strictEqual(consensus.distinctClusters, 2);
+  assert.deepStrictEqual(consensus.votes.map((row) => row.registryVersion), [41, 42],
+    'the row must retain the exact cached eligibility versions seen before the source signal');
+
+  const relatedMint = 'EarlyPureBuyRelatedCluster1111111111111111111';
+  suite.onSmartWalletEvent({
+    id: 503, mint: relatedMint, wallet: 'related-one', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: base - 20_000,
+  }, { walletSnapshot: snapshot('related-one', 'same-cluster', 43) });
+  suite.onSmartWalletEvent({
+    id: 504, mint: relatedMint, wallet: 'related-two', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: base - 10_000,
+  }, { walletSnapshot: snapshot('related-two', 'same-cluster', 44) });
+  send({ mint: relatedMint, offset: 1_000, sol: 1.25, wallet: 'related-public-1' });
+  send({ mint: relatedMint, offset: 1_250, sol: 1.25, wallet: 'related-public-2' });
+  const relatedSignal = send({
+    mint: relatedMint, offset: 1_500, sol: 1.5, wallet: 'related-public-3',
+  });
+  assert.strictEqual(relatedSignal.signals.length, 3,
+    'two addresses in one cluster must remain one vote');
+
+  const futureMint = 'EarlyPureBuyNoLookahead111111111111111111111';
+  suite.onSmartWalletEvent({
+    id: 505, mint: futureMint, wallet: 'past-smart', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: base,
+  }, { walletSnapshot: snapshot('past-smart', 'past-cluster', 45) });
+  send({ mint: futureMint, offset: 2_000, sol: 1.25, wallet: 'future-public-1' });
+  send({ mint: futureMint, offset: 2_250, sol: 1.25, wallet: 'future-public-2' });
+  const futureSignal = send({
+    mint: futureMint, offset: 2_500, sol: 1.5, wallet: 'future-public-3',
+  });
+  assert.strictEqual(futureSignal.signals.length, 3);
+  suite.onSmartWalletEvent({
+    id: 506, mint: futureMint, wallet: 'future-smart', side: 'BUY', positionPhase: 'OPEN',
+    timestampMs: base + 2_600,
+  }, { walletSnapshot: snapshot('future-smart', 'future-cluster', 46) });
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM early_pure_buy_burst_shadow_positions
+    WHERE mint=? AND entry_profile_id='EB_A_SWC_R2_W300'
+  `).get(futureMint).n, 0, 'a vote after EB-A must never be applied retroactively');
+  assert.strictEqual(suite.health().smartConsensusSignals, 1);
+  store.close();
+}
+
 function main() {
   testEntryPathsAndExecutableExits();
   testIdlePoolUsesPersistedReserveQuote();
+  testCausalSmartWalletConsensusOverlay();
   console.log('Early pure-buy burst shadow test passed.');
 }
 

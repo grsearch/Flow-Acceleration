@@ -284,6 +284,8 @@ Smart Wallet 事件按 Token 余额保存 `OPEN / ADD / REDUCE / CLOSE / SELL` �
 
 `Smart Wallet Consensus Overlay V1` 为仍在前向验证或已有实盘候选依据的 G、O 与 `FEA-BNH-120` 增加并行条件组。原 Shadow 表、原 cohort、原入场与退出计算全部保留；Overlay 只读取原信号及其最终模拟结果，并检查同 Mint 在原信号前15分钟内是否已有滚动 Registry 的合格独立集群共识。默认对照 `POST_GE30_R23_F2_ONLY_G2_XLEG`、`POST_GD25_35_X8`、`O_C80_D5_B2_S0_NC:1SOL`、`O90_M5_STAIR120:1SOL` 与 `FEA_BNH_120`，已证伪或退休策略不扩组。该层从部署时刻开始前向记录，不回填旧历史，不接受原信号之后出现的共识，也不会签名、发链或改变任何实盘开仓。Dashboard 的 Smart Wallet 页同时展示原全样本与共识通过子集的通过率、收益、胜率和 PF。
 
+两天初始样本筛出的两个新方向只进入独立 Shadow：`EARLY_C25_R3` 在 Curve 小于25%且180秒内出现3个合格独立集群时，按后续真实 Curve 成交分别运行 `FIX30` 与峰值保护 Core/Runner；`EB_A_SWC_R2_W300` 保留原 `EB_A` 信号与成交模型，仅在信号前300秒已有2个合格独立集群时运行 `FIX20/FIX30`。资格、集群和 Registry 版本在钱包首次 `OPEN` 当时固化到 `smart_wallet_voting_event_snapshots`，重启后只恢复这些历史快照，不用当前等级回看旧事件；该表随每日研究归档导出。两个方向均不发送交易，也不改变原 Shadow 或实盘入口。
+
 入场只接受 `Signal Time + Execution Delay` 之后、入场等待上限以内且毕业之前的 Bonding Curve 成交，绝不会用 PumpSwap 反推买入。持仓时间从实际模拟入场开始计算；出场可使用 Bonding Curve 或毕业后的 PumpSwap 成交。没有入场、毕业前未成交、没有出场、历史数据缺口和数据右删失会分别统计，不再静默丢弃。没有出场的已入场样本默认按 `-100%` 再扣确定性成本。
 
 平台费、双边滑点、价格冲击和固定链上费用构成成功成交的确定性成本。Future Label 只扣除这些确定性成本，不再把随机执行失败混入市场收益标签。买入失败表示没有建仓，只损失失败尝试成本；卖出失败使用 `exit-retry-count`、重试间隔和失败费用沿真实逐笔价格路径重新执行。若正常策略本身为负，买入失败可能在数学上改善每信号收益，因此输出同时提供条件于已执行交易的收益并给出警告，不能把它误读成策略改善。

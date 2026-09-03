@@ -71,6 +71,10 @@ function main() {
       id INTEGER PRIMARY KEY, profile_id TEXT NOT NULL,
       source_signal_at INTEGER NOT NULL, mint TEXT NOT NULL, gate_status TEXT NOT NULL
     );
+    CREATE TABLE smart_wallet_voting_event_snapshots (
+      smart_event_id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL,
+      wallet TEXT NOT NULL, mint TEXT NOT NULL
+    );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
   `);
   db.prepare('INSERT INTO raw_trades VALUES (?, ?, ?)').run(1, startMs - 1, 'old');
@@ -126,6 +130,10 @@ function main() {
     .run(60, 'inside-profile', startMs + 60, 'inside-overlay', 'PASS');
   db.prepare('INSERT INTO smart_wallet_consensus_overlay_rows VALUES (?, ?, ?, ?, ?)')
     .run(61, 'future-profile', endMs + 60, 'future-overlay', 'NO_CONSENSUS');
+  db.prepare('INSERT INTO smart_wallet_voting_event_snapshots VALUES (?, ?, ?, ?)')
+    .run(70, startMs + 70, 'voter', 'inside-vote');
+  db.prepare('INSERT INTO smart_wallet_voting_event_snapshots VALUES (?, ?, ?, ?)')
+    .run(71, endMs + 70, 'voter', 'future-vote');
   db.prepare('INSERT INTO metadata VALUES (?, ?)').run('version', 'test');
   const walPath = `${source}-wal`;
   const walBytesBefore = fs.statSync(walPath).size;
@@ -196,6 +204,13 @@ function main() {
     exported.prepare('SELECT id FROM smart_wallet_consensus_overlay_rows ORDER BY id')
       .all().map((row) => row.id),
     [60],
+  );
+  assert.deepStrictEqual(
+    exported.prepare(`
+      SELECT smart_event_id FROM smart_wallet_voting_event_snapshots ORDER BY smart_event_id
+    `).all().map((row) => row.smart_event_id),
+    [70],
+    'the causal wallet-vote snapshots must be available in the next daily analysis export',
   );
   assert.ok(exported.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='idx_raw_trades_ts'").get().count);
   exported.close();

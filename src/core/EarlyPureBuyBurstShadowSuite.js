@@ -11,6 +11,11 @@ const {
   exitCensorReason,
 } = require('./ShadowPoolQuote');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const {
+  initializeVotingSnapshotStorage,
+  persistVotingSnapshot,
+  recentVotingOpenSnapshots,
+} = require('./SmartWalletVotingSnapshotStore');
 
 const MARKET = 'PUMP_BONDING_CURVE';
 const ACTIVE = new Set(['PENDING_ENTRY', 'OPEN', 'EXIT_PENDING']);
@@ -58,6 +63,8 @@ class EarlyPureBuyBurstShadowSuite {
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((profile) => [profile.id, profile]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
+    this.maxSmartConsensusWindowMs = Math.max(0, ...(config.entryProfiles || [])
+      .map((profile) => number(profile.consensusWindowMs, 0)));
     this.smartWallets = new Set((config.smartWallets || []).filter(Boolean));
     this.states = new Map();
     this.positions = new Map();
@@ -65,6 +72,7 @@ class EarlyPureBuyBurstShadowSuite {
     this.seenMints = new Set();
     this.counters = {
       trades: 0, excludedSmartTrades: 0, candidates: 0, signals: 0,
+      observedVotingSmartOpens: 0, smartConsensusSignals: 0,
       blockedByRugGuard: 0, opened: 0, closed: 0, noEntry: 0, noExit: 0,
       rightCensored: 0,
       cachedReserveExits: 0,
@@ -143,6 +151,7 @@ class EarlyPureBuyBurstShadowSuite {
       CREATE INDEX IF NOT EXISTS idx_early_pure_buy_profiles
         ON early_pure_buy_burst_shadow_positions(entry_profile_id, exit_profile_id);
     `);
+    initializeVotingSnapshotStorage(this.store);
     const columns = new Set(this.store.db.prepare(
       'PRAGMA table_info(early_pure_buy_burst_shadow_positions)',
     ).all().map((row) => row.name));
@@ -206,6 +215,17 @@ class EarlyPureBuyBurstShadowSuite {
     if (!this.config.enabled) return;
     for (const row of this.loadSeen.all()) this.seenMints.add(row.mint);
     for (const row of this.loadActive.all()) this._trackPosition(this._position(row));
+    for (const restored of recentVotingOpenSnapshots(
+      this.store,
+      this.now() - this.maxSmartConsensusWindowMs,
+      this.now(),
+    )) {
+      this._rememberSmartWalletEvent(
+        restored.event,
+        restored.walletSnapshot,
+        { restored: true },
+      );
+    }
     this.advanceTime(this.now());
   }
 
@@ -280,10 +300,18 @@ class EarlyPureBuyBurstShadowSuite {
   _state(mint) {
     let state = this.states.get(mint);
     if (!state) {
-      state = { rows: [], anchor: null, lastAt: 0 };
+      state = { rows: [], smartBuys: [], anchor: null, lastAt: 0 };
       this.states.set(mint, state);
     }
+    if (!Array.isArray(state.smartBuys)) state.smartBuys = [];
     return state;
+  }
+
+  _pruneSmartBuys(state, at) {
+    const cutoff = at - this.maxSmartConsensusWindowMs;
+    while (state.smartBuys.length && state.smartBuys[0].timestampMs < cutoff) {
+      state.smartBuys.shift();
+    }
   }
 
   _addTrade(trade) {
@@ -338,7 +366,9 @@ class EarlyPureBuyBurstShadowSuite {
     const profile = this.entryProfiles.get(profileId);
     if (!profile || profile.newEntriesEnabled === false) return [];
     const created = [];
+    const allowedExits = new Set(profile.exitProfileIds || []);
     for (const exitProfile of this.exitProfiles.values()) {
+      if (allowedExits.size && !allowedExits.has(exitProfile.id)) continue;
       const cohortId = `${profileId}:${exitProfile.id}`;
       const payload = {
         cohortId, entryProfileId: profileId, exitProfileId: exitProfile.id,
@@ -371,6 +401,7 @@ class EarlyPureBuyBurstShadowSuite {
     if (created.length) {
       anchor.triggered.add(profileId);
       this.counters.signals += created.length;
+      if (extras.smartConsensus) this.counters.smartConsensusSignals += 1;
       this.counters.lastActionAt = trade.timestampMs;
     }
     return created;
@@ -388,6 +419,18 @@ class EarlyPureBuyBurstShadowSuite {
           features, triggered: new Set(),
         };
         emitted.push(...this._emit('EB_A', trade, state.anchor, features));
+        for (const profile of this.entryProfiles.values()) {
+          if (profile.sourceProfileId !== 'EB_A' || profile.newEntriesEnabled === false) continue;
+          const smartConsensus = this._smartConsensus(state, trade.timestampMs, profile);
+          if (!smartConsensus) continue;
+          emitted.push(...this._emit(
+            profile.id,
+            trade,
+            state.anchor,
+            features,
+            { smartConsensus },
+          ));
+        }
       }
     }
     const anchor = state.anchor;
@@ -568,6 +611,66 @@ class EarlyPureBuyBurstShadowSuite {
     return this._evaluateSignals(trade, state);
   }
 
+  onSmartWalletEvent(event, { walletSnapshot = null, persist = true } = {}) {
+    if (!this.config.enabled || !event?.mint || !event?.wallet || !walletSnapshot
+      || String(event.side || '').toUpperCase() !== 'BUY'
+      || String(event.positionPhase || event.position_phase || '').toUpperCase() !== 'OPEN') {
+      return false;
+    }
+    const timestampMs = number(event.timestampMs ?? event.timestamp_ms);
+    if (!(timestampMs > 0)) return false;
+    if (persist) persistVotingSnapshot(this.store, event, walletSnapshot, this.now());
+    return this._rememberSmartWalletEvent(event, walletSnapshot);
+  }
+
+  _rememberSmartWalletEvent(event, walletSnapshot, { restored = false } = {}) {
+    const timestampMs = number(event.timestampMs ?? event.timestamp_ms);
+    if (!(timestampMs > 0) || !event?.mint || !event?.wallet || !walletSnapshot) return false;
+    const state = this._state(event.mint);
+    const eventId = number(event.id ?? event.smartEventId ?? event.smart_event_id);
+    if (state.smartBuys.some((row) => row.wallet === event.wallet && row.eventId === eventId)) {
+      return false;
+    }
+    state.smartBuys.push({
+      timestampMs,
+      eventId,
+      wallet: event.wallet,
+      clusterId: walletSnapshot.clusterId || event.wallet,
+      selectionGrade: walletSnapshot.selectionGrade || null,
+      pnlEligibilityClass: walletSnapshot.pnlEligibilityClass || null,
+      registryVersion: number(walletSnapshot.registryVersion, 0),
+      snapshotGeneratedAt: number(walletSnapshot.snapshotGeneratedAt),
+      snapshotExpiresAt: number(walletSnapshot.snapshotExpiresAt),
+    });
+    state.smartBuys.sort((left, right) => left.timestampMs - right.timestampMs);
+    state.lastAt = Math.max(state.lastAt, timestampMs);
+    this._pruneSmartBuys(state, timestampMs);
+    if (!restored) this.counters.observedVotingSmartOpens += 1;
+    return true;
+  }
+
+  _smartConsensus(state, at, profile) {
+    const windowMs = number(profile.consensusWindowMs, 0);
+    const requiredClusters = number(profile.requiredClusters, Infinity);
+    if (!(windowMs > 0) || !(requiredClusters > 0)) return null;
+    const byCluster = new Map();
+    for (const row of state.smartBuys) {
+      if (row.timestampMs < at - windowMs || row.timestampMs > at) continue;
+      const current = byCluster.get(row.clusterId);
+      if (!current || row.timestampMs < current.timestampMs) byCluster.set(row.clusterId, row);
+    }
+    const votes = [...byCluster.values()].sort((left, right) => left.timestampMs - right.timestampMs);
+    if (votes.length < requiredClusters) return null;
+    return {
+      sourceProfileId: profile.sourceProfileId,
+      windowMs,
+      requiredClusters,
+      distinctClusters: votes.length,
+      evaluatedAt: at,
+      votes,
+    };
+  }
+
   advanceTime(now = this.now()) {
     for (const position of [...this.positions.values()]) {
       if (position.status === 'PENDING_ENTRY' && now > position.entryDeadlineAt) {
@@ -602,8 +705,9 @@ class EarlyPureBuyBurstShadowSuite {
         );
       }
     }
-    const cutoff = now - this.config.stateRetentionMs;
+    const cutoff = now - Math.max(this.config.stateRetentionMs, this.maxSmartConsensusWindowMs);
     for (const [mint, state] of this.states) {
+      this._pruneSmartBuys(state, now);
       if (state.lastAt < cutoff && !this.positionIdsByMint.has(mint)) {
         this.states.delete(mint);
       }
@@ -615,6 +719,7 @@ class EarlyPureBuyBurstShadowSuite {
       enabled: this.config.enabled, mode: 'SHADOW_EB', sendsTransactions: false,
       activePositions: this.positions.size, trackedMints: this.states.size,
       boundedPerMintTradeQueue: this.config.maxTradesPerMint,
+      smartConsensusMaxWindowMs: this.maxSmartConsensusWindowMs,
       positionSizeSol: this.config.positionSizeSol,
       entryProfiles: [...this.entryProfiles.values()],
       exitProfiles: [...this.exitProfiles.values()], ...this.counters,
@@ -647,7 +752,7 @@ class EarlyPureBuyBurstShadowSuite {
       health: this.health(),
       strategy: {
         id: 'EB', name: 'Early Pure-Buy Burst Shadow',
-        description: 'AGE<10s / Curve<50 / W3 3-5 SOL / Buyers 2-4 / pure buys; independent A/B/C confirmations',
+        description: 'AGE<10s / Curve<50 / W3 3-5 SOL / Buyers 2-4 / pure buys; independent A/B/C and causal Smart Wallet overlay cohorts',
         missingExitPolicy: 'NO_EXIT_EXCLUDED_FROM_RETURN_STATS',
         positionSizeSol: this.config.positionSizeSol,
       },

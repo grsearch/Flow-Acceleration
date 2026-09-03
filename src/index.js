@@ -59,6 +59,7 @@ const { FeatureEdgeAuditObserver } = require('./core/FeatureEdgeAuditObserver');
 const {
   SmartWalletConsensusOverlayObserver,
 } = require('./core/SmartWalletConsensusOverlayObserver');
+const { persistVotingSnapshot } = require('./core/SmartWalletVotingSnapshotStore');
 const {
   PostMigrationSurvivorObserver,
 } = require('./core/PostMigrationSurvivorObserver');
@@ -766,9 +767,19 @@ function createRuntime(runtimeConfig = config) {
               ));
             }
             if (isRegistryVotingWalletTrade) {
+              observeShadow('smartVotingSnapshot', () => persistVotingSnapshot(
+                store, normalizedSmartEvent, registryVotingSnapshot, Date.now(),
+              ));
               observeShadow('smartConsensusV2Event', () => (
                 smartWalletConsensusFlowRunnerShadow.onSmartWalletEvent(
-                  normalizedSmartEvent, { walletSnapshot: registryVotingSnapshot },
+                  normalizedSmartEvent,
+                  { walletSnapshot: registryVotingSnapshot, persist: false },
+                )
+              ));
+              observeShadow('earlyPureBuySmartConsensusEvent', () => (
+                earlyPureBuyBurstShadow.onSmartWalletEvent(
+                  normalizedSmartEvent,
+                  { walletSnapshot: registryVotingSnapshot, persist: false },
                 )
               ));
             }

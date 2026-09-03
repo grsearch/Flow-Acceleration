@@ -3,6 +3,11 @@
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 const { tradePrice } = require('./PreEntryRugRiskTracker');
+const {
+  initializeVotingSnapshotStorage,
+  persistVotingSnapshot,
+  recentVotingOpenSnapshots,
+} = require('./SmartWalletVotingSnapshotStore');
 
 const ACTIVE_STATUSES = [
   'PENDING_SCOUT', 'SCOUT_OPEN', 'WAITING_GRADUATION', 'WAITING_FLOW',
@@ -35,6 +40,7 @@ function rowToPosition(row) {
     signalAt: row.signal_at,
     signalMarket: row.signal_market,
     signalPrice: row.signal_price,
+    signalCurvePct: row.signal_curve_pct,
     requiredClusters: row.required_clusters,
     availableClusters: row.available_clusters,
     distinctClusters: row.distinct_clusters,
@@ -92,6 +98,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       observedSmartOpens: 0,
       consensusSignals: 0,
       scoutOpened: 0,
+      directOpened: 0,
       flowConfirmed: 0,
       scaled: 0,
       coreSold: 0,
@@ -120,6 +127,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         signal_at INTEGER NOT NULL,
         signal_market TEXT NOT NULL,
         signal_price REAL NOT NULL,
+        signal_curve_pct REAL,
         required_clusters INTEGER NOT NULL,
         available_clusters INTEGER NOT NULL,
         distinct_clusters INTEGER NOT NULL,
@@ -174,10 +182,20 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
           entry_profile_id, exit_profile_id, status
         );
     `);
+    initializeVotingSnapshotStorage(this.store);
+    const columns = new Set(this.store.db.prepare(
+      'PRAGMA table_info(smart_wallet_consensus_flow_runner_shadow_positions)',
+    ).all().map((row) => row.name));
+    if (!columns.has('signal_curve_pct')) {
+      this.store.db.exec(`
+        ALTER TABLE smart_wallet_consensus_flow_runner_shadow_positions
+        ADD COLUMN signal_curve_pct REAL
+      `);
+    }
     this.insert = this.store.db.prepare(`
       INSERT OR IGNORE INTO smart_wallet_consensus_flow_runner_shadow_positions (
         cohort_id, entry_profile_id, exit_profile_id, episode_id, mint, status,
-        signal_strength, signal_at, signal_market, signal_price,
+        signal_strength, signal_at, signal_market, signal_price, signal_curve_pct,
         required_clusters, available_clusters, distinct_clusters,
         selection_a_clusters, copy_a_clusters, weighted_score, cluster_votes_json,
         registry_version, position_sol, scout_fraction, configured_cost_pct,
@@ -185,7 +203,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         created_at, updated_at
       ) VALUES (
         @cohortId, @entryProfileId, @exitProfileId, @episodeId, @mint, @status,
-        @signalStrength, @signalAt, @signalMarket, @signalPrice,
+        @signalStrength, @signalAt, @signalMarket, @signalPrice, @signalCurvePct,
         @requiredClusters, @availableClusters, @distinctClusters,
         @selectionAClusters, @copyAClusters, @weightedScore, @clusterVotesJson,
         @registryVersion, @positionSol, @scoutFraction, @configuredCostPct,
@@ -251,6 +269,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     `).all(this.now() - this.config.stateRetentionMs);
     for (const row of episodes) {
       this.lastEpisodes.set(`${row.mint}:${row.entry_profile_id}`, row.signal_at);
+    }
+    for (const restored of recentVotingOpenSnapshots(
+      this.store,
+      this.now() - this.maxConsensusWindowMs,
+      this.now(),
+    )) {
+      this._rememberSmartOpen(restored.event, restored.walletSnapshot, { restored: true });
     }
     this.advanceTime(this.now());
   }
@@ -323,7 +348,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     };
   }
 
-  onSmartWalletEvent(event, { replay = false, walletSnapshot = null } = {}) {
+  onSmartWalletEvent(event, {
+    replay = false, walletSnapshot = null, persist = true,
+  } = {}) {
     if (!this.config.enabled || replay || !event?.mint || !event?.wallet
       || String(event.side || '').toUpperCase() !== 'BUY'
       || String(event.positionPhase || event.position_phase || '').toUpperCase() !== 'OPEN') return [];
@@ -334,34 +361,12 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         ? this.registry.cachedWalletSnapshot(event.wallet, timestampMs)
         : this.registry.walletSnapshot(event.wallet, timestampMs));
     if (!(timestampMs > 0) || !(price > 0) || !snapshot) return [];
-    this.metrics.observedSmartOpens += 1;
+    if (persist) persistVotingSnapshot(this.store, event, snapshot, this.now());
     const state = this._state(event.mint);
-    const duplicate = state.smartBuys.some((row) => row.wallet === event.wallet
-      && row.eventId === finite(event.id));
-    if (!duplicate) {
-      state.smartBuys.push({
-        timestampMs,
-        wallet: event.wallet,
-        eventId: finite(event.id),
-        clusterId: snapshot.clusterId,
-        selectionGrade: snapshot.selectionGrade,
-        copyGrade: snapshot.copyGrade,
-        holdingGrade: snapshot.holdingGrade,
-        registryVersion: finite(snapshot.registryVersion, 0),
-        snapshotGeneratedAt: finite(snapshot.snapshotGeneratedAt),
-        snapshotExpiresAt: finite(snapshot.snapshotExpiresAt),
-        weight: Number.isFinite(snapshot.voteWeight)
-          ? snapshot.voteWeight
-          : (snapshot.status === 'PROBATION'
-            ? this.config.probationVoteWeight : snapshot.selectionWeight),
-        market: event.market,
-        price,
-      });
-    }
-    state.lastAt = Math.max(state.lastAt, timestampMs);
-    this._prune(state, timestampMs);
+    this._rememberSmartOpen(event, snapshot);
     const created = [];
     for (const profile of this.entryProfiles.values()) {
+      if (profile.enabled === false || !this._profileAcceptsSignal(profile, event, state)) continue;
       const episodeKey = `${event.mint}:${profile.id}`;
       if (timestampMs - finite(this.lastEpisodes.get(episodeKey), -Infinity)
         < this.config.episodeCooldownMs) continue;
@@ -371,6 +376,40 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       created.push(...this._recordSignal(event, profile, consensus, timestampMs, price));
     }
     return created;
+  }
+
+  _rememberSmartOpen(event, snapshot, { restored = false } = {}) {
+    const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
+    const price = tradePrice(event);
+    if (!(timestampMs > 0) || !(price > 0) || !snapshot) return false;
+    const state = this._state(event.mint);
+    const eventId = finite(event.id ?? event.smartEventId ?? event.smart_event_id);
+    const duplicate = state.smartBuys.some((row) => row.wallet === event.wallet
+      && row.eventId === eventId);
+    if (duplicate) return false;
+    state.smartBuys.push({
+      timestampMs,
+      wallet: event.wallet,
+      eventId,
+      clusterId: snapshot.clusterId,
+      selectionGrade: snapshot.selectionGrade,
+      copyGrade: snapshot.copyGrade,
+      holdingGrade: snapshot.holdingGrade,
+      registryVersion: finite(snapshot.registryVersion, 0),
+      snapshotGeneratedAt: finite(snapshot.snapshotGeneratedAt),
+      snapshotExpiresAt: finite(snapshot.snapshotExpiresAt),
+      weight: Number.isFinite(snapshot.voteWeight)
+        ? snapshot.voteWeight
+        : (snapshot.status === 'PROBATION'
+          ? this.config.probationVoteWeight : finite(snapshot.selectionWeight, 1)),
+      market: event.market,
+      price,
+    });
+    state.smartBuys.sort((left, right) => left.timestampMs - right.timestampMs);
+    state.lastAt = Math.max(state.lastAt, timestampMs);
+    this._prune(state, timestampMs);
+    if (!restored) this.metrics.observedSmartOpens += 1;
+    return true;
   }
 
   onGraduated(event) {
@@ -497,6 +536,25 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     };
   }
 
+  _profileAcceptsSignal(profile, event, state) {
+    if (!profile?.directCurveEntry) return true;
+    const curvePct = finite(event.curvePct ?? event.curve_pct);
+    const market = String(event.market || '').toUpperCase();
+    return !state?.graduatedAt
+      && market === 'PUMP_BONDING_CURVE'
+      && curvePct != null
+      && curvePct >= finite(profile.minCurvePct, 0)
+      && curvePct < finite(profile.maxCurvePct, 100);
+  }
+
+  _exitProfilesFor(profile) {
+    const allowed = new Set(profile?.exitProfileIds || []);
+    return [...this.exitProfiles.values()].filter((exit) => (
+      (!allowed.size || allowed.has(exit.id))
+      && (!Array.isArray(exit.entryProfileIds) || exit.entryProfileIds.includes(profile.id))
+    ));
+  }
+
   _consensus(state, at, profile) {
     const rows = state.smartBuys.filter((row) => (
       row.timestampMs >= at - profile.consensusWindowMs && row.timestampMs <= at
@@ -511,7 +569,10 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     }
     const votes = [...byCluster.values()].sort((left, right) => left.timestampMs - right.timestampMs);
     const thresholds = this._thresholdSnapshot(at);
-    const required = profile.strength === 'STRONG' ? thresholds.strong : thresholds.ordinary;
+    const required = finite(
+      profile.requiredClusters,
+      profile.strength === 'STRONG' ? thresholds.strong : thresholds.ordinary,
+    );
     const selectionA = votes.filter((row) => row.selectionGrade === 'S_A').length;
     const copyA = votes.filter((row) => row.copyGrade === 'C_A').length;
     const weightedScore = votes.reduce((sum, row) => sum + Math.max(0, row.weight), 0);
@@ -530,9 +591,11 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       ? this.rugRiskTracker.snapshot(event.mint, at) : null;
     if (rugLabel) this.metrics.rugLabelsObserved += 1;
     const rows = [];
-    for (const exit of this.exitProfiles.values()) {
+    for (const exit of this._exitProfilesFor(profile)) {
       const episodeId = `${event.mint}:${profile.id}:${at}`;
-      const scoutFraction = graduatedAt ? 0 : finite(profile.scoutFraction, 0);
+      const directCurveEntry = profile.directCurveEntry === true && !graduatedAt;
+      const scoutFraction = directCurveEntry
+        ? 1 : (graduatedAt ? 0 : finite(profile.scoutFraction, 0));
       const status = scoutFraction > 0 ? 'PENDING_SCOUT'
         : (graduatedAt ? 'WAITING_FLOW' : 'WAITING_GRADUATION');
       const now = this.now();
@@ -547,6 +610,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         signalAt: at,
         signalMarket: event.market,
         signalPrice: price,
+        signalCurvePct: finite(event.curvePct ?? event.curve_pct),
         requiredClusters: consensus.required,
         availableClusters: consensus.thresholds.eligible,
         distinctClusters: consensus.votes.length,
@@ -592,7 +656,14 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     if (position.status === 'PENDING_SCOUT') {
       if (trade.market === 'PUMP_BONDING_CURVE' && at >= position.entryTargetAt
         && at <= position.entryDeadlineAt) {
-        this._buy(position, trade, price, position.positionSol * position.scoutFraction, 'SCOUT');
+        const profile = this.entryProfiles.get(position.entryProfileId);
+        this._buy(
+          position,
+          trade,
+          price,
+          position.positionSol * position.scoutFraction,
+          profile?.directCurveEntry ? 'DIRECT' : 'SCOUT',
+        );
       }
       return;
     }
@@ -663,6 +734,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     } else {
       position.status = 'OPEN';
       this.metrics.scaled += 1;
+      if (leg === 'DIRECT') this.metrics.directOpened += 1;
     }
     this.metrics.lastActionAt = this.now();
     this._save(position);

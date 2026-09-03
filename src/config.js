@@ -2880,8 +2880,37 @@ const config = {
         consensusWindowMs: 300_000, scoutFraction: 0.25, flowGate: 'STRICT',
         minSelectionAClusters: 3, minWeightedScoreRatio: 0.6,
       },
-    ],
+      booleanEnv('FLOW_SMART_CONSENSUS_V2_EARLY_C25_R3_ENABLED', true) && {
+        id: 'EARLY_C25_R3',
+        label: '早期Curve<25% · 180秒3个独立集群直接入场',
+        strength: 'RESEARCH_FIXED',
+        consensusWindowMs: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_EARLY_C25_WINDOW_MS', 180_000, { min: 30_000 },
+        ),
+        requiredClusters: integerEnv(
+          'FLOW_SMART_CONSENSUS_V2_EARLY_C25_REQUIRED_CLUSTERS', 3, { min: 2 },
+        ),
+        minSelectionAClusters: 0,
+        minWeightedScoreRatio: numberEnv(
+          'FLOW_SMART_CONSENSUS_V2_EARLY_C25_MIN_WEIGHT_RATIO', 0.5,
+          { min: 0, max: 1 },
+        ),
+        minCurvePct: 0,
+        maxCurvePct: numberEnv(
+          'FLOW_SMART_CONSENSUS_V2_EARLY_C25_MAX_CURVE_PCT', 25,
+          { min: 1, max: 100 },
+        ),
+        directCurveEntry: true,
+        scoutFraction: 1,
+        exitProfileIds: ['FIX30', 'CORE80_RUNNER6H_SP30T20'],
+      },
+    ].filter(Boolean),
     exitProfiles: [
+      {
+        id: 'FIX30', label: '固定30秒早期共振对照', mode: 'FIXED_HOLD',
+        fixedHoldMs: 30_000, maxHoldMs: 30_000, hardStopPct: 20,
+        entryProfileIds: ['EARLY_C25_R3'],
+      },
       {
         id: 'FIX120_H20', label: '固定120秒对照', mode: 'FIXED_HOLD',
         fixedHoldMs: 120_000, maxHoldMs: 120_000, hardStopPct: 20,
@@ -4968,7 +4997,20 @@ const config = {
       { id: 'EB_A', label: 'EB-A · immediate pure-buy burst', newEntriesEnabled: true },
       { id: 'EB_B', label: 'EB-B · 300-500ms continuation', newEntriesEnabled: true },
       { id: 'EB_C', label: 'EB-C · 1-3s pullback reclaim', newEntriesEnabled: true },
-    ],
+      booleanEnv('FLOW_EARLY_PURE_BUY_BURST_SWC_R2_W300_ENABLED', true) && {
+        id: 'EB_A_SWC_R2_W300',
+        label: 'EB-A + Smart Wallet 300秒内2个独立集群',
+        newEntriesEnabled: true,
+        sourceProfileId: 'EB_A',
+        consensusWindowMs: integerEnv(
+          'FLOW_EARLY_PURE_BUY_BURST_SWC_WINDOW_MS', 300_000, { min: 30_000 },
+        ),
+        requiredClusters: integerEnv(
+          'FLOW_EARLY_PURE_BUY_BURST_SWC_REQUIRED_CLUSTERS', 2, { min: 2 },
+        ),
+        exitProfileIds: ['FIX20', 'FIX30'],
+      },
+    ].filter(Boolean),
     exitProfiles: [
       { id: 'FIX5', label: 'fixed 5s', maxHoldMs: 5_000 },
       { id: 'FIX20', label: 'fixed 20s', maxHoldMs: 20_000 },

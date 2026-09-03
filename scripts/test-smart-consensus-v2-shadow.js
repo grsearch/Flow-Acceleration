@@ -85,6 +85,11 @@ async function main() {
       entryProfiles: [{
         id: 'SCOUT15_FLOW', strength: 'ORDINARY', consensusWindowMs: 5_000,
         scoutFraction: 0.15, minSelectionAClusters: 1, minWeightedScoreRatio: 0.5,
+      }, {
+        id: 'EARLY_C25_R2_TEST', strength: 'STRONG', consensusWindowMs: 5_000,
+        requiredClusters: 2, minSelectionAClusters: 0, minWeightedScoreRatio: 0.5,
+        maxCurvePct: 25, directCurveEntry: true, scoutFraction: 1,
+        exitProfileIds: ['DIRECT_FIX1'],
       }],
       exitProfiles: [
         { id: 'FIX120', mode: 'FIXED_HOLD', fixedHoldMs: 120_000,
@@ -95,6 +100,9 @@ async function main() {
           coreFraction: 0.8, runnerTrailPct: 30, maxHoldMs: 60_000, hardStopPct: 20,
           scoutProtectActivationPct: 30, scoutProtectTrailPct: 20,
           scoutProtectFloorPct: 5 },
+        { id: 'DIRECT_FIX1', mode: 'FIXED_HOLD', fixedHoldMs: 1_000,
+          maxHoldMs: 1_000, hardStopPct: 20,
+          entryProfileIds: ['EARLY_C25_R2_TEST'] },
       ],
       costModel,
     },
@@ -209,6 +217,57 @@ async function main() {
       AND net_return_pct IS NOT NULL
   `).get().n, 1);
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
+
+  // The early-Curve cohort uses its fixed research threshold instead of the
+  // dynamic STRONG threshold, records the causal Curve stage, and deploys the
+  // full theoretical position without waiting for graduation/public AMM flow.
+  const directMint = 'ConsensusEarlyCurve1111111111111111111111111';
+  const directTrade = (offset, wallet, eventId = null) => {
+    now = base + offset;
+    sequence += 1;
+    const row = {
+      mint: directMint, timestampMs: now, receivedAtMs: now,
+      market: 'PUMP_BONDING_CURVE', side: 'BUY', wallet,
+      solAmount: 0.5, tokenAmount: 500, price: 0.001, reservePrice: 0.001,
+      signature: `direct-${sequence}`, eventIndex: 0, curvePct: 20,
+      virtualTokenReservesRaw: '1000000000000',
+      virtualSolReservesRaw: '1000000000000',
+    };
+    suite.observeTrade(row);
+    if (eventId != null) {
+      suite.onSmartWalletEvent({ ...row, id: eventId, positionPhase: 'OPEN' });
+    }
+    return row;
+  };
+  directTrade(4_000, 'smart-a', 101);
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE entry_profile_id='EARLY_C25_R2_TEST'
+  `).get().n, 0);
+  directTrade(4_200, 'smart-c', 102);
+  const directSignal = store.db.prepare(`
+    SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE entry_profile_id='EARLY_C25_R2_TEST'
+  `).get();
+  assert(directSignal, 'two independent clusters must trigger the fixed-threshold cohort');
+  assert.strictEqual(directSignal.required_clusters, 2);
+  assert.strictEqual(directSignal.signal_curve_pct, 20);
+  directTrade(4_400, 'public-direct-entry');
+  assert.strictEqual(store.db.prepare(`
+    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE entry_profile_id='EARLY_C25_R2_TEST'
+  `).get().status, 'OPEN');
+  directTrade(5_500, 'public-direct-exit-trigger');
+  directTrade(5_700, 'public-direct-exit-fill');
+  const directClosed = store.db.prepare(`
+    SELECT status, capital_in_sol, entry_tx_count, net_return_pct
+    FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE entry_profile_id='EARLY_C25_R2_TEST'
+  `).get();
+  assert.strictEqual(directClosed.status, 'CLOSED');
+  assert.strictEqual(directClosed.capital_in_sol, 1);
+  assert.strictEqual(directClosed.entry_tx_count, 1);
+  assert(Number.isFinite(directClosed.net_return_pct));
 
   // Rolling discovery requires two distinct graduated seed tokens and applies
   // the configured forward delay; one lucky token cannot enter the pool.

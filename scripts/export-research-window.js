@@ -27,6 +27,9 @@ const EXPLICIT_FILTERS = Object.freeze({
     anchor: null,
   },
   smart_wallet_events: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
+  smart_wallet_voting_event_snapshots: {
+    where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms',
+  },
   smart_wallet_discovery_seeds: {
     where: `(
       (created_at >= ? AND created_at < ?)

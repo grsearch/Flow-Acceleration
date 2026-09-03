@@ -99,6 +99,26 @@ assert.deepStrictEqual(
     ['SWC_FEA_BNH_120', 'FEATURE_EDGE_BNH', 'FEA_BNH_120'],
   ],
 );
+const earlyCurveConsensus = config.smartWalletConsensusFlowRunnerShadow.entryProfiles.find(
+  (profile) => profile.id === 'EARLY_C25_R3',
+);
+assert(earlyCurveConsensus);
+assert.strictEqual(earlyCurveConsensus.requiredClusters, 3);
+assert.strictEqual(earlyCurveConsensus.consensusWindowMs, 180_000);
+assert.strictEqual(earlyCurveConsensus.maxCurvePct, 25);
+assert.strictEqual(earlyCurveConsensus.directCurveEntry, true);
+assert.deepStrictEqual(
+  earlyCurveConsensus.exitProfileIds,
+  ['FIX30', 'CORE80_RUNNER6H_SP30T20'],
+);
+const earlyBurstConsensus = config.earlyPureBuyBurstShadow.entryProfiles.find(
+  (profile) => profile.id === 'EB_A_SWC_R2_W300',
+);
+assert(earlyBurstConsensus);
+assert.strictEqual(earlyBurstConsensus.sourceProfileId, 'EB_A');
+assert.strictEqual(earlyBurstConsensus.requiredClusters, 2);
+assert.strictEqual(earlyBurstConsensus.consensusWindowMs, 300_000);
+assert.deepStrictEqual(earlyBurstConsensus.exitProfileIds, ['FIX20', 'FIX30']);
 assert.strictEqual(config.liveTrading.enabled, false);
 assert.strictEqual(config.liveTrading.requestedEnabled, false);
 assert.strictEqual(config.liveTrading.safetyLock, true);
