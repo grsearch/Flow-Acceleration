@@ -576,6 +576,8 @@ function testEarlyOpportunityProfiles() {
     3,
   );
 
+  const beforeLateDiagnostics = new Map(suite.health().profileDiagnostics
+    .map((row) => [row.profileId, row]));
   const lateMint = 'LateOpportunity11111111111111111111111111111';
   recordCreate(store, lateMint, base);
   recordMigration(store, lateMint, base);
@@ -587,6 +589,22 @@ function testEarlyOpportunityProfiles() {
     store.db.prepare('SELECT COUNT(*) AS n FROM migrated_drop_rebound_shadow_positions WHERE mint=?').get(lateMint).n,
     0,
   );
+  const lateDiagnostics = new Map(suite.health().profileDiagnostics
+    .map((row) => [row.profileId, row]));
+  assert.strictEqual(
+    lateDiagnostics.get('GE30_R23_F1').matchedRebounds,
+    beforeLateDiagnostics.get('GE30_R23_F1').matchedRebounds,
+  );
+  assert.strictEqual(
+    lateDiagnostics.get('GE30_R23_F1').lifecycleAgeRejected,
+    beforeLateDiagnostics.get('GE30_R23_F1').lifecycleAgeRejected + 3,
+  );
+  assert.strictEqual(lateDiagnostics.get('GE30_R23_F1').lastReason, 'MAX_LIFECYCLE_AGE');
+  assert.strictEqual(
+    lateDiagnostics.get('GE30_R23_F3').lifecycleAgeRejected,
+    beforeLateDiagnostics.get('GE30_R23_F3').lifecycleAgeRejected + 3,
+  );
+  assert.strictEqual(lateDiagnostics.get('GE30_R23_F3').lastLifecycleAgeMs, 31_200);
   store.close();
 }
 

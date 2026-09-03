@@ -1664,14 +1664,15 @@
       if (runtime.safetyLock) {
         document.querySelector('#live-mode-description').textContent = '实盘安全锁已开启：即使旧 .env 仍配置 ENABLED=true，也不会签名或发送链上交易。';
       }
+      const strategyRuntime = strategy.runtimeMetrics || {};
       document.querySelector('#live-runtime-strip').innerHTML = [
-        ['本次运行评估', number(runtime.evaluated)],
-        ['命中', number(runtime.matched)],
-        ['开仓', number(runtime.entries)],
-        ['平仓', number(runtime.exits)],
-        ['提交前已毕业', number(runtime.entryMigrationsBeforeSubmit)],
-        ['提交前保护', number(runtime.entryPreSubmitRejected)],
-        ['真实执行失败', number((runtime.entryTransactionFailures || 0) + (runtime.exitFailures || 0))],
+        ['本策略收到', number(strategyRuntime.receivedSignals)],
+        ['进入实盘队列', number(strategyRuntime.queuedSignals)],
+        ['开仓', number(strategyRuntime.entries)],
+        ['平仓', number(strategyRuntime.exits)],
+        ['风控拒绝', number(strategyRuntime.riskRejected)],
+        ['入场失败', number(strategyRuntime.entryFailures)],
+        ['重复信号', number(strategyRuntime.duplicateSignals)],
         ['紧急开关', runtime.killSwitchActive ? '<span class="negative">已触发</span>' : '<span class="positive">正常</span>'],
       ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
 
@@ -1727,7 +1728,20 @@
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>${venueCopy}</b><br>单笔 ${number(strategy.positionSizeSol,4)} SOL；Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究。`;
 
       const matchRate = stats.decisions > 0 ? stats.matched / stats.decisions * 100 : null;
+      const source = data.sourceDiagnostics || {};
+      const sourceMetrics = source.kind === 'MIGRATED_DROP_REBOUND' ? [
+        ['源头反弹匹配', number(source.matchedRebounds), `形成 Shadow 信号 ${number(source.emittedSignals)}`],
+        ['超龄成交已跳过', number(source.lifecycleAgeRejected), `生命周期上限 ${age(source.maxLifecycleAgeMs)}`],
+        ['等待指定次序', number(source.ordinalWaiting), `次数上限拒绝 ${number(source.signalLimitRejected)}`],
+        ['最近匹配年龄', age(source.lastLifecycleAgeMs), `最大超时 ${age(source.maxRejectedLifecycleAgeMs)}`],
+      ] : source.kind === 'GRADUATION_PERSISTENCE' ? [
+        ['P500源头评估', number(source.evaluated), `形成信号 ${number(source.signals)}`],
+        ['持续确认已启动', number(source.persistenceArmed), `要求 ${age(source.persistenceMs)}`],
+        ['初筛未通过', number(source.persistenceBaseRejected), 'Curve增量 / 买家 / 卖单条件'],
+        ['持续确认失败', number(source.persistenceConfirmationRejected), '回撤 / 卖单 / Curve保持条件'],
+      ] : [];
       const metrics = [
+        ...sourceMetrics,
         ['策略判定', stats.decisions, `命中率 ${rate(matchRate)}`],
         ['规则命中', stats.matched, `规则拒绝 ${number(stats.rule_rejected)}`],
         ['仓位记录', stats.positions, `活动 ${number(stats.active_positions)}`],

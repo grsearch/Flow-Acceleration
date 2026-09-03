@@ -140,6 +140,20 @@ function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
   }
 }
 
+function emptyProfileDiagnostics() {
+  return {
+    evaluated: 0,
+    signals: 0,
+    persistenceArmed: 0,
+    persistenceBaseRejected: 0,
+    persistenceConfirmationRejected: 0,
+    lastEvaluatedAt: null,
+    lastArmedAt: null,
+    lastSignalAt: null,
+    lastReason: null,
+  };
+}
+
 class GraduationAccelerationShadowSuite {
   constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
@@ -155,6 +169,8 @@ class GraduationAccelerationShadowSuite {
     this.rowsByMint = new Map();
     this.graduatedMints = new Set();
     this.postMigrationTrades = new Map();
+    this.profileDiagnostics = new Map([...this.entryProfiles.keys()]
+      .map((profileId) => [profileId, emptyProfileDiagnostics()]));
     this.metrics = {
       evaluated: 0,
       signals: 0,
@@ -217,6 +233,13 @@ class GraduationAccelerationShadowSuite {
 
   stop() {}
 
+  _profileDiagnostics(profileId) {
+    if (!this.profileDiagnostics.has(profileId)) {
+      this.profileDiagnostics.set(profileId, emptyProfileDiagnostics());
+    }
+    return this.profileDiagnostics.get(profileId);
+  }
+
   health() {
     return {
       enabled: this.config.enabled,
@@ -226,6 +249,10 @@ class GraduationAccelerationShadowSuite {
       activePositions: this.positions.size,
       trackedMints: this.trackedMints().length,
       entryProfiles: [...this.entryProfiles.values()],
+      profileDiagnostics: [...this.entryProfiles.keys()].map((profileId) => ({
+        profileId,
+        ...this._profileDiagnostics(profileId),
+      })),
       capacitySols: this.capacitySols,
       strategy: {
         name: 'Graduation Acceleration O',
@@ -535,6 +562,7 @@ class GraduationAccelerationShadowSuite {
   }
 
   _evaluatePersistenceEntry(state, profile, trade, price) {
+    const diagnostics = this._profileDiagnostics(profile.id);
     let confirmation = state.confirmations.get(profile.id);
     if (!confirmation) {
       if (state.crossed.has(profile.id)
@@ -549,8 +577,12 @@ class GraduationAccelerationShadowSuite {
         && features.sellTx <= profile.maxSellTx
         && (!profile.requireNoCreatorSell || !state.creatorSold);
       this.metrics.evaluated += 1;
+      diagnostics.evaluated += 1;
+      diagnostics.lastEvaluatedAt = trade.timestampMs;
       if (!baseMatched) {
         this.metrics.persistenceRejected += 1;
+        diagnostics.persistenceBaseRejected += 1;
+        diagnostics.lastReason = 'PERSISTENCE_BASE_REJECTED';
         return;
       }
       confirmation = {
@@ -561,6 +593,9 @@ class GraduationAccelerationShadowSuite {
       };
       state.confirmations.set(profile.id, confirmation);
       this.metrics.persistenceArmed += 1;
+      diagnostics.persistenceArmed += 1;
+      diagnostics.lastArmedAt = trade.timestampMs;
+      diagnostics.lastReason = 'PERSISTENCE_ARMED';
       return;
     }
     if (trade.timestampMs < confirmation.deadlineAt) return;
@@ -580,12 +615,19 @@ class GraduationAccelerationShadowSuite {
       && pullbackPct <= profile.maxPersistencePullbackPct
       && (!profile.requireNoCreatorSell || !state.creatorSold);
     this.metrics.evaluated += 1;
+    diagnostics.evaluated += 1;
+    diagnostics.lastEvaluatedAt = trade.timestampMs;
     if (!matched) {
       this.metrics.persistenceRejected += 1;
+      diagnostics.persistenceConfirmationRejected += 1;
+      diagnostics.lastReason = 'PERSISTENCE_CONFIRMATION_REJECTED';
       return;
     }
     state.triggered.add(profile.id);
     this.metrics.signals += 1;
+    diagnostics.signals += 1;
+    diagnostics.lastSignalAt = trade.timestampMs;
+    diagnostics.lastReason = 'EMITTED';
     this._createPendingRows(state, profile, trade, price, features);
   }
 

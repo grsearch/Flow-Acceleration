@@ -127,6 +127,26 @@ function rawSol(value) {
   }
 }
 
+function emptyStrategyRuntimeMetrics() {
+  return {
+    receivedSignals: 0,
+    queuedSignals: 0,
+    entryDisabledSignals: 0,
+    modeDisabledSignals: 0,
+    duplicateSignals: 0,
+    decisionWriteFailures: 0,
+    riskRejected: 0,
+    entries: 0,
+    entryFailures: 0,
+    exits: 0,
+    exitFailures: 0,
+    lastSignalAt: null,
+    lastQueuedAt: null,
+    lastActionAt: null,
+    lastReason: null,
+  };
+}
+
 class LiveTradingManager {
   constructor({ config, store, executor = null, now = () => Date.now() }) {
     this.config = config;
@@ -158,9 +178,17 @@ class LiveTradingManager {
     this.entryQueue = Promise.resolve();
     this.entryFailureObservers = new Set();
     this.stopping = false;
+    this.strategyMetrics = new Map([...this.strategies.keys()]
+      .map((strategyId) => [strategyId, emptyStrategyRuntimeMetrics()]));
     this.metrics = {
       evaluated: 0,
       matched: 0,
+      observedSignals: 0,
+      queuedSignals: 0,
+      entryDisabledSignals: 0,
+      modeDisabledSignals: 0,
+      duplicateSignals: 0,
+      decisionWriteFailures: 0,
       riskRejected: 0,
       entries: 0,
       entryFailures: 0,
@@ -179,6 +207,73 @@ class LiveTradingManager {
       candidates: 0,
       signals: 0,
     };
+  }
+
+  _strategyMetrics(strategyId) {
+    if (!this.strategyMetrics.has(strategyId)) {
+      this.strategyMetrics.set(strategyId, emptyStrategyRuntimeMetrics());
+    }
+    return this.strategyMetrics.get(strategyId);
+  }
+
+  _bumpStrategyMetric(strategyId, field, amount = 1) {
+    const metrics = this._strategyMetrics(strategyId);
+    metrics[field] = Number(metrics[field] || 0) + amount;
+    return metrics;
+  }
+
+  _noteReceivedStrategySignal(strategy, event) {
+    this.metrics.evaluated += 1;
+    this.metrics.matched += 1;
+    this.metrics.observedSignals += 1;
+    const metrics = this._bumpStrategyMetric(strategy.id, 'receivedSignals');
+    metrics.lastSignalAt = Number(event?.timestampMs || event?.receivedAtMs || this.now());
+    metrics.lastReason = null;
+    return metrics;
+  }
+
+  _classifyStrategyDecision(strategy, decision) {
+    const metrics = this._strategyMetrics(strategy.id);
+    if (!decision) {
+      this.metrics.decisionWriteFailures += 1;
+      metrics.decisionWriteFailures += 1;
+      metrics.lastReason = 'DECISION_WRITE_FAILED';
+      return false;
+    }
+    if (!decision.inserted) {
+      this.metrics.duplicateSignals += 1;
+      metrics.duplicateSignals += 1;
+      metrics.lastReason = 'DUPLICATE_EPISODE';
+      return false;
+    }
+    if (strategy.entryEnabled === false) {
+      this.metrics.entryDisabledSignals += 1;
+      metrics.entryDisabledSignals += 1;
+      metrics.lastReason = 'STRATEGY_ENTRY_DISABLED';
+      return false;
+    }
+    if (this.mode === 'DISABLED') {
+      this.metrics.modeDisabledSignals += 1;
+      metrics.modeDisabledSignals += 1;
+      metrics.lastReason = 'LIVE_MODE_DISABLED';
+      return false;
+    }
+    if (this.stopping) {
+      metrics.lastReason = 'RUNTIME_STOPPING';
+      return false;
+    }
+    this.metrics.signals += 1;
+    this.metrics.queuedSignals += 1;
+    metrics.queuedSignals += 1;
+    metrics.lastQueuedAt = this.now();
+    metrics.lastReason = 'QUEUED';
+    return true;
+  }
+
+  _noteStrategyOutcome(strategyId, field, reason = null, at = this.now()) {
+    const metrics = this._bumpStrategyMetric(strategyId, field);
+    metrics.lastActionAt = at;
+    metrics.lastReason = reason;
   }
 
   addEntryFailureObserver(observer) {
@@ -415,6 +510,7 @@ class LiveTradingManager {
         ...strategy,
         mode: this.mode,
         ruleVersion: strategy.ruleVersion || LIVE_RULE_VERSION,
+        runtimeMetrics: { ...this._strategyMetrics(strategy.id) },
         activePositions: [...this.positions.values()]
           .filter((position) => position.strategyId === strategy.id).length,
       })),
@@ -443,9 +539,7 @@ class LiveTradingManager {
   onExternalStrategySignal(event) {
     const strategy = this.strategies.get(event?.strategyId);
     if (!strategy || !event?.mint || !event?.episodeId) return null;
-    this.metrics.evaluated += 1;
-    this.metrics.matched += 1;
-    this.metrics.signals += 1;
+    this._noteReceivedStrategySignal(strategy, event);
     const decision = this.store.recordLiveStrategyDecision({
       strategyId: strategy.id,
       episodeId: event.episodeId,
@@ -469,8 +563,7 @@ class LiveTradingManager {
         ? 'MATCHED_ENTRY_DISABLED'
         : (this.mode === 'DISABLED' ? 'MATCHED_DISABLED' : 'QUEUED'),
     });
-    if (!decision?.inserted || strategy.entryEnabled === false
-      || this.mode === 'DISABLED' || this.stopping) return decision;
+    if (!this._classifyStrategyDecision(strategy, decision)) return decision;
     this.entryQueue = this.entryQueue
       .then(() => this._enter(decision, event))
       .catch((error) => this._rememberError(error));
@@ -859,9 +952,21 @@ class LiveTradingManager {
       Number.isSafeInteger(Number(trade.slot)) ? Number(trade.slot) : 'NA',
       candidate.lowAt,
     ].join(':');
-    this.metrics.evaluated += 1;
-    this.metrics.matched += 1;
-    this.metrics.signals += 1;
+    const event = {
+      strategyId: strategy.id,
+      episodeId,
+      mint: trade.mint,
+      symbol: this.tracked.get(trade.mint)?.symbol || null,
+      price: trade.price,
+      slot: trade.slot,
+      timestampMs: trade.timestampMs,
+      receivedAtMs: trade.receivedAtMs || trade.timestampMs,
+      market: 'PUMP_AMM',
+      poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
+      poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
+      virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+    };
+    this._noteReceivedStrategySignal(strategy, event);
     const decision = this.store.recordLiveStrategyDecision({
       strategyId: strategy.id,
       episodeId,
@@ -895,21 +1000,7 @@ class LiveTradingManager {
       mode: this.mode,
       actionStatus: this.mode === 'DISABLED' ? 'MATCHED_DISABLED' : 'QUEUED',
     });
-    if (!decision?.inserted || this.mode === 'DISABLED' || this.stopping) return;
-    const event = {
-      strategyId: strategy.id,
-      episodeId,
-      mint: trade.mint,
-      symbol: this.tracked.get(trade.mint)?.symbol || null,
-      price: trade.price,
-      slot: trade.slot,
-      timestampMs: trade.timestampMs,
-      receivedAtMs: trade.receivedAtMs || trade.timestampMs,
-      market: 'PUMP_AMM',
-      poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
-      poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
-      virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
-    };
+    if (!this._classifyStrategyDecision(strategy, decision)) return;
     this.entryQueue = this.entryQueue
       .then(() => this._enter(decision, event))
       .catch((error) => this._rememberError(error));
@@ -1025,12 +1116,14 @@ class LiveTradingManager {
     });
     if (rugGuard.blocked) {
       this.metrics.riskRejected += 1;
+      this._noteStrategyOutcome(strategy.id, 'riskRejected', 'PRE_ENTRY_RUG_RISK');
       this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', 'PRE_ENTRY_RUG_RISK');
       return;
     }
     const riskReason = this._riskReason(event);
     if (riskReason) {
       this.metrics.riskRejected += 1;
+      this._noteStrategyOutcome(strategy.id, 'riskRejected', riskReason);
       this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', riskReason);
       return;
     }
@@ -1057,6 +1150,11 @@ class LiveTradingManager {
       this._addPosition(position);
     } catch (error) {
       this.metrics.riskRejected += 1;
+      this._noteStrategyOutcome(
+        strategy.id,
+        'riskRejected',
+        error.code || 'POSITION_CREATE_FAILED',
+      );
       this.store.updateLiveStrategyDecision(
         decision.id,
         'RISK_REJECTED',
@@ -1164,6 +1262,7 @@ class LiveTradingManager {
       this.store.updateLiveStrategyDecision(decision.id, 'OPEN', null);
       this.metrics.entries += 1;
       this.metrics.lastActionAt = openedAt;
+      this._noteStrategyOutcome(strategy.id, 'entries', 'OPEN', openedAt);
       this._armPositionExit(position);
       if (strategy.exitMode === 'GRADUATION_CORE_RUNNER') {
         const token = this.store.getToken(position.mint);
@@ -1285,6 +1384,12 @@ class LiveTradingManager {
       this.store.updateLiveStrategyDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
       this._removePosition(position);
       this.metrics.entryFailures += 1;
+      this._noteStrategyOutcome(
+        strategy.id,
+        'entryFailures',
+        error.code || rejectionReason,
+        failedAt,
+      );
       if (error.code === 'CURVE_COMPLETE') this.metrics.entryMigrationsBeforeSubmit += 1;
       else if (transactionFailed) this.metrics.entryTransactionFailures += 1;
       else this.metrics.entryPreSubmitRejected += 1;
@@ -1368,6 +1473,12 @@ class LiveTradingManager {
       this.metrics.entryFailures += 1;
       this.metrics.entryTransactionFailures += 1;
       this.metrics.lastActionAt = reconciledAt;
+      this._noteStrategyOutcome(
+        position.strategyId,
+        'entryFailures',
+        failure,
+        reconciledAt,
+      );
       return 'FAILED';
     }
 
@@ -1409,6 +1520,7 @@ class LiveTradingManager {
       this.metrics.entries += 1;
       this.metrics.entryRecoveries += 1;
       this.metrics.lastActionAt = reconciledAt;
+      this._noteStrategyOutcome(position.strategyId, 'entries', 'ENTRY_RECONCILED', reconciledAt);
       const strategy = position.strategy || this.strategies.get(position.strategyId);
       if (reconciledAt - openedAt >= (strategy?.maxHoldMs || this.config.maxHoldMs)) {
         this._requestExit(position, 'ENTRY_RECONCILED_MAX_HOLD', null);
@@ -1447,6 +1559,12 @@ class LiveTradingManager {
       this.metrics.entryFailures += 1;
       this.metrics.entryTransactionFailures += 1;
       this.metrics.lastActionAt = reconciledAt;
+      this._noteStrategyOutcome(
+        position.strategyId,
+        'entryFailures',
+        'ENTRY_EXPIRED_UNOBSERVED',
+        reconciledAt,
+      );
       return 'FAILED';
     }
 
@@ -1924,6 +2042,11 @@ class LiveTradingManager {
         exitError: errorText(error),
       });
       this.metrics.exitFailures += 1;
+      this._noteStrategyOutcome(
+        position.strategyId,
+        'exitFailures',
+        failureReason,
+      );
       throw error;
     }
   }
@@ -2073,6 +2196,12 @@ class LiveTradingManager {
         this.timers.delete(position.id);
         this.metrics.exits += 1;
         this.metrics.lastActionAt = closedAt;
+        this._noteStrategyOutcome(
+          position.strategyId,
+          'exits',
+          position.exitReason || reason,
+          closedAt,
+        );
         return;
       } catch (error) {
         lastError = error;
@@ -2122,6 +2251,11 @@ class LiveTradingManager {
       errorText(lastError),
     );
     this.metrics.exitFailures += 1;
+    this._noteStrategyOutcome(
+      position.strategyId,
+      'exitFailures',
+      errorText(lastError),
+    );
     this._rememberError(lastError);
   }
 }

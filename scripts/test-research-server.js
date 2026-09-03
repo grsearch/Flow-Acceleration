@@ -380,6 +380,12 @@ async function main() {
     const liveTrading = await (await fetch(
       `http://127.0.0.1:${port}/api/live-trading`,
     )).json();
+    const grtLiveTrading = await (await fetch(
+      `http://127.0.0.1:${port}/api/live-trading?strategyId=migrated_grt_r23_f3_v2_xleg_live`,
+    )).json();
+    const p500LiveTrading = await (await fetch(
+      `http://127.0.0.1:${port}/api/live-trading?strategyId=graduation_accel_o_c80_p500_stair240_live`,
+    )).json();
     const strategyStatus = await (await fetch(
       `http://127.0.0.1:${port}/api/strategy-status`,
     )).json();
@@ -391,6 +397,12 @@ async function main() {
     assert.strictEqual(strategyStatus.shadows['smart-pullback'], false);
     assert.strictEqual(liveTrading.runtime.mode, 'DISABLED');
     assert.strictEqual(liveTrading.runtime.safetyLock, true);
+    assert.strictEqual(grtLiveTrading.sourceDiagnostics.kind, 'MIGRATED_DROP_REBOUND');
+    assert.strictEqual(grtLiveTrading.sourceDiagnostics.profileId, 'GRT_R23_F3_V2');
+    assert.strictEqual(grtLiveTrading.sourceDiagnostics.maxLifecycleAgeMs, 30_000);
+    assert.strictEqual(p500LiveTrading.sourceDiagnostics.kind, 'GRADUATION_PERSISTENCE');
+    assert.strictEqual(p500LiveTrading.sourceDiagnostics.profileId, 'O_C80_P500_STAIR240');
+    assert.strictEqual(p500LiveTrading.sourceDiagnostics.persistenceMs, 500);
     const continuity = liveTrading.runtime.strategies.find((strategy) => (
       strategy.id === 'migration_continuity_mc_c5_e120_live'
     ));

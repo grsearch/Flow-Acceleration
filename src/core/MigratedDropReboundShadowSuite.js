@@ -27,6 +27,26 @@ function migrationAt(token) {
   return finite(token?.migrated_at ?? token?.migratedAt);
 }
 
+function emptyProfileDiagnostics() {
+  return {
+    candidates: 0,
+    matchedRebounds: 0,
+    emittedSignals: 0,
+    lifecycleAgeRejected: 0,
+    signalLimitRejected: 0,
+    ordinalWaiting: 0,
+    timeWindowRejected: 0,
+    rugRiskRejected: 0,
+    rugSampleInsufficient: 0,
+    lastCandidateAt: null,
+    lastMatchAt: null,
+    lastSignalAt: null,
+    lastLifecycleAgeMs: null,
+    maxRejectedLifecycleAgeMs: null,
+    lastReason: null,
+  };
+}
+
 function shadowPrice(trade) {
   const reservePrice = finite(trade?.reservePrice);
   return reservePrice > 0 ? reservePrice : finite(trade?.price);
@@ -216,6 +236,8 @@ class MigratedDropReboundShadowSuite {
     );
     this.fastFlowByMint = new Map();
     this.liveSignalsEmitted = new Set();
+    this.profileDiagnostics = new Map([...this.entryProfiles.keys()]
+      .map((profileId) => [profileId, emptyProfileDiagnostics()]));
     this.lastFastFlowSweepAt = 0;
     this.metrics = {
       graduationEventsObserved: 0,
@@ -318,6 +340,13 @@ class MigratedDropReboundShadowSuite {
   }
 
   stop() {}
+
+  _profileDiagnostics(profileId) {
+    if (!this.profileDiagnostics.has(profileId)) {
+      this.profileDiagnostics.set(profileId, emptyProfileDiagnostics());
+    }
+    return this.profileDiagnostics.get(profileId);
+  }
 
   onGraduated(token, { source = 'event' } = {}) {
     if (!this.config.enabled || !token?.mint) return;
@@ -459,7 +488,18 @@ class MigratedDropReboundShadowSuite {
         this.config.trackingAgeMs,
       );
       if (lifecycleStage === 'POST_MIGRATION'
-        && timestampMs - anchorAt > maxLifecycleAgeMs) continue;
+        && timestampMs - anchorAt > maxLifecycleAgeMs) {
+        const lifecycleAgeMs = Math.max(0, timestampMs - anchorAt);
+        const diagnostics = this._profileDiagnostics(profile.id);
+        diagnostics.lifecycleAgeRejected += 1;
+        diagnostics.lastLifecycleAgeMs = lifecycleAgeMs;
+        diagnostics.maxRejectedLifecycleAgeMs = Math.max(
+          finite(diagnostics.maxRejectedLifecycleAgeMs, 0),
+          lifecycleAgeMs,
+        );
+        diagnostics.lastReason = 'MAX_LIFECYCLE_AGE';
+        continue;
+      }
       this._observeDetector(profile, lifecycleStage, trade, price, anchorAt, replay);
     }
   }
@@ -551,6 +591,10 @@ class MigratedDropReboundShadowSuite {
         .reduce((total, buffer) => total + Math.max(0, buffer.rows.length - buffer.start), 0),
       activePositions: this.positions.size,
       entryProfiles: [...this.entryProfiles.values()],
+      profileDiagnostics: [...this.entryProfiles.keys()].map((profileId) => ({
+        profileId,
+        ...this._profileDiagnostics(profileId),
+      })),
       enabledEntryProfileIds: [...this.entryProfiles.values()]
         .filter((profile) => profile.newEntriesEnabled !== false)
         .map((profile) => profile.id),
@@ -836,6 +880,10 @@ class MigratedDropReboundShadowSuite {
               this.metrics.replaySignalsSuppressed += 1;
             } else {
               const lifecycleAgeMs = Math.max(0, trade.timestampMs - anchorAt);
+              const diagnostics = this._profileDiagnostics(profile.id);
+              diagnostics.matchedRebounds += 1;
+              diagnostics.lastMatchAt = trade.timestampMs;
+              diagnostics.lastLifecycleAgeMs = lifecycleAgeMs;
               const signalKey = this._signalCountKey(lifecycleStage, profile.id, trade.mint);
               const signalCount = this._signalCount(lifecycleStage, profile, trade.mint);
               const signalOrdinal = signalCount + 1;
@@ -849,6 +897,20 @@ class MigratedDropReboundShadowSuite {
                 trade.timestampMs,
                 profile.beijingHourRanges,
               );
+              if (!agePass) {
+                diagnostics.lifecycleAgeRejected += 1;
+                diagnostics.maxRejectedLifecycleAgeMs = Math.max(
+                  finite(diagnostics.maxRejectedLifecycleAgeMs, 0),
+                  lifecycleAgeMs,
+                );
+                diagnostics.lastReason = 'MAX_LIFECYCLE_AGE';
+              } else if (!countPass) {
+                diagnostics.signalLimitRejected += 1;
+                diagnostics.lastReason = 'MAX_SIGNALS_PER_MINT';
+              } else if (!timePass) {
+                diagnostics.timeWindowRejected += 1;
+                diagnostics.lastReason = 'BEIJING_TIME_WINDOW';
+              }
               if (agePass && countPass && timePass) {
                 const rugRisk = profile.requireHealthyRugRisk
                   ? this.rugRiskTracker?.snapshot(trade.mint, trade.timestampMs) || null
@@ -856,6 +918,9 @@ class MigratedDropReboundShadowSuite {
                 const rugRiskPass = !profile.requireHealthyRugRisk
                   || (rugRisk?.sampleReady && !rugRisk.flagged);
                 if (minimumPass && rugRiskPass) {
+                  diagnostics.emittedSignals += 1;
+                  diagnostics.lastSignalAt = trade.timestampMs;
+                  diagnostics.lastReason = 'EMITTED';
                   this._emitSignal({
                     profile,
                     lifecycleStage,
@@ -868,8 +933,18 @@ class MigratedDropReboundShadowSuite {
                     rugRisk,
                   });
                 } else if (minimumPass && profile.requireHealthyRugRisk) {
-                  if (!rugRisk?.sampleReady) this.metrics.rugRiskSampleInsufficient += 1;
-                  else if (rugRisk.flagged) this.metrics.rugRiskRejected += 1;
+                  if (!rugRisk?.sampleReady) {
+                    this.metrics.rugRiskSampleInsufficient += 1;
+                    diagnostics.rugSampleInsufficient += 1;
+                    diagnostics.lastReason = 'RUG_SAMPLE_INSUFFICIENT';
+                  } else if (rugRisk.flagged) {
+                    this.metrics.rugRiskRejected += 1;
+                    diagnostics.rugRiskRejected += 1;
+                    diagnostics.lastReason = 'RUG_RISK_REJECTED';
+                  }
+                } else if (!minimumPass) {
+                  diagnostics.ordinalWaiting += 1;
+                  diagnostics.lastReason = 'MIN_SIGNAL_ORDINAL';
                 }
                 this.signalCounts.set(signalKey, signalOrdinal);
               }
@@ -891,6 +966,9 @@ class MigratedDropReboundShadowSuite {
       };
       state.dropReady = false;
       this.metrics.candidates += 1;
+      const diagnostics = this._profileDiagnostics(profile.id);
+      diagnostics.candidates += 1;
+      diagnostics.lastCandidateAt = timestampMs;
     }
   }
 

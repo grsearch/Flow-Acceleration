@@ -141,6 +141,42 @@ class ResearchServer {
     this._routes();
   }
 
+  _liveSourceDiagnostics(strategy) {
+    if (!strategy) return null;
+    const migratedProfiles = {
+      MIGRATED_GE30_R23_F2_ONLY_G2_XLEG: 'GE30_R23_F2_ONLY',
+      MIGRATED_GRT_R23_F3_V2_XLEG: 'GRT_R23_F3_V2',
+    };
+    const migratedProfileId = migratedProfiles[strategy.signalSource];
+    if (migratedProfileId && this.migratedDropReboundShadow) {
+      const runtime = this.migratedDropReboundShadow.health();
+      const profile = runtime.entryProfiles?.find((row) => row.id === migratedProfileId) || null;
+      const diagnostics = runtime.profileDiagnostics
+        ?.find((row) => row.profileId === migratedProfileId) || null;
+      return {
+        kind: 'MIGRATED_DROP_REBOUND',
+        profileId: migratedProfileId,
+        maxLifecycleAgeMs: profile?.maxLifecycleAgeMs ?? null,
+        ...diagnostics,
+      };
+    }
+    if (strategy.signalSource === 'GRADUATION_ACCEL_O_C80_P500_STAIR240'
+      && this.graduationAccelerationShadow) {
+      const runtime = this.graduationAccelerationShadow.health();
+      const profileId = 'O_C80_P500_STAIR240';
+      const profile = runtime.entryProfiles?.find((row) => row.id === profileId) || null;
+      const diagnostics = runtime.profileDiagnostics
+        ?.find((row) => row.profileId === profileId) || null;
+      return {
+        kind: 'GRADUATION_PERSISTENCE',
+        profileId,
+        persistenceMs: profile?.persistenceMs ?? null,
+        ...diagnostics,
+      };
+    }
+    return null;
+  }
+
   _routes() {
     const publicDir = path.join(__dirname, 'public');
     this.app.disable('x-powered-by');
@@ -353,14 +389,17 @@ class ResearchServer {
         dryRun: true,
         activePositions: 0,
       };
+      const strategyId = request.query.strategyId
+        || runtime.strategies?.[0]?.id
+        || null;
+      const strategy = runtime.strategies?.find((row) => row.id === strategyId) || null;
       response.json({
         generatedAt: Date.now(),
         runtime,
         monitoredWallets: this.config.smartWallets,
+        sourceDiagnostics: this._liveSourceDiagnostics(strategy),
         ...this.store.liveTradingDashboard({
-          strategyId: request.query.strategyId
-            || runtime.strategies?.[0]?.id
-            || null,
+          strategyId,
           positionLimit: numeric(request.query.positionLimit, 30),
           orderLimit: numeric(request.query.orderLimit, 30),
           decisionLimit: numeric(request.query.decisionLimit, 30),

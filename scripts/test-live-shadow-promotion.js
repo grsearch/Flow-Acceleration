@@ -227,6 +227,14 @@ async function main() {
         { activationPct: 80, drawdownPct: 20 },
       ],
     },
+    {
+      id: 'disabled_observability_test', enabled: true, entryEnabled: false,
+      signalSource: 'DISABLED_OBSERVABILITY_TEST', ruleVersion: 'disabled-test',
+      market: 'PUMP_AMM', positionSizeSol: 0.1, maxSignalAgeMs: 1_500,
+      maxEntriesPerMint: 1, reentryCooldownMs: 0, maxEntryPriceJumpPct: 15,
+      maxEntrySelfImpactPct: 10, exitMode: 'FIXED_HOLD', fixedHoldMs: 1_000,
+      maxHoldMs: 1_000,
+    },
   ];
   const manager = new LiveTradingManager({
     config: runtimeConfig(strategies), store, now: () => now,
@@ -628,6 +636,34 @@ async function main() {
   p500Dashboard = store.liveTradingDashboard({ strategyId: strategies[10].id });
   assert.strictEqual(p500Dashboard.positions[0].status, 'CLOSED');
   assert.strictEqual(p500Dashboard.positions[0].exit_reason, 'RUNNER_STAIR_T40_D15');
+
+  const executableSignalsBeforeDiagnostics = manager.health().signals;
+  manager.onExternalStrategySignal({
+    strategyId: strategies[10].id, episodeId: 'p500:1', mint: p500Mint,
+    symbol: 'P500', price: 1, market: 'PUMP_BONDING_CURVE',
+    timestampMs: now, receivedAtMs: now,
+  });
+  manager.onExternalStrategySignal({
+    strategyId: strategies[11].id, episodeId: 'disabled:1', mint: 'disabled-mint',
+    symbol: 'OFF', price: 1, market: 'PUMP_AMM',
+    timestampMs: now, receivedAtMs: now,
+  });
+  await waitForQueue();
+  const diagnosticHealth = manager.health();
+  const p500Runtime = diagnosticHealth.strategies[10].runtimeMetrics;
+  const disabledRuntime = diagnosticHealth.strategies[11].runtimeMetrics;
+  assert.strictEqual(p500Runtime.receivedSignals, 2);
+  assert.strictEqual(p500Runtime.queuedSignals, 1);
+  assert.strictEqual(p500Runtime.duplicateSignals, 1);
+  assert.strictEqual(p500Runtime.entries, 1);
+  assert.strictEqual(p500Runtime.exits, 1);
+  assert.strictEqual(disabledRuntime.receivedSignals, 1);
+  assert.strictEqual(disabledRuntime.entryDisabledSignals, 1);
+  assert.strictEqual(disabledRuntime.queuedSignals, 0);
+  assert.strictEqual(diagnosticHealth.entryDisabledSignals, 1);
+  assert.strictEqual(diagnosticHealth.duplicateSignals, 1);
+  assert.strictEqual(diagnosticHealth.signals, executableSignalsBeforeDiagnostics,
+    'disabled and duplicate source events must not inflate executable signal counts');
 
   const taxonomyStrategyId = 'entry_failure_taxonomy_test';
   const migrated = store.createLivePosition({

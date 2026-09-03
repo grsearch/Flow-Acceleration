@@ -483,6 +483,13 @@ function testCurve80P500LiveSignalWaitsForPersistence() {
     'graduation_accel_o_c80_p500_stair240_live',
   );
   assert.ok(liveSignals[0].features.persistenceMs >= 500);
+  const diagnostics = suite.health().profileDiagnostics
+    .find((row) => row.profileId === 'O_C80_P500_STAIR240');
+  assert.strictEqual(diagnostics.persistenceArmed, 1);
+  assert.strictEqual(diagnostics.persistenceBaseRejected, 0);
+  assert.strictEqual(diagnostics.persistenceConfirmationRejected, 0);
+  assert.strictEqual(diagnostics.signals, 1);
+  assert.strictEqual(diagnostics.lastReason, 'EMITTED');
   store.close();
 }
 
