@@ -415,6 +415,12 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-resonance" data-strategy-code="SR-R0/R1/R2/R3">
               <b><span class="strategy-code">SR-R0/R1/R2/R3</span>Smart 多钱包共振右尾</b><small>第二/第三个不同钱包确认后入场；硬止损 + 60–240秒固定持有</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-consensus-v2" data-strategy-code="SC-V2">
+              <b><span class="strategy-code">SC-V2</span>Smart 共识选币与毕业后持仓</b><small>P_A / 早期Curve / 毕业持仓3集群；2m～6h右尾对照</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-consensus-overlay" data-strategy-code="SC-GATE">
+              <b><span class="strategy-code">SC-GATE</span>现有 Shadow × Smart 共识门控</b><small>同批原信号对照有/无 P_A 共识，检验胜率与收益改善</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="smart-wallet-rug-escape" data-strategy-code="SWRE-B/E/G">
               <b><span class="strategy-code">SWRE-B/E/G</span>Smart 首仓快速 RUG 逃生</b><small>只研究首次 OPEN；30秒基准 / 10秒紧急退出 / 合成拉盘过滤</small>
             </button>
@@ -855,6 +861,58 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint / 触发钱包</th><th>共振</th><th>AGE / Curve</th><th>公共 Buyers / Flow / Top1</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="smart-resonance-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="smart-consensus-v2" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Smart Wallet Consensus V2 Shadow · SC-V2</h2>
+                <p>今天新增的 Smart Wallet 因果组统一在这里展示；全部只做理论成交，不签名、不发送链上交易。</p>
+              </div>
+              <div class="strategy-expression" id="smart-consensus-v2-expression">P_A毕业预测 / 早期Curve共振 / 毕业时仍持仓3个独立集群 / 30分钟与6小时右尾</div>
+              <div class="strategy-metric-groups" id="smart-consensus-v2-metrics"></div>
+              <div class="section-title"><h2>当前加载的全部组别</h2><p>即使尚无样本也会显示，已停历史组会明确标记。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场组</th><th>状态 / 类型</th><th>独立集群</th><th>观察窗口</th><th>退出对照</th></tr></thead>
+                <tbody id="smart-consensus-v2-profile-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>入场 × 退出表现</h2><p>计划资金与实际部署资金分开；NO_EXIT 只作右删失，不伪造为亏损。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>机会 / Mint</th><th>状态分布</th><th>关闭 / NO_EXIT</th><th>计划 / 已部署</th><th>计划 / 已部署回报</th><th>净盈亏</th></tr></thead>
+                <tbody id="smart-consensus-v2-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近毕业持仓判定</h2><p>只在真实首笔 PumpSwap AMM 成交出现时判定；展示合格集群与拒绝原因。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>判定时间</th><th>入场组 / 状态</th><th>Mint</th><th>集群 / 钱包</th><th>加权分</th><th>毕业 / 首笔AMM</th><th>拒绝原因</th></tr></thead>
+                <tbody id="smart-consensus-v2-holding-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>长持仓组同时展示最近一个 30/60/120/300 秒前兆快照。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号时间</th><th>入场 / 退出 / 状态</th><th>Mint</th><th>共识</th><th>信号 / 入场 / 最高 / 出场</th><th>资金</th><th>净收益</th><th>最近前兆快照</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="smart-consensus-v2-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="smart-consensus-overlay" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Smart Wallet 共识门控 Shadow · SC-GATE</h2>
+                <p>保留原 Shadow 全样本，比较信号发生前已经存在严格 P_A 独立集群共识的同批模拟结果。</p>
+              </div>
+              <div class="strategy-metric-groups" id="smart-consensus-overlay-shadow-summary"></div>
+              <p class="registry-note" id="smart-consensus-overlay-shadow-note"></p>
+              <div class="section-title"><h2>原策略 × 共识表现</h2><p>门控只作前向分组，不改变原 Shadow 的入场与退出。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>原策略 + 共识</th><th>原信号 / 入场 / 完成</th><th>共识通过 / 通过率</th><th>原组平均 / 胜率 / PF</th><th>共识组平均 / 胜率 / PF</th><th>平均 / 胜率改善</th><th>判断</th></tr></thead>
+                <tbody id="smart-consensus-overlay-shadow-profile-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近门控样本</h2><p>PASS 必须由原信号之前的因果共识产生，不使用未来钱包信息。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>原信号时间</th><th>策略</th><th>门控</th><th>Mint</th><th>共识时间 / 提前量</th><th>独立集群 / 要求</th><th>原 Shadow 状态 / 净收益</th></tr></thead>
+                <tbody id="smart-consensus-overlay-shadow-recent-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1580,7 +1638,7 @@
       }).join('');
     }
 
-    function renderSmartConsensusOverlay(data) {
+    function renderSmartConsensusOverlay(data, targetPrefix = 'smart-consensus-overlay') {
       const profiles = Array.isArray(data.profiles) ? data.profiles : [];
       const recent = Array.isArray(data.recent) ? data.recent : [];
       const passRate = data.classified
@@ -1592,11 +1650,11 @@
         ['无共识保留基线', number(data.noConsensus)],
         ['总通过率', rate(passRate)],
       ];
-      document.querySelector('#smart-consensus-overlay-summary').innerHTML = items
+      document.querySelector(`#${targetPrefix}-summary`).innerHTML = items
         .map(([label,value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
-      document.querySelector('#smart-consensus-overlay-note').innerHTML = `从 ${dateTime(data.startedAt)} 起前向记录，不回填部署前历史。原 Shadow 表、原 cohort 和退出收益均不修改；本层只读取原模拟结果并做条件分组。门控窗口 ${age(data.gatePolicy?.gateWindowMs)}，共识必须先于或等于原信号，并来自严格的3个P_A毕业预测独立集群；宽松滚动钱包规则只保留为对照，不能通过主门控。观察器不发送交易。`;
+      document.querySelector(`#${targetPrefix}-note`).innerHTML = `从 ${dateTime(data.startedAt)} 起前向记录，不回填部署前历史。原 Shadow 表、原 cohort 和退出收益均不修改；本层只读取原模拟结果并做条件分组。门控窗口 ${age(data.gatePolicy?.gateWindowMs)}，共识必须先于或等于原信号，并来自严格的3个P_A毕业预测独立集群；宽松滚动钱包规则只保留为对照，不能通过主门控。观察器不发送交易。`;
 
-      const profileTarget = document.querySelector('#smart-consensus-overlay-profile-rows');
+      const profileTarget = document.querySelector(`#${targetPrefix}-profile-rows`);
       if (!profiles.length) {
         profileTarget.innerHTML = '<tr><td colspan="7" class="empty">暂无共识门控对照策略</td></tr>';
       } else {
@@ -1612,7 +1670,7 @@
         }).join('');
       }
 
-      const recentTarget = document.querySelector('#smart-consensus-overlay-recent-rows');
+      const recentTarget = document.querySelector(`#${targetPrefix}-recent-rows`);
       if (!recent.length) {
         recentTarget.innerHTML = '<tr><td colspan="7" class="empty">部署后的原策略信号尚未出现</td></tr>';
       } else {
@@ -1622,6 +1680,10 @@
           return `<tr><td>${dateTime(row.source_signal_at)}</td><td><b>${escapeHtml(row.profile_label)}</b><br><span class="table-note">${escapeHtml(row.source_cohort_id)}</span></td><td>${statusChip(row.gate_status)}</td><td>${mintLink(row.mint)}</td><td>${dateTime(row.consensus_at)}<br><span class="table-note">提前 ${lead}</span></td><td>${number(row.distinct_clusters)} / ${number(row.required_clusters)}<br><span class="table-note">${escapeHtml(row.consensus_strength || '—')}</span></td><td>${statusChip(row.source_status)}<br><b class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}</b></td></tr>`;
         }).join('');
       }
+    }
+
+    function renderSmartConsensusOverlayShadow(data) {
+      renderSmartConsensusOverlay(data, 'smart-consensus-overlay-shadow');
     }
 
     function renderWallets(rows) {
@@ -1937,6 +1999,95 @@
         const reason = row.exit_reason || row.rejection_reason || '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.trigger_wallet || '')}</span></td><td>${number(row.distinct_wallets)} 钱包 / ${age(row.resonance_span_ms)}<br><span class="table-note">窗口 ${age(row.resonance_window_ms)}</span></td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_5s)} / ${number(row.public_buy_flow_5s,2)} SOL / ${rate(row.largest_buyer_share_pct)}<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL · Sell ${number(row.public_sell_tx_5s)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">暂无 Smart Resonance 模拟仓位。</td></tr>';
+    }
+
+    function renderSmartConsensusV2Shadow(data) {
+      const runtime = data || {};
+      const entryProfiles = Array.isArray(runtime.entryProfiles) ? runtime.entryProfiles : [];
+      const exitProfiles = Array.isArray(runtime.exitProfiles) ? runtime.exitProfiles : [];
+      const exitLabels = Object.fromEntries(exitProfiles.map(row => [row.id, row.label || row.id]));
+      const thresholds = runtime.dynamicThresholds || {};
+      document.querySelector('#smart-consensus-v2-expression').textContent = `严格 P_A 毕业预测、早期 Curve 共振，以及毕业首笔 AMM 时仍持仓的独立集群分开统计；当前合格集群 ${number(thresholds.eligible)}，普通 / 强信号门槛 ${number(thresholds.ordinary)} / ${number(thresholds.strong)}。`;
+      renderMetricGroups('#smart-consensus-v2-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW SC-V2' : '关闭', '只做理论成交；RUG仅记录标签，不作本组入场过滤'],
+        ['共识信号 / 活动仓位', `${number(runtime.consensusSignals)} / ${number(runtime.activePositions)}`, `跟踪Mint ${number(runtime.trackedMints)} · 等待首笔AMM ${number(runtime.holdingSubscriptionMints)}`],
+        ['毕业持仓判定', number(runtime.firstAmmHoldingEvaluations), `通过 ${number(runtime.holdingConsensusQualified)} · 拒绝 ${number(runtime.holdingConsensusRejected)} · 锚点拒绝 ${number(runtime.migrationAnchorRejected)}`],
+        ['直接 / Scout / Flow开仓', `${number(runtime.directOpened)} / ${number(runtime.scoutOpened)} / ${number(runtime.flowConfirmed)}`, `累计完成加仓 ${number(runtime.scaled)} · Core卖出 ${number(runtime.coreSold)}`],
+        ['关闭 / 无入场 / NO_EXIT', `${number(runtime.closed)} / ${number(runtime.noEntry)} / ${number(runtime.noExit)}`, `重启删失 ${number(runtime.restartCensored)} · 最近动作 ${dateTime(runtime.lastActionAt)}`],
+        ['恢复与持仓事件', `${number(runtime.restoredSmartHoldings)} / ${number(runtime.observedSmartPositionEvents)}`, `已观察成交 ${number(runtime.observedTrades)} · Smart OPEN ${number(runtime.observedSmartOpens)}`],
+      ], []);
+
+      const profileTarget = document.querySelector('#smart-consensus-v2-profile-rows');
+      profileTarget.innerHTML = entryProfiles.length ? entryProfiles.map(profile => {
+        const exitIds = Array.isArray(profile.exitProfileIds) && profile.exitProfileIds.length
+          ? profile.exitProfileIds
+          : exitProfiles.filter(exit => (
+            !Array.isArray(exit.entryProfileIds) || exit.entryProfileIds.includes(profile.id)
+          )).map(exit => exit.id);
+        const kind = profile.directPostGraduationEntry
+          ? '毕业持仓 · 直接AMM'
+          : profile.postGraduationHoldingConsensus
+            ? '毕业持仓 · 公共流确认'
+            : profile.directCurveEntry
+              ? '毕业前Curve直接入场'
+              : profile.researchControl
+                ? '宽松动态对照'
+                : '毕业预测共识';
+        const required = profile.requiredHoldingClusters
+          ?? profile.requiredClusters
+          ?? (profile.strength === 'STRONG' ? thresholds.strong : thresholds.ordinary);
+        const windowMs = profile.consensusWindowMs || profile.flowWindowMs || profile.maxFlowWaitMs;
+        const exits = exitIds.length
+          ? exitIds.map(id => `<span title="${escapeHtml(exitLabels[id] || id)}">${escapeHtml(id)}</span>`).join('<br>')
+          : '—';
+        return `<tr><td><b>${escapeHtml(profile.label || profile.id)}</b><br><span class="table-note">${escapeHtml(profile.id)}</span></td><td>${statusChip(profile.enabled === false ? 'STOPPED' : 'ACTIVE')}<br><span class="table-note">${escapeHtml(kind)}</span></td><td>${number(required)}<br><span class="table-note">A集群≥${number(profile.minSelectionAClusters)}</span></td><td>${Number.isFinite(Number(windowMs)) ? age(Number(windowMs)) : '动态'}<br><span class="table-note">权重≥${number((Number(profile.minWeightedScoreRatio) || 0) * 100)}%</span></td><td class="wrap-cell">${exits}</td></tr>`;
+      }).join('') : '<tr><td colspan="5" class="empty">当前运行实例没有加载 SC-V2 入场组。</td></tr>';
+
+      const statusRows = Array.isArray(runtime.summary) ? runtime.summary : [];
+      const statusesByCohort = new Map();
+      for (const row of statusRows) {
+        const key = `${row.entry_profile_id}:${row.exit_profile_id}`;
+        const values = statusesByCohort.get(key) || [];
+        values.push(row);
+        statusesByCohort.set(key, values);
+      }
+      const cohorts = Array.isArray(runtime.capitalSummary) ? runtime.capitalSummary : [];
+      document.querySelector('#smart-consensus-v2-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => {
+        const states = statusesByCohort.get(`${row.entry_profile_id}:${row.exit_profile_id}`) || [];
+        const stateLabel = states.map(item => `${item.status} ${number(item.n)}`).join(' · ') || '—';
+        const closed = states.find(item => item.status === 'CLOSED') || {};
+        const closedWinRate = Number(closed.n) > 0
+          ? Number(closed.winners || 0) / Number(closed.n) * 100 : null;
+        return `<tr><td><b>${escapeHtml(row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(row.exit_profile_id)}</span></td><td>${number(row.opportunities)} / ${number(row.independent_mints)}</td><td class="wrap-cell">${escapeHtml(stateLabel)}</td><td>${number(row.closed)} / ${number(row.censored)}<br><span class="table-note">胜率 ${rate(closedWinRate)} · 平均 ${pct(closed.avg_net_return_pct)}</span></td><td>${number(row.planned_capital_sol,3)} / ${number(row.deployed_capital_sol,3)} SOL</td><td class="${tone(row.deployed_capital_return_pct)}">${pct(row.planned_capital_return_pct)} / ${pct(row.deployed_capital_return_pct)}</td><td class="${tone(row.net_pnl_sol)}">${number(row.net_pnl_sol,4)} SOL</td></tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">等待 SC-V2 新样本；上方仍会显示所有已加载规则。</td></tr>';
+
+      const holdingRows = Array.isArray(runtime.recentPostGradHoldingEvaluations)
+        ? runtime.recentPostGradHoldingEvaluations : [];
+      document.querySelector('#smart-consensus-v2-holding-rows').innerHTML = holdingRows.length
+        ? holdingRows.slice(0, 50).map(row => `<tr><td>${dateTime(row.evaluated_at)}</td><td><b>${escapeHtml(row.entry_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${number(row.distinct_clusters)} / ${number(row.eligible_wallets)}<br><span class="table-note">要求 ${number(row.required_clusters)}</span></td><td>${number(row.weighted_score,2)}</td><td>${dateTime(row.migrated_at)}<br><span class="table-note">AMM ${dateTime(row.first_amm_at)}</span></td><td class="wrap-cell">${escapeHtml(row.rejection_reason || '通过')}</td></tr>`).join('')
+        : '<tr><td colspan="7" class="empty">尚无毕业首笔 AMM 持仓判定。</td></tr>';
+
+      const positions = Array.isArray(runtime.recent) ? runtime.recent : [];
+      document.querySelector('#smart-consensus-v2-position-rows').innerHTML = positions.length
+        ? positions.map(row => {
+          let featureData = null;
+          try { featureData = row.flow_features_json ? JSON.parse(row.flow_features_json) : null; } catch (_error) { featureData = null; }
+          const snapshots = featureData?.kind === 'POST_GRAD_SNAPSHOTS'
+            ? Object.entries(featureData.snapshots || {}).sort((left, right) => Number(right[0]) - Number(left[0]))
+            : [];
+          const latest = snapshots[0] || null;
+          const snapshot = latest?.[1] || {};
+          const flow = snapshot.publicFlow || {};
+          const snapshotLabel = latest
+            ? `${age(Number(latest[0]))}: ${number(snapshot.qualifiedHoldingClusters)}集群/${number(snapshot.qualifiedHoldingWallets)}钱包 · Buyers ${number(flow.buyers)} · Net ${number(flow.netFlowSol,2)} SOL · Mark ${pct(snapshot.markReturnPct)}`
+            : (row.entry_profile_id === 'POST_GRAD_HOLD3_DIRECT' ? '等待30秒快照' : '—');
+          const holdMs = row.entry_at
+            ? Math.max(0, Number(row.exit_at || row.last_observed_at || Date.now()) - Number(row.entry_at))
+            : null;
+          const reason = row.exit_reason || (row.status === 'NO_ENTRY' ? 'NO_ENTRY' : '—');
+          return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(row.exit_profile_id)}</span><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${number(row.distinct_clusters)} / ${number(row.required_clusters)}<br><span class="table-note">权重 ${number(row.weighted_score,2)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${pct(row.highest_return_pct)} / ${number(row.exit_price,10)}</td><td>${number(row.position_sol,3)} / ${number(row.capital_in_sol,3)} SOL</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}</td><td class="wrap-cell">${escapeHtml(snapshotLabel)}</td><td>${Number.isFinite(holdMs) ? age(holdMs) : '—'}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+        }).join('')
+        : '<tr><td colspan="9" class="empty">暂无 SC-V2 模拟仓位。</td></tr>';
     }
 
     function renderSmartWalletRugEscapeShadow(data) {
@@ -3331,6 +3482,12 @@
         ],
         'smart-resonance': requestContext => [
           loadDashboard('/api/smart-resonance-shadow?positionLimit=50', renderSmartResonanceShadow, requestContext),
+        ],
+        'smart-consensus-v2': requestContext => [
+          loadDashboard('/api/smart-consensus-v2-shadow?positionLimit=100', renderSmartConsensusV2Shadow, requestContext),
+        ],
+        'smart-consensus-overlay': requestContext => [
+          loadDashboard('/api/smart-consensus-overlay?limit=100', renderSmartConsensusOverlayShadow, requestContext),
         ],
         'smart-wallet-rug-escape': requestContext => [
           loadDashboard('/api/smart-wallet-rug-escape-shadow?positionLimit=50', renderSmartWalletRugEscapeShadow, requestContext),

@@ -38,6 +38,17 @@ async function main() {
   assert.ok(dashboard.includes('id="smart-consensus-overlay-summary"'));
   assert.ok(dashboard.includes('id="smart-consensus-overlay-profile-rows"'));
   assert.ok(dashboard.includes('id="smart-consensus-overlay-recent-rows"'));
+  assert.ok(dashboard.includes('data-live-strategy="smart-consensus-v2"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="smart-consensus-v2"'));
+  assert.ok(dashboard.includes('id="smart-consensus-v2-profile-rows"'));
+  assert.ok(dashboard.includes('id="smart-consensus-v2-cohort-rows"'));
+  assert.ok(dashboard.includes('id="smart-consensus-v2-holding-rows"'));
+  assert.ok(dashboard.includes('id="smart-consensus-v2-position-rows"'));
+  assert.ok(dashboard.includes('data-live-strategy="smart-consensus-overlay"'));
+  assert.ok(dashboard.includes('data-live-strategy-pane="smart-consensus-overlay"'));
+  assert.ok(dashboard.includes('id="smart-consensus-overlay-shadow-summary"'));
+  assert.ok(dashboard.includes('id="smart-consensus-overlay-shadow-profile-rows"'));
+  assert.ok(dashboard.includes('id="smart-consensus-overlay-shadow-recent-rows"'));
   assert.ok(dashboard.includes('原 Shadow 表、原 cohort 和退出收益均不修改'));
   assert.ok(dashboard.includes('<th>链上 AGE</th>'));
   assert.ok(dashboard.includes('<th>24h / 60d 真实已实现收益</th>'));
@@ -57,6 +68,8 @@ async function main() {
   assert.ok(dashboard.includes('自动独立已确认'));
   assert.ok(dashboard.includes("loadDashboard('/api/smart-wallet-registry?limit=100'"));
   assert.ok(dashboard.includes("loadDashboard('/api/smart-consensus-overlay?limit=100'"));
+  assert.ok(dashboard.includes("loadDashboard('/api/smart-consensus-v2-shadow?positionLimit=100'"));
+  assert.ok(dashboard.includes("loadDashboard('/api/smart-consensus-overlay?limit=100', renderSmartConsensusOverlayShadow"));
   assert.ok(dashboard.includes('value="shadow_2w"'));
   assert.ok(dashboard.includes('aria-controls="live-trading"'));
   assert.ok(dashboard.includes('id="live-trading"'));
