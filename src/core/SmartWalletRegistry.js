@@ -46,6 +46,18 @@ function topProfitContribution(values) {
   return total > 0 ? wins[0] / total * 100 : null;
 }
 
+function wilsonLowerBoundPct(successes, total, z = 1.96) {
+  if (!(total > 0)) return 0;
+  const probability = Math.max(0, Math.min(1, successes / total));
+  const zSquared = z * z;
+  const denominator = 1 + zSquared / total;
+  const centre = probability + zSquared / (2 * total);
+  const margin = z * Math.sqrt(
+    (probability * (1 - probability) + zSquared / (4 * total)) / total,
+  );
+  return Math.max(0, (centre - margin) / denominator * 100);
+}
+
 function parseJson(value, fallback = {}) {
   try {
     return JSON.parse(value || '') || fallback;
@@ -104,10 +116,12 @@ class SmartWalletRegistry {
       all: new Map(),
       monitoring: new Map(),
       voting: new Map(),
+      controlVoting: new Map(),
       clusterCounts: { eligible: 0, selectionA: 0 },
       pnlCounts: {},
       ageCounts: {},
       statusCounts: {},
+      selectionGradeCounts: {},
     };
     this.walletEligibilitySnapshotDirty = true;
     this.lastSeenWrites = new Map();
@@ -1398,8 +1412,9 @@ class SmartWalletRegistry {
       pnlEligible: pnl.eligible,
       pnlEligibilityClass: pnl.eligibilityClass,
       longTermElite: pnl.eliteQualified,
-      voteWeight: pnl.eliteQualified
-        ? 1 : (row.status === 'PROBATION' ? null : gradeWeight(row.selection_grade)),
+      predictionVotingEligible: ['S_A', 'S_B'].includes(row.selection_grade),
+      controlVoteWeight: pnl.eliteQualified ? 1 : 0.5,
+      voteWeight: row.status === 'PROBATION' ? null : gradeWeight(row.selection_grade),
       actualPnl24h: pnl.window24h,
       actualPnl7d: pnl.window7d,
       actualPnl30d: pnl.window30d,
@@ -1416,7 +1431,7 @@ class SmartWalletRegistry {
       snapshotExpiresAt: expiresAt,
       votingEligible: false,
     };
-    const votingEligible = row.effective_from <= at && row.risk_status === 'OK'
+    const controlVotingEligible = row.effective_from <= at && row.risk_status === 'OK'
       && ['PROBATION', 'ACTIVE'].includes(row.status)
       && ageEligible && pnl.eligible
       && (row.source === 'CONFIG_SEED' || (
@@ -1424,6 +1439,9 @@ class SmartWalletRegistry {
           || row.status === 'ACTIVE')
         && (this.config.autoVoteRequiresKnownCluster === false || clusterKnown)
       ));
+    snapshot.controlVotingEligible = controlVotingEligible;
+    const votingEligible = controlVotingEligible
+      && ['S_A', 'S_B'].includes(row.selection_grade);
     return votingEligible ? { ...snapshot, votingEligible: true } : snapshot;
   }
 
@@ -1472,21 +1490,26 @@ class SmartWalletRegistry {
       const all = new Map();
       const monitoring = new Map();
       const voting = new Map();
+      const controlVoting = new Map();
       const eligibleClusters = new Set();
       const selectionAClusters = new Set();
       const pnlCounts = {};
       const ageCounts = {};
       const statusCounts = {};
+      const selectionGradeCounts = {};
       for (const row of rows) {
         const snapshot = Object.freeze(this._snapshotFromGradeRow(row, at, at, expiresAt));
         all.set(row.wallet, snapshot);
         statusCounts[row.status] = (statusCounts[row.status] || 0) + 1;
+        selectionGradeCounts[row.selection_grade]
+          = (selectionGradeCounts[row.selection_grade] || 0) + 1;
         pnlCounts[snapshot.pnlStatus] = (pnlCounts[snapshot.pnlStatus] || 0) + 1;
         ageCounts[snapshot.ageStatus] = (ageCounts[snapshot.ageStatus] || 0) + 1;
         if (row.discovered_at <= at && ['PROBATION', 'ACTIVE'].includes(row.status)
           && row.risk_status === 'OK' && this._ageEventMonitoringAllowed(row)) {
           monitoring.set(row.wallet, snapshot);
         }
+        if (snapshot.controlVotingEligible) controlVoting.set(row.wallet, snapshot);
         if (!snapshot.votingEligible) continue;
         voting.set(row.wallet, snapshot);
         eligibleClusters.add(snapshot.clusterId);
@@ -1503,6 +1526,7 @@ class SmartWalletRegistry {
         all,
         monitoring,
         voting,
+        controlVoting,
         clusterCounts: {
           eligible: eligibleClusters.size,
           selectionA: selectionAClusters.size,
@@ -1510,6 +1534,7 @@ class SmartWalletRegistry {
         pnlCounts,
         ageCounts,
         statusCounts,
+        selectionGradeCounts,
       };
       this.walletEligibilitySnapshotDirty = false;
       this.metrics.eligibilitySnapshotRefreshes += 1;
@@ -1542,6 +1567,12 @@ class SmartWalletRegistry {
   cachedWalletSnapshot(wallet, at = this.now()) {
     const snapshot = this._cachedWalletEligibility(wallet, { voting: true });
     return snapshot && snapshot.effectiveFrom <= at ? snapshot : null;
+  }
+
+  cachedControlWalletSnapshot(wallet, at = this.now()) {
+    const snapshot = this.walletEligibilitySnapshot.controlVoting.get(wallet) || null;
+    return snapshot && snapshot.effectiveFrom <= at
+      ? { ...snapshot, voteWeight: snapshot.controlVoteWeight } : null;
   }
 
   _queueMaintenance(type, at = this.now(), options = {}) {
@@ -1703,12 +1734,12 @@ class SmartWalletRegistry {
     `).all();
     for (const row of active) this._hydrateLabel(row);
     const meta = this._meta();
-    const needsActualGradeMigration = Boolean(this.store.db.prepare(`
+    const needsPredictionGradeMigration = Boolean(this.store.db.prepare(`
       SELECT 1 FROM smart_wallet_registry
-      WHERE metrics_json NOT LIKE '%"actualPnl30d"%'
+      WHERE metrics_json NOT LIKE '%"graduationPredictionV1":true%'
       LIMIT 1
     `).get());
-    if (needsActualGradeMigration) {
+    if (needsPredictionGradeMigration) {
       this._scheduleGradeMaintenance(now, { force: true, forceModelMigration: true });
     } else if (!meta.last_grade_refresh_at
       || now - meta.last_grade_refresh_at >= this.config.gradeRefreshMs) {
@@ -1744,10 +1775,12 @@ class SmartWalletRegistry {
       all: new Map(),
       monitoring: new Map(),
       voting: new Map(),
+      controlVoting: new Map(),
       clusterCounts: { eligible: 0, selectionA: 0 },
       pnlCounts: {},
       ageCounts: {},
       statusCounts: {},
+      selectionGradeCounts: {},
     };
     this.walletEligibilitySnapshotDirty = true;
     this.lastSeenWrites.clear();
@@ -1813,7 +1846,8 @@ class SmartWalletRegistry {
     if (!row || row.effective_from > at || row.risk_status !== 'OK'
       || !['PROBATION', 'ACTIVE'].includes(row.status)
       || !this._ageEligibleRow(row, at)
-      || !pnl?.eligible) return false;
+      || !pnl?.eligible
+      || !['S_A', 'S_B'].includes(row.selection_grade)) return false;
     if (row.source === 'CONFIG_SEED') return true;
     if (!pnl.eliteQualified
       && this.config.autoVoteRequiresActive !== false && row.status !== 'ACTIVE') return false;
@@ -2477,6 +2511,10 @@ class SmartWalletRegistry {
     if (!snapshot || snapshot.effectiveFrom > at) return null;
     if (!snapshot.ageEligible) return null;
     if (!snapshot.pnlEligible) return null;
+    // Profitability and graduation prediction are deliberately separate. A
+    // LONG_TERM_ELITE wallet may remain useful for holding research, but it
+    // cannot cast a pre-graduation selection vote while graded S_C.
+    if (!['S_A', 'S_B'].includes(snapshot.selectionGrade)) return null;
     if (snapshot.source !== 'CONFIG_SEED') {
       if (snapshot.pnlEligibilityClass !== 'LONG_TERM_ELITE'
         && this.config.autoVoteRequiresActive !== false && snapshot.status !== 'ACTIVE') return null;
@@ -2517,8 +2555,10 @@ class SmartWalletRegistry {
       pnlEligible: pnl.eligible,
       pnlEligibilityClass: pnl.eligibilityClass,
       longTermElite: pnl.eliteQualified,
-      voteWeight: pnl.eliteQualified
-        ? 1 : (row.status === 'PROBATION' ? null : gradeWeight(row.selection_grade)),
+      predictionVotingEligible: ['S_A', 'S_B'].includes(row.selection_grade),
+      controlVotingEligible: Boolean(pnl.eligible && this._ageEligibleRow(row, at)),
+      controlVoteWeight: pnl.eliteQualified ? 1 : 0.5,
+      voteWeight: row.status === 'PROBATION' ? null : gradeWeight(row.selection_grade),
       actualPnl24h: pnl.window24h,
       actualPnl7d: pnl.window7d,
       actualPnl30d: pnl.window30d,
@@ -2558,6 +2598,7 @@ class SmartWalletRegistry {
     if (!row || row.effective_from > at || row.risk_status !== 'OK'
       || !['PROBATION', 'ACTIVE'].includes(row.status)
       || !this._ageEligibleRow(row, at)) return false;
+    if (!['S_A', 'S_B'].includes(row.selection_grade)) return false;
     const metrics = parseJson(row.metrics_json, {});
     const pnlEligible = this.config.pnlGateEnabled === false
       || metrics.pnlEligible === true
@@ -2882,6 +2923,66 @@ class SmartWalletRegistry {
       bucket.push(row);
       grouped.set(row.wallet, bucket);
     }
+    const predictionHorizonMs = Math.max(
+      60_000,
+      finite(this.config.graduationPredictionHorizonMs, 12 * 60 * 60_000),
+    );
+    const predictionLookbackMs = Math.max(
+      predictionHorizonMs,
+      finite(this.config.graduationPredictionLookbackMs, this.config.lookbackMs),
+    );
+    // Grade selection skill from causal, mature, pre-graduation first OPENs.
+    // The Mints that nominated an auto-discovered wallet are excluded so the
+    // registry cannot grade a wallet on the same successes used to find it.
+    const predictionRows = this.store.db.prepare(`
+      WITH first_opens AS (
+        SELECT event.wallet, event.mint, MIN(event.timestamp_ms) opened_at
+        FROM smart_wallet_events event
+        JOIN smart_wallet_registry registry ON registry.wallet=event.wallet
+        WHERE event.side='BUY'
+          AND COALESCE(event.position_phase, 'OPEN')='OPEN'
+          AND event.market='PUMP_BONDING_CURVE'
+          AND event.timestamp_ms>=? AND event.timestamp_ms<=?
+        GROUP BY event.wallet, event.mint
+      )
+      SELECT first_open.wallet, first_open.mint, first_open.opened_at,
+        token.graduated_at
+      FROM first_opens first_open
+      JOIN flow_tokens token ON token.mint=first_open.mint
+        AND token.created_at IS NOT NULL
+      LEFT JOIN smart_wallet_discovery_seeds seed
+        ON seed.wallet=first_open.wallet AND seed.seed_mint=first_open.mint
+      WHERE seed.seed_mint IS NULL
+      ORDER BY first_open.wallet, first_open.opened_at, first_open.mint
+    `).all(now - predictionLookbackMs, now - predictionHorizonMs)
+      .filter((row) => !(finite(row.graduated_at) > 0)
+        || finite(row.graduated_at) > finite(row.opened_at));
+    const predictionByWallet = new Map();
+    const baselineByMint = new Map();
+    for (const row of predictionRows) {
+      const openedAt = finite(row.opened_at);
+      const graduatedAt = finite(row.graduated_at);
+      const graduated = graduatedAt > openedAt
+        && graduatedAt <= openedAt + predictionHorizonMs;
+      const sample = predictionByWallet.get(row.wallet) || [];
+      sample.push({ ...row, graduated });
+      predictionByWallet.set(row.wallet, sample);
+      const baseline = baselineByMint.get(row.mint);
+      if (!baseline || openedAt < baseline.openedAt) {
+        baselineByMint.set(row.mint, { openedAt, graduatedAt });
+      }
+    }
+    let baselineGraduated = 0;
+    for (const row of baselineByMint.values()) {
+      if (row.graduatedAt > row.openedAt
+        && row.graduatedAt <= row.openedAt + predictionHorizonMs) baselineGraduated += 1;
+    }
+    const fallbackBaselinePct = Math.max(
+      0.01,
+      finite(this.config.graduationPredictionFallbackBaselinePct, 8),
+    );
+    const baselineGraduationRatePct = baselineByMint.size
+      ? baselineGraduated / baselineByMint.size * 100 : fallbackBaselinePct;
     const wallets = this.store.db.prepare('SELECT * FROM smart_wallet_registry').all();
     for (const current of wallets) {
       if (current.status === 'QUARANTINED') continue;
@@ -2899,17 +3000,43 @@ class SmartWalletRegistry {
       const top1Pct = topProfitContribution(pnlValues);
       const profitable30d = pnl.window30d.realizedPnlSol > 0
         && pnl.window30d.capitalReturnPct > 0;
+      const predictionSample = predictionByWallet.get(current.wallet) || [];
+      const predictionGraduated = predictionSample.filter((row) => row.graduated).length;
+      const graduationRatePct = predictionSample.length
+        ? predictionGraduated / predictionSample.length * 100 : 0;
+      const graduationLift = graduationRatePct / Math.max(0.01, baselineGraduationRatePct);
+      const graduationWilsonLowerPct = wilsonLowerBoundPct(
+        predictionGraduated,
+        predictionSample.length,
+      );
+      const predictionActiveDays = new Set(predictionSample.map((row) => (
+        Math.floor(row.opened_at / DAY_MS)
+      ))).size;
+      const selectionMinSamples = Math.max(1, finite(this.config.selectionMinSamples, 30));
+      const predictionMinActiveDays = Math.max(
+        1,
+        finite(this.config.graduationPredictionMinActiveDays, 3),
+      );
+      const minGraduationRatePct = Math.max(
+        0,
+        finite(this.config.minGraduationRatePct, 25),
+      );
+      const minGraduationWilsonLowerPct = Math.max(
+        0,
+        finite(this.config.minGraduationWilsonLowerPct, 10),
+      );
       let selectionGrade = 'S_C';
-      if (sample.length >= this.config.selectionMinSamples
-        && activeDays >= this.config.minActiveDays
-        && profitable30d
-        && (pf == null || pf >= this.config.minCopyPf)
-        && positiveWindowPct >= this.config.minPositiveWindowPct
-        && (top1Pct == null || top1Pct <= this.config.maxTop1ProfitPct)) {
+      if (predictionSample.length >= selectionMinSamples
+        && predictionActiveDays >= predictionMinActiveDays
+        && graduationRatePct >= minGraduationRatePct
+        && graduationLift >= finite(this.config.minGraduationLift, 1.5)
+        && graduationWilsonLowerPct >= minGraduationWilsonLowerPct) {
         selectionGrade = 'S_A';
       }
-      else if (sample.length >= Math.ceil(this.config.selectionMinSamples / 2)
-        && profitable30d && (pf == null || pf >= 1)) selectionGrade = 'S_B';
+      else if (predictionSample.length >= Math.ceil(selectionMinSamples / 2)
+        && predictionActiveDays >= Math.max(1, Math.ceil(predictionMinActiveDays / 2))
+        && graduationRatePct >= baselineGraduationRatePct
+          * finite(this.config.minSelectionBLift, 1.1)) selectionGrade = 'S_B';
       let copyGrade = 'C_C';
       if (returns.length >= this.config.copyMinSamples
         && activeDays >= this.config.minActiveDays
@@ -2936,6 +3063,22 @@ class SmartWalletRegistry {
       const desiredStatus = performanceQualified && ageEligible && pnl.eligible
         ? 'ACTIVE' : 'PROBATION';
       const metrics = {
+        graduationPredictionV1: true,
+        graduationPrediction: {
+          horizonMs: predictionHorizonMs,
+          lookbackMs: predictionLookbackMs,
+          matureSamples: predictionSample.length,
+          graduated: predictionGraduated,
+          graduationRatePct,
+          baselineMints: baselineByMint.size,
+          baselineGraduated,
+          baselineGraduationRatePct,
+          graduationLift,
+          wilsonLower95Pct: graduationWilsonLowerPct,
+          activeDays: predictionActiveDays,
+          discoverySeedsExcluded: true,
+          knownTokenOutcomeCoverageOnly: true,
+        },
         sampleSize: sample.length,
         activeDays,
         actualAverageReturnPct: averageReturnPct,
@@ -2983,7 +3126,8 @@ class SmartWalletRegistry {
           holdingGrade,
           status: desiredStatus,
           reason: forceModelMigration
-            ? 'ACTUAL_WALLET_PNL_MODEL_MIGRATION' : 'ROLLING_ACTUAL_WALLET_PNL',
+            ? 'GRADUATION_PREDICTION_MODEL_MIGRATION'
+            : 'ROLLING_GRADUATION_PREDICTION_AND_ACTUAL_PNL',
           metrics: nextMetrics,
           effectiveAt: now,
         });
@@ -3033,6 +3177,8 @@ class SmartWalletRegistry {
           this.walletEligibilitySnapshot.generatedAt || observedAt,
           this.walletEligibilitySnapshot.expiresAt || observedAt,
         );
+      const gradeMetrics = parseJson(row.metrics_json, {});
+      const prediction = gradeMetrics.graduationPrediction || {};
       return {
         ...row,
         age_ms: nullableFinite(row.first_chain_activity_at) == null
@@ -3057,6 +3203,14 @@ class SmartWalletRegistry {
         actual_open_positions: cached.actualOpenPositions,
         actual_open_cost_sol: cached.actualOpenCostSol,
         voting_eligible: cached.votingEligible ? 1 : 0,
+        prediction_voting_eligible: cached.predictionVotingEligible ? 1 : 0,
+        grad_prediction_samples: finite(prediction.matureSamples, 0),
+        grad_prediction_graduated: finite(prediction.graduated, 0),
+        grad_prediction_rate_pct: finite(prediction.graduationRatePct),
+        grad_prediction_baseline_pct: finite(prediction.baselineGraduationRatePct),
+        grad_prediction_lift: finite(prediction.graduationLift),
+        grad_prediction_wilson_lower_pct: finite(prediction.wilsonLower95Pct),
+        grad_prediction_active_days: finite(prediction.activeDays, 0),
       };
     });
     return {
@@ -3097,6 +3251,34 @@ class SmartWalletRegistry {
           realizedOnly: true,
           requiresCompleteHistory: true,
         },
+      },
+      graduationPredictionPolicy: {
+        modelVersion: 'GRADUATION_PREDICTION_V1',
+        horizonMs: Math.max(
+          60_000,
+          finite(this.config.graduationPredictionHorizonMs, 12 * 60 * 60_000),
+        ),
+        lookbackMs: Math.max(
+          7 * DAY_MS,
+          finite(this.config.graduationPredictionLookbackMs, 60 * DAY_MS),
+        ),
+        minSamples: Math.max(1, finite(this.config.selectionMinSamples, 30)),
+        minActiveDays: Math.max(
+          1,
+          finite(this.config.graduationPredictionMinActiveDays, 3),
+        ),
+        minGraduationRatePct: Math.max(
+          0,
+          finite(this.config.minGraduationRatePct, 25),
+        ),
+        minGraduationLift: Math.max(0, finite(this.config.minGraduationLift, 1.5)),
+        minWilsonLower95Pct: Math.max(
+          0,
+          finite(this.config.minGraduationWilsonLowerPct, 10),
+        ),
+        discoverySeedsExcluded: true,
+        knownTokenOutcomeCoverageOnly: true,
+        profitabilityIsSeparate: true,
       },
       historyBackfillPolicy: {
         enabled: this.config.historyBackfillEnabled === true,
@@ -3188,6 +3370,7 @@ class SmartWalletRegistry {
       eligibilitySnapshotWallets: snapshot.all.size,
       eligibilitySnapshotMonitored: snapshot.monitoring.size,
       eligibilitySnapshotVoting: snapshot.voting.size,
+      eligibilitySnapshotControlVoting: snapshot.controlVoting.size,
       eventMonitoringRequiresResolvedAge:
         this.config.eventMonitoringRequiresResolvedAge !== false,
       actualEventBackfillPending: this.actualEventBackfillPending,
@@ -3224,6 +3407,7 @@ class SmartWalletRegistry {
     const pnlCounts = eligibility.pnlCounts;
     const ageCounts = eligibility.ageCounts;
     const statusCounts = eligibility.statusCounts;
+    const selectionGradeCounts = eligibility.selectionGradeCounts || {};
     const clusterEvaluationCounts = Object.fromEntries(this.store.db.prepare(`
       SELECT status, COUNT(*) count
       FROM smart_wallet_cluster_evaluations
@@ -3295,6 +3479,10 @@ class SmartWalletRegistry {
       lastClusterRefreshAt: this.lastClusterRefreshAt || null,
       monitored: eligibility.monitoring.size,
       votingEligible: eligibility.voting.size,
+      broadControlVotingEligible: eligibility.controlVoting.size,
+      predictionGradeA: selectionGradeCounts.S_A || 0,
+      predictionGradeB: selectionGradeCounts.S_B || 0,
+      predictionGradeC: selectionGradeCounts.S_C || 0,
       observationOnly: Math.max(0, eligibility.monitoring.size - eligibility.voting.size),
       historyBackfillEnabled: this.config.historyBackfillEnabled === true,
       historyRpcConfigured: Boolean(this.config.historyRpcUrl),

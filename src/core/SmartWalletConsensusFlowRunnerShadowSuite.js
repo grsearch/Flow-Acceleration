@@ -720,11 +720,20 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     let eligibleWallets = 0;
     for (const holding of state.smartHoldings.values()) {
       if (!(holding.tokenBalanceAfter > 0) || holding.timestampMs > at) continue;
-      const snapshot = typeof this.registry.cachedWalletSnapshot === 'function'
-        ? this.registry.cachedWalletSnapshot(holding.wallet, at)
-        : this.registry.walletSnapshot(holding.wallet, at);
+      // Post-graduation holding consensus is a different capability from
+      // predicting graduation. It may use H_A/H_B or a 60d elite wallet, while
+      // pre-graduation _consensus() below remains restricted to S_A/S_B votes.
+      const snapshot = typeof this.registry.cachedMonitoringSnapshot === 'function'
+        ? this.registry.cachedMonitoringSnapshot(holding.wallet, at)
+        : this.registry.monitoringSnapshot(holding.wallet, at);
       if (!snapshot) continue;
+      if (snapshot.ageEligible === false || snapshot.pnlEligible === false) continue;
+      if (!snapshot.longTermElite
+        && !['H_A', 'H_B'].includes(snapshot.holdingGrade)) continue;
+      if (snapshot.source !== 'CONFIG_SEED' && snapshot.clusterKnown === false) continue;
       eligibleWallets += 1;
+      const holdingWeight = snapshot.longTermElite || snapshot.holdingGrade === 'H_A'
+        ? 1 : 0.5;
       const vote = {
         timestampMs: holding.timestampMs,
         wallet: holding.wallet,
@@ -734,9 +743,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         copyGrade: snapshot.copyGrade,
         holdingGrade: snapshot.holdingGrade,
         registryVersion: finite(snapshot.registryVersion, holding.registryVersion || 0),
-        weight: Number.isFinite(snapshot.voteWeight)
-          ? snapshot.voteWeight
-          : finite(snapshot.selectionWeight, holding.weight || 1),
+        weight: holdingWeight,
         tokenBalanceAfter: holding.tokenBalanceAfter,
       };
       const current = byCluster.get(vote.clusterId);
@@ -842,7 +849,11 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         byCluster.set(row.clusterId, row);
       }
     }
-    const votes = [...byCluster.values()].sort((left, right) => left.timestampMs - right.timestampMs);
+    const allVotes = [...byCluster.values()]
+      .sort((left, right) => left.timestampMs - right.timestampMs);
+    const votes = profile.selectionGradeOnly
+      ? allVotes.filter((row) => row.selectionGrade === profile.selectionGradeOnly)
+      : allVotes;
     const thresholds = this._thresholdSnapshot(at);
     const required = finite(
       profile.requiredClusters,
@@ -852,8 +863,10 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     const copyA = votes.filter((row) => row.copyGrade === 'C_A').length;
     const weightedScore = votes.reduce((sum, row) => sum + Math.max(0, row.weight), 0);
     const configuredRequiredA = finite(profile.minSelectionAClusters, 0);
-    const requiredA = thresholds.eligible >= this.config.enforceAGradeAfterClusters
-      && thresholds.selectionA >= configuredRequiredA ? configuredRequiredA : 0;
+    // Fail closed: pool growth must never silently turn a P_A requirement into
+    // zero. Broad behavior is retained only in explicit research-control
+    // profiles whose configuredRequiredA is intentionally zero.
+    const requiredA = configuredRequiredA;
     if (votes.length < required || selectionA < requiredA
       || weightedScore < required * profile.minWeightedScoreRatio) return null;
     return { votes, thresholds, required, selectionA, copyA, weightedScore };

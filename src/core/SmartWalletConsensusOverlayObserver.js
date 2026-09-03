@@ -287,19 +287,26 @@ class SmartWalletConsensusOverlayObserver {
     });
   }
 
-  _consensus(mint, sourceSignalAt) {
+  _consensus(mint, sourceSignalAt, profile = null) {
     if (!this._tableExists('smart_wallet_consensus_flow_runner_shadow_positions')) return null;
     const gateWindowMs = Math.max(1_000, finite(this.config.gateWindowMs, 15 * 60_000));
+    const allowedProfiles = Array.isArray(profile?.consensusEntryProfileIds)
+      ? profile.consensusEntryProfileIds
+      : (Array.isArray(this.config.consensusEntryProfileIds)
+        ? this.config.consensusEntryProfileIds : []);
+    const profileFilter = allowedProfiles.length
+      ? `AND entry_profile_id IN (${allowedProfiles.map(() => '?').join(',')})` : '';
     return this.store.db.prepare(`
       SELECT signal_at, entry_profile_id, signal_strength,
         required_clusters, distinct_clusters, selection_a_clusters,
         copy_a_clusters, weighted_score, cluster_votes_json
       FROM smart_wallet_consensus_flow_runner_shadow_positions
       WHERE mint=? AND signal_at>=? AND signal_at<=?
+        ${profileFilter}
         AND distinct_clusters>=required_clusters
       ORDER BY signal_at DESC, distinct_clusters DESC, id DESC
       LIMIT 1
-    `).get(mint, sourceSignalAt - gateWindowMs, sourceSignalAt);
+    `).get(mint, sourceSignalAt - gateWindowMs, sourceSignalAt, ...allowedProfiles);
   }
 
   _save(profile, source, consensus, now) {
@@ -383,7 +390,7 @@ class SmartWalletConsensusOverlayObserver {
           items.push({
             profile,
             source,
-            consensus: this._consensus(source.mint, source.source_signal_at),
+            consensus: this._consensus(source.mint, source.source_signal_at, profile),
           });
         }
       }

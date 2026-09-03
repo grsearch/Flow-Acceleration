@@ -111,6 +111,33 @@ assert.deepStrictEqual(
   earlyCurveConsensus.exitProfileIds,
   ['FIX30', 'CORE80_RUNNER6H_SP30T20'],
 );
+const strictPredictionConsensus = config.smartWalletConsensusFlowRunnerShadow.entryProfiles.find(
+  (profile) => profile.id === 'PA3_EARLY_C25_V1',
+);
+assert(strictPredictionConsensus);
+assert.strictEqual(strictPredictionConsensus.requiredClusters, 3);
+assert.strictEqual(strictPredictionConsensus.minSelectionAClusters, 3);
+assert.strictEqual(strictPredictionConsensus.selectionGradeOnly, 'S_A');
+assert.strictEqual(strictPredictionConsensus.consensusWindowMs, 300_000);
+const broadConsensusControl = config.smartWalletConsensusFlowRunnerShadow.entryProfiles.find(
+  (profile) => profile.id === 'ROLLING_DYNAMIC_CONTROL_V1',
+);
+assert(broadConsensusControl);
+assert.strictEqual(broadConsensusControl.researchControl, true);
+assert.strictEqual(broadConsensusControl.minSelectionAClusters, 0);
+for (const legacyProfileId of [
+  'POST_FLOW', 'SCOUT15_FLOW', 'POST_FLOW_STRICT',
+  'SCOUT15_FLOW_STRICT', 'STRONG25_FLOW',
+]) {
+  const legacyProfile = config.smartWalletConsensusFlowRunnerShadow.entryProfiles.find(
+    (profile) => profile.id === legacyProfileId,
+  );
+  assert(legacyProfile);
+  assert.strictEqual(legacyProfile.enabled, false);
+}
+assert.deepStrictEqual(config.smartWalletConsensusOverlay.consensusEntryProfileIds, [
+  'PA3_POST_FLOW_V1', 'PA3_SCOUT15_FLOW_V1', 'PA3_EARLY_C25_V1',
+]);
 const postGradHoldingConsensus = config.smartWalletConsensusFlowRunnerShadow.entryProfiles.find(
   (profile) => profile.id === 'POST_GRAD_HOLD3_FLOW2_60',
 );
@@ -142,6 +169,13 @@ assert.strictEqual(earlyBurstConsensus.sourceProfileId, 'EB_A');
 assert.strictEqual(earlyBurstConsensus.requiredClusters, 2);
 assert.strictEqual(earlyBurstConsensus.consensusWindowMs, 300_000);
 assert.deepStrictEqual(earlyBurstConsensus.exitProfileIds, ['FIX20', 'FIX30']);
+const strictEarlyBurstConsensus = config.earlyPureBuyBurstShadow.entryProfiles.find(
+  (profile) => profile.id === 'EB_A_SWC_PA3_W300',
+);
+assert(strictEarlyBurstConsensus);
+assert.strictEqual(strictEarlyBurstConsensus.requiredClusters, 3);
+assert.strictEqual(strictEarlyBurstConsensus.minSelectionAClusters, 3);
+assert.strictEqual(strictEarlyBurstConsensus.selectionGradeOnly, 'S_A');
 assert.strictEqual(config.liveTrading.enabled, false);
 assert.strictEqual(config.liveTrading.requestedEnabled, false);
 assert.strictEqual(config.liveTrading.safetyLock, true);

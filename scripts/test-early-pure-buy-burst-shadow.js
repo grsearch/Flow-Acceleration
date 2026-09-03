@@ -55,6 +55,13 @@ function config() {
         consensusWindowMs: 300_000, requiredClusters: 2,
         exitProfileIds: ['FIX20', 'FIX30'],
       },
+      {
+        id: 'EB_A_SWC_PA3_W300', label: 'EB-A + three P_A clusters',
+        newEntriesEnabled: true, sourceProfileId: 'EB_A',
+        consensusWindowMs: 300_000, requiredClusters: 3,
+        minSelectionAClusters: 3, selectionGradeOnly: 'S_A',
+        exitProfileIds: ['FIX20', 'FIX30'],
+      },
     ],
     exitProfiles: [
       { id: 'FIX5', label: 'fixed 5s', maxHoldMs: 5_000 },

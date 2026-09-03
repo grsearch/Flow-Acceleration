@@ -2772,6 +2772,31 @@ const config = {
     maxCrossMarketJumpPct: numberEnv('FLOW_SMART_WALLET_MAX_CROSS_MARKET_JUMP_PCT', 500, {
       min: 0, max: 10_000,
     }),
+    // S_A/S_B are graduation-prediction grades, not profitability aliases.
+    // Only mature first OPENs on the Bonding Curve are counted; discovery
+    // seeds are excluded and recent unresolved Mints are right-censored.
+    graduationPredictionHorizonMs: integerEnv(
+      'FLOW_SMART_WALLET_GRAD_PREDICTION_HORIZON_MS', 12 * 60 * 60_000,
+      { min: 60 * 60_000, max: 7 * 24 * 60 * 60_000 },
+    ),
+    graduationPredictionLookbackMs: integerEnv(
+      'FLOW_SMART_WALLET_GRAD_PREDICTION_LOOKBACK_MS', 60 * 24 * 60 * 60_000,
+      { min: 7 * 24 * 60 * 60_000 },
+    ),
+    graduationPredictionMinActiveDays: integerEnv(
+      'FLOW_SMART_WALLET_GRAD_PREDICTION_MIN_ACTIVE_DAYS', 3,
+      { min: 1, max: 60 },
+    ),
+    graduationPredictionFallbackBaselinePct: numberEnv(
+      'FLOW_SMART_WALLET_GRAD_PREDICTION_FALLBACK_BASELINE_PCT', 8,
+      { min: 0.01, max: 100 },
+    ),
+    minGraduationRatePct: numberEnv(
+      'FLOW_SMART_WALLET_MIN_GRAD_RATE_PCT', 25, { min: 0, max: 100 },
+    ),
+    minGraduationWilsonLowerPct: numberEnv(
+      'FLOW_SMART_WALLET_MIN_GRAD_WILSON_LOWER_PCT', 10, { min: 0, max: 100 },
+    ),
     selectionMinSamples: integerEnv('FLOW_SMART_WALLET_SELECTION_MIN_SAMPLES', 30, { min: 5 }),
     copyMinSamples: integerEnv('FLOW_SMART_WALLET_COPY_MIN_SAMPLES', 30, { min: 5 }),
     holdingMinSamples: integerEnv('FLOW_SMART_WALLET_HOLDING_MIN_SAMPLES', 30, { min: 5 }),
@@ -2811,7 +2836,7 @@ const config = {
   smartWalletConsensusFlowRunnerShadow: {
     enabled: booleanEnv('FLOW_SMART_CONSENSUS_V2_SHADOW_ENABLED', true),
     positionSizeSol: shadowPositionEnv('FLOW_SMART_CONSENSUS_V2_POSITION_SOL'),
-    probationVoteWeight: numberEnv('FLOW_SMART_CONSENSUS_V2_PROBATION_WEIGHT', 1, {
+    probationVoteWeight: numberEnv('FLOW_SMART_CONSENSUS_V2_PROBATION_WEIGHT', 0.5, {
       min: 0, max: 1,
     }),
     enforceAGradeAfterClusters: integerEnv(
@@ -2860,27 +2885,83 @@ const config = {
     ],
     entryProfiles: [
       {
-        id: 'POST_FLOW', label: '毕业后公共流确认', strength: 'ORDINARY',
+        id: 'PA3_POST_FLOW_V1',
+        label: 'P_A严格3集群/300秒 · 毕业后公共流确认',
+        ruleVersion: 'GRAD_PREDICTION_V1',
+        strength: 'PREDICTION_A3',
+        consensusWindowMs: 300_000,
+        requiredClusters: 3,
+        minSelectionAClusters: 3,
+        selectionGradeOnly: 'S_A',
+        scoutFraction: 0,
+        minWeightedScoreRatio: 1,
+      },
+      {
+        id: 'PA3_SCOUT15_FLOW_V1',
+        label: 'P_A严格3集群/300秒 · 毕业前15%试仓',
+        ruleVersion: 'GRAD_PREDICTION_V1',
+        strength: 'PREDICTION_A3',
+        consensusWindowMs: 300_000,
+        requiredClusters: 3,
+        minSelectionAClusters: 3,
+        selectionGradeOnly: 'S_A',
+        scoutFraction: 0.15,
+        minWeightedScoreRatio: 1,
+      },
+      {
+        id: 'PA3_EARLY_C25_V1',
+        label: 'P_A严格3集群/300秒 · 早期Curve<25%',
+        ruleVersion: 'GRAD_PREDICTION_V1',
+        strength: 'PREDICTION_A3',
+        consensusWindowMs: 300_000,
+        requiredClusters: 3,
+        minSelectionAClusters: 3,
+        selectionGradeOnly: 'S_A',
+        minWeightedScoreRatio: 1,
+        minCurvePct: 0,
+        maxCurvePct: 25,
+        directCurveEntry: true,
+        scoutFraction: 1,
+        exitProfileIds: ['FIX30', 'CORE80_RUNNER6H_SP30T20'],
+      },
+      {
+        id: 'ROLLING_DYNAMIC_CONTROL_V1',
+        label: '宽松滚动钱包动态门槛对照（不要求P_A）',
+        ruleVersion: 'LEGACY_BROAD_CONTROL_V1',
+        strength: 'ORDINARY',
+        consensusWindowMs: 180_000,
+        scoutFraction: 0,
+        minSelectionAClusters: 0,
+        minWeightedScoreRatio: 0.5,
+        researchControl: true,
+      },
+      {
+        id: 'POST_FLOW', label: '历史规则（停止新增）· 毕业后公共流', strength: 'ORDINARY',
+        enabled: false,
         consensusWindowMs: 180_000, scoutFraction: 0,
         minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
       },
       {
-        id: 'SCOUT15_FLOW', label: '毕业前15%试仓 + 毕业后公共流加仓', strength: 'ORDINARY',
+        id: 'SCOUT15_FLOW', label: '历史规则（停止新增）· 毕业前15%试仓', strength: 'ORDINARY',
+        enabled: false,
         consensusWindowMs: 180_000, scoutFraction: 0.15,
         minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
       },
       {
-        id: 'POST_FLOW_STRICT', label: '毕业后强公共流确认', strength: 'ORDINARY',
+        id: 'POST_FLOW_STRICT', label: '历史规则（停止新增）· 毕业后强公共流', strength: 'ORDINARY',
+        enabled: false,
         consensusWindowMs: 180_000, scoutFraction: 0, flowGate: 'STRICT',
         minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
       },
       {
-        id: 'SCOUT15_FLOW_STRICT', label: '毕业前15%试仓 + 强公共流加仓', strength: 'ORDINARY',
+        id: 'SCOUT15_FLOW_STRICT', label: '历史规则（停止新增）· 15%试仓+强公共流', strength: 'ORDINARY',
+        enabled: false,
         consensusWindowMs: 180_000, scoutFraction: 0.15, flowGate: 'STRICT',
         minSelectionAClusters: 2, minWeightedScoreRatio: 0.5,
       },
       {
-        id: 'STRONG25_FLOW', label: '强共识毕业前25%试仓 + 毕业后公共流加仓', strength: 'STRONG',
+        id: 'STRONG25_FLOW', label: '历史规则（停止新增）· 25%试仓+公共流', strength: 'STRONG',
+        enabled: false,
         consensusWindowMs: 300_000, scoutFraction: 0.25, flowGate: 'STRICT',
         minSelectionAClusters: 3, minWeightedScoreRatio: 0.6,
       },
@@ -2928,7 +3009,7 @@ const config = {
       },
       booleanEnv('FLOW_SMART_CONSENSUS_V2_EARLY_C25_R3_ENABLED', true) && {
         id: 'EARLY_C25_R3',
-        label: '早期Curve<25% · 180秒3个独立集群直接入场',
+        label: '宽松对照 · 早期Curve<25% · 180秒3个独立集群',
         strength: 'RESEARCH_FIXED',
         consensusWindowMs: integerEnv(
           'FLOW_SMART_CONSENSUS_V2_EARLY_C25_WINDOW_MS', 180_000, { min: 30_000 },
@@ -3003,6 +3084,11 @@ const config = {
   // does not duplicate execution state, and can never send a transaction.
   smartWalletConsensusOverlay: {
     enabled: booleanEnv('FLOW_SMART_CONSENSUS_OVERLAY_ENABLED', true),
+    consensusEntryProfileIds: [
+      'PA3_POST_FLOW_V1',
+      'PA3_SCOUT15_FLOW_V1',
+      'PA3_EARLY_C25_V1',
+    ],
     gateWindowMs: integerEnv(
       'FLOW_SMART_CONSENSUS_OVERLAY_WINDOW_MS', 15 * 60_000, { min: 60_000 },
     ),
@@ -5061,7 +5147,7 @@ const config = {
       { id: 'EB_C', label: 'EB-C · 1-3s pullback reclaim', newEntriesEnabled: true },
       booleanEnv('FLOW_EARLY_PURE_BUY_BURST_SWC_R2_W300_ENABLED', true) && {
         id: 'EB_A_SWC_R2_W300',
-        label: 'EB-A + Smart Wallet 300秒内2个独立集群',
+        label: '宽松对照 · EB-A + 300秒内2个独立集群',
         newEntriesEnabled: true,
         sourceProfileId: 'EB_A',
         consensusWindowMs: integerEnv(
@@ -5070,6 +5156,19 @@ const config = {
         requiredClusters: integerEnv(
           'FLOW_EARLY_PURE_BUY_BURST_SWC_REQUIRED_CLUSTERS', 2, { min: 2 },
         ),
+        exitProfileIds: ['FIX20', 'FIX30'],
+      },
+      booleanEnv('FLOW_EARLY_PURE_BUY_BURST_SWC_PA3_W300_ENABLED', true) && {
+        id: 'EB_A_SWC_PA3_W300',
+        label: 'EB-A + 300秒内3个P_A独立集群',
+        newEntriesEnabled: true,
+        sourceProfileId: 'EB_A',
+        consensusWindowMs: integerEnv(
+          'FLOW_EARLY_PURE_BUY_BURST_SWC_PA3_WINDOW_MS', 300_000, { min: 30_000 },
+        ),
+        requiredClusters: 3,
+        minSelectionAClusters: 3,
+        selectionGradeOnly: 'S_A',
         exitProfileIds: ['FIX20', 'FIX30'],
       },
     ].filter(Boolean),

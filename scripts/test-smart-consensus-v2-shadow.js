@@ -60,6 +60,18 @@ async function main() {
   };
   const registry = new SmartWalletRegistry({ config: registryConfig, store, now: () => now });
   registry.start();
+  for (const wallet of ['smart-a', 'smart-b', 'smart-c']) {
+    registry.setGrades({
+      wallet,
+      selectionGrade: 'S_A',
+      copyGrade: 'C_A',
+      holdingGrade: 'H_A',
+      status: 'ACTIVE',
+      effectiveAt: base - 1,
+      metrics: { graduationPredictionV1: true },
+    });
+  }
+  registry._refreshWalletEligibilitySnapshot(base, { force: true });
   const suite = new SmartWalletConsensusFlowRunnerShadowSuite({
     config: {
       enabled: true,
@@ -112,6 +124,17 @@ async function main() {
     now: () => now,
   });
   suite.start();
+  assert.strictEqual(suite._consensus({
+    smartBuys: [
+      { timestampMs: base - 200, clusterId: 'strict-a', selectionGrade: 'S_A', weight: 1 },
+      { timestampMs: base - 100, clusterId: 'strict-b', selectionGrade: 'S_B', weight: 1 },
+    ],
+  }, base, {
+    consensusWindowMs: 5_000,
+    requiredClusters: 2,
+    minSelectionAClusters: 2,
+    minWeightedScoreRatio: 0.5,
+  }), null, 'a configured P_A requirement must fail closed even when the pool is small');
   const mint = 'ConsensusV211111111111111111111111111111';
   store.recordCreate({
     mint, symbol: 'V2', name: null, uri: null, bondingCurve: null, creator: 'creator',
@@ -374,8 +397,127 @@ async function main() {
   store.close();
   await testWalletAgeGate(costModel);
   testActualWalletPnlGate(costModel);
+  testGraduationPredictionGrades(costModel);
   testAutomaticClusterConfirmation(costModel);
   console.log('Smart Wallet Consensus Flow Runner V2 tests: PASS');
+}
+
+function testGraduationPredictionGrades(costModel) {
+  const HOUR = 60 * 60_000;
+  const DAY = 24 * HOUR;
+  const base = 1_905_000_000_000;
+  let now = base;
+  const store = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const registry = new SmartWalletRegistry({
+    config: {
+      enabled: true,
+      seedWallets: [],
+      seedClusters: [],
+      ageCheckEnabled: false,
+      pnlGateEnabled: false,
+      discoveryEnabled: false,
+      discoveryDelayMs: 0,
+      autoVoteRequiresActive: true,
+      autoVoteRequiresKnownCluster: false,
+      lookbackMs: 60 * DAY,
+      graduationPredictionHorizonMs: HOUR,
+      graduationPredictionLookbackMs: 60 * DAY,
+      graduationPredictionMinActiveDays: 1,
+      graduationPredictionFallbackBaselinePct: 8,
+      selectionMinSamples: 4,
+      minGraduationRatePct: 50,
+      minGraduationWilsonLowerPct: 0,
+      minGraduationLift: 1.5,
+      minSelectionBLift: 1.1,
+      copyMinSamples: 30,
+      holdingMinSamples: 30,
+      minActiveDays: 7,
+      minCopyPf: 1.2,
+      minPositiveWindowPct: 70,
+      maxTop1ProfitPct: 35,
+      holdingBigWinnerPct: 100,
+      holdingMinBigWinnerRatePct: 10,
+      gradeConfirmationRuns: 1,
+      labelPositionSol: 1,
+      costModel,
+    },
+    store,
+    now: () => now,
+  });
+  for (const wallet of ['predictor-good', 'predictor-noise']) {
+    registry.discoverWallet({ wallet, source: 'ROLLING_DISCOVERY', discoveredAt: base - DAY });
+  }
+  let eventId = 50_000;
+  for (const wallet of ['predictor-good', 'predictor-noise']) {
+    for (let index = 0; index < 4; index += 1) {
+      const mint = `${wallet}-mint-${index}`;
+      const openedAt = base + index * 1_000;
+      store.recordCreate({
+        mint,
+        symbol: null,
+        name: null,
+        uri: null,
+        bondingCurve: null,
+        creator: 'prediction-test-creator',
+        createdAt: openedAt - 1_000,
+        initialRealTokenReservesRaw: null,
+        tokenTotalSupplyRaw: null,
+      });
+      eventId += 1;
+      store.recordSmartWalletEvent({
+        id: eventId,
+        wallet,
+        mint,
+        side: 'BUY',
+        positionPhase: 'OPEN',
+        timestampMs: openedAt,
+        receivedAtMs: openedAt,
+        market: 'PUMP_BONDING_CURVE',
+        solAmount: 1,
+        tokenAmount: 1_000,
+        price: 0.001,
+        signature: `prediction-${eventId}`,
+        eventIndex: 0,
+      });
+      if (wallet === 'predictor-good') {
+        store.recordComplete({ mint, completedAt: openedAt + 30_000 });
+      }
+    }
+  }
+  eventId += 1;
+  store.recordSmartWalletEvent({
+    wallet: 'predictor-good',
+    mint: 'historical-outcome-unknown',
+    side: 'BUY',
+    positionPhase: 'OPEN',
+    timestampMs: base - DAY,
+    receivedAtMs: base - DAY,
+    market: 'PUMP_BONDING_CURVE',
+    solAmount: 1,
+    tokenAmount: 1_000,
+    price: 0.001,
+    signature: `prediction-${eventId}`,
+    eventIndex: 0,
+  });
+  now = base + 2 * HOUR;
+  registry.refreshGrades(now, { forceModelMigration: true });
+  const rows = Object.fromEntries(store.db.prepare(`
+    SELECT wallet, selection_grade, metrics_json
+    FROM smart_wallet_registry ORDER BY wallet
+  `).all().map((row) => [row.wallet, row]));
+  assert.strictEqual(rows['predictor-good'].selection_grade, 'S_A');
+  assert.strictEqual(rows['predictor-noise'].selection_grade, 'S_C');
+  const prediction = JSON.parse(rows['predictor-good'].metrics_json).graduationPrediction;
+  assert.strictEqual(prediction.matureSamples, 4);
+  assert.strictEqual(prediction.knownTokenOutcomeCoverageOnly, true);
+  assert.strictEqual(prediction.graduated, 4);
+  assert.strictEqual(prediction.graduationRatePct, 100);
+  assert.strictEqual(prediction.baselineGraduationRatePct, 50);
+  assert.strictEqual(prediction.graduationLift, 2);
+  store.close();
 }
 
 async function testWalletAgeGate(costModel) {
@@ -440,8 +582,10 @@ async function testWalletAgeGate(costModel) {
     holdingGrade: migratedGrade.holding_grade,
   }, {
     status: 'PROBATION', selectionGrade: 'S_C', copyGrade: 'C_C', holdingGrade: 'H_C',
-  }, 'the first actual-PnL startup must immediately remove stale simulated grades');
-  assert(JSON.parse(migratedGrade.metrics_json).actualPnl30d);
+  }, 'the prediction-model migration must immediately remove stale simulated grades');
+  const migratedMetrics = JSON.parse(migratedGrade.metrics_json);
+  assert(migratedMetrics.actualPnl30d);
+  assert.strictEqual(migratedMetrics.graduationPredictionV1, true);
   migrationRegistry.stop();
   migrationStore.close();
   const histories = {

@@ -29,14 +29,16 @@ function insertSource(store, {
   );
 }
 
-function insertConsensus(store, { mint, signalAt, clusters = 3, required = 2 }) {
+function insertConsensus(store, {
+  mint, signalAt, clusters = 3, required = 2, entryProfileId = 'PA3_POST_FLOW_V1',
+}) {
   store.db.prepare(`
     INSERT INTO smart_wallet_consensus_flow_runner_shadow_positions (
       mint, signal_at, entry_profile_id, signal_strength,
       required_clusters, distinct_clusters, selection_a_clusters,
       copy_a_clusters, weighted_score, cluster_votes_json
-    ) VALUES (?, ?, 'POST_FLOW', 'ORDINARY', ?, ?, 2, 1, 2.5, '[]')
-  `).run(mint, signalAt, required, clusters);
+    ) VALUES (?, ?, ?, 'PREDICTION_A3', ?, ?, 2, 1, 2.5, '[]')
+  `).run(mint, signalAt, entryProfileId, required, clusters);
 }
 
 function main() {
@@ -61,6 +63,7 @@ function main() {
     now: () => now,
     config: {
       enabled: true,
+      consensusEntryProfileIds: ['PA3_POST_FLOW_V1'],
       gateWindowMs: 15 * 60_000,
       gateFinalizeDelayMs: 60_000,
       syncMs: 1_000,

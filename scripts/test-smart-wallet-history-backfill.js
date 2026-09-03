@@ -160,9 +160,22 @@ async function main() {
   assert.strictEqual(monitoring.actualPnl60d.realizedPnlSol, 240);
   assert.strictEqual(monitoring.pnlStatus, 'PNL_ELITE_60D');
   assert.strictEqual(monitoring.pnlEligibilityClass, 'LONG_TERM_ELITE');
-  assert.strictEqual(monitoring.voteWeight, 1);
-  assert(registry.walletSnapshot(elite, observedAt),
-    'a complete >200 SOL 60d wallet must vote even when its recent 24h loses money');
+  assert.strictEqual(monitoring.voteWeight, null);
+  assert.strictEqual(registry.walletSnapshot(elite, observedAt), null,
+    '60d profit alone must not masquerade as a graduation-prediction vote');
+  registry.setGrades({
+    wallet: elite,
+    selectionGrade: 'S_A',
+    copyGrade: 'C_A',
+    holdingGrade: 'H_A',
+    status: 'ACTIVE',
+    effectiveAt: observedAt - 1,
+    metrics: { graduationPredictionV1: true },
+  });
+  const elitePredictionVote = registry.walletSnapshot(elite, observedAt);
+  assert(elitePredictionVote,
+    'a P_A wallet with complete >200 SOL 60d profit must vote despite a 24h loss');
+  assert.strictEqual(elitePredictionVote.voteWeight, 1);
 
   const exact = 'exact-200-wallet';
   registry.discoverWallet({

@@ -352,11 +352,11 @@
         <div class="quality-grid" id="signal-quality"></div>
       </article>
       <article class="card signal-quality">
-        <div class="section-title"><h2>滚动 Smart Wallet Registry</h2><p>按钱包自己的真实买卖收益分级；只有 AGE、24h 盈利和独立集群均通过后才进入共识投票池</p></div>
+        <div class="section-title"><h2>滚动 Smart Wallet Registry</h2><p>选币等级按毕业预测能力评定；钱包盈利、持仓能力分别评分，不能替代毕业预测票权</p></div>
         <div class="quality-grid" id="smart-wallet-registry-summary"></div>
         <p class="registry-note" id="smart-wallet-registry-note"></p>
         <div class="table-wrap"><table>
-          <thead><tr><th>钱包</th><th>来源</th><th>状态 / 风险</th><th>链上 AGE</th><th>24h / 60d 真实已实现收益</th><th>选币 / 盈利稳定 / 持仓等级</th><th>独立集群</th><th>生效 / 最近出现</th><th>版本</th></tr></thead>
+          <thead><tr><th>钱包</th><th>来源</th><th>状态 / 风险</th><th>链上 AGE</th><th>24h / 60d 真实已实现收益</th><th>毕业预测 / 盈利稳定 / 持仓等级</th><th>独立集群</th><th>生效 / 最近出现</th><th>版本</th></tr></thead>
           <tbody id="smart-wallet-registry-rows"></tbody>
         </table></div>
       </article>
@@ -1492,6 +1492,7 @@
         ['已晋级 ACTIVE', number(health.active)],
         ['可用独立集群', number(clusters.eligible)],
         ['S_A 独立集群', number(clusters.selectionA)],
+        ['宽松对照钱包', number(health.broadControlVotingEligible)],
         ['自动独立已确认', number(health.clusterConfirmedIndependent)],
         ['关联钱包已归组', number(health.clusterConfirmedRelated)],
         ['集群观察中', number(health.clusterObserving)],
@@ -1502,6 +1503,8 @@
         ['AGE 待确认', number(health.ageUnknown)],
         ['24h 盈利可投票', number(health.pnlProfitable)],
         ['60天长期精英', number(health.pnlElite60d)],
+        ['毕业预测 P_A', number(health.predictionGradeA)],
+        ['毕业预测 P_B', number(health.predictionGradeB)],
         ['24h 亏损屏蔽', number(health.pnlLossBlocked)],
         ['24h 待平仓样本', number(health.pnlPending)],
         ['历史回填完成', number(health.historyComplete)],
@@ -1530,7 +1533,8 @@
         .join(' · ') || '暂无来源数据';
       const total = Number.isFinite(health.wallets) ? health.wallets : rows.length;
       const displaySummary = rows.length < total ? `当前展示 ${number(rows.length)} / ${number(total)}。` : '';
-      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}监控 ${number(health.monitored)} · 可投票 ${number(health.votingEligible)} · 仅观察 ${number(health.observationOnly)}。收益只按钱包自身真实 OPEN / ADD / REDUCE / CLOSE 账本统计。普通组仍要求滚动24h已实现收益和资金回报率都大于0；长期精英组只要求完整60天真实已实现收益严格超过200 SOL，近24h即使亏损也不禁票，并获得1个有效票权。未平仓显示 OPEN / PARTIAL，不是 NO_EXIT，也不进入已实现收益。首轮对当前 Registry 全量回填，此后北京时间每天最多新增50个钱包；当前进行中 ${number(health.historyRunning)}，累计页数 ${number(health.historyPagesTotal)}，预计 Credits ${number(health.historyCreditsTotal)}。AGE &lt; 7天硬排除，7–30天仅观察，≥30天后才具备年龄资格；长期精英仍须通过风险和独立集群检查，同集群只计一票。自动发现钱包观察 ${longAge(clusterPolicy.observationMs)} 且至少交易 ${number(clusterPolicy.minDistinctMints)} 个不同 Mint 后确认集群。隔离 ${number(health.quarantined)} · AGE校验中 ${number(health.ageChecksInFlight)} · 集群刷新 ${dateTime(health.lastClusterRefreshAt)} · Registry v${number(data.registryVersion)}`;
+      const predictionPolicy = data.graduationPredictionPolicy || {};
+      document.querySelector('#smart-wallet-registry-note').innerHTML = `来源：${sourceSummary}。${displaySummary}监控 ${number(health.monitored)} · 具备预测票权 ${number(health.votingEligible)} · 仅观察 ${number(health.observationOnly)}。P_A/P_B只按成熟的毕业前首次OPEN评价：固定 ${longAge(predictionPolicy.horizonMs)} 毕业结果窗口、至少 ${number(predictionPolicy.minSamples)} 个样本，发现该钱包的种子Mint永久排除；P_A还要求毕业率≥${rate(predictionPolicy.minGraduationRatePct)}、相对基线≥${number(predictionPolicy.minGraduationLift,1)}x、95%下界≥${rate(predictionPolicy.minWilsonLower95Pct)}。钱包真实收益只用于盈利稳定/持仓等级，60天长期精英不能替代毕业预测票权。普通收益资格仍要求滚动24h已实现收益和资金回报率都大于0；长期精英近24h亏损不禁用其交易/持仓研究资格。未平仓显示 OPEN / PARTIAL，不是 NO_EXIT。首轮全量回填，此后每天最多新增50个钱包；累计预计 Credits ${number(health.historyCreditsTotal)}。AGE &lt; 7天硬排除，7–30天仅观察，≥30天后才具备年龄资格；同集群只计一票。自动发现钱包观察 ${longAge(clusterPolicy.observationMs)} 且至少交易 ${number(clusterPolicy.minDistinctMints)} 个不同 Mint 后确认集群。隔离 ${number(health.quarantined)} · 集群刷新 ${dateTime(health.lastClusterRefreshAt)} · Registry v${number(data.registryVersion)}`;
 
       const target = document.querySelector('#smart-wallet-registry-rows');
       if (!rows.length) {
@@ -1571,7 +1575,8 @@
           : `${row.history_backfill_status || 'NOT_QUEUED'} · ${number(row.history_backfill_pages)}页`;
         const openNote = Number(row.actual_open_positions) > 0
           ? ` · 未平仓 ${number(row.actual_open_positions)}` : '';
-        return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)} · ${voteState}</span></td><td>${statusChip(ageStatus)}<br><b>${longAge(row.age_ms)}</b><br><span class="table-note" title="${escapeHtml(ageDetail)}">验证 ${dateTime(row.age_verified_at)}</span></td><td>${statusChip(pnlStatus)}<br><b class="${pnlClass}">24h ${number(row.pnl_24h_realized_sol,4)} SOL</b> · ${pct(row.pnl_24h_return_pct,1)}<br><b class="${pnl60dClass}">60d ${number(row.pnl_60d_realized_sol,4)} SOL</b><br><span class="table-note" title="${escapeHtml(row.history_backfill_error || '')}">${escapeHtml(backfillState)} · 60d平仓 ${number(row.pnl_60d_closed_positions)}${openNote}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}</td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(clusterState)}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
+        const predictionDetail = `${number(row.grad_prediction_graduated)}/${number(row.grad_prediction_samples)}毕业 · ${rate(row.grad_prediction_rate_pct)} · ${number(row.grad_prediction_lift,1)}x · 下界${rate(row.grad_prediction_wilson_lower_pct)}`;
+        return `<tr><td>${walletLink(row.wallet)}</td><td>${escapeHtml(source)}</td><td>${statusChip(row.status)}<br><span class="table-note">${statusChip(row.risk_status)} · ${voteState}</span></td><td>${statusChip(ageStatus)}<br><b>${longAge(row.age_ms)}</b><br><span class="table-note" title="${escapeHtml(ageDetail)}">验证 ${dateTime(row.age_verified_at)}</span></td><td>${statusChip(pnlStatus)}<br><b class="${pnlClass}">24h ${number(row.pnl_24h_realized_sol,4)} SOL</b> · ${pct(row.pnl_24h_return_pct,1)}<br><b class="${pnl60dClass}">60d ${number(row.pnl_60d_realized_sol,4)} SOL</b><br><span class="table-note" title="${escapeHtml(row.history_backfill_error || '')}">${escapeHtml(backfillState)} · 60d平仓 ${number(row.pnl_60d_closed_positions)}${openNote}</span></td><td><b>${escapeHtml(row.selection_grade || '—')}</b> / ${escapeHtml(row.copy_grade || '—')} / ${escapeHtml(row.holding_grade || '—')}<br><span class="table-note">${escapeHtml(predictionDetail)}</span></td><td title="${escapeHtml(cluster)}">${escapeHtml(short(cluster))}<br><span class="table-note">${escapeHtml(clusterState)}</span></td><td>${dateTime(row.effective_from)}<br><span class="table-note">${dateTime(row.last_seen_at)}</span></td><td>v${number(row.registry_version)}</td></tr>`;
       }).join('');
     }
 
@@ -1589,7 +1594,7 @@
       ];
       document.querySelector('#smart-consensus-overlay-summary').innerHTML = items
         .map(([label,value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
-      document.querySelector('#smart-consensus-overlay-note').innerHTML = `从 ${dateTime(data.startedAt)} 起前向记录，不回填部署前历史。原 Shadow 表、原 cohort 和退出收益均不修改；本层只读取原模拟结果并做条件分组。门控窗口 ${age(data.gatePolicy?.gateWindowMs)}，共识必须先于或等于原信号，且来自已通过 AGE、钱包自身滚动收益与独立集群资格的 Registry 投票。观察器不发送交易。`;
+      document.querySelector('#smart-consensus-overlay-note').innerHTML = `从 ${dateTime(data.startedAt)} 起前向记录，不回填部署前历史。原 Shadow 表、原 cohort 和退出收益均不修改；本层只读取原模拟结果并做条件分组。门控窗口 ${age(data.gatePolicy?.gateWindowMs)}，共识必须先于或等于原信号，并来自严格的3个P_A毕业预测独立集群；宽松滚动钱包规则只保留为对照，不能通过主门控。观察器不发送交易。`;
 
       const profileTarget = document.querySelector('#smart-consensus-overlay-profile-rows');
       if (!profiles.length) {

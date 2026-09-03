@@ -659,13 +659,20 @@ class EarlyPureBuyBurstShadowSuite {
       const current = byCluster.get(row.clusterId);
       if (!current || row.timestampMs < current.timestampMs) byCluster.set(row.clusterId, row);
     }
-    const votes = [...byCluster.values()].sort((left, right) => left.timestampMs - right.timestampMs);
-    if (votes.length < requiredClusters) return null;
+    const allVotes = [...byCluster.values()]
+      .sort((left, right) => left.timestampMs - right.timestampMs);
+    const votes = profile.selectionGradeOnly
+      ? allVotes.filter((row) => row.selectionGrade === profile.selectionGradeOnly)
+      : allVotes;
+    const selectionAClusters = votes.filter((row) => row.selectionGrade === 'S_A').length;
+    const requiredA = number(profile.minSelectionAClusters, 0);
+    if (votes.length < requiredClusters || selectionAClusters < requiredA) return null;
     return {
       sourceProfileId: profile.sourceProfileId,
       windowMs,
       requiredClusters,
       distinctClusters: votes.length,
+      selectionAClusters,
       evaluatedAt: at,
       votes,
     };

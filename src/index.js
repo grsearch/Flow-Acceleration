@@ -754,6 +754,10 @@ function createRuntime(runtimeConfig = config) {
         const isRegistryMonitoredWalletTrade = Boolean(registryMonitoringSnapshot);
         const registryVotingSnapshot = registryMonitoringSnapshot
           ? smartWalletRegistry.cachedWalletSnapshot(trade.wallet, trade.timestampMs) : null;
+        const registryControlSnapshot = registryMonitoringSnapshot
+          ? smartWalletRegistry.cachedControlWalletSnapshot(
+            trade.wallet, trade.timestampMs,
+          ) : null;
         const isRegistryVotingWalletTrade = Boolean(registryVotingSnapshot);
         if (isLegacySmartWalletTrade || isRegistryMonitoredWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
@@ -772,20 +776,21 @@ function createRuntime(runtimeConfig = config) {
                 )
               ));
             }
-            if (isRegistryVotingWalletTrade) {
+            if (isRegistryVotingWalletTrade || registryControlSnapshot) {
+              const consensusSnapshot = registryVotingSnapshot || registryControlSnapshot;
               observeShadow('smartVotingSnapshot', () => persistVotingSnapshot(
-                store, normalizedSmartEvent, registryVotingSnapshot, Date.now(),
+                store, normalizedSmartEvent, consensusSnapshot, Date.now(),
               ));
               observeShadow('smartConsensusV2Event', () => (
                 smartWalletConsensusFlowRunnerShadow.onSmartWalletEvent(
                   normalizedSmartEvent,
-                  { walletSnapshot: registryVotingSnapshot, persist: false },
+                  { walletSnapshot: consensusSnapshot, persist: false },
                 )
               ));
               observeShadow('earlyPureBuySmartConsensusEvent', () => (
                 earlyPureBuyBurstShadow.onSmartWalletEvent(
                   normalizedSmartEvent,
-                  { walletSnapshot: registryVotingSnapshot, persist: false },
+                  { walletSnapshot: consensusSnapshot, persist: false },
                 )
               ));
             }
