@@ -643,8 +643,14 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         if (position.tokenUnits > 0) this._requestExit(position, now, 'FLOW_CONFIRM_TIMEOUT');
         else this._finishWithoutPosition(position, 'NO_ENTRY', 'FLOW_CONFIRM_TIMEOUT');
       } else if (position.status === 'SCALE_PENDING' && now > position.entryDeadlineAt) {
+        const profile = this.entryProfiles.get(position.entryProfileId);
         if (position.tokenUnits > 0) this._requestExit(position, now, 'SCALE_ENTRY_TIMEOUT');
-        else this._finishWithoutPosition(position, 'NO_ENTRY', 'POST_FLOW_ENTRY_TIMEOUT');
+        else this._finishWithoutPosition(
+          position,
+          'NO_ENTRY',
+          profile?.directPostGraduationEntry === true
+            ? 'DIRECT_AMM_ENTRY_TIMEOUT' : 'POST_FLOW_ENTRY_TIMEOUT',
+        );
       } else if (position.status === 'EXIT_PENDING' && now > position.exitDeadlineAt) {
         this._closeNoExit(position, 'NO_EXIT_QUOTE');
       } else if (['OPEN', 'RUNNER'].includes(position.status)) {
@@ -884,12 +890,15 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     for (const exit of this._exitProfilesFor(profile)) {
       const episodeId = `${event.mint}:${profile.id}:${at}`;
       const directCurveEntry = profile.directCurveEntry === true && !graduatedAt;
+      const directPostGraduationEntry = profile.postGraduationHoldingConsensus === true
+        && profile.directPostGraduationEntry === true && Boolean(graduatedAt);
       const scoutFraction = directCurveEntry
         ? 1 : (graduatedAt ? 0 : finite(profile.scoutFraction, 0));
       const entryDelayMs = finite(profile.entryDelayMs, this.config.entryDelayMs);
       const entryTimeoutMs = finite(profile.entryTimeoutMs, this.config.entryTimeoutMs);
       const status = scoutFraction > 0 ? 'PENDING_SCOUT'
-        : (graduatedAt ? 'WAITING_FLOW' : 'WAITING_GRADUATION');
+        : (directPostGraduationEntry ? 'SCALE_PENDING'
+          : (graduatedAt ? 'WAITING_FLOW' : 'WAITING_GRADUATION'));
       const now = this.now();
       const result = this.insert.run({
         cohortId: `${profile.id}|${exit.id}`,
@@ -919,8 +928,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         configuredCostPct: this.costs.deterministicCostPct,
         rugLabelJson: rugLabel ? JSON.stringify(rugLabel) : null,
         graduatedAt,
-        entryTargetAt: scoutFraction > 0 ? at + entryDelayMs : null,
-        entryDeadlineAt: scoutFraction > 0
+        entryTargetAt: scoutFraction > 0 || directPostGraduationEntry
+          ? at + entryDelayMs : null,
+        entryDeadlineAt: scoutFraction > 0 || directPostGraduationEntry
           ? at + entryDelayMs + entryTimeoutMs : null,
         createdAt: now,
         updatedAt: now,
@@ -976,8 +986,15 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     }
     if (position.status === 'SCALE_PENDING' && trade.market === 'PUMP_AMM'
       && at >= position.entryTargetAt && at <= position.entryDeadlineAt) {
+      const profile = this.entryProfiles.get(position.entryProfileId);
       const remaining = Math.max(0, position.positionSol - position.capitalInSol);
-      this._buy(position, trade, price, remaining, 'SCALE');
+      this._buy(
+        position,
+        trade,
+        price,
+        remaining,
+        profile?.directPostGraduationEntry === true ? 'DIRECT' : 'SCALE',
+      );
       return;
     }
     if (!['SCOUT_OPEN', 'OPEN', 'RUNNER', 'EXIT_PENDING'].includes(position.status)

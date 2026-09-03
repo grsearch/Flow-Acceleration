@@ -22,7 +22,7 @@ function main() {
     status: 'ACTIVE',
     selectionGrade: 'S_B',
     copyGrade: 'C_B',
-    holdingGrade: 'H_A',
+    holdingGrade: 'H_B',
     selectionWeight: 1,
     voteWeight: 1,
     registryVersion: 7,
@@ -67,31 +67,69 @@ function main() {
     strictMinFlowNetSharePct: 3,
     strictMaxFlowConfirmationDelayMs: 1_000,
     dynamicThresholds: [{ maxEligibleClusters: 10, ordinary: 2, strong: 3 }],
-    entryProfiles: [{
-      id: 'POST_GRAD_HOLD3_FLOW2_60',
-      strength: 'HOLDING_STRONG',
-      postGraduationHoldingConsensus: true,
-      requiredHoldingClusters: 3,
-      minWeightedScoreRatio: 0.5,
-      cumulativePostGraduationFlow: true,
-      flowWindowMs: 60_000,
-      maxFlowWaitMs: 60_000,
-      minFlowNetSol: 0,
-      minFlowBuyers: 2,
-      minFlowBuyTx: 2,
-      requirePositiveFlow: true,
-      requireFlowAcceleration: false,
-      entryDelayMs: 100,
-      entryTimeoutMs: 30_000,
-      scoutFraction: 0,
-      exitProfileIds: ['CORE80_RUNNER30M'],
-    }],
-    exitProfiles: [{
-      id: 'CORE80_RUNNER30M', mode: 'CORE_RUNNER',
-      coreActivationPct: 30, coreFraction: 0.8, runnerTrailPct: 30,
-      maxHoldMs: 30 * 60_000, hardStopPct: 20, exitTimeoutMs: 30_000,
-      entryProfileIds: ['POST_GRAD_HOLD3_FLOW2_60'],
-    }],
+    entryProfiles: [
+      {
+        id: 'POST_GRAD_HOLD3_FLOW2_60',
+        strength: 'HOLDING_STRONG',
+        postGraduationHoldingConsensus: true,
+        requiredHoldingClusters: 3,
+        minWeightedScoreRatio: 0.5,
+        cumulativePostGraduationFlow: true,
+        flowWindowMs: 60_000,
+        maxFlowWaitMs: 60_000,
+        minFlowNetSol: 0,
+        minFlowBuyers: 2,
+        minFlowBuyTx: 2,
+        requirePositiveFlow: true,
+        requireFlowAcceleration: false,
+        entryDelayMs: 100,
+        entryTimeoutMs: 30_000,
+        scoutFraction: 0,
+        exitProfileIds: ['CORE80_RUNNER30M'],
+      },
+      {
+        id: 'POST_GRAD_HOLD3_DIRECT',
+        strength: 'HOLDING_STRONG_DIRECT',
+        postGraduationHoldingConsensus: true,
+        directPostGraduationEntry: true,
+        requiredHoldingClusters: 3,
+        minWeightedScoreRatio: 0.5,
+        entryDelayMs: 100,
+        entryTimeoutMs: 30_000,
+        scoutFraction: 0,
+        exitProfileIds: [
+          'POST_GRAD_HOLD3_FIX2M',
+          'POST_GRAD_HOLD3_FIX5M',
+          'POST_GRAD_HOLD3_CORE80_5M',
+        ],
+      },
+    ],
+    exitProfiles: [
+      {
+        id: 'CORE80_RUNNER30M', mode: 'CORE_RUNNER',
+        coreActivationPct: 30, coreFraction: 0.8, runnerTrailPct: 30,
+        maxHoldMs: 30 * 60_000, hardStopPct: 20, exitTimeoutMs: 30_000,
+        entryProfileIds: ['POST_GRAD_HOLD3_FLOW2_60'],
+      },
+      {
+        id: 'POST_GRAD_HOLD3_FIX2M', mode: 'FIXED_HOLD',
+        fixedHoldMs: 120_000, maxHoldMs: 120_000,
+        hardStopPct: 100, exitTimeoutMs: 30_000,
+        entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
+      },
+      {
+        id: 'POST_GRAD_HOLD3_FIX5M', mode: 'FIXED_HOLD',
+        fixedHoldMs: 300_000, maxHoldMs: 300_000,
+        hardStopPct: 100, exitTimeoutMs: 30_000,
+        entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
+      },
+      {
+        id: 'POST_GRAD_HOLD3_CORE80_5M', mode: 'CORE_RUNNER',
+        coreActivationPct: 30, coreFraction: 0.8, runnerTrailPct: 20,
+        maxHoldMs: 300_000, hardStopPct: 20, exitTimeoutMs: 30_000,
+        entryProfileIds: ['POST_GRAD_HOLD3_DIRECT'],
+      },
+    ],
     costModel,
   };
   const recordToken = (mint, symbol) => store.recordCreate({
@@ -158,31 +196,59 @@ function main() {
   `).get(mint);
   assert.strictEqual(evaluation.status, 'QUALIFIED');
   assert.strictEqual(evaluation.distinct_clusters, 3);
+  assert.strictEqual(evaluation.weighted_score, 1.5,
+    'three independent H_B clusters must remain eligible for the direct Shadow');
   assert.strictEqual(store.db.prepare(`
-    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions WHERE mint=?
+    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_FLOW2_60'
   `).get(mint).status, 'WAITING_FLOW');
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_DIRECT'
+      AND status='SCALE_PENDING'
+  `).get(mint).n, 3);
 
   trade(mint, 3_200, 'BUY', 'public-2');
   assert.strictEqual(store.db.prepare(`
-    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions WHERE mint=?
+    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_FLOW2_60'
   `).get(mint).status, 'SCALE_PENDING');
+  assert.strictEqual(store.db.prepare(`
+    SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_DIRECT' AND status='OPEN'
+  `).get(mint).n, 3,
+  'all direct exit arms must use the next executable AMM trade');
   trade(mint, 3_400, 'BUY', 'public-entry');
   assert.strictEqual(store.db.prepare(`
-    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions WHERE mint=?
+    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_FLOW2_60'
   `).get(mint).status, 'OPEN');
   trade(mint, 3_600, 'BUY', 'public-rise', 1_400);
   assert.strictEqual(store.db.prepare(`
-    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions WHERE mint=?
+    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_FLOW2_60'
+  `).get(mint).status, 'RUNNER');
+  assert.strictEqual(store.db.prepare(`
+    SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND exit_profile_id='POST_GRAD_HOLD3_CORE80_5M'
   `).get(mint).status, 'RUNNER');
   trade(mint, 3_800, 'SELL', 'public-fall', 900);
   trade(mint, 4_000, 'BUY', 'public-exit', 900);
   const closed = store.db.prepare(`
-    SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions WHERE mint=?
+    SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_FLOW2_60'
   `).get(mint);
   assert.strictEqual(closed.status, 'CLOSED');
   assert.strictEqual(closed.exit_reason, 'RUNNER_TRAIL');
   assert.strictEqual(closed.entry_tx_count, 1);
   assert.strictEqual(closed.exit_tx_count, 2);
+  const staged = store.db.prepare(`
+    SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND exit_profile_id='POST_GRAD_HOLD3_CORE80_5M'
+  `).get(mint);
+  assert.strictEqual(staged.status, 'CLOSED');
+  assert.strictEqual(staged.exit_reason, 'RUNNER_TRAIL');
+  assert.strictEqual(staged.exit_tx_count, 2);
 
   const soldMint = 'PostGradSoldBeforeMigration111111111111111111';
   recordToken(soldMint, 'SOLD');
@@ -221,9 +287,28 @@ function main() {
   assert.strictEqual(evaluation.status, 'REJECTED');
   assert.strictEqual(evaluation.rejection_reason, 'FIRST_AMM_EVENT_MISSED');
 
+  trade(mint, 123_500, 'SELL', 'fixed-2m-trigger', 1_100);
+  trade(mint, 123_700, 'BUY', 'fixed-2m-exit', 1_100);
+  const fixed2m = store.db.prepare(`
+    SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND exit_profile_id='POST_GRAD_HOLD3_FIX2M'
+  `).get(mint);
+  assert.strictEqual(fixed2m.status, 'CLOSED');
+  assert.strictEqual(fixed2m.exit_reason, 'MAX_HOLD');
+
+  trade(mint, 303_500, 'SELL', 'fixed-5m-trigger', 1_200);
+  trade(mint, 303_700, 'BUY', 'fixed-5m-exit', 1_200);
+  const fixed5m = store.db.prepare(`
+    SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND exit_profile_id='POST_GRAD_HOLD3_FIX5M'
+  `).get(mint);
+  assert.strictEqual(fixed5m.status, 'CLOSED');
+  assert.strictEqual(fixed5m.exit_reason, 'MAX_HOLD');
+
   assert.strictEqual(store.db.prepare('SELECT COUNT(*) n FROM live_positions').get().n, 0);
-  assert.strictEqual(suite.health().holdingConsensusQualified, 1);
-  assert.strictEqual(suite.health().holdingConsensusRejected, 2);
+  assert.strictEqual(suite.health().holdingConsensusQualified, 2);
+  assert.strictEqual(suite.health().holdingConsensusRejected, 4);
+  assert.strictEqual(suite.health().directOpened, 3);
   suite.stop();
   store.close();
   console.log('Post-graduation holding consensus Shadow tests: PASS');
