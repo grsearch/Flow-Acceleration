@@ -42,6 +42,14 @@ const FIRST_CLIFF_LIFECYCLE_STAGES = Object.freeze([
   { id: 'AMM_MATURE', label: 'PumpSwap 10 秒后' },
 ]);
 
+const TOXIC_WALLET_ROLES = Object.freeze({
+  COORDINATED_BUYER: 'COORDINATED_BUYER',
+  DUMP_SELLER: 'DUMP_SELLER',
+});
+
+const LEGACY_GLOBAL_STAGE = 'LEGACY_GLOBAL';
+const UNKNOWN_MARKET = 'UNKNOWN';
+
 function firstCliffCounterRow() {
   return {
     firstCliffStageCandidateMatched: 0,
@@ -116,6 +124,9 @@ class PreEntryRugRiskTracker {
       toxicMemorySaved: 0,
       toxicMemoryLoadErrors: 0,
       toxicMemorySaveErrors: 0,
+      toxicMemoryJsonLoaded: 0,
+      toxicMemoryDbLoaded: 0,
+      toxicLegacyQuarantined: 0,
       toxicHistoryPersisted: 0,
       toxicHistoryErrors: 0,
       toxicFuzzyMatches: 0,
@@ -230,7 +241,7 @@ class PreEntryRugRiskTracker {
     if (market === 'PUMP_AMM' && !(state.firstAmmAt > 0)) state.firstAmmAt = timestampMs;
     const curvePct = finite(trade.curvePct);
     if (curvePct != null) state.lastCurvePct = curvePct;
-    state.events.push({
+    const observedEvent = {
       timestampMs,
       side: trade.side,
       price,
@@ -242,8 +253,14 @@ class PreEntryRugRiskTracker {
       slot: finite(trade.slot),
       ageMs: finite(trade.ageMs),
       curvePct,
-    });
+      lifecycleStage: null,
+      lifecycleAgeMs: null,
+    };
+    state.events.push(observedEvent);
     state.lastTrade = this._capacityTrade(trade);
+    const lifecycle = this._firstCliffLifecycle(state, [observedEvent], timestampMs);
+    observedEvent.lifecycleStage = lifecycle.stage;
+    observedEvent.lifecycleAgeMs = lifecycle.ageMs;
     state.version += 1;
     state.lastAt = Math.max(state.lastAt, timestampMs);
     if (!(state.peakPrice > 0) || price > state.peakPrice) {
@@ -256,8 +273,8 @@ class PreEntryRugRiskTracker {
       this._compact(state);
     }
     if (this.config.crossMintEnabled !== false) {
-      this._refreshCrossMintTemplate(state, timestampMs, price);
-      this._labelRapidCollapse(trade.mint, state, timestampMs, price);
+      this._refreshCrossMintTemplate(state, timestampMs, price, lifecycle);
+      this._labelRapidCollapse(trade.mint, state, observedEvent, lifecycle);
     }
     this._observeRugPath(trade.mint, state, state.events[state.events.length - 1]);
     this._resolveFirstCliffCounterfactuals(
@@ -339,12 +356,18 @@ class PreEntryRugRiskTracker {
     const firstCliffCounterfactual = this._firstCliffCounterfactualSnapshot(
       state, rows, dumpability, timestampMs,
     );
+    const lifecycleStage = firstCliffCounterfactual.lifecycleStage || LEGACY_GLOBAL_STAGE;
+    const lifecycleMarket = String(firstCliffCounterfactual.market || UNKNOWN_MARKET);
     const rugPath = this._activeRugPath(state, timestampMs, rows[rows.length - 1].price);
     const template = state.template
       && timestampMs - state.template.observedAt <= this._cfg('toxicCollapseWindowMs', 30_000)
+      && state.template.lifecycleStage === lifecycleStage
+      && state.template.market === lifecycleMarket
       ? state.template : null;
-    const toxicWalletOverlap = template
-      ? this._toxicWalletOverlap(template.wallets, timestampMs) : 0;
+    const toxicWalletMatch = template
+      ? this._toxicWalletMatch(template.wallets, timestampMs, lifecycleStage, lifecycleMarket)
+      : { overlap: 0, roles: {} };
+    const toxicWalletOverlap = toxicWalletMatch.overlap;
     const toxicTemplateMatch = template
       ? this._activeToxicTemplate(template, timestampMs) : null;
     const crossMintToxicWallets = toxicWalletOverlap
@@ -431,9 +454,12 @@ class PreEntryRugRiskTracker {
       repeatedBuySizeSharePct,
       maxBuyImpactPct,
       lastPrice: rows[rows.length - 1]?.price || null,
+      lifecycleStage,
+      lifecycleMarket,
       crossMintToxic,
       extremeCoordinatedDumpability,
       toxicWalletOverlap,
+      toxicWalletRoleMatches: toxicWalletMatch.roles,
       toxicTemplateMatch: toxicTemplateMatch?.fingerprint || null,
       templateFingerprint: template?.fingerprint || null,
       templateLargeBuyCount: template?.largeBuyCount || 0,
@@ -633,6 +659,21 @@ class PreEntryRugRiskTracker {
   }
 
   health() {
+    const toxicMemoryByStage = {};
+    for (const record of this.toxicTemplates.values()) {
+      const stage = record.lifecycleStage || LEGACY_GLOBAL_STAGE;
+      const row = toxicMemoryByStage[stage] || { wallets: 0, templates: 0, roles: {} };
+      row.templates += 1;
+      toxicMemoryByStage[stage] = row;
+    }
+    for (const record of this.toxicWallets.values()) {
+      const stage = record.lifecycleStage || LEGACY_GLOBAL_STAGE;
+      const row = toxicMemoryByStage[stage] || { wallets: 0, templates: 0, roles: {} };
+      row.wallets += 1;
+      const role = record.walletRole || TOXIC_WALLET_ROLES.COORDINATED_BUYER;
+      row.roles[role] = (row.roles[role] || 0) + 1;
+      toxicMemoryByStage[stage] = row;
+    }
     return {
       enabled: this.config.enabled,
       mode: 'UNIVERSAL_PRE_ENTRY_RUG_GUARD',
@@ -647,8 +688,9 @@ class PreEntryRugRiskTracker {
       trackedMints: this.states.size,
       toxicWallets: this.toxicWallets.size,
       toxicTemplates: this.toxicTemplates.size,
+      toxicMemoryByStage,
       toxicMemoryPath: this._cfg('toxicMemoryPath', null),
-      toxicMemoryPersistence: 'ASYNC_SNAPSHOT_HOT_PATH_MEMORY_ONLY',
+      toxicMemoryPersistence: 'ASYNC_JSON_HOT_PATH_SQLITE_RECOVERY',
       thresholds: {
         windowMs: this.config.windowMs,
         minTrades: this.config.minTrades,
@@ -768,9 +810,12 @@ class PreEntryRugRiskTracker {
       repeatedBuySizeSharePct: null,
       maxBuyImpactPct: null,
       lastPrice: null,
+      lifecycleStage: null,
+      lifecycleMarket: null,
       crossMintToxic: false,
       extremeCoordinatedDumpability: false,
       toxicWalletOverlap: 0,
+      toxicWalletRoleMatches: {},
       toxicTemplateMatch: null,
       templateFingerprint: null,
       templateLargeBuyCount: 0,
@@ -1547,12 +1592,16 @@ class PreEntryRugRiskTracker {
     return value == null ? fallback : value;
   }
 
-  _refreshCrossMintTemplate(state, timestampMs, price) {
+  _refreshCrossMintTemplate(state, timestampMs, price, lifecycle = null) {
+    const lifecycleStage = lifecycle?.stage || LEGACY_GLOBAL_STAGE;
+    const market = String(state.lastTrade?.market || UNKNOWN_MARKET);
     const cutoff = timestampMs - this._cfg('templateWindowMs', 5_000);
     const minSol = this._cfg('templateLargeBuyMinSol', 1);
     const largeBuys = state.events.slice(state.offset).filter((row) => (
       row.side === 'BUY' && row.timestampMs >= cutoff && row.timestampMs <= timestampMs
       && row.solAmount >= minSol
+      && row.lifecycleStage === lifecycleStage
+      && String(row.market || UNKNOWN_MARKET) === market
     ));
     const minBuys = this._cfg('templateMinLargeBuys', 4);
     const maxBuys = this._cfg('templateMaxLargeBuys', 6);
@@ -1564,7 +1613,9 @@ class PreEntryRugRiskTracker {
     if (burstSpanMs > this._cfg('templateMaxBurstSpanMs', 500)
       || totalBuySol < this._cfg('templateMinTotalBuySol', 40)) return;
     const amounts = largeBuys.map((row) => row.solAmount).sort((left, right) => right - left);
-    const fingerprint = this._templateFingerprint(amounts, burstSpanMs);
+    const fingerprint = this._templateFingerprint(
+      amounts, burstSpanMs, lifecycleStage, market,
+    );
     const prior = state.template;
     state.template = {
       fingerprint,
@@ -1575,6 +1626,8 @@ class PreEntryRugRiskTracker {
       largeBuyCount: largeBuys.length,
       wallets: [...new Set(largeBuys.map((row) => row.wallet).filter(Boolean))],
       amounts,
+      lifecycleStage,
+      market,
     };
     if (!prior || prior.fingerprint !== fingerprint || prior.observedAt !== observedAt) {
       state.templatePeakPrice = price;
@@ -1582,7 +1635,7 @@ class PreEntryRugRiskTracker {
     } else if (price > state.templatePeakPrice) state.templatePeakPrice = price;
   }
 
-  _templateFingerprint(amounts, burstSpanMs) {
+  _templateFingerprint(amounts, burstSpanMs, lifecycleStage, market) {
     const bucketSol = Math.max(0.01, this._cfg('templateSizeBucketSol', 0.25));
     const amountKey = amounts.map((amount) => (
       Math.round(amount / bucketSol) * bucketSol
@@ -1592,12 +1645,19 @@ class PreEntryRugRiskTracker {
     else if (burstSpanMs <= 100) spanKey = '100';
     else if (burstSpanMs <= 250) spanKey = '250';
     else if (burstSpanMs <= 500) spanKey = '500';
-    return `${amounts.length}|${spanKey}|${amountKey}`;
+    return `${lifecycleStage || LEGACY_GLOBAL_STAGE}|${market || UNKNOWN_MARKET}`
+      + `|${amounts.length}|${spanKey}|${amountKey}`;
   }
 
-  _labelRapidCollapse(mint, state, timestampMs, price) {
+  _labelRapidCollapse(mint, state, event, lifecycle = null) {
+    const timestampMs = finite(event?.timestampMs);
+    const price = finite(event?.price);
     const template = state.template;
-    if (!template || state.templateToxicLabeled
+    const lifecycleStage = template?.lifecycleStage
+      || lifecycle?.stage || event?.lifecycleStage || LEGACY_GLOBAL_STAGE;
+    const market = String(template?.market || event?.market || UNKNOWN_MARKET);
+    if (!template || !(timestampMs > 0) || !(price > 0) || state.templateToxicLabeled
+      || String(event?.market || UNKNOWN_MARKET) !== market
       || timestampMs - template.observedAt > this._cfg('toxicCollapseWindowMs', 30_000)) return;
     if (!(state.templatePeakPrice > 0) || price > state.templatePeakPrice) {
       state.templatePeakPrice = price;
@@ -1622,19 +1682,35 @@ class PreEntryRugRiskTracker {
       largeBuyCount: template.largeBuyCount,
       burstSpanMs: template.burstSpanMs,
       amounts: [...template.amounts],
+      lifecycleStage,
+      market,
     };
     const templateRecord = { ...record, expiresAt: templateExpiresAt };
     this.toxicTemplates.set(template.fingerprint, templateRecord);
     this._indexToxicTemplate(templateRecord);
     this._boundToxicTemplates(this._cfg('maxToxicTemplates', 1_024));
     let learnedWallets = 0;
-    const historyRows = [{ kind: 'TEMPLATE', subject: template.fingerprint, ...templateRecord }];
-    for (const wallet of template.wallets) {
-      if (!wallet) continue;
-      if (!this.toxicWallets.has(wallet)) learnedWallets += 1;
-      const walletRecord = { ...record, wallet, expiresAt: walletExpiresAt };
-      this.toxicWallets.set(wallet, walletRecord);
+    const historyRows = [{
+      kind: 'TEMPLATE', subject: template.fingerprint, walletRole: null, ...templateRecord,
+    }];
+    const learnWallet = (wallet, walletRole) => {
+      if (!wallet) return;
+      const walletRecord = { ...record, wallet, walletRole, expiresAt: walletExpiresAt };
+      const key = this._toxicWalletKey(wallet, lifecycleStage, market, walletRole);
+      if (!this.toxicWallets.has(key)) learnedWallets += 1;
+      this.toxicWallets.set(key, walletRecord);
       historyRows.push({ kind: 'WALLET', subject: wallet, ...walletRecord });
+    };
+    for (const wallet of template.wallets) {
+      learnWallet(wallet, TOXIC_WALLET_ROLES.COORDINATED_BUYER);
+    }
+    const dumpSellers = new Set(state.events.slice(state.offset)
+      .filter((row) => row.side === 'SELL' && row.wallet
+        && row.timestampMs >= template.observedAt && row.timestampMs <= timestampMs
+        && String(row.market || UNKNOWN_MARKET) === market)
+      .map((row) => row.wallet));
+    for (const wallet of dumpSellers) {
+      learnWallet(wallet, TOXIC_WALLET_ROLES.DUMP_SELLER);
     }
     this._boundMap(this.toxicWallets, this._cfg('maxToxicWallets', 4_096));
     this.metrics.toxicCollapsesLabeled += 1;
@@ -1654,19 +1730,36 @@ class PreEntryRugRiskTracker {
     }
   }
 
-  _toxicWalletOverlap(wallets, timestampMs) {
+  _toxicWalletKey(wallet, lifecycleStage, market, walletRole) {
+    return `${lifecycleStage || LEGACY_GLOBAL_STAGE}|${market || UNKNOWN_MARKET}`
+      + `|${walletRole || TOXIC_WALLET_ROLES.COORDINATED_BUYER}|${wallet}`;
+  }
+
+  _toxicWalletMatch(wallets, timestampMs, lifecycleStage, market) {
     let overlap = 0;
+    let changed = false;
+    const roles = {};
     for (const wallet of new Set(wallets || [])) {
-      const record = this.toxicWallets.get(wallet);
-      if (!record) continue;
-      if (record.expiresAt <= timestampMs) {
-        this.toxicWallets.delete(wallet);
-        this.toxicVersion += 1;
-        this.toxicMemoryDirty = true;
+      let walletMatched = false;
+      for (const walletRole of Object.values(TOXIC_WALLET_ROLES)) {
+        const key = this._toxicWalletKey(wallet, lifecycleStage, market, walletRole);
+        const record = this.toxicWallets.get(key);
+        if (!record) continue;
+        if (record.expiresAt <= timestampMs) {
+          this.toxicWallets.delete(key);
+          changed = true;
+          continue;
+        }
+        walletMatched = true;
+        roles[walletRole] = (roles[walletRole] || 0) + 1;
       }
-      else overlap += 1;
+      if (walletMatched) overlap += 1;
     }
-    return overlap;
+    if (changed) {
+      this.toxicVersion += 1;
+      this.toxicMemoryDirty = true;
+    }
+    return { overlap, roles };
   }
 
   _activeToxicTemplate(template, timestampMs) {
@@ -1677,7 +1770,7 @@ class PreEntryRugRiskTracker {
     // Conservative fuzzy matching is bounded by large-buy count. It tolerates
     // tiny amount/timing jitter, but never treats a scaled or structurally
     // different burst as the same launch template.
-    const candidates = this.toxicTemplateIndex.get(template.largeBuyCount);
+    const candidates = this.toxicTemplateIndex.get(this._templateIndexKey(template));
     if (!candidates?.size) return null;
     for (const fingerprint of candidates) {
       const record = this.toxicTemplates.get(fingerprint);
@@ -1719,6 +1812,7 @@ class PreEntryRugRiskTracker {
   }
 
   _templatesApproximatelyEqual(left, right) {
+    if (left.lifecycleStage !== right.lifecycleStage || left.market !== right.market) return false;
     if (left.largeBuyCount !== right.largeBuyCount) return false;
     const burstToleranceMs = this._cfg('toxicBurstToleranceMs', 100);
     if (Math.abs(left.burstSpanMs - right.burstSpanMs) > burstToleranceMs) return false;
@@ -1732,9 +1826,16 @@ class PreEntryRugRiskTracker {
     });
   }
 
+  _templateIndexKey(record) {
+    const count = finite(record?.largeBuyCount, 0);
+    if (!(count > 0)) return null;
+    return `${record.lifecycleStage || LEGACY_GLOBAL_STAGE}`
+      + `|${record.market || UNKNOWN_MARKET}|${count}`;
+  }
+
   _indexToxicTemplate(record) {
-    const key = finite(record?.largeBuyCount, 0);
-    if (!(key > 0) || !record?.fingerprint) return;
+    const key = this._templateIndexKey(record);
+    if (!key || !record?.fingerprint) return;
     const bucket = this.toxicTemplateIndex.get(key) || new Set();
     bucket.add(record.fingerprint);
     this.toxicTemplateIndex.set(key, bucket);
@@ -1744,9 +1845,10 @@ class PreEntryRugRiskTracker {
     const record = this.toxicTemplates.get(fingerprint);
     if (!record) return;
     this.toxicTemplates.delete(fingerprint);
-    const bucket = this.toxicTemplateIndex.get(record.largeBuyCount);
+    const indexKey = this._templateIndexKey(record);
+    const bucket = this.toxicTemplateIndex.get(indexKey);
     bucket?.delete(fingerprint);
-    if (bucket && !bucket.size) this.toxicTemplateIndex.delete(record.largeBuyCount);
+    if (bucket && !bucket.size) this.toxicTemplateIndex.delete(indexKey);
     if (bumpVersion) this.toxicVersion += 1;
     this.toxicMemoryDirty = true;
   }
@@ -1764,8 +1866,9 @@ class PreEntryRugRiskTracker {
 
   _memorySnapshot(now = this.now()) {
     return {
-      version: 2,
+      version: 3,
       savedAt: now,
+      scope: 'LIFECYCLE_STAGE_MARKET_WALLET_ROLE',
       retentionMs: this._cfg('toxicRetentionMs', 86_400_000),
       walletRetentionMs: this._cfg(
         'toxicWalletRetentionMs', this._cfg('toxicRetentionMs', 60 * 86_400_000),
@@ -1778,32 +1881,76 @@ class PreEntryRugRiskTracker {
     };
   }
 
+  _ingestToxicMemory(payload, now) {
+    let added = 0;
+    for (const source of payload?.templates || []) {
+      if (!source?.fingerprint || !(source.expiresAt > now)) continue;
+      const record = {
+        ...source,
+        lifecycleStage: source.lifecycleStage || LEGACY_GLOBAL_STAGE,
+        market: String(source.market || UNKNOWN_MARKET),
+      };
+      if (!this.toxicTemplates.has(record.fingerprint)) added += 1;
+      this.toxicTemplates.set(record.fingerprint, record);
+      this._indexToxicTemplate(record);
+    }
+    for (const source of payload?.wallets || []) {
+      if (!source?.wallet || !(source.expiresAt > now)) continue;
+      const record = {
+        ...source,
+        lifecycleStage: source.lifecycleStage || LEGACY_GLOBAL_STAGE,
+        market: String(source.market || UNKNOWN_MARKET),
+        walletRole: source.walletRole || TOXIC_WALLET_ROLES.COORDINATED_BUYER,
+      };
+      const key = this._toxicWalletKey(
+        record.wallet, record.lifecycleStage, record.market, record.walletRole,
+      );
+      if (!this.toxicWallets.has(key)) added += 1;
+      this.toxicWallets.set(key, record);
+    }
+    return added;
+  }
+
   _loadToxicMemory() {
     const memoryPath = this._memoryPath();
-    if (!memoryPath) return;
-    try {
-      const payload = JSON.parse(this.fileSystem.readFileSync(memoryPath, 'utf8'));
-      const now = this.now();
-      for (const record of payload.templates || []) {
-        if (!record?.fingerprint || !(record.expiresAt > now)) continue;
-        this.toxicTemplates.set(record.fingerprint, record);
-        this._indexToxicTemplate(record);
-      }
-      for (const record of payload.wallets || []) {
-        if (!record?.wallet || !(record.expiresAt > now)) continue;
-        this.toxicWallets.set(record.wallet, record);
-      }
-      this._boundToxicTemplates(this._cfg('maxToxicTemplates', 1_024));
-      this._boundMap(this.toxicWallets, this._cfg('maxToxicWallets', 4_096));
-      this.metrics.toxicMemoryLoaded = this.toxicTemplates.size + this.toxicWallets.size;
-      this.toxicMemoryDirty = false;
-      if (this.metrics.toxicMemoryLoaded > 0) this.toxicVersion += 1;
-    } catch (error) {
-      if (error?.code !== 'ENOENT') {
-        this.metrics.toxicMemoryLoadErrors += 1;
-        this.metrics.lastError = `toxic memory load: ${error.message}`;
+    const now = this.now();
+    let jsonLoaded = 0;
+    let dbLoaded = 0;
+    if (memoryPath) {
+      try {
+        const payload = JSON.parse(this.fileSystem.readFileSync(memoryPath, 'utf8'));
+        jsonLoaded = this._ingestToxicMemory(payload, now);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          this.metrics.toxicMemoryLoadErrors += 1;
+          this.metrics.lastError = `toxic memory load: ${error.message}`;
+        }
       }
     }
+    if (typeof this.store?.loadActivePreEntryRugToxicHistory === 'function') {
+      try {
+        const rows = this.store.loadActivePreEntryRugToxicHistory(now);
+        dbLoaded = this._ingestToxicMemory({
+          templates: rows.filter((row) => row.kind === 'TEMPLATE'),
+          wallets: rows.filter((row) => row.kind === 'WALLET'),
+        }, now);
+      } catch (error) {
+        this.metrics.toxicMemoryLoadErrors += 1;
+        this.metrics.lastError = `toxic history restore: ${error.message}`;
+      }
+    }
+    this._boundToxicTemplates(this._cfg('maxToxicTemplates', 1_024));
+    this._boundMap(this.toxicWallets, this._cfg('maxToxicWallets', 4_096));
+    this.metrics.toxicMemoryJsonLoaded = jsonLoaded;
+    this.metrics.toxicMemoryDbLoaded = dbLoaded;
+    this.metrics.toxicMemoryLoaded = this.toxicTemplates.size + this.toxicWallets.size;
+    this.metrics.toxicLegacyQuarantined = [
+      ...this.toxicTemplates.values(), ...this.toxicWallets.values(),
+    ].filter((row) => row.lifecycleStage === LEGACY_GLOBAL_STAGE).length;
+    // DB history is the recovery source of truth. When it contributes records,
+    // refresh the small JSON hot-path snapshot asynchronously after startup.
+    this.toxicMemoryDirty = Boolean(dbLoaded > 0);
+    if (this.metrics.toxicMemoryLoaded > 0) this.toxicVersion += 1;
   }
 
   async _persistToxicMemory() {

@@ -428,7 +428,7 @@ function testHighFrequencyRugPairSharesSignalAndOnlyFiltersRugx() {
   assert.strictEqual(baselineCall.hardBlockSignatures, undefined);
   const rugxCall = guardCalls.find((row) => row.strategyId.includes('FIX30_RUGX'));
   assert.deepStrictEqual(rugxCall.hardBlockSignatures, [
-    'crossMintToxicWallets', 'crossMintToxicTemplate', 'extremeCoordinatedDumpability',
+    'crossMintToxicWallets', 'crossMintToxicTemplate',
   ]);
 
   store.db.prepare(`

@@ -11,7 +11,7 @@ const {
   exitCensorReason,
 } = require('./ShadowPoolQuote');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
-const { LIVE_CURVE_HARD_BLOCK_SIGNATURES } = require('./RugGuardPolicy');
+const { hardBlockSignaturesForLifecycle } = require('./RugGuardPolicy');
 const { buildShadowRugPairComparison } = require('./ShadowRugPairComparison');
 const {
   initializeVotingSnapshotStorage,
@@ -501,7 +501,9 @@ class EarlyPureBuyBurstShadowSuite {
         market: MARKET, lifecycleStage: 'CURVE_EARLY',
         ...(selectiveRugPair ? {
           enforcementMode: 'HARD_BLOCK',
-          hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+          hardBlockSignatures: hardBlockSignaturesForLifecycle({
+            market: MARKET, lifecycleStage: 'CURVE_EARLY',
+          }),
           policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
         } : {}),
       });

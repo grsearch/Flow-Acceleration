@@ -2,7 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
-const { LIVE_CURVE_HARD_BLOCK_SIGNATURES } = require('./RugGuardPolicy');
+const { hardBlockSignaturesForLifecycle } = require('./RugGuardPolicy');
 const { executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
@@ -783,7 +783,9 @@ class GraduationAccelerationShadowSuite {
           lifecycleStage: 'CURVE_MIGRATION',
           ...(selectiveRugPair ? {
             enforcementMode: 'HARD_BLOCK',
-            hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+            hardBlockSignatures: hardBlockSignaturesForLifecycle({
+              market: 'PUMP_BONDING_CURVE', lifecycleStage: 'CURVE_MIGRATION',
+            }),
             policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
           } : {}),
         });
@@ -1064,7 +1066,9 @@ class GraduationAccelerationShadowSuite {
       lifecycleAgeMs: trade.timestampMs - pending.graduatedAt,
       enforcementMode: selectiveRugPair ? 'HARD_BLOCK' : 'LABEL_ONLY',
       ...(selectiveRugPair ? {
-        hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+        hardBlockSignatures: hardBlockSignaturesForLifecycle({
+          market: 'PUMP_AMM', lifecycleStage: 'AMM_EARLY',
+        }),
         policyReason: 'SHADOW_POST_GRAD_CATASTROPHE_PAIRED',
       } : {
         policyReason: 'SHADOW_POST_GRAD_BASELINE_LABEL_ONLY',

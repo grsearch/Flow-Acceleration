@@ -1216,7 +1216,9 @@ assert.ok(config.migrationSecondLegShadow.cohorts
 assert.ok(config.migrationSecondLegShadow.cohorts
   .filter((cohort) => cohort.id.startsWith('PMO-FLOW-') && cohort.id.endsWith('-RUGX'))
   .every((cohort) => cohort.rugGuardMode === 'HARD_BLOCK'
-    && cohort.hardBlockSignatures.length === 3));
+    && cohort.hardBlockSignatures.length === 2
+    && cohort.hardBlockSignatures.includes('crossMintToxicWallets')
+    && cohort.hardBlockSignatures.includes('crossMintToxicTemplate')));
 assert.ok(config.migrationSecondLegShadow.cohorts
   .filter((cohort) => cohort.id.startsWith('PMO-FLOW-') && !cohort.id.endsWith('-RUGX'))
   .every((cohort) => cohort.rugGuardMode === 'LABEL_ONLY'));

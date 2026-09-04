@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { PreEntryRugRiskTracker } = require('../src/core/PreEntryRugRiskTracker');
+const { ResearchStore } = require('../src/data/ResearchStore');
 
 const config = {
   enabled: true,
@@ -454,19 +455,25 @@ const config = {
   toxicSizes.forEach((solAmount, index) => tracker.observeTrade({
     mint: 'first-toxic-mint', side: 'BUY', wallet: `toxic-wallet-${index}`,
     solAmount, timestampMs: base + index * 10, price: 1 + index * 0.2,
+    market: 'PUMP_BONDING_CURVE', curvePct: 85,
   }));
   tracker.observeTrade({
     mint: 'first-toxic-mint', side: 'SELL', wallet: 'dump-wallet', solAmount: 70,
     timestampMs: base + 1_000, price: 0.2,
+    market: 'PUMP_BONDING_CURVE', curvePct: 85,
   });
   assert.equal(tracker.health().toxicCollapsesLabeled, 1);
   assert.equal(tracker.health().toxicTemplates, 1);
-  assert.equal(tracker.health().toxicWallets, 4);
+  assert.equal(tracker.health().toxicWallets, 5);
+  assert.equal(
+    tracker.health().toxicMemoryByStage.CURVE_MIGRATION.roles.DUMP_SELLER, 1,
+  );
 
   // Rotating every wallet does not evade an identical amount/timing template.
   toxicSizes.forEach((solAmount, index) => tracker.observeTrade({
     mint: 'rotated-wallet-copy', side: 'BUY', wallet: `rotated-${index}`,
     solAmount, timestampMs: base + 2_000 + index * 10, price: 1 + index * 0.2,
+    market: 'PUMP_BONDING_CURVE', curvePct: 85,
   }));
   const templateCopy = tracker.evaluateGuard({
     strategyId: 'O90', mint: 'rotated-wallet-copy',
@@ -482,6 +489,7 @@ const config = {
     mint: 'wallet-overlap-copy', side: 'BUY',
     wallet: index < 2 ? `toxic-wallet-${index}` : `fresh-wallet-${index}`,
     solAmount, timestampMs: base + 3_000 + index * 10, price: 1 + index * 0.1,
+    market: 'PUMP_BONDING_CURVE', curvePct: 85,
   }));
   const walletCopy = tracker.evaluateGuard({
     strategyId: 'O90', mint: 'wallet-overlap-copy',
@@ -491,6 +499,20 @@ const config = {
   assert.equal(walletCopy.toxicWalletOverlap, 2);
   assert.equal(walletCopy.signatures.crossMintToxicWallets, true);
   assert.equal(walletCopy.blocked, true);
+
+  // An identical burst after migration must not inherit a Curve-age label.
+  toxicSizes.forEach((solAmount, index) => tracker.observeTrade({
+    mint: 'cross-stage-copy', side: 'BUY', wallet: `toxic-wallet-${index}`,
+    solAmount, timestampMs: base + 3_500 + index * 10, price: 1 + index * 0.1,
+    market: 'PUMP_AMM',
+  }));
+  const crossStageCopy = tracker.evaluateGuard({
+    strategyId: 'POST', mint: 'cross-stage-copy', timestampMs: base + 3_600,
+    source: 'LIVE', market: 'PUMP_AMM', lifecycleStage: 'AMM_EARLY',
+    hardBlockSignatures: ['crossMintToxicWallets', 'crossMintToxicTemplate'],
+  });
+  assert.equal(crossStageCopy.crossMintToxic, false);
+  assert.equal(crossStageCopy.blocked, false);
 
   [5, 10, 15, 20].forEach((solAmount, index) => tracker.observeTrade({
     mint: 'benign-burst', side: 'BUY', wallet: `benign-${index}`,
@@ -527,12 +549,14 @@ const config = {
     toxicSizes.forEach((solAmount, index) => first.observeTrade({
       mint: 'persistent-toxic', side: 'BUY', wallet: `persist-wallet-${index}`,
       solAmount, timestampMs: base + index * 10, price: 1 + index * 0.2,
+      market: 'PUMP_BONDING_CURVE', curvePct: 85,
     }));
     first.observeTrade({
       mint: 'persistent-toxic', side: 'SELL', wallet: 'dump-wallet', solAmount: 70,
       timestampMs: base + 1_000, price: 0.2,
+      market: 'PUMP_BONDING_CURVE', curvePct: 85,
     });
-    assert.equal(toxicHistory.length, 5);
+    assert.equal(toxicHistory.length, 6);
     assert.equal(
       toxicHistory.find((row) => row.kind === 'WALLET').expiresAt,
       base + 1_000 + 60 * 86_400_000,
@@ -541,7 +565,7 @@ const config = {
       toxicHistory.find((row) => row.kind === 'TEMPLATE').expiresAt,
       base + 1_000 + 30 * 86_400_000,
     );
-    assert.equal(first.health().toxicHistoryPersisted, 5);
+    assert.equal(first.health().toxicHistoryPersisted, 6);
     first.stop();
     assert.equal(fs.existsSync(memoryPath), true);
 
@@ -558,6 +582,7 @@ const config = {
       mint: 'fuzzy-copy', side: 'BUY', wallet: `new-wallet-${index}`,
       solAmount: solAmount + 0.3,
       timestampMs: base + 2_100 + index * 40, price: 1 + index * 0.1,
+      market: 'PUMP_BONDING_CURVE', curvePct: 85,
     }));
     const decision = restored.evaluateGuard({
       strategyId: 'O90', mint: 'fuzzy-copy', timestampMs: base + 2_300, source: 'LIVE',
@@ -569,6 +594,84 @@ const config = {
   } finally {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
+}
+
+{
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-rug-legacy-'));
+  const memoryPath = path.join(temporaryDirectory, 'toxic-memory.json');
+  const base = Date.UTC(2026, 7, 23, 5, 30, 0);
+  try {
+    fs.writeFileSync(memoryPath, JSON.stringify({
+      version: 2,
+      templates: [{
+        mint: 'legacy-origin', fingerprint: '4|50|20.00,20.00,19.25,19.25',
+        labeledAt: base, expiresAt: base + 60_000, collapsePct: 80,
+        totalBuySol: 78, largeBuyCount: 4, burstSpanMs: 30,
+        amounts: [20.01, 20.07, 19.16, 19.25],
+      }],
+      wallets: [{
+        mint: 'legacy-origin', wallet: 'legacy-wallet', labeledAt: base,
+        expiresAt: base + 60_000, collapsePct: 80,
+      }],
+    }));
+    const tracker = new PreEntryRugRiskTracker({
+      config: { ...config, toxicMemoryPath: memoryPath }, now: () => base + 1_000,
+    });
+    tracker.start();
+    assert.equal(tracker.health().toxicLegacyQuarantined, 2);
+    [20.01, 20.07, 19.16, 19.25].forEach((solAmount, index) => tracker.observeTrade({
+      mint: 'legacy-copy', side: 'BUY', wallet: index === 0
+        ? 'legacy-wallet' : `legacy-fresh-${index}`,
+      solAmount, timestampMs: base + 100 + index * 10, price: 1 + index * 0.1,
+      market: 'PUMP_BONDING_CURVE', curvePct: 85,
+    }));
+    const decision = tracker.evaluateGuard({
+      strategyId: 'O90', mint: 'legacy-copy', timestampMs: base + 200,
+      source: 'LIVE', market: 'PUMP_BONDING_CURVE', lifecycleStage: 'CURVE_MIGRATION',
+      hardBlockSignatures: ['crossMintToxicWallets', 'crossMintToxicTemplate'],
+    });
+    assert.equal(decision.crossMintToxic, false);
+    assert.equal(decision.blocked, false);
+    tracker.stop();
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+{
+  const store = new ResearchStore({ dbPath: ':memory:' });
+  const base = Date.UTC(2026, 7, 23, 6, 0, 0);
+  const first = new PreEntryRugRiskTracker({ config, store, now: () => base + 2_000 });
+  first.start();
+  [20.01, 20.07, 19.16, 19.25].forEach((solAmount, index) => first.observeTrade({
+    mint: 'db-toxic-origin', side: 'BUY', wallet: `db-toxic-${index}`, solAmount,
+    timestampMs: base + index * 10, price: 1 + index * 0.2,
+    market: 'PUMP_BONDING_CURVE', curvePct: 85,
+  }));
+  first.observeTrade({
+    mint: 'db-toxic-origin', side: 'SELL', wallet: 'db-dumper', solAmount: 70,
+    timestampMs: base + 1_000, price: 0.2,
+    market: 'PUMP_BONDING_CURVE', curvePct: 85,
+  });
+  first.stop();
+
+  const restored = new PreEntryRugRiskTracker({ config, store, now: () => base + 3_000 });
+  restored.start();
+  assert.ok(restored.health().toxicMemoryDbLoaded >= 6);
+  assert.equal(restored.health().toxicLegacyQuarantined, 0);
+  [20.01, 20.07, 19.16, 19.25].forEach((solAmount, index) => restored.observeTrade({
+    mint: 'db-toxic-copy', side: 'BUY', wallet: `db-fresh-${index}`, solAmount,
+    timestampMs: base + 2_100 + index * 10, price: 1 + index * 0.1,
+    market: 'PUMP_BONDING_CURVE', curvePct: 85,
+  }));
+  const decision = restored.evaluateGuard({
+    strategyId: 'O90', mint: 'db-toxic-copy', timestampMs: base + 2_200,
+    source: 'LIVE', market: 'PUMP_BONDING_CURVE', lifecycleStage: 'CURVE_MIGRATION',
+    hardBlockSignatures: ['crossMintToxicWallets', 'crossMintToxicTemplate'],
+  });
+  assert.equal(decision.blocked, true);
+  restored.stop();
+  store.close();
 }
 
 console.log('pre-entry RUG risk tests passed');

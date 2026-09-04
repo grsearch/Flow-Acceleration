@@ -375,8 +375,9 @@ const lpsCohorts = lpsEntryTargets.flatMap(([
 // PMO is a forward-only, strictly paired post-migration opportunity matrix.
 // The archived one-day screening selected public-flow continuation over the
 // two sparse pullback entries. Every exit is run twice on the exact same
-// signal: BASE only labels RUG risk, while RUGX blocks only the three current
-// high-confidence catastrophe signatures.
+// signal: BASE only labels RUG risk, while RUGX blocks only repeat actors or
+// templates learned inside the same PumpSwap lifecycle stage. Curve-only
+// coordinated-dumpability thresholds are deliberately not inherited here.
 const postMigrationOpportunityEnabled = booleanEnv(
   'FLOW_POST_MIGRATION_OPPORTUNITY_SHADOW_ENABLED',
   true,
@@ -439,7 +440,6 @@ const postMigrationOpportunityCohorts = postMigrationOpportunityExits.flatMap((e
     hardBlockSignatures: arm === 'RUGX' ? [
       'crossMintToxicWallets',
       'crossMintToxicTemplate',
-      'extremeCoordinatedDumpability',
     ] : [],
     rugPolicyReason: arm === 'RUGX'
       ? 'PMO_STRICT_PAIR_HIGH_CONFIDENCE_RUGX'

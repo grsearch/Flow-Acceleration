@@ -34,6 +34,23 @@ const LIVE_CURVE_HARD_BLOCK_SIGNATURES = Object.freeze([
   'extremeCoordinatedDumpability',
 ]);
 
+const REPEAT_ACTOR_HARD_BLOCK_SIGNATURES = Object.freeze([
+  'crossMintToxicWallets',
+  'crossMintToxicTemplate',
+]);
+
+function hardBlockSignaturesForLifecycle({ market, lifecycleStage } = {}) {
+  const normalizedMarket = normalized(market);
+  const stage = normalized(lifecycleStage);
+  // The coordinated-dumpability signature is currently validated only at the
+  // Curve migration boundary. On earlier Curve stages and PumpSwap it remains
+  // observable, but cannot inherit a threshold learned at another age.
+  if (normalizedMarket === 'PUMP_BONDING_CURVE' && stage === 'CURVE_MIGRATION') {
+    return [...LIVE_CURVE_HARD_BLOCK_SIGNATURES];
+  }
+  return [...REPEAT_ACTOR_HARD_BLOCK_SIGNATURES];
+}
+
 function normalized(value) {
   return String(value || '').trim().toUpperCase();
 }
@@ -74,8 +91,12 @@ function resolveRugGuardPolicy({
   if (normalizedSource === 'LIVE' && isCurve) {
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.HARD_BLOCK,
-      policyReason: 'LIVE_CURVE_CATASTROPHE_SIGNATURES_HARD_BLOCK',
-      hardBlockSignatures: [...LIVE_CURVE_HARD_BLOCK_SIGNATURES],
+      policyReason: stage === 'CURVE_MIGRATION'
+        ? 'LIVE_CURVE_MIGRATION_CATASTROPHE_HARD_BLOCK'
+        : 'LIVE_CURVE_STAGE_SCOPED_REPEAT_ACTOR_HARD_BLOCK',
+      hardBlockSignatures: hardBlockSignaturesForLifecycle({
+        market: normalizedMarket, lifecycleStage: stage,
+      }),
       requireHc2: false,
     };
   }
@@ -86,7 +107,10 @@ function resolveRugGuardPolicy({
   if (startsWithAny(id, HARD_BLOCK_FAMILIES)) {
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.HARD_BLOCK,
-      policyReason: 'POST_MIGRATION_FAMILY_HARD_BLOCK',
+      policyReason: 'POST_MIGRATION_FAMILY_STAGE_SCOPED_HARD_BLOCK',
+      hardBlockSignatures: hardBlockSignaturesForLifecycle({
+        market: normalizedMarket, lifecycleStage: stage,
+      }),
     };
   }
 
@@ -128,7 +152,10 @@ function resolveRugGuardPolicy({
     }
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.HARD_BLOCK,
-      policyReason: 'POST_MIGRATION_AMM_HARD_BLOCK',
+      policyReason: 'POST_MIGRATION_AMM_STAGE_SCOPED_HARD_BLOCK',
+      hardBlockSignatures: hardBlockSignaturesForLifecycle({
+        market: normalizedMarket, lifecycleStage: isAmmEarly ? 'AMM_EARLY' : 'AMM_MATURE',
+      }),
     };
   }
 
@@ -146,7 +173,9 @@ function resolveRugGuardPolicy({
 }
 
 module.exports = {
+  hardBlockSignaturesForLifecycle,
   LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+  REPEAT_ACTOR_HARD_BLOCK_SIGNATURES,
   RUG_GUARD_ENFORCEMENT,
   resolveRugGuardPolicy,
 };

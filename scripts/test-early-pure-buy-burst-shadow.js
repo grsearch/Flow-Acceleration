@@ -359,7 +359,7 @@ function testHighFrequencyRugPairSharesSignalAndOnlyFiltersRugx() {
   assert.strictEqual(pairRows[1].rejection_reason, 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY');
   const rugxCall = guardCalls.find((row) => row.strategyId.includes('EB_A_RUGX'));
   assert.deepStrictEqual(rugxCall.hardBlockSignatures, [
-    'crossMintToxicWallets', 'crossMintToxicTemplate', 'extremeCoordinatedDumpability',
+    'crossMintToxicWallets', 'crossMintToxicTemplate',
   ]);
   store.db.prepare(`
     UPDATE early_pure_buy_burst_shadow_positions

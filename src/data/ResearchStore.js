@@ -791,6 +791,9 @@ class ResearchStore {
         mint TEXT NOT NULL,
         fingerprint TEXT,
         wallet TEXT,
+        lifecycle_stage TEXT,
+        market TEXT,
+        wallet_role TEXT,
         labeled_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
         collapse_pct REAL,
@@ -804,6 +807,8 @@ class ResearchStore {
         ON pre_entry_rug_toxic_history(labeled_at DESC);
       CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_toxic_history_subject
         ON pre_entry_rug_toxic_history(kind, subject, labeled_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_toxic_history_expires
+        ON pre_entry_rug_toxic_history(expires_at, labeled_at);
 
       CREATE TABLE IF NOT EXISTS flow_signals (
         signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2313,6 +2318,22 @@ class ResearchStore {
         ON graduation_acceleration_shadow_positions(mint, signal_at DESC);
     `);
 
+    const rugToxicHistoryColumns = new Set(
+      this.db.prepare('PRAGMA table_info(pre_entry_rug_toxic_history)')
+        .all().map((column) => column.name),
+    );
+    for (const [column, type] of [
+      ['lifecycle_stage', 'TEXT'],
+      ['market', 'TEXT'],
+      ['wallet_role', 'TEXT'],
+    ]) {
+      if (!rugToxicHistoryColumns.has(column)) {
+        this.db.exec(`ALTER TABLE pre_entry_rug_toxic_history ADD COLUMN ${column} ${type}`);
+      }
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_toxic_history_stage
+      ON pre_entry_rug_toxic_history(lifecycle_stage, market, kind, expires_at)`);
+
     const flowTokenColumns = new Set(
       this.db.prepare('PRAGMA table_info(flow_tokens)').all().map((column) => column.name),
     );
@@ -3097,11 +3118,13 @@ class ResearchStore {
       insertPreEntryRugToxicHistory: this.db.prepare(`
         INSERT OR IGNORE INTO pre_entry_rug_toxic_history (
           event_key, kind, subject, mint, fingerprint, wallet, labeled_at,
-          expires_at, collapse_pct, total_buy_sol, large_buy_count,
+          lifecycle_stage, market, wallet_role, expires_at,
+          collapse_pct, total_buy_sol, large_buy_count,
           burst_span_ms, details_json, created_at
         ) VALUES (
           @eventKey, @kind, @subject, @mint, @fingerprint, @wallet, @labeledAt,
-          @expiresAt, @collapsePct, @totalBuySol, @largeBuyCount,
+          @lifecycleStage, @market, @walletRole, @expiresAt,
+          @collapsePct, @totalBuySol, @largeBuyCount,
           @burstSpanMs, @detailsJson, @createdAt
         )
       `),
@@ -4786,12 +4809,17 @@ class ResearchStore {
     if (!Array.isArray(rows) || rows.length === 0) return 0;
     const createdAt = Date.now();
     const normalized = rows.map((row) => ({
-      eventKey: `${row.mint}|${row.labeledAt}|${row.kind}|${row.subject}`,
+      eventKey: `${row.mint}|${row.labeledAt}|${row.kind}`
+        + `|${row.lifecycleStage || 'LEGACY_GLOBAL'}|${row.market || 'UNKNOWN'}`
+        + `|${row.walletRole || ''}|${row.subject}`,
       kind: String(row.kind || 'UNKNOWN'),
       subject: String(row.subject || ''),
       mint: String(row.mint || ''),
       fingerprint: row.fingerprint || null,
       wallet: row.wallet || null,
+      lifecycleStage: row.lifecycleStage || 'LEGACY_GLOBAL',
+      market: String(row.market || 'UNKNOWN'),
+      walletRole: row.walletRole || null,
       labeledAt: Number(row.labeledAt),
       expiresAt: Number(row.expiresAt),
       collapsePct: finiteOrNull(row.collapsePct),
@@ -4804,6 +4832,38 @@ class ResearchStore {
       createdAt,
     }));
     return this._writePreEntryRugToxicHistory(normalized);
+  }
+
+  loadActivePreEntryRugToxicHistory(now = Date.now()) {
+    const rows = this.db.prepare(`
+      SELECT kind, subject, mint, fingerprint, wallet, lifecycle_stage, market,
+             wallet_role, labeled_at, expires_at, collapse_pct, total_buy_sol,
+             large_buy_count, burst_span_ms, details_json
+      FROM pre_entry_rug_toxic_history
+      WHERE expires_at > ?
+      ORDER BY labeled_at ASC, id ASC
+    `).all(now);
+    return rows.map((row) => {
+      let details = {};
+      try { details = JSON.parse(row.details_json || '{}'); } catch { details = {}; }
+      return {
+        kind: row.kind,
+        subject: row.subject,
+        mint: row.mint,
+        fingerprint: row.fingerprint,
+        wallet: row.wallet || (row.kind === 'WALLET' ? row.subject : null),
+        lifecycleStage: row.lifecycle_stage || 'LEGACY_GLOBAL',
+        market: row.market || 'UNKNOWN',
+        walletRole: row.wallet_role || null,
+        labeledAt: row.labeled_at,
+        expiresAt: row.expires_at,
+        collapsePct: row.collapse_pct,
+        totalBuySol: row.total_buy_sol,
+        largeBuyCount: row.large_buy_count,
+        burstSpanMs: row.burst_span_ms,
+        amounts: Array.isArray(details.amounts) ? details.amounts : [],
+      };
+    });
   }
 
   recordCreate(event) {

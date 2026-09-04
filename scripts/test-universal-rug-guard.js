@@ -6,7 +6,9 @@ const path = require('node:path');
 const { PreEntryRugRiskTracker } = require('../src/core/PreEntryRugRiskTracker');
 const { evaluateUniversalRugGuard } = require('../src/core/UniversalRugGuard');
 const {
+  hardBlockSignaturesForLifecycle,
   LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+  REPEAT_ACTOR_HARD_BLOCK_SIGNATURES,
   resolveRugGuardPolicy,
 } = require('../src/core/RugGuardPolicy');
 
@@ -55,9 +57,10 @@ const live = evaluateUniversalRugGuard(store, {
   strategyId: 'LIVE-A', mint: 'rug', timestampMs: 9_010, source: 'LIVE',
   market: 'PUMP_AMM', lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 20_000,
 });
-assert.equal(live.blocked, true);
-assert.equal(live.reason, 'PRE_ENTRY_RUG_RISK');
+assert.equal(live.blocked, false);
+assert.equal(live.reason, 'RUG_RISK_NOT_IN_HARD_BLOCK_SIGNATURES');
 assert.equal(live.enforcementMode, 'HARD_BLOCK');
+assert.deepEqual(live.hardBlockSignatures, REPEAT_ACTOR_HARD_BLOCK_SIGNATURES);
 assert.equal(tracker.health().liveCacheHits, 1);
 
 const earlyPolicy = resolveRugGuardPolicy({
@@ -65,7 +68,8 @@ const earlyPolicy = resolveRugGuardPolicy({
   lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 5_000,
 });
 assert.equal(earlyPolicy.enforcementMode, 'HARD_BLOCK');
-assert.equal(earlyPolicy.policyReason, 'POST_MIGRATION_AMM_HARD_BLOCK');
+assert.equal(earlyPolicy.policyReason, 'POST_MIGRATION_AMM_STAGE_SCOPED_HARD_BLOCK');
+assert.deepEqual(earlyPolicy.hardBlockSignatures, REPEAT_ACTOR_HARD_BLOCK_SIGNATURES);
 const gEarlyPolicy = resolveRugGuardPolicy({
   strategyId: 'MIGRATED_DROP_REBOUND:GFR_300', source: 'SHADOW', market: 'PUMP_AMM',
   lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 5_000,
@@ -78,7 +82,7 @@ const maturePolicy = resolveRugGuardPolicy({
   lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 20_000,
 });
 assert.equal(maturePolicy.enforcementMode, 'HARD_BLOCK');
-assert.equal(maturePolicy.policyReason, 'POST_MIGRATION_AMM_HARD_BLOCK');
+assert.equal(maturePolicy.policyReason, 'POST_MIGRATION_AMM_STAGE_SCOPED_HARD_BLOCK');
 
 const launch = evaluateUniversalRugGuard(store, {
   strategyId: 'LAUNCH_PULLBACK:FO', mint: 'rug', timestampMs: 9_020, source: 'SHADOW',
@@ -91,15 +95,16 @@ const lifecycle = evaluateUniversalRugGuard(store, {
   strategyId: 'MIGRATED_DROP_REBOUND:GFR_300', mint: 'rug', timestampMs: 9_030, source: 'SHADOW',
   market: 'PUMP_AMM', lifecycleStage: 'POST_MIGRATION', lifecycleAgeMs: 30_000,
 });
-assert.equal(lifecycle.blocked, true);
-assert.equal(lifecycle.reason, 'PRE_ENTRY_RUG_RISK');
+assert.equal(lifecycle.blocked, false);
+assert.equal(lifecycle.reason, 'RUG_RISK_NOT_IN_HARD_BLOCK_SIGNATURES');
 
 const migrationFamilyPolicy = resolveRugGuardPolicy({
   strategyId: 'MIGRATION_CONTINUITY:M-C5', source: 'SHADOW', market: 'PUMP_AMM',
   lifecycleStage: 'AMM_EARLY', lifecycleAgeMs: 5_000,
 });
 assert.equal(migrationFamilyPolicy.enforcementMode, 'HARD_BLOCK');
-assert.equal(migrationFamilyPolicy.policyReason, 'POST_MIGRATION_FAMILY_HARD_BLOCK');
+assert.equal(migrationFamilyPolicy.policyReason, 'POST_MIGRATION_FAMILY_STAGE_SCOPED_HARD_BLOCK');
+assert.deepEqual(migrationFamilyPolicy.hardBlockSignatures, REPEAT_ACTOR_HARD_BLOCK_SIGNATURES);
 
 const incomplete = evaluateUniversalRugGuard(store, {
   strategyId: 'LIVE-B', mint: 'unknown', timestampMs: 9_010, source: 'LIVE',
@@ -108,8 +113,8 @@ assert.equal(incomplete.blocked, false);
 
 const health = tracker.health();
 assert.equal(health.guardRiskFlagged, 4);
-assert.equal(health.guardHardBlocked, 2);
-assert.equal(health.guardLabelOnly, 2);
+assert.equal(health.guardHardBlocked, 0);
+assert.equal(health.guardLabelOnly, 4);
 assert.equal(
   health.enforcement,
   'LIVE_CURVE_CATASTROPHE_SELECTIVE_HARD_BLOCK',
@@ -120,8 +125,11 @@ const curveLivePolicy = resolveRugGuardPolicy({
   lifecycleStage: 'CURVE_MIGRATION', lifecycleAgeMs: 4_000,
 });
 assert.equal(curveLivePolicy.enforcementMode, 'HARD_BLOCK');
-assert.equal(curveLivePolicy.policyReason, 'LIVE_CURVE_CATASTROPHE_SIGNATURES_HARD_BLOCK');
+assert.equal(curveLivePolicy.policyReason, 'LIVE_CURVE_MIGRATION_CATASTROPHE_HARD_BLOCK');
 assert.deepEqual(curveLivePolicy.hardBlockSignatures, LIVE_CURVE_HARD_BLOCK_SIGNATURES);
+assert.deepEqual(hardBlockSignaturesForLifecycle({
+  market: 'PUMP_AMM', lifecycleStage: 'AMM_EARLY',
+}), REPEAT_ACTOR_HARD_BLOCK_SIGNATURES);
 
 // A broad native stair-step warning remains observable on Live Curve entries,
 // but only a high-specificity catastrophe signature may reject it.
@@ -139,15 +147,17 @@ const toxicAmounts = [20.01, 20.07, 19.16, 19.25];
 toxicAmounts.forEach((solAmount, index) => toxicTracker.observeTrade({
   mint: 'toxic-origin', side: 'BUY', wallet: `toxic-${index}`, solAmount,
   timestampMs: 20_000 + index * 10, price: 1 + index * 0.2,
+  market: 'PUMP_BONDING_CURVE', curvePct: 85,
 }));
 toxicTracker.observeTrade({
   mint: 'toxic-origin', side: 'SELL', wallet: 'dumper', solAmount: 70,
   timestampMs: 21_000, price: 0.2,
+  market: 'PUMP_BONDING_CURVE', curvePct: 85,
 });
 toxicAmounts.forEach((solAmount, index) => toxicTracker.observeTrade({
   mint: 'toxic-copy', side: 'BUY', market: 'PUMP_BONDING_CURVE',
   wallet: `rotated-${index}`, solAmount,
-  timestampMs: 22_000 + index * 10, price: 1 + index * 0.2,
+  timestampMs: 22_000 + index * 10, price: 1 + index * 0.2, curvePct: 85,
 }));
 const toxicCurveLive = evaluateUniversalRugGuard(toxicStore, {
   strategyId: 'CURVE-LIVE', mint: 'toxic-copy', timestampMs: 22_100, source: 'LIVE',

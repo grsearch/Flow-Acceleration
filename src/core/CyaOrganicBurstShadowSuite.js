@@ -11,7 +11,7 @@ const {
   exitCensorReason,
 } = require('./ShadowPoolQuote');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
-const { LIVE_CURVE_HARD_BLOCK_SIGNATURES } = require('./RugGuardPolicy');
+const { hardBlockSignaturesForLifecycle } = require('./RugGuardPolicy');
 const { buildShadowRugPairComparison } = require('./ShadowRugPairComparison');
 
 const STATUS = Object.freeze({
@@ -926,7 +926,9 @@ class CyaOrganicBurstShadowSuite {
       lifecycleStage: 'CURVE_EARLY',
       ...(selectiveRugPair ? {
         enforcementMode: 'HARD_BLOCK',
-        hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+        hardBlockSignatures: hardBlockSignaturesForLifecycle({
+          market: 'PUMP_BONDING_CURVE', lifecycleStage: 'CURVE_EARLY',
+        }),
         policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
       } : {
         enforcementMode: 'LABEL_ONLY',

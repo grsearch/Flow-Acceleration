@@ -3,7 +3,10 @@
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
-const { RUG_GUARD_ENFORCEMENT } = require('./RugGuardPolicy');
+const {
+  hardBlockSignaturesForLifecycle,
+  RUG_GUARD_ENFORCEMENT,
+} = require('./RugGuardPolicy');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -539,19 +542,26 @@ class MigrationSecondLegShadowSuite {
 
   _tryEntry(position, trade, price) {
     const cohort = this._cohort(position);
+    const lifecycleAgeMs = Math.max(
+      0,
+      trade.timestampMs - finite(position.migrationAt, trade.timestampMs),
+    );
+    const lifecycleStage = lifecycleAgeMs <= 10_000 ? 'AMM_EARLY' : 'AMM_MATURE';
+    const hardBlockSignatures = Array.isArray(cohort.hardBlockSignatures)
+      ? cohort.hardBlockSignatures
+      : (cohort.rugGuardMode === RUG_GUARD_ENFORCEMENT.HARD_BLOCK
+        ? hardBlockSignaturesForLifecycle({ market: trade.market, lifecycleStage })
+        : null);
     const rugGuard = evaluateUniversalRugGuard(this.store, {
       strategyId: position.cohortId,
       mint: position.mint,
       timestampMs: trade.timestampMs,
       source: 'SHADOW',
       market: trade.market,
-      lifecycleStage: 'POST_MIGRATION',
-      lifecycleAgeMs: Math.max(
-        0,
-        trade.timestampMs - finite(position.migrationAt, trade.timestampMs),
-      ),
+      lifecycleStage,
+      lifecycleAgeMs,
       enforcementMode: cohort.rugGuardMode,
-      hardBlockSignatures: cohort.hardBlockSignatures,
+      hardBlockSignatures,
       policyReason: cohort.rugPolicyReason,
     });
     if (rugGuard.blocked) {
