@@ -170,6 +170,33 @@ function main() {
   const noExitRows = dashboard.positions.filter((row) => row.mint === 'curve80-mint');
   assert.ok(noExitRows.every((row) => row.status === STATUS.NO_EXIT));
   assert.ok(noExitRows.every((row) => row.net_return_pct == null), 'NO_EXIT is not forced to -100%');
+  assert.ok(noExitRows.every((row) => row.late_exit_status === 'PENDING'));
+  // A later signal must still be creatable while prior NO_EXIT rows remain under
+  // diagnostic observation; expiry belongs to advanceTime, not signal creation.
+  suite.onCreate({
+    mint: 'post-no-exit-signal', symbol: 'NEXT', creator: 'creator-next', createdAt: 504_001,
+  });
+  suite.observeTrade(trade({
+    mint: 'post-no-exit-signal', timestampMs: 504_100, curvePct: 70, wallet: 'next-buyer-1',
+  }));
+  suite.observeTrade(trade({
+    mint: 'post-no-exit-signal', timestampMs: 505_000, curvePct: 80, wallet: 'next-buyer-2',
+  }));
+  suite.observeTrade(trade({
+    mint: 'curve80-mint', timestampMs: 504_200, price: entryPrice * 0.7,
+    curvePct: 100, market: 'PUMP_AMM',
+  }));
+  const lateExitRows = store.db.prepare(`
+    SELECT status, net_return_pct, late_exit_status, late_exit_after_deadline_ms,
+      late_exit_net_return_pct
+    FROM graduation_acceleration_shadow_positions WHERE mint=?
+  `).all('curve80-mint');
+  assert.ok(lateExitRows.every((row) => row.status === STATUS.NO_EXIT));
+  assert.ok(lateExitRows.every((row) => row.net_return_pct == null),
+    'a diagnostic late quote must not rewrite censored realized returns');
+  assert.ok(lateExitRows.every((row) => row.late_exit_status === 'OBSERVED_EXECUTABLE'));
+  assert.ok(lateExitRows.every((row) => row.late_exit_after_deadline_ms > 0));
+  assert.ok(lateExitRows.every((row) => Number.isFinite(row.late_exit_net_return_pct)));
 
   const cohorts = dashboard.cohorts;
   assert.strictEqual(cohorts.length, 6, '2 entries x 3 capacities remain independent');
@@ -1049,7 +1076,9 @@ function testP500RugPairSharesSignalAndOnlyFiltersRugx() {
     SET status='CLOSED', net_return_pct=-75
     WHERE mint=? AND entry_profile_id='O_C80_P500_STAIR240'
   `).run(mint);
-  const comparison = store.graduationAccelerationShadowDashboard().rugComparisons[0];
+  const comparison = store.graduationAccelerationShadowDashboard().rugComparisons.find(
+    (row) => row.id === 'O_C80_P500_STAIR240_RUGX',
+  );
   assert.equal(comparison.pairedSignals, 1);
   assert.equal(comparison.blocked, 1);
   assert.equal(comparison.avoidedRug50, 1);
@@ -1059,3 +1088,84 @@ function testP500RugPairSharesSignalAndOnlyFiltersRugx() {
 }
 
 testP500RugPairSharesSignalAndOnlyFiltersRugx();
+
+function testHandoffRugPairSharesTheExecutableAmmEntry() {
+  const store = makeStore();
+  store.preEntryRugRisk = {
+    config: { enabled: true },
+    evaluateGuard: (options) => {
+      const blocked = Array.isArray(options.hardBlockSignatures);
+      return {
+        ...options,
+        sampleReady: true,
+        flagged: blocked,
+        riskFlagged: blocked,
+        blocked,
+        signatures: { extremeCoordinatedDumpability: blocked },
+        reason: blocked ? 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY' : 'RUG_GUARD_PASS',
+      };
+    },
+  };
+  const now = 11_000_000;
+  const settings = config();
+  settings.capacitySols = [0.1];
+  const shared = {
+    mode: 'CURVE_MILESTONE', thresholdPct: 80,
+    recentWindowMs: 5_000, minCurveDeltaPct: 5, minBuyers: 2,
+    maxSellTx: 0, requireNoCreatorSell: true, migrationHandoff: true,
+    capacityAwareExit: true, capacitySols: [0.1], coreExitPct: 0,
+    postMigrationEntryGate: {
+      windowMs: 500, evaluateAtFill: true, captureWindowMs: 10_000,
+      minBuyers: 1, minNetFlowSol: 0, maxSellBuyRatio: 1,
+      maxDrawdownPct: 20, maxMarketMovePct: 15, maxSelfImpactPct: 10,
+    },
+    runnerExitMode: 'FIXED_HOLD', runnerMaxHoldMs: 60_000,
+  };
+  settings.entryProfiles = [
+    { id: 'O_C80_HO500_X60', label: 'baseline', ...shared },
+    {
+      id: 'O_C80_HO500_X60_RUGX', label: 'filtered', ...shared,
+      pairedBaselineProfileId: 'O_C80_HO500_X60',
+      rugGuardMode: 'HIGH_CONFIDENCE_CATASTROPHE',
+    },
+  ];
+  const suite = new GraduationAccelerationShadowSuite({
+    config: settings, store, now: () => now,
+  });
+  suite.start();
+  const mint = 'handoff-rug-pair';
+  suite.onCreate({ mint, symbol: 'PAIR', creator: 'creator', createdAt: now });
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 100, price: 7e-8, curvePct: 70, wallet: 'buyer-1',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 1_000, price: 7e-8, curvePct: 80, wallet: 'buyer-2',
+  }));
+  suite.onGraduated({ mint, graduated_at: now + 2_000 });
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 2_600, price: 1e-7,
+    market: 'PUMP_AMM', side: 'BUY', wallet: 'amm-buyer', solAmount: 0.2,
+  }));
+  const rows = store.db.prepare(`
+    SELECT entry_profile_id, signal_at, status, rejection_reason, rug_guard_json
+    FROM graduation_acceleration_shadow_positions WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].signal_at, rows[1].signal_at);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'O_C80_HO500_X60').status,
+    STATUS.RUNNER);
+  assert.equal(rows.find((row) => row.entry_profile_id === 'O_C80_HO500_X60_RUGX').status,
+    STATUS.NO_ENTRY);
+  assert.ok(rows.every((row) => row.rug_guard_json));
+  const comparison = store.graduationAccelerationShadowDashboard().rugComparisons.find(
+    (row) => row.id === 'O_C80_HO500_X60_RUGX',
+  );
+  assert.equal(comparison.pairedSignals, 1);
+  assert.equal(comparison.blocked, 1);
+  assert.equal(comparison.guardAudit.evaluated, 1);
+  assert.equal(comparison.guardAudit.hardBlocked, 1);
+  assert.equal(comparison.guardAudit.signatureHits.extremeCoordinatedDumpability, 1);
+  store.close();
+}
+
+testHandoffRugPairSharesTheExecutableAmmEntry();

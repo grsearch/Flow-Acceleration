@@ -43,6 +43,13 @@ function isRugBlock(row) {
     && String(row.filtered_reason || '').startsWith('PRE_ENTRY_RUG_');
 }
 
+function parsedGuard(row) {
+  const raw = row?.filtered_rug_guard_json ?? row?.filteredRugGuardJson;
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch (_) { return null; }
+}
+
 function buildShadowRugPairComparison({
   id,
   label,
@@ -78,6 +85,20 @@ function buildShadowRugPairComparison({
   const avoidedRug80 = resolvedBlocked.filter((row) => finite(row.baseline_return_pct) <= -80).length;
   const blockedWinners = resolvedBlocked.filter((row) => finite(row.baseline_return_pct) > 0).length;
   const blockedBig50 = resolvedBlocked.filter((row) => finite(row.baseline_return_pct) >= 50).length;
+  const guards = rows.map(parsedGuard).filter(Boolean);
+  const signatureHits = {};
+  const hardBlockedBySignature = {};
+  for (const row of rows) {
+    const guard = parsedGuard(row);
+    if (!guard) continue;
+    for (const [signature, matched] of Object.entries(guard.signatures || {})) {
+      if (!matched) continue;
+      signatureHits[signature] = (signatureHits[signature] || 0) + 1;
+      if (isRugBlock(row)) {
+        hardBlockedBySignature[signature] = (hardBlockedBySignature[signature] || 0) + 1;
+      }
+    }
+  }
   return {
     id,
     label,
@@ -92,6 +113,15 @@ function buildShadowRugPairComparison({
     avoidedRug80,
     blockedWinners,
     blockedBig50,
+    guardAudit: {
+      evaluated: guards.length,
+      sampleReady: guards.filter((guard) => guard.sampleReady).length,
+      sampleInsufficient: guards.filter((guard) => !guard.sampleReady).length,
+      riskFlagged: guards.filter((guard) => guard.riskFlagged || guard.flagged).length,
+      hardBlocked: guards.filter((guard) => guard.blocked).length,
+      signatureHits,
+      hardBlockedBySignature,
+    },
     blockPrecisionPct: ratio(avoidedRug50, resolvedBlocked.length),
     falsePositiveRatePct: ratio(blockedWinners, resolvedBlocked.length),
     baseline: performance(baselineReturns),

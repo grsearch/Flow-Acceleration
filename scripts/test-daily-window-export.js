@@ -148,6 +148,11 @@ function main() {
 
   const result = exportResearchWindow({ sourcePath: source, destinationPath: destination, startMs, endMs, schemaPath: schema });
   assert.strictEqual(result.integrity, 'ok');
+  assert.strictEqual(result.formatVersion, 2);
+  assert.strictEqual(result.dataQuality.rawTrades.rows, 2);
+  assert.strictEqual(result.dataQuality.rawTrades.status, 'GAPS_DETECTED');
+  assert.ok(result.dataQuality.rawTrades.gapsOverThreshold >= 1);
+  assert.ok(result.dataQuality.rawTrades.largestGapMs > 60_000);
   assert.strictEqual(result.mode, 'CONSISTENT_READ_TRANSACTION_WINDOW');
   assert.strictEqual(result.safety.walCheckpointExecuted, false);
   assert.strictEqual(result.safety.backupApiUsed, false);

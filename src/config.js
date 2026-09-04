@@ -464,40 +464,55 @@ const graduationRelaxedCapacitySols = positiveNumberListEnv(
 );
 const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
   ...[0, 200, 500].flatMap((handoffDelayMs) => (
-    [60_000, 120_000].map((runnerMaxHoldMs) => ({
-      id: `O_C80_HO${handoffDelayMs}_X${runnerMaxHoldMs / 1_000}`,
-      label: `O-C80-HO${handoffDelayMs} · 毕业后PumpSwap接力 / 固定${runnerMaxHoldMs / 1_000}秒`,
-      studyGroup: 'O_C80_POST_GRADUATION_HANDOFF',
-      mode: 'CURVE_MILESTONE',
-      thresholdPct: 80,
-      recentWindowMs: 5_000,
-      minCurveDeltaPct: 5,
-      minBuyers: 2,
-      maxSellTx: 0,
-      requireNoCreatorSell: true,
-      migrationHandoff: true,
-      handoffLiveStrategyId: handoffDelayMs === 500 && runnerMaxHoldMs === 60_000
-        ? 'graduation_accel_o_c80_ho500_x60_recovery_live'
-        : null,
-      liveBridgeCapacitySol: 1,
-      capacityAwareExit: true,
-      capacitySols: graduationRelaxedCapacitySols,
-      coreExitPct: 0,
-      postMigrationEntryGate: {
-        windowMs: handoffDelayMs,
-        // Keep the first executable post-delay trade in the causal snapshot.
-        evaluateAtFill: true,
-        captureWindowMs: 10_000,
-        minBuyers: 1,
-        minNetFlowSol: 0,
-        maxSellBuyRatio: 1,
-        maxDrawdownPct: 20,
-        maxMarketMovePct: 15,
-        maxSelfImpactPct: 10,
-      },
-      runnerExitMode: 'FIXED_HOLD',
-      runnerMaxHoldMs,
-    }))
+    [60_000, 120_000].flatMap((runnerMaxHoldMs) => {
+      const baseline = {
+        id: `O_C80_HO${handoffDelayMs}_X${runnerMaxHoldMs / 1_000}`,
+        label: `O-C80-HO${handoffDelayMs} · 毕业后PumpSwap接力 / 固定${runnerMaxHoldMs / 1_000}秒`,
+        studyGroup: 'O_C80_POST_GRADUATION_HANDOFF',
+        mode: 'CURVE_MILESTONE',
+        thresholdPct: 80,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 2,
+        maxSellTx: 0,
+        requireNoCreatorSell: true,
+        migrationHandoff: true,
+        handoffLiveStrategyId: handoffDelayMs === 500 && runnerMaxHoldMs === 60_000
+          ? 'graduation_accel_o_c80_ho500_x60_recovery_live'
+          : null,
+        liveBridgeCapacitySol: 1,
+        capacityAwareExit: true,
+        capacitySols: graduationRelaxedCapacitySols,
+        coreExitPct: 0,
+        postMigrationEntryGate: {
+          windowMs: handoffDelayMs,
+          // Keep the first executable post-delay trade in the causal snapshot.
+          evaluateAtFill: true,
+          captureWindowMs: 10_000,
+          minBuyers: 1,
+          minNetFlowSol: 0,
+          maxSellBuyRatio: 1,
+          maxDrawdownPct: 20,
+          maxMarketMovePct: 15,
+          maxSelfImpactPct: 10,
+        },
+        runnerExitMode: 'FIXED_HOLD',
+        runnerMaxHoldMs,
+      };
+      if (handoffDelayMs !== 500 || runnerMaxHoldMs !== 60_000) return [baseline];
+      return [
+        baseline,
+        {
+          ...baseline,
+          id: 'O_C80_HO500_X60_RUGX',
+          label: 'O-C80-HO500-X60 RUGX · 同信号 + 当前高置信灾难过滤',
+          handoffLiveStrategyId: null,
+          capacitySols: [0.1],
+          pairedBaselineProfileId: 'O_C80_HO500_X60',
+          rugGuardMode: 'HIGH_CONFIDENCE_CATASTROPHE',
+        },
+      ];
+    })
   )),
   ...[
     ['DAY0420', 4, 20],
@@ -8020,6 +8035,13 @@ const config = {
     entryTimeoutMs: integerEnv('FLOW_GRADUATION_ACCEL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
     exitDelayMs: integerEnv('FLOW_GRADUATION_ACCEL_EXIT_DELAY_MS', 200, { min: 0 }),
     exitTimeoutMs: integerEnv('FLOW_GRADUATION_ACCEL_EXIT_TIMEOUT_MS', 15_000, { min: 1 }),
+    // NO_EXIT remains right-censored. Continue observing the public tape only
+    // to measure when a same-market executable exit eventually reappears.
+    noExitObservationMs: integerEnv(
+      'FLOW_GRADUATION_ACCEL_NO_EXIT_OBSERVATION_MS',
+      10 * 60_000,
+      { min: 1_000, max: 60 * 60_000 },
+    ),
     maxEntryPriceJumpPct: numberEnv('FLOW_GRADUATION_ACCEL_MAX_ENTRY_JUMP_PCT', 15, {
       min: 0, max: 1_000,
     }),
@@ -8475,6 +8497,12 @@ const config = {
       min: 100,
       max: 30_000,
     }),
+    // A late quote is diagnostic only: it never converts NO_EXIT into CLOSED.
+    noExitObservationMs: integerEnv(
+      'FLOW_M2F_NO_EXIT_OBSERVATION_MS',
+      10 * 60_000,
+      { min: 1_000, max: 60 * 60_000 },
+    ),
     maxEntryPriceJumpPct: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_MAX_ENTRY_JUMP_PCT', 15, {
       min: 0,
       max: 1_000,

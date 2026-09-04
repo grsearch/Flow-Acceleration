@@ -224,6 +224,85 @@ function createSchemaFile(databasePath, schemaPath) {
   }
 }
 
+function inspectRawTradeCoverage(db, {
+  startMs,
+  endMs,
+  gapThresholdMs = 60_000,
+  maxReportedGaps = 100,
+}) {
+  const table = db.prepare(`
+    SELECT 1 AS present FROM sqlite_master
+    WHERE type='table' AND name='raw_trades'
+  `).get();
+  if (!table) return { status: 'RAW_TRADES_TABLE_MISSING', rows: 0 };
+  const threshold = Math.max(1, Math.trunc(Number(gapThresholdMs) || 60_000));
+  const reportLimit = Math.max(1, Math.trunc(Number(maxReportedGaps) || 100));
+  let rows = 0;
+  let firstMs = null;
+  let lastMs = null;
+  let previousMs = null;
+  let gapsOverThreshold = 0;
+  let totalGapDurationMs = 0;
+  let estimatedMissingDurationMs = 0;
+  let largestGapMs = 0;
+  const largestGaps = [];
+  const recordGap = (kind, fromMs, toMs) => {
+    const durationMs = toMs - fromMs;
+    if (!(durationMs > threshold)) return;
+    gapsOverThreshold += 1;
+    totalGapDurationMs += durationMs;
+    estimatedMissingDurationMs += durationMs - threshold;
+    largestGapMs = Math.max(largestGapMs, durationMs);
+    largestGaps.push({
+      kind,
+      fromMs,
+      toMs,
+      fromCst: formatShanghai(fromMs),
+      toCst: formatShanghai(toMs),
+      durationMs,
+    });
+    largestGaps.sort((left, right) => right.durationMs - left.durationMs);
+    if (largestGaps.length > reportLimit) largestGaps.length = reportLimit;
+  };
+  for (const row of db.prepare(`
+    SELECT timestamp_ms FROM raw_trades
+    WHERE timestamp_ms >= ? AND timestamp_ms < ?
+    ORDER BY timestamp_ms
+  `).iterate(startMs, endMs)) {
+    const timestampMs = Number(row.timestamp_ms);
+    if (!Number.isFinite(timestampMs)) continue;
+    rows += 1;
+    if (firstMs == null) firstMs = timestampMs;
+    if (previousMs != null) recordGap('INTERNAL', previousMs, timestampMs);
+    previousMs = timestampMs;
+    lastMs = timestampMs;
+  }
+  if (!rows) recordGap('EMPTY_WINDOW', startMs, endMs);
+  else {
+    recordGap('WINDOW_START', startMs, firstMs);
+    recordGap('WINDOW_END', lastMs, endMs);
+  }
+  return {
+    status: rows === 0
+      ? 'NO_RAW_TRADES'
+      : gapsOverThreshold > 0 ? 'GAPS_DETECTED' : 'CONTIGUOUS_WITHIN_THRESHOLD',
+    rows,
+    gapThresholdMs: threshold,
+    firstMs,
+    lastMs,
+    firstCst: firstMs == null ? null : formatShanghai(firstMs),
+    lastCst: lastMs == null ? null : formatShanghai(lastMs),
+    startLagMs: firstMs == null ? endMs - startMs : Math.max(0, firstMs - startMs),
+    endLagMs: lastMs == null ? endMs - startMs : Math.max(0, endMs - lastMs),
+    gapsOverThreshold,
+    totalGapDurationMs,
+    estimatedMissingDurationMs,
+    largestGapMs,
+    reportedGaps: largestGaps,
+    reportedGapLimit: reportLimit,
+  };
+}
+
 function attachWindowRawShards(db, { sourcePath, startMs, endMs }) {
   db.exec('DROP VIEW IF EXISTS temp.source_raw_trades');
   const hasMeta = db.prepare(`
@@ -268,7 +347,15 @@ function attachWindowRawShards(db, { sourcePath, startMs, endMs }) {
   return { enabled: true, aliases, files };
 }
 
-function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, schemaPath = null }) {
+function exportResearchWindow({
+  sourcePath,
+  destinationPath,
+  startMs,
+  endMs,
+  schemaPath = null,
+  gapThresholdMs = 60_000,
+  maxReportedGaps = 100,
+}) {
   const source = path.resolve(sourcePath);
   const destination = path.resolve(destinationPath);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) {
@@ -384,16 +471,22 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
 
   const exported = new Database(destination, { readonly: true, fileMustExist: true });
   let integrity;
+  let dataQuality;
   try {
     integrity = exported.pragma('quick_check', { simple: true });
     if (integrity !== 'ok') throw new Error(`Export integrity check failed: ${integrity}`);
+    dataQuality = {
+      rawTrades: inspectRawTradeCoverage(exported, {
+        startMs, endMs, gapThresholdMs, maxReportedGaps,
+      }),
+    };
   } finally {
     exported.close();
   }
   if (schemaPath) createSchemaFile(destination, path.resolve(schemaPath));
 
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     mode: 'CONSISTENT_READ_TRANSACTION_WINDOW',
     source,
     destination,
@@ -410,6 +503,7 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
     sourceBytes,
     exportBytes: fs.statSync(destination).size,
     integrity,
+    dataQuality,
     safety: {
       sourceWritesExecuted: false,
       walCheckpointExecuted: false,
@@ -436,6 +530,10 @@ function main() {
     startMs,
     endMs,
     schemaPath: input.schema || null,
+    gapThresholdMs: Number(input['gap-threshold-ms']
+      || process.env.FLOW_EXPORT_GAP_THRESHOLD_MS || 60_000),
+    maxReportedGaps: Number(input['max-reported-gaps']
+      || process.env.FLOW_EXPORT_MAX_REPORTED_GAPS || 100),
   });
   fs.writeFileSync(manifestPath, `${JSON.stringify(result, null, 2)}\n`, {
     encoding: 'utf8', mode: 0o600,
@@ -452,4 +550,10 @@ if (require.main === module) {
   }
 }
 
-module.exports = { args, chooseFilter, exportResearchWindow, formatShanghai };
+module.exports = {
+  args,
+  chooseFilter,
+  exportResearchWindow,
+  formatShanghai,
+  inspectRawTradeCoverage,
+};

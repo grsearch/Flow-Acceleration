@@ -1111,27 +1111,37 @@ assert.deepStrictEqual(
     'O_C80_NIGHT0004_STAIR240', 'O_C80_EVENING2024_STAIR240',
     'O_C80_HO0_X60', 'O_C80_HO0_X120',
     'O_C80_HO200_X60', 'O_C80_HO200_X120',
-    'O_C80_HO500_X60', 'O_C80_HO500_X120',
+    'O_C80_HO500_X60', 'O_C80_HO500_X60_RUGX', 'O_C80_HO500_X120',
     'O_C80_HO500_X60_DAY0420', 'O_C80_HO500_X60_OFF2004',
     'O_C80_J40_50_X60', 'O_C80_J40_50_X120',
     'O_C80_J50_60_X60', 'O_C80_J50_60_X120',
     'O_C80_J60_70_X60', 'O_C80_J60_70_X120',
   ],
 );
+const graduationHandoffRugPair = config.graduationAccelerationShadow.entryProfiles
+  .find((profile) => profile.id === 'O_C80_HO500_X60_RUGX');
+assert.strictEqual(graduationHandoffRugPair.pairedBaselineProfileId, 'O_C80_HO500_X60');
+assert.strictEqual(graduationHandoffRugPair.rugGuardMode, 'HIGH_CONFIDENCE_CATASTROPHE');
+assert.deepStrictEqual(graduationHandoffRugPair.capacitySols, [0.1]);
+assert.strictEqual(graduationHandoffRugPair.handoffLiveStrategyId, null);
+assert.strictEqual(config.graduationAccelerationShadow.noExitObservationMs, 600_000);
+assert.strictEqual(config.migrationSecondLegShadow.noExitObservationMs, 600_000);
 const d5StopProfiles = config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('O_C80_D5_B2_S0_NC_H'));
 assert.deepStrictEqual(d5StopProfiles.map((profile) => profile.hardStopPct), [15, 20]);
 assert.ok(d5StopProfiles.every((profile) => !profile.liveStrategyId));
 const relaxedGraduationProfiles = config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.studyGroup?.startsWith('O_C80_'));
-assert.strictEqual(relaxedGraduationProfiles.length, 14);
+assert.strictEqual(relaxedGraduationProfiles.length, 15);
 assert.ok(relaxedGraduationProfiles.every((profile) => (
   !profile.liveStrategyId
   && profile.capacityAwareExit === true
-  && JSON.stringify(profile.capacitySols) === JSON.stringify([0.1, 1])
+  && JSON.stringify(profile.capacitySols) === JSON.stringify(
+    profile.id === 'O_C80_HO500_X60_RUGX' ? [0.1] : [0.1, 1],
+  )
 )));
 assert.strictEqual(relaxedGraduationProfiles
-  .filter((profile) => profile.migrationHandoff).length, 8);
+  .filter((profile) => profile.migrationHandoff).length, 9);
 assert.strictEqual(relaxedGraduationProfiles
   .filter((profile) => profile.entryPriceJumpBand).length, 6);
 const recoveryBridgeProfiles = relaxedGraduationProfiles

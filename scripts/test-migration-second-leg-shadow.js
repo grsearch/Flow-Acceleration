@@ -303,3 +303,47 @@ function testTrailingAndStrictRugPair() {
 }
 
 testTrailingAndStrictRugPair();
+
+function testNoExitKeepsCensoredReturnAndRecordsLateExecutableTrade() {
+  let now = 4_000_000;
+  const store = makeStore();
+  const suite = new MigrationSecondLegShadowSuite({
+    config: {
+      ...config,
+      maxHoldMs: 1_000,
+      noExitObservationMs: 10_000,
+    },
+    store,
+    now: () => now,
+  });
+  suite.start();
+  suite.onSnapshot(snapshot('late-exit-mint', now), trade('late-exit-mint', now));
+  now += 200;
+  suite.observeTrade(trade('late-exit-mint', now));
+  now += 1_000;
+  suite.advanceTime(now);
+  now += 2_201;
+  suite.advanceTime(now);
+  let row = store.db.prepare(`
+    SELECT * FROM migration_second_leg_shadow_positions WHERE mint='late-exit-mint'
+  `).get();
+  assert.equal(row.status, 'NO_EXIT');
+  assert.equal(row.net_return_pct, null);
+  assert.equal(row.late_exit_status, 'PENDING');
+  assert.equal(suite.health().closed, 0, 'NO_EXIT must not be counted as a completed exit');
+  assert.equal(suite.health().noExit, 1);
+  now += 100;
+  suite.observeTrade(trade('late-exit-mint', now, 0.9e-7));
+  row = store.db.prepare(`
+    SELECT * FROM migration_second_leg_shadow_positions WHERE mint='late-exit-mint'
+  `).get();
+  assert.equal(row.status, 'NO_EXIT');
+  assert.equal(row.net_return_pct, null);
+  assert.equal(row.late_exit_status, 'OBSERVED_EXECUTABLE');
+  assert.ok(row.late_exit_after_deadline_ms > 0);
+  assert.ok(Number.isFinite(row.late_exit_net_return_pct));
+  assert.equal(suite.health().lateExitObserved, 1);
+  store.close();
+}
+
+testNoExitKeepsCensoredReturnAndRecordsLateExecutableTrade();

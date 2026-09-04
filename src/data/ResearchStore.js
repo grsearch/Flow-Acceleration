@@ -2079,6 +2079,15 @@ class ResearchStore {
         exit_reason TEXT,
         gross_return_pct REAL,
         net_return_pct REAL,
+        late_exit_status TEXT,
+        late_exit_at INTEGER,
+        late_exit_market TEXT,
+        late_exit_mark_price REAL,
+        late_exit_price REAL,
+        late_exit_impact_pct REAL,
+        late_exit_delay_ms INTEGER,
+        late_exit_after_deadline_ms INTEGER,
+        late_exit_net_return_pct REAL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(cohort_id, episode_id)
@@ -2282,6 +2291,16 @@ class ResearchStore {
         exit_reason TEXT,
         gross_return_pct REAL,
         net_return_pct REAL,
+        rug_guard_json TEXT,
+        late_exit_status TEXT,
+        late_exit_at INTEGER,
+        late_exit_market TEXT,
+        late_exit_mark_price REAL,
+        late_exit_price REAL,
+        late_exit_impact_pct REAL,
+        late_exit_delay_ms INTEGER,
+        late_exit_after_deadline_ms INTEGER,
+        late_exit_net_return_pct REAL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(cohort_id, episode_id)
@@ -2316,6 +2335,44 @@ class ResearchStore {
     if (!graduationAccelerationColumns.has('exit_impact_pct')) {
       this.db.exec(`ALTER TABLE graduation_acceleration_shadow_positions
         ADD COLUMN exit_impact_pct REAL`);
+    }
+    for (const [column, type] of [
+      ['rug_guard_json', 'TEXT'],
+      ['late_exit_status', 'TEXT'],
+      ['late_exit_at', 'INTEGER'],
+      ['late_exit_market', 'TEXT'],
+      ['late_exit_mark_price', 'REAL'],
+      ['late_exit_price', 'REAL'],
+      ['late_exit_impact_pct', 'REAL'],
+      ['late_exit_delay_ms', 'INTEGER'],
+      ['late_exit_after_deadline_ms', 'INTEGER'],
+      ['late_exit_net_return_pct', 'REAL'],
+    ]) {
+      if (!graduationAccelerationColumns.has(column)) {
+        this.db.exec(`ALTER TABLE graduation_acceleration_shadow_positions
+          ADD COLUMN ${column} ${type}`);
+      }
+    }
+
+    const migrationSecondLegColumns = new Set(
+      this.db.prepare('PRAGMA table_info(migration_second_leg_shadow_positions)')
+        .all().map((column) => column.name),
+    );
+    for (const [column, type] of [
+      ['late_exit_status', 'TEXT'],
+      ['late_exit_at', 'INTEGER'],
+      ['late_exit_market', 'TEXT'],
+      ['late_exit_mark_price', 'REAL'],
+      ['late_exit_price', 'REAL'],
+      ['late_exit_impact_pct', 'REAL'],
+      ['late_exit_delay_ms', 'INTEGER'],
+      ['late_exit_after_deadline_ms', 'INTEGER'],
+      ['late_exit_net_return_pct', 'REAL'],
+    ]) {
+      if (!migrationSecondLegColumns.has(column)) {
+        this.db.exec(`ALTER TABLE migration_second_leg_shadow_positions
+          ADD COLUMN ${column} ${type}`);
+      }
     }
 
     this._migrateLiveTradingSchema();
@@ -4340,13 +4397,13 @@ class ResearchStore {
         INSERT OR IGNORE INTO graduation_acceleration_shadow_positions (
           cohort_id, episode_id, entry_profile_id, mint, symbol, creator,
           status, rejection_reason, position_sol, configured_cost_pct,
-          signal_at, signal_price, signal_curve_pct, features_json,
+          signal_at, signal_price, signal_curve_pct, features_json, rug_guard_json,
           entry_target_at, entry_deadline_at, core_weight_pct,
           created_at, updated_at
         ) VALUES (
           @cohortId, @episodeId, @entryProfileId, @mint, @symbol, @creator,
           @status, @rejectionReason, @positionSol, @configuredCostPct,
-          @signalAt, @signalPrice, @signalCurvePct, @featuresJson,
+          @signalAt, @signalPrice, @signalCurvePct, @featuresJson, @rugGuardJson,
           @entryTargetAt, @entryDeadlineAt, @coreWeightPct,
           @createdAt, @updatedAt
         )
@@ -4359,6 +4416,7 @@ class ResearchStore {
         UPDATE graduation_acceleration_shadow_positions SET
           status = COALESCE(@status, status),
           rejection_reason = COALESCE(@rejectionReason, rejection_reason),
+          rug_guard_json = COALESCE(@rugGuardJson, rug_guard_json),
           entry_target_at = COALESCE(@entryTargetAt, entry_target_at),
           entry_deadline_at = COALESCE(@entryDeadlineAt, entry_deadline_at),
           entry_at = COALESCE(@entryAt, entry_at),
@@ -4398,6 +4456,19 @@ class ResearchStore {
           exit_reason = COALESCE(@exitReason, exit_reason),
           gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
           net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          late_exit_status = COALESCE(@lateExitStatus, late_exit_status),
+          late_exit_at = COALESCE(@lateExitAt, late_exit_at),
+          late_exit_market = COALESCE(@lateExitMarket, late_exit_market),
+          late_exit_mark_price = COALESCE(@lateExitMarkPrice, late_exit_mark_price),
+          late_exit_price = COALESCE(@lateExitPrice, late_exit_price),
+          late_exit_impact_pct = COALESCE(@lateExitImpactPct, late_exit_impact_pct),
+          late_exit_delay_ms = COALESCE(@lateExitDelayMs, late_exit_delay_ms),
+          late_exit_after_deadline_ms = COALESCE(
+            @lateExitAfterDeadlineMs, late_exit_after_deadline_ms
+          ),
+          late_exit_net_return_pct = COALESCE(
+            @lateExitNetReturnPct, late_exit_net_return_pct
+          ),
           updated_at = @updatedAt
         WHERE id = @id
       `),
@@ -4407,6 +4478,11 @@ class ResearchStore {
           'PENDING_ENTRY', 'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
         )
         ORDER BY signal_at, id
+      `),
+      recoverableGraduationAccelerationNoExitPositions: this.db.prepare(`
+        SELECT * FROM graduation_acceleration_shadow_positions
+        WHERE status = 'NO_EXIT' AND late_exit_status = 'PENDING'
+        ORDER BY exit_deadline_at, id
       `),
       insertLaunchQualityObservation: this.db.prepare(`
         INSERT OR IGNORE INTO launch_quality_observations (
@@ -4551,6 +4627,11 @@ class ResearchStore {
         WHERE status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
         ORDER BY updated_at, id
       `),
+      recoverableMigrationSecondLegNoExitPositions: this.db.prepare(`
+        SELECT * FROM migration_second_leg_shadow_positions
+        WHERE status = 'NO_EXIT' AND late_exit_status = 'PENDING'
+        ORDER BY exit_deadline_at, id
+      `),
       updateMigrationSecondLegShadowPosition: this.db.prepare(`
         UPDATE migration_second_leg_shadow_positions SET
           status = COALESCE(@status, status),
@@ -4579,6 +4660,19 @@ class ResearchStore {
           exit_reason = COALESCE(@exitReason, exit_reason),
           gross_return_pct = COALESCE(@grossReturnPct, gross_return_pct),
           net_return_pct = COALESCE(@netReturnPct, net_return_pct),
+          late_exit_status = COALESCE(@lateExitStatus, late_exit_status),
+          late_exit_at = COALESCE(@lateExitAt, late_exit_at),
+          late_exit_market = COALESCE(@lateExitMarket, late_exit_market),
+          late_exit_mark_price = COALESCE(@lateExitMarkPrice, late_exit_mark_price),
+          late_exit_price = COALESCE(@lateExitPrice, late_exit_price),
+          late_exit_impact_pct = COALESCE(@lateExitImpactPct, late_exit_impact_pct),
+          late_exit_delay_ms = COALESCE(@lateExitDelayMs, late_exit_delay_ms),
+          late_exit_after_deadline_ms = COALESCE(
+            @lateExitAfterDeadlineMs, late_exit_after_deadline_ms
+          ),
+          late_exit_net_return_pct = COALESCE(
+            @lateExitNetReturnPct, late_exit_net_return_pct
+          ),
           updated_at = @updatedAt
         WHERE id = @id
       `),
@@ -7078,6 +7172,7 @@ class ResearchStore {
       signalPrice: finiteOrNull(position.signalPrice),
       signalCurvePct: finiteOrNull(position.signalCurvePct),
       featuresJson: JSON.stringify(position.features || {}),
+      rugGuardJson: position.rugGuard ? JSON.stringify(position.rugGuard) : null,
       entryTargetAt: Math.trunc(position.entryTargetAt),
       entryDeadlineAt: Math.trunc(position.entryDeadlineAt),
       coreWeightPct: finiteOrNull(position.coreWeightPct) ?? 50,
@@ -7102,6 +7197,7 @@ class ResearchStore {
       id,
       status: value('status'),
       rejectionReason: value('rejectionReason'),
+      rugGuardJson: patch.rugGuard ? JSON.stringify(patch.rugGuard) : null,
       entryTargetAt: value('entryTargetAt'),
       entryDeadlineAt: value('entryDeadlineAt'),
       entryAt: value('entryAt'),
@@ -7134,12 +7230,25 @@ class ResearchStore {
       exitReason: value('exitReason'),
       grossReturnPct: finiteOrNull(value('grossReturnPct')),
       netReturnPct: finiteOrNull(value('netReturnPct')),
+      lateExitStatus: value('lateExitStatus'),
+      lateExitAt: value('lateExitAt'),
+      lateExitMarket: value('lateExitMarket'),
+      lateExitMarkPrice: finiteOrNull(value('lateExitMarkPrice')),
+      lateExitPrice: finiteOrNull(value('lateExitPrice')),
+      lateExitImpactPct: finiteOrNull(value('lateExitImpactPct')),
+      lateExitDelayMs: value('lateExitDelayMs'),
+      lateExitAfterDeadlineMs: value('lateExitAfterDeadlineMs'),
+      lateExitNetReturnPct: finiteOrNull(value('lateExitNetReturnPct')),
       updatedAt: Date.now(),
     });
   }
 
   activeGraduationAccelerationShadowPositions() {
     return this.stmts.activeGraduationAccelerationShadowPositions.all();
+  }
+
+  recoverableGraduationAccelerationNoExitPositions() {
+    return this.stmts.recoverableGraduationAccelerationNoExitPositions.all();
   }
 
   createLaunchQualityObservation(token) {
@@ -7420,6 +7529,10 @@ class ResearchStore {
     return this.stmts.activeMigrationSecondLegShadowPositions.all();
   }
 
+  recoverableMigrationSecondLegNoExitPositions() {
+    return this.stmts.recoverableMigrationSecondLegNoExitPositions.all();
+  }
+
   updateMigrationSecondLegShadowPosition(id, patch = {}) {
     const numberOrNull = (key) => {
       const number = Number(patch[key]);
@@ -7449,6 +7562,15 @@ class ResearchStore {
       exitReason: patch.exitReason || null,
       grossReturnPct: numberOrNull('grossReturnPct'),
       netReturnPct: numberOrNull('netReturnPct'),
+      lateExitStatus: patch.lateExitStatus || null,
+      lateExitAt: numberOrNull('lateExitAt'),
+      lateExitMarket: patch.lateExitMarket || null,
+      lateExitMarkPrice: numberOrNull('lateExitMarkPrice'),
+      lateExitPrice: numberOrNull('lateExitPrice'),
+      lateExitImpactPct: numberOrNull('lateExitImpactPct'),
+      lateExitDelayMs: numberOrNull('lateExitDelayMs'),
+      lateExitAfterDeadlineMs: numberOrNull('lateExitAfterDeadlineMs'),
+      lateExitNetReturnPct: numberOrNull('lateExitNetReturnPct'),
       updatedAt: Date.now(),
     });
   }
@@ -7460,8 +7582,16 @@ class ResearchStore {
         COUNT(DISTINCT mint) AS mints,
         COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(entry_at IS NOT NULL), 0) AS entered,
         COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(late_exit_status = 'OBSERVED_EXECUTABLE'), 0) AS late_exit_observed,
+        COALESCE(SUM(late_exit_status = 'EXPIRED_NO_EXECUTABLE_TRADE'), 0)
+          AS late_exit_expired,
+        AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+          THEN late_exit_after_deadline_ms END) AS average_late_exit_after_deadline_ms,
+        AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+          THEN late_exit_net_return_pct END) AS average_late_exit_net_return_pct,
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(rejection_reason LIKE 'PRE_ENTRY_RUG_%'), 0) AS rug_rejected,
@@ -7489,8 +7619,16 @@ class ResearchStore {
         COUNT(DISTINCT mint) AS mints,
         COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(entry_at IS NOT NULL), 0) AS entered,
         COALESCE(SUM(status = 'CLOSED'), 0) AS resolved,
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(late_exit_status = 'OBSERVED_EXECUTABLE'), 0) AS late_exit_observed,
+        COALESCE(SUM(late_exit_status = 'EXPIRED_NO_EXECUTABLE_TRADE'), 0)
+          AS late_exit_expired,
+        AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+          THEN late_exit_after_deadline_ms END) AS average_late_exit_after_deadline_ms,
+        AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+          THEN late_exit_net_return_pct END) AS average_late_exit_net_return_pct,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(rejection_reason LIKE 'PRE_ENTRY_RUG_%'), 0) AS rug_rejected,
@@ -7545,7 +7683,8 @@ class ResearchStore {
       SELECT b.mint, b.signal_at,
         b.status AS baseline_status, b.net_return_pct AS baseline_return_pct,
         f.status AS filtered_status, f.net_return_pct AS filtered_return_pct,
-        f.rejection_reason AS filtered_reason
+        f.rejection_reason AS filtered_reason,
+        f.rug_guard_json AS filtered_rug_guard_json
       FROM migration_second_leg_shadow_positions b
       JOIN migration_second_leg_shadow_positions f
         ON f.mint = b.mint
@@ -7570,8 +7709,16 @@ class ResearchStore {
         COUNT(DISTINCT mint) AS mints,
         COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
         COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(entry_at IS NOT NULL), 0) AS entered,
         COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(late_exit_status = 'OBSERVED_EXECUTABLE'), 0) AS late_exit_observed,
+        COALESCE(SUM(late_exit_status = 'EXPIRED_NO_EXECUTABLE_TRADE'), 0)
+          AS late_exit_expired,
+        AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+          THEN late_exit_after_deadline_ms END) AS average_late_exit_after_deadline_ms,
+        AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+          THEN late_exit_net_return_pct END) AS average_late_exit_net_return_pct,
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(rejection_reason LIKE 'PRE_ENTRY_RUG_%'), 0) AS rug_rejected,
@@ -8414,8 +8561,17 @@ class ResearchStore {
           COALESCE(SUM(status IN (
             'PENDING_ENTRY', 'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
           )), 0) AS active,
+          COALESCE(SUM(entry_at IS NOT NULL), 0) AS entered,
           COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
           COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          COALESCE(SUM(late_exit_status = 'OBSERVED_EXECUTABLE'), 0)
+            AS late_exit_observed,
+          COALESCE(SUM(late_exit_status = 'EXPIRED_NO_EXECUTABLE_TRADE'), 0)
+            AS late_exit_expired,
+          AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+            THEN late_exit_after_deadline_ms END) AS average_late_exit_after_deadline_ms,
+          AVG(CASE WHEN late_exit_status = 'OBSERVED_EXECUTABLE'
+            THEN late_exit_net_return_pct END) AS average_late_exit_net_return_pct,
           COALESCE(SUM(graduated_at IS NOT NULL), 0) AS graduated,
           AVG(entry_jump_pct) AS average_entry_jump_pct,
           AVG(entry_impact_pct) AS average_entry_impact_pct,
@@ -8469,27 +8625,32 @@ class ResearchStore {
     const cohorts = cacheStats
       ? this._cachedDashboardStats(`graduation-accel:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
-    const rugPairRows = this.db.prepare(`
+    const rugPairStatement = this.db.prepare(`
       SELECT b.mint, b.signal_at,
         b.status AS baseline_status, b.net_return_pct AS baseline_return_pct,
         f.status AS filtered_status, f.net_return_pct AS filtered_return_pct,
-        f.rejection_reason AS filtered_reason
+        f.rejection_reason AS filtered_reason,
+        f.rug_guard_json AS filtered_rug_guard_json
       FROM graduation_acceleration_shadow_positions f
       JOIN graduation_acceleration_shadow_positions b
         ON b.mint = f.mint
         AND b.signal_at = f.signal_at
         AND b.position_sol = f.position_sol
-      WHERE b.entry_profile_id = 'O_C80_P500_STAIR240'
-        AND f.entry_profile_id = 'O_C80_P500_STAIR240_RUGX'
+      WHERE b.entry_profile_id = ? AND f.entry_profile_id = ?
       ORDER BY f.signal_at DESC
-    `).all();
-    const rugComparisons = [buildShadowRugPairComparison({
-      id: 'O_C80_P500_STAIR240_RUGX',
-      label: '低频 O-C80 P500 · STAIR240',
-      baselineProfileId: 'O_C80_P500_STAIR240',
-      filteredProfileId: 'O_C80_P500_STAIR240_RUGX',
-      rows: rugPairRows,
-    })];
+    `);
+    const rugComparisons = [
+      ['O_C80_HO500_X60', 'O_C80_HO500_X60_RUGX', '高频 O-C80 HO500 · 0.1 SOL X60'],
+      ['O_C80_P500_STAIR240', 'O_C80_P500_STAIR240_RUGX', '低频 O-C80 P500 · STAIR240'],
+    ].map(([baselineProfileId, filteredProfileId, label]) => (
+      buildShadowRugPairComparison({
+        id: filteredProfileId,
+        label,
+        baselineProfileId,
+        filteredProfileId,
+        rows: rugPairStatement.all(baselineProfileId, filteredProfileId),
+      })
+    ));
     return { cohorts, positions, rugComparisons };
   }
 

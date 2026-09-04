@@ -1440,7 +1440,7 @@
             ? `仍需积累，已验证拦截 ${number(row.resolvedBlocked)}/30`
             : '部署后开始前向采集';
         const readiness = guardAudit
-          ? `<br><span class="table-note">RUG样本就绪 ${number(guardAudit.sampleReady)}/${number(guardAudit.evaluated)} · 不足 ${number(guardAudit.sampleInsufficient)} · 硬拦截 ${number(guardAudit.hardBlocked)}</span>`
+          ? `<br><span class="table-note">RUG样本就绪 ${number(guardAudit.sampleReady)}/${number(guardAudit.evaluated)} · 不足 ${number(guardAudit.sampleInsufficient)} · 风险命中 ${number(guardAudit.riskFlagged)} · 硬拦截 ${number(guardAudit.hardBlocked)}</span><br><span class="table-note">特征 ${escapeHtml(Object.entries(guardAudit.signatureHits || {}).filter(([, count]) => Number(count) > 0).map(([name, count]) => `${name}:${count}`).join(' · ') || '尚无命中')}</span>`
           : '';
         return `<tr><td><b>${escapeHtml(row.label || row.id)}</b><br><span class="table-note">${escapeHtml(row.baselineProfileId)} → ${escapeHtml(row.filteredProfileId)}${row.exitProfileId ? ` · ${escapeHtml(row.exitProfileId)}` : ''}</span></td><td>${number(row.pairedSignals)} / ${number(row.comparableResolved)}<br><span class="table-note">${escapeHtml(evidence)}</span>${readiness}</td><td>${number(row.blocked)} / ${number(row.resolvedBlocked)}<br><span class="table-note">拦截精度 ${rate(row.blockPrecisionPct)}</span></td><td>${number(row.avoidedRug50)} / ${number(row.avoidedRug80)}</td><td>${number(row.blockedWinners)} / ${number(row.blockedBig50)}<br><span class="table-note">误杀率 ${rate(row.falsePositiveRatePct)}</span></td><td class="${tone(baseline.averageNetReturnPct)}">均值 ${pct(baseline.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(baseline.winRatePct)} · PF ${number(baseline.profitFactor,2)} · RUG50 ${rate(baseline.rug50RatePct)}</span></td><td class="${tone(filtered.averageNetReturnPct)}">均值 ${pct(filtered.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(filtered.winRatePct)} · PF ${number(filtered.profitFactor,2)} · RUG50 ${rate(filtered.rug50RatePct)}</span></td><td class="${tone(row.averageNetReturnLiftPct)}">${pct(row.averageNetReturnLiftPct)}<br><span class="table-note">被拦截按空仓 0% 计</span></td></tr>`;
       }).join('') : '<tr><td colspan="8" class="empty">等待严格配对前向样本。</td></tr>';
@@ -3020,6 +3020,8 @@
         ['评估 / 信号', `${number(runtime.evaluated)} / ${number(runtime.signals)}`, `去重 ${number(runtime.deduplicated)} · 重启回放抑制 ${number(runtime.replayEvaluationsSuppressed)}`],
         ['待入场 / 活动', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)}`, `已开 ${number(runtime.opened)} · 已关 ${number(runtime.closed)}`],
         ['毕业 / Core / Runner', `${number(runtime.graduated)} / ${number(runtime.coreExits)} / ${number(runtime.runnerExits)}`, `NO_EXIT ${number(runtime.noExit)} · 跳价 ${number(runtime.priceJump)}`],
+        ['NO_EXIT 延迟观察', `${number(runtime.lateExitObserved)} 可执行 / ${number(runtime.lateExitPending)} 等待`, `观察超时 ${number(runtime.lateExitObservationExpired)}；不改写原收益`],
+        ['RUG 诊断', `${number(runtime.rugGuardHardBlocked)} 拦截 / ${number(runtime.rugGuardRiskFlagged)} 命中`, `已评估 ${number(runtime.rugGuardEvaluated)} · 样本不足 ${number(runtime.rugGuardSampleInsufficient)}`],
         ['PumpSwap 5秒门槛', `${number(runtime.postMigrationGatePassed)} 通过 / ${number(runtime.postMigrationGateFailed)} 失败`, 'O90 系 Runner 使用；Core 毕业时仍退出50%'],
       ]);
       renderRugPairComparisons(
@@ -3029,14 +3031,17 @@
 
       const cohorts = data.cohorts || [];
       document.querySelector('#graduation-acceleration-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
-        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${number(row.position_sol, 2)} SOL</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}<br><span class="table-note">跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)} · 活动 ${number(row.active)}</span></td><td>${rate(row.migration_rate_pct)} / ${rate(row.exit_coverage_pct)}<br><span class="table-note">毕业 ${number(row.graduated)} · NO_EXIT ${number(row.no_exit)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${pct(row.average_net_return_ex_top1_pct)} / ${number(row.profit_factor, 2)}</td><td>${rate(row.top_3_winner_contribution_pct)} / ${number(row.big_winners)}<br><span class="table-note">最大 ${pct(row.max_winner_pct)}</span></td><td>${pct(row.average_entry_impact_pct)} / ${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}<br><span class="table-note">平均跳价 ${pct(row.average_entry_jump_pct)}</span></td></tr>`
+        `<tr><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${number(row.position_sol, 2)} SOL</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}<br><span class="table-note">入场 ${number(row.entered)} · 跳价 ${number(row.price_jump)} · 无入场 ${number(row.no_entry)} · 活动 ${number(row.active)}</span></td><td>${rate(row.migration_rate_pct)} / ${rate(row.exit_coverage_pct)}<br><span class="table-note">毕业 ${number(row.graduated)} · NO_EXIT ${number(row.no_exit)} · 延迟可卖 ${number(row.late_exit_observed)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${pct(row.average_net_return_ex_top1_pct)} / ${number(row.profit_factor, 2)}</td><td>${rate(row.top_3_winner_contribution_pct)} / ${number(row.big_winners)}<br><span class="table-note">最大 ${pct(row.max_winner_pct)}</span></td><td>${pct(row.average_entry_impact_pct)} / ${pct(row.average_mfe_pct)} / ${pct(row.average_mae_pct)}<br><span class="table-note">延迟退出 ${age(row.average_late_exit_after_deadline_ms)} · ${pct(row.average_late_exit_net_return_pct)}</span></td></tr>`
       )).join('') : '<tr><td colspan="8" class="empty">等待新的毕业加速信号；旧 I 组数据不会混入这里</td></tr>';
 
       const rows = data.positions || [];
       document.querySelector('#graduation-acceleration-position-rows').innerHTML = rows.length ? rows.map(row => {
         let features = {};
         try { features = JSON.parse(row.features_json || '{}'); } catch (_) { features = {}; }
-        const reason = row.exit_reason || row.rejection_reason || '—';
+        const lateExit = row.late_exit_status === 'OBSERVED_EXECUTABLE'
+          ? ` · 延迟可卖 +${age(row.late_exit_after_deadline_ms)} / ${pct(row.late_exit_net_return_pct)}`
+          : row.late_exit_status === 'PENDING' ? ' · 延迟观察中' : '';
+        const reason = `${row.exit_reason || row.rejection_reason || '—'}${lateExit}`;
         const prices = `${number(row.signal_price, 10)} / ${number(row.entry_price, 10)} / ${number(row.core_exit_price, 10)} / ${number(row.exit_price, 10)}`;
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(profileLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${number(row.position_sol, 2)} SOL · ${statusChip(row.status)}</span></td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.symbol || '')}</span></td><td>${pct(row.signal_curve_pct)} / ${number(features.netFlowSol, 2)} SOL / ${number(features.buyers)}<br><span class="table-note">ΔCurve ${pct(features.curveDeltaPct)} · Sell ${number(features.sellTx)}</span></td><td>${prices}</td><td>${pct(row.entry_impact_pct)} / ${pct(row.entry_jump_pct)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${row.graduated_at ? dateTime(row.graduated_at) : '未毕业'} / ${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(reason)}</td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">暂无 Shadow O 模拟仓位</td></tr>';
@@ -3133,10 +3138,11 @@
         || activeCohorts[0] || {};
       renderMetricGroups('#m2f-shadow-metrics', [
         ['运行模式', shadowRuntime.enabled ? 'PMO STRICT PAIRS' : '关闭', `${number(activeCohorts.length)} 个前向 cohort · 永不签名或发送交易`],
-        ['信号 / Mint', `${number(shadowStats.signals)} / ${number(shadowStats.mints)}`, `待入场 ${number(shadowStats.pending_entries)} · 活动 ${number(shadowStats.active_positions)}`],
+        ['信号 / Mint', `${number(shadowStats.signals)} / ${number(shadowStats.mints)}`, `已入场 ${number(shadowStats.entered)} · 待入场 ${number(shadowStats.pending_entries)} · 活动 ${number(shadowStats.active_positions)}`],
         ['完成 / 胜率', `${number(shadowStats.resolved)} / ${pct(shadowStats.win_rate_pct)}`, `已关 ${number(shadowStats.closed_positions)} · NO_EXIT ${number(shadowStats.no_exit)}`],
         ['平均净收益', pct(shadowStats.average_net_return_pct), `PF ${number(shadowStats.profit_factor,2)} · 最大赢家 ${pct(shadowStats.maximum_winner_pct)}`],
         ['RUGX 拦截', number(shadowStats.rug_rejected), '仅三个高置信灾难特征硬拦截；BASE 只打标签'],
+        ['NO_EXIT 延迟观察', `${number(shadowStats.late_exit_observed)} 可执行 / ${number(shadowRuntime.lateExitPending)} 等待`, `平均超期 ${age(shadowStats.average_late_exit_after_deadline_ms)} · 模拟净收益 ${pct(shadowStats.average_late_exit_net_return_pct)}`],
         ['价格跳变', number(shadowStats.price_jump), `200ms延迟 · 上冲≤${pct(shadowStrategy.maxEntryPriceJumpPct)}`],
         ['模拟仓位', `${number(shadowStrategy.positionSizeSol,2)} SOL`, `成本 ${pct(shadowStrategy.configuredCostPct)} · 容量冲击计入`],
         ['市场状态（仅Shadow）', escapeHtml(marketRegime.state || 'INSUFFICIENT'), `${number(marketRegime.sampleMints)} Mint · 正收益 ${pct(marketRegime.positiveReturnRatePct)} · RUG ${pct(marketRegime.rugCollapseRatePct)}`],
@@ -3150,7 +3156,7 @@
       document.querySelector('#m2f-shadow-cohort-rows').innerHTML = shadowCohorts.length
         ? shadowCohorts.map(row => {
           const rejects = Number(row.no_entry || 0) + Number(row.price_jump || 0);
-          return `<tr><td><b>${escapeHtml(row.cohort_id || '—')}</b></td><td>${number(row.signals)} / ${number(row.mints)}</td><td>${number(row.resolved)} / ${pct(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${number(row.profit_factor,2)}</td><td class="${tone(row.maximum_winner_pct)}">${pct(row.maximum_winner_pct)}</td><td>${number(row.pending_entries)} / ${number(row.active_positions)}</td><td>${number(rejects)}<br><span class="table-note">RUG ${number(row.rug_rejected)} · NO_EXIT ${number(row.no_exit)}</span></td></tr>`;
+          return `<tr><td><b>${escapeHtml(row.cohort_id || '—')}</b></td><td>${number(row.signals)} / ${number(row.mints)}<br><span class="table-note">入场 ${number(row.entered)}</span></td><td>${number(row.resolved)} / ${pct(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${number(row.profit_factor,2)}</td><td class="${tone(row.maximum_winner_pct)}">${pct(row.maximum_winner_pct)}</td><td>${number(row.pending_entries)} / ${number(row.active_positions)}</td><td>${number(rejects)}<br><span class="table-note">RUG ${number(row.rug_rejected)} · NO_EXIT ${number(row.no_exit)} · 延迟可卖 ${number(row.late_exit_observed)}</span></td></tr>`;
         }).join('')
         : '<tr><td colspan="7" class="empty">等待新的 PMO 前向样本；原 M2F/LPS 历史分组继续保留</td></tr>';
 
@@ -3163,7 +3169,10 @@
         ? shadowPositions.map(row => {
           const features = row.features || {};
           const hold = row.hold_ms != null ? age(row.hold_ms) : '—';
-          return `<tr><td>${dateTime(row.signal_at)}<br><span class="table-note">${escapeHtml(row.cohort_id || '')}</span></td><td>${statusChip(row.status)}<br>${mintLink(row.mint)}</td><td>${age(row.signal_age_ms)}<br><span class="table-note">峰值 ${pct(features.peakImpulsePct)} · 回撤 ${pct(features.pullbackPct)} · 反弹 ${pct(features.reboundPct)}</span></td><td>${number(features.netFlow3s,2)} / ${number(features.netFlow10s,2)} SOL<br><span class="table-note">${number(features.buyers3s)} / ${number(features.buyers10s)} Buyers</span></td><td>Top1 ${pct(features.largestBuyerShare10sPct)}<br><span class="table-note">DI ${number(features.holderDiffusionIndex)} · 1SOL冲击 ${pct(features.estimatedImpact1SolPct)} · MRG ${escapeHtml(features.marketRegime?.state || '—')}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)} · MAE ${pct(row.max_adverse_return_pct)}</span></td><td>${hold}<br><span class="table-note">${escapeHtml(row.exit_reason || row.rejection_reason || '—')}</span></td></tr>`;
+          const lateExit = row.late_exit_status === 'OBSERVED_EXECUTABLE'
+            ? ` · 延迟可卖 +${age(row.late_exit_after_deadline_ms)} / ${pct(row.late_exit_net_return_pct)}`
+            : row.late_exit_status === 'PENDING' ? ' · 延迟观察中' : '';
+          return `<tr><td>${dateTime(row.signal_at)}<br><span class="table-note">${escapeHtml(row.cohort_id || '')}</span></td><td>${statusChip(row.status)}<br>${mintLink(row.mint)}</td><td>${age(row.signal_age_ms)}<br><span class="table-note">峰值 ${pct(features.peakImpulsePct)} · 回撤 ${pct(features.pullbackPct)} · 反弹 ${pct(features.reboundPct)}</span></td><td>${number(features.netFlow3s,2)} / ${number(features.netFlow10s,2)} SOL<br><span class="table-note">${number(features.buyers3s)} / ${number(features.buyers10s)} Buyers</span></td><td>Top1 ${pct(features.largestBuyerShare10sPct)}<br><span class="table-note">DI ${number(features.holderDiffusionIndex)} · 1SOL冲击 ${pct(features.estimatedImpact1SolPct)} · MRG ${escapeHtml(features.marketRegime?.state || '—')}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)} · MAE ${pct(row.max_adverse_return_pct)}</span></td><td>${hold}<br><span class="table-note">${escapeHtml(row.exit_reason || row.rejection_reason || '—')}${lateExit}</span></td></tr>`;
         }).join('')
         : '<tr><td colspan="8" class="empty">等待 PMO 的毕业后公开资金流信号；不会影响实盘策略</td></tr>';
 

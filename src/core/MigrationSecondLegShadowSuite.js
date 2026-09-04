@@ -205,6 +205,7 @@ class MigrationSecondLegShadowSuite {
     })]));
     this.pendingEntries = new Map();
     this.positions = new Map();
+    this.noExitWatches = new Map();
     this.rowsByMint = new Map();
     this.confirmationByCohort = new Map(this.cohorts
       .filter((cohort) => cohort.confirmationMode !== 'IMMEDIATE')
@@ -220,6 +221,9 @@ class MigrationSecondLegShadowSuite {
       opened: 0,
       closed: 0,
       noExit: 0,
+      noExitWatchRecovered: 0,
+      lateExitObserved: 0,
+      lateExitObservationExpired: 0,
       dataError: 0,
       lastActionAt: null,
       lastError: null,
@@ -233,6 +237,22 @@ class MigrationSecondLegShadowSuite {
       if (position.status === STATUS.PENDING_ENTRY) this.pendingEntries.set(position.id, position);
       else this.positions.set(position.id, position);
       this._index(position);
+    }
+    const startupAt = this.now();
+    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
+    for (const row of this.store.recoverableMigrationSecondLegNoExitPositions()) {
+      const position = restore(row);
+      if (!(position.exitDeadlineAt > 0)
+        || startupAt > position.exitDeadlineAt + noExitObservationMs) {
+        this.store.updateMigrationSecondLegShadowPosition(position.id, {
+          lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
+        });
+        this.metrics.lateExitObservationExpired += 1;
+        continue;
+      }
+      this.noExitWatches.set(position.id, position);
+      this._index(position);
+      this.metrics.noExitWatchRecovered += 1;
     }
     this.advanceTime(this.now());
   }
@@ -266,6 +286,7 @@ class MigrationSecondLegShadowSuite {
       strictRugPairs: true,
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
+      lateExitPending: this.noExitWatches.size,
       strategy: {
         name: this.config.strategyName
           || 'Late Post-Migration Stabilization LPS',
@@ -400,6 +421,11 @@ class MigrationSecondLegShadowSuite {
     if (!this.config.enabled || trade?.market !== 'PUMP_AMM' || !trade?.mint
       || !(price > 0) || !(timestampMs > 0)) return;
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
+      const noExitWatch = this.noExitWatches.get(id);
+      if (noExitWatch) {
+        this._observeLateExit(noExitWatch, trade, price);
+        continue;
+      }
       const position = this.pendingEntries.get(id) || this.positions.get(id);
       if (!position) continue;
       if (position.entryPrice > 0 && this._priceScaleDiscontinuity(position, price)) {
@@ -467,6 +493,16 @@ class MigrationSecondLegShadowSuite {
       if (position.status === STATUS.EXIT_PENDING && now > position.exitDeadlineAt) {
         this._markNoExit(position);
       }
+    }
+    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
+    for (const position of [...this.noExitWatches.values()]) {
+      if (now <= position.exitDeadlineAt + noExitObservationMs) continue;
+      this.store.updateMigrationSecondLegShadowPosition(position.id, {
+        lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
+      });
+      this.noExitWatches.delete(position.id);
+      this._unindex(position);
+      this.metrics.lateExitObservationExpired += 1;
     }
   }
 
@@ -685,16 +721,49 @@ class MigrationSecondLegShadowSuite {
     this.metrics.lastActionAt = this.now();
   }
 
+  _observeLateExit(position, trade, price) {
+    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
+    if (trade.market !== 'PUMP_AMM'
+      || trade.timestampMs <= position.exitDeadlineAt
+      || trade.timestampMs > position.exitDeadlineAt + noExitObservationMs) return;
+    if (position.entryPrice > 0 && this._priceScaleDiscontinuity(position, price)) return;
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const execution = executableSell(
+      trade,
+      position.positionSol / position.entryPrice,
+      price,
+      { rugMarkReturnPct: markReturnPct },
+    );
+    if (!execution.available) return;
+    const lateExitPrice = execution.price;
+    const executableReturnPct = ((lateExitPrice / position.entryPrice) - 1) * 100;
+    this.store.updateMigrationSecondLegShadowPosition(position.id, {
+      lateExitStatus: 'OBSERVED_EXECUTABLE',
+      lateExitAt: trade.timestampMs,
+      lateExitMarket: trade.market,
+      lateExitMarkPrice: price,
+      lateExitPrice,
+      lateExitImpactPct: execution.impactPct,
+      lateExitDelayMs: Math.max(0, trade.timestampMs - position.exitTargetAt),
+      lateExitAfterDeadlineMs: Math.max(0, trade.timestampMs - position.exitDeadlineAt),
+      lateExitNetReturnPct: executableReturnPct - position.configuredCostPct,
+    });
+    this.noExitWatches.delete(position.id);
+    this._unindex(position);
+    this.metrics.lateExitObserved += 1;
+    this.metrics.lastActionAt = this.now();
+  }
+
   _markNoExit(position) {
     this.store.updateMigrationSecondLegShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
       exitReason: position.exitReason || 'NO_EXIT',
       maxFavorableReturnPct: position.maxFavorableReturnPct,
       maxAdverseReturnPct: position.maxAdverseReturnPct,
+      lateExitStatus: 'PENDING',
     });
     this.positions.delete(position.id);
-    this._unindex(position);
-    this.metrics.closed += 1;
+    this.noExitWatches.set(position.id, position);
     this.metrics.noExit += 1;
   }
 

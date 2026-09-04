@@ -167,6 +167,7 @@ class GraduationAccelerationShadowSuite {
     this.states = new Map();
     this.pendingEntries = new Map();
     this.positions = new Map();
+    this.noExitWatches = new Map();
     this.rowsByMint = new Map();
     this.graduatedMints = new Set();
     this.postMigrationTrades = new Map();
@@ -193,6 +194,14 @@ class GraduationAccelerationShadowSuite {
       runnerExits: 0,
       closed: 0,
       noExit: 0,
+      noExitWatchRecovered: 0,
+      lateExitObserved: 0,
+      lateExitObservationExpired: 0,
+      rugGuardEvaluated: 0,
+      rugGuardSampleInsufficient: 0,
+      rugGuardRiskFlagged: 0,
+      rugGuardHardBlocked: 0,
+      rugGuardSignatureHits: {},
       persistenceArmed: 0,
       persistenceRejected: 0,
       lastActionAt: null,
@@ -210,6 +219,21 @@ class GraduationAccelerationShadowSuite {
       this._index(position);
     }
     const startupAt = this.now();
+    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
+    for (const row of this.store.recoverableGraduationAccelerationNoExitPositions()) {
+      const position = rowPosition(row);
+      if (!(position.exitDeadlineAt > 0)
+        || startupAt > position.exitDeadlineAt + noExitObservationMs) {
+        this.store.updateGraduationAccelerationShadowPosition(position.id, {
+          lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
+        });
+        this.metrics.lateExitObservationExpired += 1;
+        continue;
+      }
+      this.noExitWatches.set(position.id, position);
+      this._index(position);
+      this.metrics.noExitWatchRecovered += 1;
+    }
     const postMigrationSince = startupAt - Math.max(this.config.maxPostGraduationHoldMs, 30_000);
     for (const trade of this.store.recentAmmTrades(postMigrationSince)) {
       this._recordPostMigrationTrade(trade);
@@ -248,6 +272,7 @@ class GraduationAccelerationShadowSuite {
       sendsTransactions: false,
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
+      lateExitPending: this.noExitWatches.size,
       trackedMints: this.trackedMints().length,
       entryProfiles: [...this.entryProfiles.values()],
       profileDiagnostics: [...this.entryProfiles.keys()].map((profileId) => ({
@@ -454,6 +479,16 @@ class GraduationAccelerationShadowSuite {
             'MAX_POST_GRAD_RUNNER', 'PUMP_AMM');
         }
       }
+    }
+    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
+    for (const position of [...this.noExitWatches.values()]) {
+      if (now <= position.exitDeadlineAt + noExitObservationMs) continue;
+      this.store.updateGraduationAccelerationShadowPosition(position.id, {
+        lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
+      });
+      this.noExitWatches.delete(position.id);
+      this._unindex(position);
+      this.metrics.lateExitObservationExpired += 1;
     }
     for (const [mint, state] of this.states) {
       if (now - finite(state.lastAt, now) > this.config.maxPreGraduationHoldMs + 60_000) {
@@ -723,6 +758,11 @@ class GraduationAccelerationShadowSuite {
 
   _observePositions(trade, price) {
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
+      const noExitWatch = this.noExitWatches.get(id);
+      if (noExitWatch) {
+        this._observeLateExit(noExitWatch, trade, price);
+        continue;
+      }
       const pending = this.pendingEntries.get(id);
       if (pending) {
         const profile = this.entryProfiles.get(pending.entryProfileId);
@@ -747,10 +787,12 @@ class GraduationAccelerationShadowSuite {
             policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
           } : {}),
         });
+        this._recordRugGuard(rugGuard);
         if (rugGuard.blocked) {
           this.store.updateGraduationAccelerationShadowPosition(id, {
             status: STATUS.NO_ENTRY,
             rejectionReason: rugGuard.reason || 'PRE_ENTRY_RUG_RISK',
+            rugGuard,
           });
           this.pendingEntries.delete(id);
           this._unindex(pending);
@@ -771,6 +813,7 @@ class GraduationAccelerationShadowSuite {
           this.metrics.relaxedJumpBandRejected += 1;
           continue;
         }
+        this.store.updateGraduationAccelerationShadowPosition(id, { rugGuard });
         const maxEntryPriceJumpPct = jumpBand
           ? finite(jumpBand.maxPct, this.config.maxEntryPriceJumpPct)
           : finite(profile?.maxEntryPriceJumpPct, this.config.maxEntryPriceJumpPct);
@@ -1010,15 +1053,29 @@ class GraduationAccelerationShadowSuite {
       this.metrics.migrationHandoffRejected += 1;
       return;
     }
+    const selectiveRugPair = profile?.rugGuardMode === 'HIGH_CONFIDENCE_CATASTROPHE';
     const rugGuard = evaluateUniversalRugGuard(this.store, {
       strategyId: `GRADUATION_ACCEL:${pending.cohortId}`,
       mint: pending.mint,
       timestampMs: trade.timestampMs,
+      source: 'SHADOW',
+      market: 'PUMP_AMM',
+      lifecycleStage: 'AMM_EARLY',
+      lifecycleAgeMs: trade.timestampMs - pending.graduatedAt,
+      enforcementMode: selectiveRugPair ? 'HARD_BLOCK' : 'LABEL_ONLY',
+      ...(selectiveRugPair ? {
+        hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+        policyReason: 'SHADOW_POST_GRAD_CATASTROPHE_PAIRED',
+      } : {
+        policyReason: 'SHADOW_POST_GRAD_BASELINE_LABEL_ONLY',
+      }),
     });
+    this._recordRugGuard(rugGuard);
     if (rugGuard.blocked) {
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
         status: STATUS.NO_ENTRY,
-        rejectionReason: 'PRE_ENTRY_RUG_RISK',
+        rejectionReason: rugGuard.reason || 'PRE_ENTRY_RUG_RISK',
+        rugGuard,
       });
       this.pendingEntries.delete(pending.id);
       this._unindex(pending);
@@ -1026,6 +1083,7 @@ class GraduationAccelerationShadowSuite {
       this.metrics.migrationHandoffRejected += 1;
       return;
     }
+    this.store.updateGraduationAccelerationShadowPosition(pending.id, { rugGuard });
     const execution = ammBuyAveragePrice(trade, pending.positionSol, price);
     if (!execution.available) {
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
@@ -1384,6 +1442,59 @@ class GraduationAccelerationShadowSuite {
     this.metrics.lastActionAt = this.now();
   }
 
+  _recordRugGuard(rugGuard) {
+    if (!rugGuard) return;
+    this.metrics.rugGuardEvaluated += 1;
+    if (!rugGuard.sampleReady) this.metrics.rugGuardSampleInsufficient += 1;
+    if (rugGuard.riskFlagged || rugGuard.flagged) this.metrics.rugGuardRiskFlagged += 1;
+    if (rugGuard.blocked) this.metrics.rugGuardHardBlocked += 1;
+    for (const [signature, matched] of Object.entries(rugGuard.signatures || {})) {
+      if (!matched) continue;
+      this.metrics.rugGuardSignatureHits[signature] =
+        (this.metrics.rugGuardSignatureHits[signature] || 0) + 1;
+    }
+  }
+
+  _observeLateExit(position, trade, price) {
+    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
+    if (trade.market !== position.exitTargetMarket
+      || trade.timestampMs <= position.exitDeadlineAt
+      || trade.timestampMs > position.exitDeadlineAt + noExitObservationMs) return;
+    const coreWeight = position.coreExitPrice ? position.coreWeightPct / 100 : 0;
+    const runnerWeight = 1 - coreWeight;
+    const markReturnPct = ((price / position.entryPrice) - 1) * 100;
+    const execution = executableSell(
+      trade,
+      position.tokenUnits * runnerWeight,
+      price,
+      { rugMarkReturnPct: markReturnPct },
+    );
+    // This diagnostic is specifically the first demonstrably executable trade.
+    // A conservative zero quote caused by absent reserves remains unobserved.
+    if (!execution.available) return;
+    const lateExitPrice = execution.price;
+    const proceeds = position.tokenUnits
+      * ((position.coreExitPrice || 0) * coreWeight + lateExitPrice * runnerWeight);
+    const grossReturnPct = ((proceeds / position.positionSol) - 1) * 100;
+    const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: position.positionSol });
+    const extraExitCostPct = position.coreExitPrice ? costs.fixedCostPct : 0;
+    this.store.updateGraduationAccelerationShadowPosition(position.id, {
+      lateExitStatus: 'OBSERVED_EXECUTABLE',
+      lateExitAt: trade.timestampMs,
+      lateExitMarket: trade.market,
+      lateExitMarkPrice: price,
+      lateExitPrice,
+      lateExitImpactPct: execution.impactPct,
+      lateExitDelayMs: Math.max(0, trade.timestampMs - position.exitTargetAt),
+      lateExitAfterDeadlineMs: Math.max(0, trade.timestampMs - position.exitDeadlineAt),
+      lateExitNetReturnPct: grossReturnPct - position.configuredCostPct - extraExitCostPct,
+    });
+    this.noExitWatches.delete(position.id);
+    this._unindex(position);
+    this.metrics.lateExitObserved += 1;
+    this.metrics.lastActionAt = this.now();
+  }
+
   _markNoExit(position, reason) {
     this.store.updateGraduationAccelerationShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
@@ -1391,9 +1502,10 @@ class GraduationAccelerationShadowSuite {
       exitReason: position.exitReason || reason,
       grossReturnPct: null,
       netReturnPct: null,
+      lateExitStatus: 'PENDING',
     });
     this.positions.delete(position.id);
-    this._unindex(position);
+    this.noExitWatches.set(position.id, position);
     this.metrics.noExit += 1;
     this.metrics.lastActionAt = this.now();
   }
