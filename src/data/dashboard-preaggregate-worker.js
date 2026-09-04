@@ -47,6 +47,17 @@ function createReadStore(db, sourceDbPath) {
   store.metrics = {};
   store.rawBuffer = [];
   store.dashboardStatsCache = new Map();
+  // Dashboard methods normally run on a fully constructed ResearchStore.
+  // The read worker deliberately skips the write-side constructor, so prepare
+  // the small read-only statement set used by liveTradingDashboard here.
+  store.stmts = {
+    activeLiveMintEntryLocks: db.prepare(`
+      SELECT * FROM live_mint_entry_locks
+      WHERE status='ACTIVE'
+      ORDER BY COALESCE(last_checked_at, 0), first_seen_at
+      LIMIT ?
+    `),
+  };
   return store;
 }
 
@@ -160,10 +171,10 @@ function fastRefresh() {
     lastError: null,
     updatedAt: startedAt,
   });
-  const tasks = [
-    ['overview', () => store.overview(Date.now(), 0)],
-    ['recent-signals', () => store.recentSignals(200)],
-  ];
+  // Materialize the selected-strategy payloads first. On a large historical
+  // database the overview can take longer, but that must not leave Live
+  // Trading displaying an incomplete response after the HTTP server is ready.
+  const tasks = [];
   for (const strategyId of workerData.liveStrategyIds || []) {
     tasks.push([snapshotKey('live-trading', strategyId), () => (
         store.liveTradingDashboard({
@@ -174,6 +185,10 @@ function fastRefresh() {
         })
       )]);
   }
+  tasks.push(
+    ['overview', () => store.overview(Date.now(), 0)],
+    ['recent-signals', () => store.recentSignals(200)],
+  );
   const { snapshots, lastError } = runTasks(tasks);
   const completedAt = Date.now();
   updateState.run({

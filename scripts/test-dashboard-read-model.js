@@ -76,7 +76,7 @@ async function main() {
     },
     storage,
     smartWallets: ['dashboard-wallet'],
-    liveStrategies: [],
+    liveStrategies: [{ id: 'dashboard-live-strategy' }],
     smartWalletRegistryConfig: registryConfig,
     smartWalletConsensusOverlayConfig: overlayConfig,
   });
@@ -87,6 +87,7 @@ async function main() {
     const shadow = await waitFor(() => model.read('shadow:primary'));
     const registry = await waitFor(() => model.read('smart-wallet-registry'));
     const overlay = await waitFor(() => model.read('smart-consensus-overlay'));
+    const live = await waitFor(() => model.read('live-trading:dashboard-live-strategy'));
     assert.ok(overview, 'overview must be preaggregated into the read model');
     assert.strictEqual(overview.value.rawTradesToday, 1);
     assert.ok(wallets, 'wallet statistics must be preaggregated into the read model');
@@ -97,8 +98,16 @@ async function main() {
       `registry dashboard must be served from the read model: ${JSON.stringify(model.health())}`,
     );
     assert.ok(overlay, 'consensus overlay must be served from the read model');
+    assert.ok(
+      live,
+      `live strategy statistics must be preaggregated: ${JSON.stringify(model.health())}`,
+    );
+    assert.strictEqual(live.value.strategyId, 'dashboard-live-strategy');
+    assert.strictEqual(live.value.stats.decisions, 0);
+    assert.strictEqual(live.value.stats.positions, 0);
     assert.notStrictEqual(path.resolve(dbPath), path.resolve(dashboardDbPath));
     assert.strictEqual(model.health().mode, 'INDEPENDENT_READ_MODEL');
+    assert.strictEqual(model.health().lastFastError, null);
   } finally {
     await model.stop();
     store.close();

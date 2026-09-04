@@ -1878,7 +1878,9 @@
       if (isCyaOrganicBurstLive) venueCopy = '毕业前使用 Bonding Curve 买入；按当前所在市场执行分批或整仓退出';
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>${venueCopy}</b><br>单笔 ${number(strategy.positionSizeSol,4)} SOL；Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究。`;
 
-      const matchRate = stats.decisions > 0 ? stats.matched / stats.decisions * 100 : null;
+      const decisionCount = Number(stats.decisions) || 0;
+      const matchedCount = Number(stats.matched) || 0;
+      const matchRate = decisionCount > 0 ? matchedCount / decisionCount * 100 : null;
       const source = data.sourceDiagnostics || {};
       const sourceMetrics = source.kind === 'MIGRATED_DROP_REBOUND' ? [
         ['源头反弹匹配', number(source.matchedRebounds), `形成 Shadow 信号 ${number(source.emittedSignals)}`],
@@ -1893,13 +1895,13 @@
       ] : [];
       const metrics = [
         ...sourceMetrics,
-        ['策略判定', stats.decisions, `命中率 ${rate(matchRate)}`],
-        ['规则命中', stats.matched, `规则拒绝 ${number(stats.rule_rejected)}`],
-        ['仓位记录', stats.positions, `活动 ${number(stats.active_positions)}`],
-        ['已关闭仓位', stats.closed_positions, `链上已结算 ${number(stats.settled_closed_positions)}`],
-        ['提交前已毕业', stats.pre_submit_migrated_positions, '未签名、未花费 SOL'],
-        ['提交前保护拒绝', stats.pre_submit_guard_rejected_positions, '追价 / 余额 / 自身冲击保护'],
-        ['真实入场失败', stats.execution_entry_failed_positions, '已进入交易执行阶段'],
+        ['策略判定', number(stats.decisions), `命中率 ${rate(matchRate)}`],
+        ['规则命中', number(stats.matched), `规则拒绝 ${number(stats.rule_rejected)}`],
+        ['仓位记录', number(stats.positions), `活动 ${number(stats.active_positions)}`],
+        ['已关闭仓位', number(stats.closed_positions), `链上已结算 ${number(stats.settled_closed_positions)}`],
+        ['提交前已毕业', number(stats.pre_submit_migrated_positions), '未签名、未花费 SOL'],
+        ['提交前保护拒绝', number(stats.pre_submit_guard_rejected_positions), '追价 / 余额 / 自身冲击保护'],
+        ['真实入场失败', number(stats.execution_entry_failed_positions), '已进入交易执行阶段'],
         ['链上实际胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
         ['平均实际收益', pct(stats.average_realized_return_pct), `累计 ${number(stats.total_realized_pnl_sol,6)} SOL`],
         ['累计开仓规模', `${number(stats.deployed_sol,4)} SOL`, `平均持仓 ${age(stats.average_hold_ms)}`],
@@ -3641,7 +3643,13 @@
       if (context.generation !== refreshGeneration || context.viewKey !== activeViewKey()) return;
       render(data);
       strategyViewCache.set(context.viewKey, { data, render, storedAt: Date.now() });
-      if (activeTabId === 'live-trading') setStrategyLoadStatus();
+      if (activeTabId === 'live-trading') {
+        if (data.dashboardSnapshot?.status === 'PREPARING') {
+          setStrategyLoadStatus('历史统计正在后台生成；实时策略状态已可用。', 'muted');
+        } else {
+          setStrategyLoadStatus();
+        }
+      }
     }
 
     async function refresh(force = false) {

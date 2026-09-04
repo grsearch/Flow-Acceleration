@@ -21,6 +21,10 @@ async function main() {
   )?.[0] || '';
   assert.ok(liveRenderer, 'live trading renderer should be present');
   assert.ok(
+    !liveRenderer.includes("['策略判定', stats.decisions"),
+    'live metrics must format absent snapshot fields instead of rendering undefined',
+  );
+  assert.ok(
     !liveRenderer.includes('rangeScalper'),
     'live renderer must not reference health-only Range Scalper state',
   );

@@ -70,6 +70,9 @@ class DashboardReadModel {
       lastFastRefreshMs: null,
       lastShadowRefreshMs: null,
       lastSlowRefreshMs: null,
+      lastFastError: null,
+      lastShadowError: null,
+      lastSlowError: null,
       refreshErrors: 0,
       cacheHits: 0,
       cacheMisses: 0,
@@ -121,13 +124,19 @@ class DashboardReadModel {
           : (message.tier === 'SHADOW' ? 'Shadow' : 'Fast');
         this.metrics[`last${key}RefreshAt`] = message.completedAt;
         this.metrics[`last${key}RefreshMs`] = message.durationMs;
+        this.metrics[`last${key}Error`] = message.ok ? null : message.error;
         if (!message.ok) {
           this.metrics.refreshErrors += 1;
-          this.metrics.lastError = message.error;
         } else {
-          this.metrics.lastError = null;
           for (const snapshot of message.snapshots || []) this.memory.delete(snapshot.key);
         }
+        // A successful refresh in one tier must not hide an active failure in
+        // another tier (the missing Live Trading snapshots were masked this
+        // way by successful Shadow refreshes).
+        this.metrics.lastError = this.metrics.lastFastError
+          || this.metrics.lastShadowError
+          || this.metrics.lastSlowError
+          || null;
       }
     });
     worker.on('error', (error) => {

@@ -27,6 +27,51 @@ function databaseOperational(status) {
   return !['LOCKED', 'DEGRADED', 'DATA_LOSS'].includes(String(status || ''));
 }
 
+const EMPTY_LIVE_TRADING_STATS = Object.freeze({
+  decisions: 0,
+  matched: 0,
+  rule_rejected: 0,
+  matched_disabled: 0,
+  risk_rejected: 0,
+  positions: 0,
+  active_positions: 0,
+  closed_positions: 0,
+  entry_failed_positions: 0,
+  pre_submit_migrated_positions: 0,
+  pre_submit_guard_rejected_positions: 0,
+  execution_entry_failed_positions: 0,
+  exit_failed_positions: 0,
+  deployed_sol: 0,
+  average_hold_ms: null,
+  priced_closed_positions: 0,
+  settled_closed_positions: 0,
+  wins: 0,
+  total_realized_pnl_sol: 0,
+  average_realized_return_pct: null,
+  average_gross_return_pct: null,
+  orders: 0,
+  confirmed_orders: 0,
+  failed_orders: 0,
+  unknown_orders: 0,
+  win_rate_pct: null,
+});
+
+function normalizedLiveTradingDashboard(value, strategyId) {
+  const dashboard = value && typeof value === 'object' ? value : {};
+  return {
+    ...dashboard,
+    stats: {
+      ...EMPTY_LIVE_TRADING_STATS,
+      ...(dashboard.stats && typeof dashboard.stats === 'object' ? dashboard.stats : {}),
+    },
+    positions: Array.isArray(dashboard.positions) ? dashboard.positions : [],
+    orders: Array.isArray(dashboard.orders) ? dashboard.orders : [],
+    decisions: Array.isArray(dashboard.decisions) ? dashboard.decisions : [],
+    entryLocks: Array.isArray(dashboard.entryLocks) ? dashboard.entryLocks : [],
+    strategyId: dashboard.strategyId || strategyId || null,
+  };
+}
+
 function loadRetentionMaintenance(dbPath) {
   if (!dbPath || dbPath === ':memory:') return null;
   const reportPath = path.join(
@@ -490,16 +535,17 @@ class ResearchServer {
       const cached = strategyId
         ? this.dashboardReadModel.read(`live-trading:${strategyId}`)
         : null;
-      const databaseDashboard = this.dashboardReadModel.enabled
-        ? (cached?.value || {
-          stats: {}, positions: [], orders: [], decisions: [], entryLocks: [], strategyId,
-        })
-        : this.store.liveTradingDashboard({
+      const databaseDashboard = normalizedLiveTradingDashboard(
+        this.dashboardReadModel.enabled
+          ? cached?.value
+          : this.store.liveTradingDashboard({
           strategyId,
           positionLimit: numeric(request.query.positionLimit, 30),
           orderLimit: numeric(request.query.orderLimit, 30),
           decisionLimit: numeric(request.query.decisionLimit, 30),
-        });
+          }),
+        strategyId,
+      );
       response.json({
         generatedAt: Date.now(),
         runtime,
