@@ -916,7 +916,10 @@ const config = {
           2_500,
           { min: 100, max: 10_000 },
         ),
-        maxEntriesPerMint: 3,
+        // Daily live evidence showed two near-simultaneous fills for the same
+        // strategy/Mint. Keep the three signal opportunities in Shadow, but
+        // never compound them with real capital.
+        maxEntriesPerMint: 1,
         reentryCooldownMs: 0,
         maxEntryPriceJumpPct: numberEnv(
           'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_MAX_ENTRY_JUMP_PCT',
@@ -1418,10 +1421,11 @@ const config = {
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_ENABLED',
           true,
         ),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_ENTRY_ENABLED',
-          true,
-        ),
+        // Code-locked after the negative live sample (including repeated
+        // curve-complete failures and a -92.77% tail). Keep the definition
+        // loaded so existing positions can still exit and history remains
+        // visible, while stale production environment values cannot reopen it.
+        entryEnabled: false,
         market: 'PUMP_BONDING_CURVE',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_GRADUATION_ACCEL_O_C80_P500_STAIR240_POSITION_SOL',
@@ -2656,7 +2660,7 @@ const config = {
       { min: 60_000, max: 60 * 60_000 },
     ),
     gradeDirtyRefreshMinMs: integerEnv(
-      'FLOW_SMART_WALLET_GRADE_DIRTY_REFRESH_MIN_MS', 15 * 60_000,
+      'FLOW_SMART_WALLET_GRADE_DIRTY_REFRESH_MIN_MS', 6 * 60 * 60_000,
       { min: 15 * 60_000, max: 24 * 60 * 60_000 },
     ),
     clusterCountCacheMs: integerEnv(
@@ -2718,7 +2722,7 @@ const config = {
       'FLOW_SMART_WALLET_CLUSTER_OBSERVATION_MS', 12 * 60 * 60_000,
       { min: 60 * 60_000 },
     ),
-    clusterRefreshMs: integerEnv('FLOW_SMART_WALLET_CLUSTER_REFRESH_MS', 60 * 60_000, {
+    clusterRefreshMs: integerEnv('FLOW_SMART_WALLET_CLUSTER_REFRESH_MS', 6 * 60 * 60_000, {
       min: 60 * 60_000,
     }),
     clusterLookbackMs: integerEnv(
@@ -2860,6 +2864,14 @@ const config = {
     entryTimeoutMs: integerEnv('FLOW_SMART_CONSENSUS_V2_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
     exitDelayMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EXIT_DELAY_MS', 200, { min: 0 }),
     exitTimeoutMs: integerEnv('FLOW_SMART_CONSENSUS_V2_EXIT_TIMEOUT_MS', 5_000, { min: 1 }),
+    // A constant-product sell quote cannot credibly be orders of magnitude
+    // above the public mark. Reject inconsistent reserve snapshots instead of
+    // recording impossible multi-thousand-SOL Shadow proceeds.
+    maxExitQuoteToMarketRatio: numberEnv(
+      'FLOW_SMART_CONSENSUS_V2_MAX_EXIT_QUOTE_TO_MARK_RATIO', 5,
+      { min: 1, max: 100 },
+    ),
+    maxHistoricalExitProceedsMultiple: 1_000,
     maxScoutWaitMs: integerEnv('FLOW_SMART_CONSENSUS_V2_MAX_SCOUT_WAIT_MS', 15 * 60_000, {
       min: 30_000,
     }),
@@ -3339,6 +3351,132 @@ const config = {
     }),
   },
 
+  // Wallet-specific copyability research. Each address owns an isolated table,
+  // trigger, execution path and exit grid. A second wallet can never complete
+  // or strengthen another wallet's signal, and no row can reach live trading.
+  individualSmartWalletShadows: {
+    enabled: booleanEnv('FLOW_INDIVIDUAL_SMART_WALLET_SHADOW_ENABLED', true),
+    defaults: {
+      positionSizeSol: numberEnv('FLOW_INDIVIDUAL_SMART_WALLET_POSITION_SOL', 0.1, {
+        min: 0.01, max: 10,
+      }),
+      entryDelayMs: integerEnv('FLOW_INDIVIDUAL_SMART_WALLET_ENTRY_DELAY_MS', 200, {
+        min: 0, max: 10_000,
+      }),
+      entryTimeoutMs: integerEnv('FLOW_INDIVIDUAL_SMART_WALLET_ENTRY_TIMEOUT_MS', 2_000, {
+        min: 100, max: 30_000,
+      }),
+      exitDelayMs: integerEnv('FLOW_INDIVIDUAL_SMART_WALLET_EXIT_DELAY_MS', 200, {
+        min: 0, max: 10_000,
+      }),
+      exitTimeoutMs: integerEnv('FLOW_INDIVIDUAL_SMART_WALLET_EXIT_TIMEOUT_MS', 5_000, {
+        min: 100, max: 30_000,
+      }),
+      flowFadeWindowMs: 3_000,
+      maxEntryPriceJumpPct: numberEnv(
+        'FLOW_INDIVIDUAL_SMART_WALLET_MAX_ENTRY_JUMP_PCT', 10,
+        { min: 0, max: 100 },
+      ),
+      maxEntryPriceDropPct: numberEnv(
+        'FLOW_INDIVIDUAL_SMART_WALLET_MAX_ENTRY_DROP_PCT', 30,
+        { min: 0, max: 100 },
+      ),
+      maxEntryImpactPct: numberEnv(
+        'FLOW_INDIVIDUAL_SMART_WALLET_MAX_ENTRY_IMPACT_PCT', 5,
+        { min: 0, max: 100 },
+      ),
+      costModel: normalizeCostModel({
+        ...labelCostModel,
+        positionSizeSol: numberEnv('FLOW_INDIVIDUAL_SMART_WALLET_POSITION_SOL', 0.1, {
+          min: 0.01, max: 10,
+        }),
+      }),
+    },
+    profiles: [
+      {
+        id: 'ARDIN_CURVE',
+        strategyCode: 'SEED-ARDIN-CURVE-S1',
+        strategyName: 'ARDIN 独立 Curve 跟单研究',
+        label: 'ARDIN · Curve 独立跟单',
+        thesis: '验证 ARDIN 的中短线 Curve 选择与退出能否按下一笔成交复制。',
+        targetWallet: process.env.FLOW_INDIVIDUAL_ARDIN_WALLET
+          || 'ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT',
+        targetMarket: 'PUMP_BONDING_CURVE',
+        allowCrossMarketExit: true,
+        storageTable: 'individual_smart_wallet_ardin_curve_shadow_positions',
+        modeCode: 'SHADOW_SEED_ARDIN_CURVE',
+        maxEpisodeMs: 310_000,
+        entryProfiles: [
+          { id: 'RAW_EXEC', label: '原始可执行跟单对照', riskGuardEnabled: false },
+          {
+            id: 'SAFE_R70_B10', label: '前涨幅≤70%且最长连买≤10',
+            riskGuardEnabled: true, maxPreReturnPct: 70, maxConsecutiveBuys: 10,
+          },
+        ],
+        exitProfiles: [
+          { id: 'FIX60_H18', label: '固定60秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 60_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'FIX120_H18', label: '固定120秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 120_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'FIX240_H18', label: '固定240秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 240_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'WALLET_X240_H18', label: '跟随钱包卖出 / 最长240秒', mode: 'WALLET_EXIT', maxHoldMs: 240_000, hardStopPct: 18, coreWeightPct: 0 },
+        ],
+      },
+      {
+        id: '4VW_CURVE',
+        strategyCode: 'SEED-4VW-CURVE-S1',
+        strategyName: '4VW 独立 Curve 跟单研究',
+        label: '4VW · Curve 独立跟单',
+        thesis: '验证 4VW 的一分钟级 Curve 短线是否具备0.1 SOL复制性。',
+        targetWallet: process.env.FLOW_INDIVIDUAL_4VW_WALLET
+          || '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9',
+        targetMarket: 'PUMP_BONDING_CURVE',
+        allowCrossMarketExit: true,
+        storageTable: 'individual_smart_wallet_4vw_curve_shadow_positions',
+        modeCode: 'SHADOW_SEED_4VW_CURVE',
+        maxEpisodeMs: 190_000,
+        entryProfiles: [
+          { id: 'RAW_EXEC', label: '原始可执行跟单对照', riskGuardEnabled: false },
+          {
+            id: 'SAFE_R70_B10', label: '前涨幅≤70%且最长连买≤10',
+            riskGuardEnabled: true, maxPreReturnPct: 70, maxConsecutiveBuys: 10,
+          },
+        ],
+        exitProfiles: [
+          { id: 'FIX30_H18', label: '固定30秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 30_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'FIX60_H18', label: '固定60秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 60_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'FIX120_H18', label: '固定120秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 120_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'WALLET_X120_H18', label: '跟随钱包卖出 / 最长120秒', mode: 'WALLET_EXIT', maxHoldMs: 120_000, hardStopPct: 18, coreWeightPct: 0 },
+        ],
+      },
+      {
+        id: 'DZ_AMM',
+        strategyCode: 'SEED-DZ-AMM-S1',
+        strategyName: 'DZ 独立毕业后 AMM 跟单研究',
+        label: 'DZ · 毕业后 AMM 独立跟单',
+        thesis: '把 DZ 的毕业后交易与所有 Curve 钱包分离，检验中短线持有。',
+        targetWallet: process.env.FLOW_INDIVIDUAL_DZ_WALLET
+          || 'DZbgq3yE3r41EFszV3XastvyS8j8QnmNT37nsq7sxR66',
+        targetMarket: 'PUMP_AMM',
+        allowCrossMarketExit: false,
+        storageTable: 'individual_smart_wallet_dz_amm_shadow_positions',
+        modeCode: 'SHADOW_SEED_DZ_AMM',
+        maxEpisodeMs: 670_000,
+        entryProfiles: [
+          { id: 'RAW_EXEC', label: '原始可执行跟单对照', riskGuardEnabled: false },
+          {
+            id: 'SAFE_R100_B12', label: '前涨幅≤100%且最长连买≤12',
+            riskGuardEnabled: true, maxPreReturnPct: 100, maxConsecutiveBuys: 12,
+          },
+        ],
+        exitProfiles: [
+          { id: 'FIX60_H18', label: '固定60秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 60_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'FIX180_H18', label: '固定180秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 180_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'FIX600_H18', label: '固定600秒 / 硬止损18%', mode: 'FIXED_HOLD', maxHoldMs: 600_000, hardStopPct: 18, coreWeightPct: 0 },
+          { id: 'WALLET_X600_H18', label: '跟随钱包卖出 / 最长600秒', mode: 'WALLET_EXIT', maxHoldMs: 600_000, hardStopPct: 18, coreWeightPct: 0 },
+        ],
+      },
+    ],
+  },
+
   // Historical Smart-first trigger experiment. Waiting for the monitored OPEN
   // proved causally late, so a second explicit gate defaults to false even when
   // an older server .env still contains the original ENABLED=true setting.
@@ -3538,6 +3676,147 @@ const config = {
     costModel: normalizeCostModel({
       ...labelCostModel,
       positionSizeSol: shadowPositionEnv('FLOW_PUBLIC_FLOW_LEAD_POSITION_SOL'),
+    }),
+  },
+
+  // PFAR-V1 is a clean forward experiment learned from profitable Smart-Wallet
+  // entry context, but its A/B entry path reads only anonymous public trades.
+  // Smart Wallet identity is retained solely as a B label and as the isolated
+  // J36 control cohort; none of these rows can reach LiveTradingManager.
+  publicFlowAbsorptionRecoveryShadow: {
+    enabled: booleanEnv('FLOW_PUBLIC_FLOW_RECOVERY_SHADOW_ENABLED', true),
+    positionSizeSol: numberEnv('FLOW_PUBLIC_FLOW_RECOVERY_POSITION_SOL', 0.1, {
+      min: 0.01,
+      max: 10,
+    }),
+    structureWindowMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_STRUCTURE_WINDOW_MS', 10_000,
+      { min: 5_000, max: 30_000 },
+    ),
+    stateRetentionMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_STATE_RETENTION_MS', 46 * 60_000,
+      { min: 10 * 60_000, max: 2 * 60 * 60_000 },
+    ),
+    completeHistoryMaxInitialAgeMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_COMPLETE_HISTORY_MAX_INITIAL_AGE_MS', 2_000,
+      { min: 0, max: 30_000 },
+    ),
+    retentionFloorFraction: numberEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_RETENTION_FLOOR_PCT', 10,
+      { min: 0, max: 100 },
+    ) / 100,
+    observationMinPullbackPct: numberEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_OBSERVE_MIN_PULLBACK_PCT', 6,
+      { min: 0.1, max: 100 },
+    ),
+    observationMinReboundPct: numberEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_OBSERVE_MIN_REBOUND_PCT', 2,
+      { min: 0.1, max: 100 },
+    ),
+    rejectionObservationCooldownMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_REJECTION_OBSERVATION_COOLDOWN_MS', 2_000,
+      { min: 250, max: 60_000 },
+    ),
+    entryDelayMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_ENTRY_DELAY_MS', 200,
+      { min: 0, max: 10_000 },
+    ),
+    entryTimeoutMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_ENTRY_TIMEOUT_MS', 1_500,
+      { min: 100, max: 30_000 },
+    ),
+    exitDelayMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_EXIT_DELAY_MS', 200,
+      { min: 0, max: 10_000 },
+    ),
+    exitTimeoutMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_EXIT_TIMEOUT_MS', 5_000,
+      { min: 100, max: 30_000 },
+    ),
+    maxEntryPriceJumpPct: numberEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_MAX_ENTRY_JUMP_PCT', 8,
+      { min: 0, max: 100 },
+    ),
+    maxEntryPriceDropPct: numberEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_MAX_ENTRY_DROP_PCT', 30,
+      { min: 0, max: 100 },
+    ),
+    maxEntryImpactPct: numberEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_MAX_ENTRY_IMPACT_PCT', 5,
+      { min: 0, max: 100 },
+    ),
+    maxCrossMarketPriceJumpPct: numberEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_MAX_CROSS_MARKET_JUMP_PCT', 50,
+      { min: 0, max: 1_000 },
+    ),
+    smartLookbackMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_SMART_LOOKBACK_MS', 5 * 60_000,
+      { min: 0, max: 60 * 60_000 },
+    ),
+    smartFutureLabelWindowMs: integerEnv(
+      'FLOW_PUBLIC_FLOW_RECOVERY_SMART_FUTURE_LABEL_WINDOW_MS', 15_000,
+      { min: 1_000, max: 10 * 60_000 },
+    ),
+    j36Wallet: process.env.FLOW_PUBLIC_FLOW_RECOVERY_J36_WALLET
+      || 'J36AVCr7uVoXwYgcL8yBmeCAatSLGLSjrCMaBca3sCXq',
+    entryProfiles: [
+      {
+        id: 'PFAR_A_NO_WALLET',
+        label: 'A · 纯公开流：抛压衰减 → 承接 → 恢复',
+        trigger: 'PUBLIC_FLOW',
+      },
+      {
+        id: 'PFAR_B_TAG_ONLY',
+        label: 'B · 与A完全同入场；Smart Wallet只作标签',
+        trigger: 'PUBLIC_FLOW',
+      },
+      {
+        id: 'PFAR_C_J36_CONTROL',
+        label: 'C · J36 OPEN + 同一公开结构对照',
+        trigger: 'J36_OPEN',
+        minTriggerBuySol: numberEnv(
+          'FLOW_PUBLIC_FLOW_RECOVERY_J36_MIN_BUY_SOL', 0.2,
+          { min: 0, max: 100 },
+        ),
+      },
+    ].map((profile) => ({
+      ...profile,
+      requireCompleteHistory: true,
+      minAgeMs: 5 * 60_000,
+      maxAgeMs: 45 * 60_000,
+      minCurvePct: 35,
+      maxCurvePct: 70,
+      minPullbackPct: 6,
+      maxPullbackPct: 18,
+      minReboundPct: 2,
+      maxReboundPct: 8,
+      minSelloffSellers: 2,
+      minSelloffSellSol: 0.5,
+      maxSelloffNetFlowSol: -0.5,
+      minNetFlow3sSol: 0.5,
+      minNetFlow5sSol: 0,
+      minNetFlow10sSol: -5,
+      minBuyers3s: 2,
+      maxTop1BuyShare5sPct: 40,
+      maxRecentSell1sSol: 0.5,
+      minObservedHolders: 20,
+      minFirstBuyerSample: 20,
+      minFirst20RetentionPct: 50,
+      maxTop3InventoryPct: 40,
+      rejectCreatorSell5s: true,
+    })),
+    exitProfiles: [10, 15, 20].map((seconds) => ({
+      id: `FIX${seconds}_H15`,
+      label: `固定${seconds}秒 / 可执行收益硬止损15%`,
+      maxHoldMs: seconds * 1_000,
+      hardStopPct: 15,
+    })),
+    costModel: normalizeCostModel({
+      ...labelCostModel,
+      positionSizeSol: numberEnv('FLOW_PUBLIC_FLOW_RECOVERY_POSITION_SOL', 0.1, {
+        min: 0.01,
+        max: 10,
+      }),
     }),
   },
 

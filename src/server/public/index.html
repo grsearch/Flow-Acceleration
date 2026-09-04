@@ -427,8 +427,14 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-first-open-right-tail" data-strategy-code="SWFO-S/B-RT">
               <b><span class="strategy-code">SWFO-S/B-RT</span>Smart 首仓结构筛选右尾（已停）</b><small>等待 Smart OPEN 触发过晚；历史数据保留</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="individual-smart-wallets" data-strategy-code="SEED-SOLO">
+              <b><span class="strategy-code">SEED-SOLO</span>种子钱包独立跟单 Shadow</b><small>ARDIN / 4VW / DZ 各自触发、执行和退出；禁止混合补票</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="public-flow-lead" data-strategy-code="PFL-OBS">
               <b><span class="strategy-code">PFL-OBS</span>Public Flow Lead 观察器</b><small>只记录公共流信号与未来 Smart OPEN；停止新增模拟仓位</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="public-flow-recovery" data-strategy-code="PFAR-V1">
+              <b><span class="strategy-code">PFAR-V1</span>公开流承接恢复</b><small>A纯公开流 / B钱包仅标签 / C-J36对照；0.1 SOL模拟</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="creator-affinity" data-strategy-code="CAF-OBS">
               <b><span class="strategy-code">CAF-OBS</span>Creator 全量历史 × 公共流观察</b><small>当前DB全部发行历史与 Smart 抽样分开；停止新增模拟仓位</small>
@@ -964,6 +970,32 @@
             </article>
           </div>
 
+          <div class="strategy-pane" data-live-strategy-pane="individual-smart-wallets" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Seed Wallet Solo Shadow · SEED-SOLO</h2>
+                <p>每个地址是一个完全独立的策略单元。只用目标钱包首次 OPEN 触发，按下一笔真实可执行成交模拟0.1 SOL；其他钱包不能补票。</p>
+              </div>
+              <div class="strategy-expression">ARDIN Curve：60/120/240秒 · 4VW Curve：30/60/120秒 · DZ AMM：60/180/600秒；均含钱包卖出对照与18%保护。</div>
+              <div class="strategy-metric-groups" id="individual-smart-wallet-metrics"></div>
+              <div class="section-title"><h2>各钱包独立状态</h2><p>地址、市场和存储表全部隔离；RAW用于可复制性基准，SAFE用于检验前置风险结构。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>策略</th><th>钱包 / 市场</th><th>信号 / 入场 / 完成</th><th>活动 Mint</th><th>钱包退出</th><th>独立表</th></tr></thead>
+                <tbody id="individual-smart-wallet-strategy-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>入场 × 退出成绩</h2><p>NO_ENTRY和NO_EXIT单独统计；只用已完成且可执行的退出计算胜率、收益与PF。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>钱包策略</th><th>入场 / 退出</th><th>信号 / Mint</th><th>入场 / 完成</th><th>胜率 / 平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / Big100</th><th>NO_EXIT</th></tr></thead>
+                <tbody id="individual-smart-wallet-group-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>跟随钱包卖出只请求退出，仍必须等下一笔可执行成交；不会使用钱包自己的成交价冒充我们的价格。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>策略 / 状态</th><th>Mint</th><th>钱包</th><th>入场 / 退出</th><th>信号 / 入场 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="individual-smart-wallet-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
           <div class="strategy-pane" data-live-strategy-pane="public-flow-lead" hidden>
             <article class="card record-section">
               <div class="section-title">
@@ -982,6 +1014,33 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Curve</th><th>Buyers 1s / 5s</th><th>Flow 1s / 5s / Accel</th><th>Top1 / Sell÷Buy</th><th>Smart标签</th><th>信号 / 入场 / 最高 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="public-flow-lead-position-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="public-flow-recovery" hidden>
+            <article class="card record-section">
+              <div class="section-title">
+                <h2>Public Flow Absorption Recovery Shadow · PFAR-V1</h2>
+                <p>A/B 不等待、不识别 Smart Wallet；C 仅作为 J36 触发对照。全部独立模拟，永不签名或发送交易。</p>
+              </div>
+              <div class="strategy-expression" id="public-flow-recovery-expression">Curve 35–70% · 先跌6–18% · 抛压衰减 · 3秒净流入恢复 · 持币结构确认</div>
+              <div class="strategy-metric-groups" id="public-flow-recovery-metrics"></div>
+              <div class="strategy-metric-groups" id="public-flow-recovery-time-sessions"></div>
+              <div class="section-title"><h2>A / B / C × 退出表现</h2><p>B 与 A 入场完全相同，只用于按钱包标签切片；NO_EXIT 保持右删失，不伪造成亏损。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>入场 / 退出</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 大赢单</th><th>无入场 / NO_EXIT</th><th>形态</th><th>筹码结构</th><th>Smart标签</th></tr></thead>
+                <tbody id="public-flow-recovery-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>成交使用下一笔可执行交易、200ms延迟、0.1 SOL容量和5%自身冲击上限。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>信号</th><th>组别 / 状态</th><th>Mint</th><th>AGE / Curve</th><th>下跌 / 反弹</th><th>资金流</th><th>Holders / Retention / Top3</th><th>Smart标签</th><th>信号 / 入场 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="public-flow-recovery-position-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近形态筛选</h2><p>即使最终未入场也保留首要拒绝原因，用于判断规则是否过严或假信号过多。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>观察时间</th><th>触发</th><th>结果</th><th>Mint</th><th>下跌 / 反弹</th><th>3s / 5s / 10s净流入</th><th>持币结构</th><th>拒绝原因</th></tr></thead>
+                <tbody id="public-flow-recovery-observation-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -2144,6 +2203,61 @@
       }).join('') : '<tr><td colspan="8" class="empty">暂无 Smart First OPEN Right-Tail 模拟仓位。</td></tr>';
     }
 
+    function renderIndividualSmartWalletShadows(data) {
+      const runtime = data.health || {};
+      const strategies = data.strategies || [];
+      const totals = strategies.reduce((sum, row) => {
+        const health = row.health || {};
+        sum.signals += Number(health.firstOpens) || 0;
+        sum.opened += Number(health.opened) || 0;
+        sum.closed += Number(health.closed) || 0;
+        sum.noExit += Number(health.noExit) || 0;
+        return sum;
+      }, { signals: 0, opened: 0, closed: 0, noExit: 0 });
+      renderMetricGroups('#individual-smart-wallet-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW SEED-SOLO' : '关闭', '永不签名或发送交易'],
+        ['独立钱包策略', number(strategies.length), 'ARDIN / 4VW / DZ 分表统计'],
+        ['首次OPEN / 可执行入场', `${number(totals.signals)} / ${number(totals.opened)}`, `已完成 ${number(totals.closed)}`],
+        ['跟踪Mint / NO_EXIT', `${number(runtime.trackedMints)} / ${number(totals.noExit)}`, 'NO_EXIT不伪造成-100%'],
+        ['钱包共振', data.pooledConsensus ? '开启' : '禁用', '任何其他钱包都不能完成或加强信号'],
+      ], []);
+
+      document.querySelector('#individual-smart-wallet-strategy-rows').innerHTML = strategies.length
+        ? strategies.map(row => {
+          const strategy = row.strategy || {};
+          const health = row.health || {};
+          return `<tr><td><b>${escapeHtml(strategy.code || row.id)}</b><br><span class="table-note">${escapeHtml(row.label || strategy.name || '')}</span></td><td>${walletLink(strategy.targetWallet)}<br><span class="table-note">${escapeHtml(strategy.targetMarket || '—')}</span></td><td>${number(health.firstOpens)} / ${number(health.opened)} / ${number(health.closed)}<br><span class="table-note">拒绝组 ${number(health.rejectedProfiles)}</span></td><td>${number(health.trackedMints)}</td><td>${number(health.walletExitSignals)}</td><td class="wrap-cell">${escapeHtml(strategy.storageTable || '—')}</td></tr>`;
+        }).join('')
+        : '<tr><td colspan="6" class="empty">尚未配置独立钱包策略。</td></tr>';
+
+      const groups = strategies.flatMap(row => (row.groups || []).map(group => ({
+        ...group,
+        strategyCode: row.strategy?.code || row.id,
+        entryLabel: (row.strategy?.entryProfiles || []).find(profile => (
+          profile.id === group.entry_profile_id
+        ))?.label,
+        exitLabel: (row.strategy?.exitProfiles || []).find(profile => (
+          profile.id === group.exit_profile_id
+        ))?.label,
+      })));
+      document.querySelector('#individual-smart-wallet-group-rows').innerHTML = groups.length
+        ? groups.map(row => (
+          `<tr><td><b>${escapeHtml(row.strategyCode)}</b></td><td>${escapeHtml(row.entryLabel || row.entry_profile_id)}<br><span class="table-note">${escapeHtml(row.exitLabel || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.mints)}<br><span class="table-note">规则拒绝 ${number(row.rule_rejected)}</span></td><td>${number(row.entries)} / ${number(row.closed)}</td><td class="${tone(row.average_net_return_pct)}">${rate(row.win_rate_pct)} / ${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}</td><td>${rate(row.big50_rate_pct)} / ${rate(row.big100_rate_pct)}</td><td>${number(row.no_exit)}</td></tr>`
+        )).join('')
+        : '<tr><td colspan="8" class="empty">等待三个目标钱包产生新的首次OPEN。</td></tr>';
+
+      const positions = strategies.flatMap(row => (row.positions || []).map(position => ({
+        ...position,
+        strategyCode: row.strategy?.code || row.id,
+      }))).sort((left, right) => (Number(right.signal_at) || 0) - (Number(left.signal_at) || 0));
+      document.querySelector('#individual-smart-wallet-position-rows').innerHTML = positions.length
+        ? positions.slice(0, 100).map(row => {
+          const reason = row.exit_reason || row.rejection_reason || '—';
+          return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.strategyCode)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${walletLink(row.smart_wallet)}</td><td>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+        }).join('')
+        : '<tr><td colspan="8" class="empty">暂无独立钱包可执行跟单样本。</td></tr>';
+    }
+
     function renderPublicFlowLeadShadow(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -2170,6 +2284,52 @@
         const smartLabel = row.smart_open_at ? `${age(row.smart_open_delay_ms)}<br><span class="table-note">${escapeHtml(row.smart_open_wallet || '')}</span>` : '—';
         return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.public_buyers_1s)} / ${number(row.public_buyers_5s)}</td><td>${number(row.public_buy_flow_1s,2)} / ${number(row.public_buy_flow_5s,2)} SOL / ${number(row.flow_acceleration_ratio,2)}x<br><span class="table-note">Net ${number(row.public_net_flow_5s,2)} SOL</span></td><td>${rate(row.largest_buyer_share_pct)} / ${number(row.sell_buy_ratio,2)}<br><span class="table-note">前涨幅 ${pct(row.pre_return_pct)} · 连买 ${number(row.pre_max_consecutive_buys)}</span></td><td>${smartLabel}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="11" class="empty">等待 Public Flow Lead 观察信号。</td></tr>';
+    }
+
+    function renderPublicFlowRecoveryShadow(data) {
+      const runtime = data.runtime || {};
+      const stats = data.observationStats || {};
+      const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
+      const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
+      document.querySelector('#public-flow-recovery-expression').textContent = `匿名公开流：Curve 35–70%，10秒内先跌6–18%，至少2个卖家形成净抛压；随后反弹2–8%，3秒Net≥0.5 SOL，Holders≥20、首20留存≥50%、Top3≤40%。A/B不以钱包为条件，C才等待J36。`;
+      const rejectionSummary = Object.entries(runtime.rejectionReasons || {})
+        .sort((left, right) => right[1] - left[1]).slice(0, 4)
+        .map(([reason, count]) => `${reason} ${number(count)}`).join(' · ') || '尚无拒绝';
+      renderMetricGroups('#public-flow-recovery-metrics', [
+        ['运行模式', runtime.enabled ? 'SHADOW PFAR-V1' : '关闭', '独立研究表；不会进入实盘信号总线'],
+        ['公开成交 / Curve', `${number(runtime.observedTrades)} / ${number(runtime.observedCurveTrades)}`, `完整历史状态 ${number(runtime.completeHistoryStates)} / ${number(runtime.trackedStates)}`],
+        ['恢复形态 / 观察记录', `${number(runtime.recoveryStructures)} / ${number(stats.observations)}`, `独立Mint ${number(stats.independent_mints)} · 通过 ${number(stats.qualified)}`],
+        ['A/B公开信号 / J36对照', `${number(runtime.publicSignals)} / ${number(runtime.j36Signals)}`, `J36 OPEN ${number(runtime.j36OpenEvents)}`],
+        ['待入场 / 活动 / 已关', `${number(runtime.pendingEntries)} / ${number(runtime.activePositions)} / ${number(runtime.closed)}`, `无入场 ${number(runtime.noEntry)} · NO_EXIT ${number(runtime.noExit)}`],
+        ['执行保护', `追价≤${pct(runtime.maxEntryPriceJumpPct)} · 冲击≤${pct(runtime.maxEntryImpactPct)}`, `RUG拒绝 ${number(runtime.rugRejected)} · 冲击拒绝 ${number(runtime.impactRejected)}`],
+        ['Smart Wallet用途', '仅B标签 + C对照', `标签更新 ${number(runtime.smartOpenLabels)}；A/B入场不读取钱包身份`],
+        ['主要未通过条件', rejectionSummary, '运行期计数；完整筛选记录保存在观察表'],
+      ], []);
+      renderTimeSessions('#public-flow-recovery-time-sessions', data.timeSessions);
+      const cohorts = data.cohorts || [];
+      document.querySelector('#public-flow-recovery-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
+        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)} / ${number(row.independent_mints)}</td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${number(row.profit_factor,2)} / ${pct(row.max_winner_pct)}<br><span class="table-note">Big20 ${rate(row.big20_rate_pct)} · Big50 ${rate(row.big50_rate_pct)}</span></td><td>${number(row.no_entry + row.rug_rejected)} / ${number(row.no_exit)}</td><td>跌 ${pct(row.average_pullback_pct)} · 弹 ${pct(row.average_rebound_pct)}<br><span class="table-note">NF3 ${number(row.average_net_flow_3s_sol,2)} SOL</span></td><td>H ${number(row.average_observed_holders,1)} · 留存 ${rate(row.average_first20_retention_pct)}<br><span class="table-note">Top3 ${rate(row.average_top3_inventory_pct)} · 冲击 ${pct(row.average_entry_impact_pct)}</span></td><td>${rate(row.smart_labeled_rate_pct)}<br><span class="table-note">钱包 ${number(row.average_smart_wallet_count,2)} · 集群 ${number(row.average_smart_cluster_count,2)}</span></td></tr>`
+      )).join('') : '<tr><td colspan="9" class="empty">等待新币完成5分钟暖机并出现“下跌—承接—恢复”形态。</td></tr>';
+
+      const positions = data.positions || [];
+      document.querySelector('#public-flow-recovery-position-rows').innerHTML = positions.length ? positions.map(row => {
+        const reason = row.exit_reason || row.rejection_reason || '—';
+        const smartDelay = row.smart_first_delay_ms == null ? '—'
+          : row.smart_first_delay_ms < 0
+            ? `公开信号前 ${age(Math.abs(row.smart_first_delay_ms))}`
+            : `公开信号后 ${age(row.smart_first_delay_ms)}`;
+        const smart = row.smart_wallet_count > 0
+          ? `${number(row.smart_wallet_count)}钱包 / ${number(row.smart_cluster_count)}集群<br><span class="table-note">${smartDelay}</span>` : '无';
+        return `<tr><td>${dateTime(row.signal_at)}<br><span class="table-note">${escapeHtml(row.trigger_type)}</span></td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${pct(row.pullback_pct)} / ${pct(row.rebound_pct)}<br><span class="table-note">卖家 ${number(row.selloff_sellers)} · ${number(row.selloff_sell_sol,2)} SOL</span></td><td>${number(row.net_flow_3s_sol,2)} / ${number(row.net_flow_5s_sol,2)} / ${number(row.net_flow_10s_sol,2)} SOL</td><td>${number(row.observed_holders)} / ${rate(row.first20_retention_pct)} / ${rate(row.top3_inventory_pct)}</td><td>${smart}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入场冲击 ${pct(row.entry_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.highest_return_pct)} / ${pct(row.lowest_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="11" class="empty">暂无 PFAR-V1 模拟仓位。</td></tr>';
+
+      const observations = data.observations || [];
+      document.querySelector('#public-flow-recovery-observation-rows').innerHTML = observations.length ? observations.map(row => {
+        let features = {}; let reasons = [];
+        try { features = JSON.parse(row.features_json || '{}'); } catch (_) {}
+        try { reasons = JSON.parse(row.rejection_reasons_json || '[]'); } catch (_) {}
+        return `<tr><td>${dateTime(row.observed_at)}</td><td>${escapeHtml(row.trigger_type)}</td><td>${row.qualified ? statusChip('PASS') : statusChip('REJECTED')}</td><td>${mintLink(row.mint)}</td><td>${pct(features.pullbackPct)} / ${pct(features.reboundPct)}</td><td>${number(features.netFlow3sSol,2)} / ${number(features.netFlow5sSol,2)} / ${number(features.netFlow10sSol,2)} SOL</td><td>H ${number(features.observedHolders)} · 留存 ${rate(features.first20RetentionPct)} · Top3 ${rate(features.top3InventoryPct)}</td><td class="wrap-cell">${escapeHtml(reasons.join(' · ') || '通过')}</td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">尚未观察到满足最低跌幅和反弹幅度的形态。</td></tr>';
     }
 
     function renderCreatorAffinityShadow(data) {
@@ -3495,8 +3655,14 @@
         'smart-first-open-right-tail': requestContext => [
           loadDashboard('/api/smart-first-open-right-tail-shadow?positionLimit=50', renderSmartFirstOpenRightTailShadow, requestContext),
         ],
+        'individual-smart-wallets': requestContext => [
+          loadDashboard('/api/individual-smart-wallet-shadows?positionLimit=50', renderIndividualSmartWalletShadows, requestContext),
+        ],
         'public-flow-lead': requestContext => [
           loadDashboard('/api/public-flow-lead-shadow?positionLimit=50', renderPublicFlowLeadShadow, requestContext),
+        ],
+        'public-flow-recovery': requestContext => [
+          loadDashboard('/api/public-flow-recovery-shadow?positionLimit=50&observationLimit=50', renderPublicFlowRecoveryShadow, requestContext),
         ],
         'creator-affinity': requestContext => [
           loadDashboard('/api/creator-affinity-shadow?positionLimit=50', renderCreatorAffinityShadow, requestContext),

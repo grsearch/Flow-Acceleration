@@ -158,6 +158,8 @@ class SmartWalletRegistry {
       maintenanceRunsCompleted: 0,
       maintenanceRunsFailed: 0,
       maintenanceTimeouts: 0,
+      maintenanceWritesApplied: 0,
+      maintenanceWritesSkipped: 0,
       lastMaintenanceType: null,
       lastMaintenanceStartedAt: null,
       lastMaintenanceCompletedAt: null,
@@ -181,7 +183,7 @@ class SmartWalletRegistry {
       actualBackfillLastError: null,
       lastActionAt: null,
     };
-    this._initStorage();
+    if (config.skipStorageInit !== true) this._initStorage();
   }
 
   _initStorage() {
@@ -1277,7 +1279,7 @@ class SmartWalletRegistry {
   _gradeDirtyRefreshMinMs() {
     return Math.max(
       60_000,
-      finite(this.config.gradeDirtyRefreshMinMs, 15 * 60_000),
+      finite(this.config.gradeDirtyRefreshMinMs, 6 * 60 * 60_000),
     );
   }
 
@@ -1575,6 +1577,77 @@ class SmartWalletRegistry {
       ? { ...snapshot, voteWeight: snapshot.controlVoteWeight } : null;
   }
 
+  _applyClusterMaintenanceResult(value = {}, at = this.now()) {
+    const memberships = Array.isArray(value.memberships) ? value.memberships : [];
+    const evaluations = Array.isArray(value.evaluations) ? value.evaluations : [];
+    let applied = 0;
+    let skipped = 0;
+    const commit = this.store.db.transaction(() => {
+      for (const operation of memberships) {
+        const current = this.store.db.prepare(`
+          SELECT status, risk_status FROM smart_wallet_registry WHERE wallet=?
+        `).get(operation.wallet);
+        if (!current || current.status === 'QUARANTINED' || current.risk_status !== 'OK') {
+          skipped += 1;
+          continue;
+        }
+        if (this.setCluster(operation)) applied += 1;
+        else skipped += 1;
+      }
+      for (const row of evaluations) this.upsertClusterEvaluation.run(row);
+    });
+    commit();
+    this.lastClusterRefreshAt = at;
+    return { applied, skipped, evaluations: evaluations.length };
+  }
+
+  _applyGradeMaintenanceResult(value = {}, at = this.now()) {
+    const operations = Array.isArray(value.operations) ? value.operations : [];
+    let applied = 0;
+    let skipped = 0;
+    const selectCurrent = this.store.db.prepare(`
+      SELECT status, risk_status, registry_version FROM smart_wallet_registry WHERE wallet=?
+    `);
+    const updateMetrics = this.store.db.prepare(`
+      UPDATE smart_wallet_registry SET metrics_json=?, updated_at=?
+      WHERE wallet=? AND registry_version=?
+    `);
+    const commit = this.store.db.transaction(() => {
+      for (const operation of operations) {
+        const current = selectCurrent.get(operation.wallet);
+        if (!current || current.status === 'QUARANTINED' || current.risk_status !== 'OK'
+          || current.registry_version !== operation.expectedRegistryVersion) {
+          skipped += 1;
+          continue;
+        }
+        if (operation.kind === 'SET_GRADES') {
+          if (this.setGrades(operation.payload)) applied += 1;
+          else skipped += 1;
+        } else if (operation.kind === 'UPDATE_METRICS') {
+          const result = updateMetrics.run(
+            operation.metricsJson,
+            at,
+            operation.wallet,
+            operation.expectedRegistryVersion,
+          );
+          if (result.changes > 0) applied += 1;
+          else skipped += 1;
+        }
+      }
+      this.store.db.prepare(`
+        UPDATE smart_wallet_registry_meta SET last_grade_refresh_at=?, updated_at=? WHERE id=1
+      `).run(at, at);
+    });
+    commit();
+    return { applied, skipped };
+  }
+
+  _applyMaintenanceResult(type, value, at) {
+    if (type === 'CLUSTERS') return this._applyClusterMaintenanceResult(value, at);
+    if (type === 'GRADES') return this._applyGradeMaintenanceResult(value, at);
+    throw new Error(`Unsupported Smart Wallet maintenance result: ${type}`);
+  }
+
   _queueMaintenance(type, at = this.now(), options = {}) {
     if (!this.config.enabled || this.stopping || this.maintenancePendingTypes.has(type)) {
       return false;
@@ -1631,8 +1704,26 @@ class SmartWalletRegistry {
       const completedAt = this.now();
       this.metrics.lastMaintenanceCompletedAt = completedAt;
       this.metrics.lastMaintenanceDurationMs = Math.max(0, completedAt - startedAt);
-      if (message?.ok) {
+      let successful = Boolean(message?.ok) && !error;
+      let failure = error || message?.error || null;
+      let applied = null;
+      if (successful) {
+        try {
+          // The worker only performs the expensive historical reads and grade/
+          // cluster calculation. All mutations are committed through the main
+          // ResearchStore connection so realtime writes never compete with a
+          // second SQLite writer.
+          applied = this._applyMaintenanceResult(task.type, message.value, task.at);
+        } catch (applyError) {
+          successful = false;
+          failure = applyError.message;
+        }
+      }
+      if (successful) {
         this.metrics.maintenanceRunsCompleted += 1;
+        this.metrics.maintenanceWritesApplied += finite(applied?.applied, 0)
+          + finite(applied?.evaluations, 0);
+        this.metrics.maintenanceWritesSkipped += finite(applied?.skipped, 0);
         if (task.type === 'CLUSTERS') {
           this.activeClusterCountsCache = null;
           this.lastClusterRefreshAt = task.at;
@@ -1654,8 +1745,8 @@ class SmartWalletRegistry {
       } else {
         this.metrics.maintenanceRunsFailed += 1;
         if (timedOut) this.metrics.maintenanceTimeouts += 1;
-        this.metrics.lastMaintenanceError = `${task.type}: ${error
-          || message?.error || 'maintenance worker failed'}`;
+        this.metrics.lastMaintenanceError = `${task.type}: ${failure
+          || 'maintenance worker failed'}`;
         if (task.type === 'GRADES') this.gradeRefreshRequested = true;
       }
       this.maintenancePendingTypes.delete(task.type);
@@ -2157,10 +2248,10 @@ class SmartWalletRegistry {
   }
 
   _clusterRefreshMs() {
-    return Math.max(60_000, finite(this.config.clusterRefreshMs, 60 * 60_000));
+    return Math.max(60_000, finite(this.config.clusterRefreshMs, 6 * 60 * 60_000));
   }
 
-  refreshClusters(at = this.now(), { force = false } = {}) {
+  refreshClusters(at = this.now(), { force = false, collectOnly = false } = {}) {
     if (!this.config.enabled || this.config.clusterAutoEnabled === false) return null;
     if (!force && this.lastClusterRefreshAt
       && at - this.lastClusterRefreshAt < this._clusterRefreshMs()) return null;
@@ -2357,6 +2448,7 @@ class SmartWalletRegistry {
       }
     }
     const evaluations = [];
+    const membershipUpdates = [];
     let confirmed = 0;
     let confirmationsChanged = 0;
     for (const row of registryRows) {
@@ -2392,14 +2484,20 @@ class SmartWalletRegistry {
       const shouldWriteMembership = canConfirm
         || (row.source === 'CONFIG_SEED' && related);
       if (shouldWriteMembership) {
-        const changed = this.setCluster({
+        const operation = {
           wallet: row.wallet,
           clusterId: desiredClusterId,
           confidence: 'CONFIRMED',
           reason,
           validFrom: at,
-        });
-        if (changed) confirmationsChanged += 1;
+        };
+        const changed = !existing || existing.cluster_id !== desiredClusterId
+          || existing.confidence !== 'CONFIRMED';
+        if (changed) {
+          confirmationsChanged += 1;
+          if (collectOnly) membershipUpdates.push(operation);
+          else this.setCluster(operation);
+        }
         confirmed += 1;
       }
       evaluations.push({
@@ -2413,6 +2511,16 @@ class SmartWalletRegistry {
         evaluatedAt: at,
         updatedAt: at,
       });
+    }
+    if (collectOnly) {
+      return {
+        wallets: registryRows.length,
+        confirmed,
+        confirmationsChanged,
+        relatedLinks: linkedPairs.length,
+        memberships: membershipUpdates,
+        evaluations,
+      };
     }
     const writeEvaluations = this.store.db.transaction((rows) => {
       for (const row of rows) this.upsertClusterEvaluation.run(row);
@@ -2909,7 +3017,9 @@ class SmartWalletRegistry {
     this._scheduleGradeMaintenance(now);
   }
 
-  refreshGrades(now = this.now(), { forceModelMigration = false } = {}) {
+  refreshGrades(now = this.now(), {
+    forceModelMigration = false, collectOnly = false,
+  } = {}) {
     if (!this.config.enabled) return;
     const cutoff = now - this.config.lookbackMs;
     const rows = this.store.db.prepare(`
@@ -2984,6 +3094,7 @@ class SmartWalletRegistry {
     const baselineGraduationRatePct = baselineByMint.size
       ? baselineGraduated / baselineByMint.size * 100 : fallbackBaselinePct;
     const wallets = this.store.db.prepare('SELECT * FROM smart_wallet_registry').all();
+    const operations = [];
     for (const current of wallets) {
       if (current.status === 'QUARANTINED') continue;
       const pnl = this._actualPnlSnapshot(current.wallet, now);
@@ -3119,7 +3230,7 @@ class SmartWalletRegistry {
         || current.status !== desiredStatus;
       if (changed && (forceModelMigration
         || candidateStreak >= this.config.gradeConfirmationRuns)) {
-        this.setGrades({
+        const payload = {
           wallet: current.wallet,
           selectionGrade,
           copyGrade,
@@ -3130,13 +3241,32 @@ class SmartWalletRegistry {
             : 'ROLLING_GRADUATION_PREDICTION_AND_ACTUAL_PNL',
           metrics: nextMetrics,
           effectiveAt: now,
-        });
+        };
+        if (collectOnly) {
+          operations.push({
+            kind: 'SET_GRADES',
+            wallet: current.wallet,
+            expectedRegistryVersion: current.registry_version,
+            payload,
+          });
+        } else this.setGrades(payload);
       } else {
-        this.store.db.prepare(`
-          UPDATE smart_wallet_registry SET metrics_json=?, updated_at=? WHERE wallet=?
-        `).run(JSON.stringify(nextMetrics), now, current.wallet);
+        const metricsJson = JSON.stringify(nextMetrics);
+        if (collectOnly) {
+          operations.push({
+            kind: 'UPDATE_METRICS',
+            wallet: current.wallet,
+            expectedRegistryVersion: current.registry_version,
+            metricsJson,
+          });
+        } else {
+          this.store.db.prepare(`
+            UPDATE smart_wallet_registry SET metrics_json=?, updated_at=? WHERE wallet=?
+          `).run(metricsJson, now, current.wallet);
+        }
       }
     }
+    if (collectOnly) return { wallets: wallets.length, operations };
     this.store.db.prepare(`
       UPDATE smart_wallet_registry_meta SET last_grade_refresh_at=?, updated_at=? WHERE id=1
     `).run(now, now);
@@ -3388,6 +3518,10 @@ class SmartWalletRegistry {
       maintenanceRunsCompleted: this.metrics.maintenanceRunsCompleted,
       maintenanceRunsFailed: this.metrics.maintenanceRunsFailed,
       maintenanceTimeouts: this.metrics.maintenanceTimeouts,
+      maintenanceWritesApplied: this.metrics.maintenanceWritesApplied,
+      maintenanceWritesSkipped: this.metrics.maintenanceWritesSkipped,
+      maintenanceWriteMode: this._maintenanceWorkerEnabled()
+        ? 'MAIN_CONNECTION_ONLY' : 'INLINE',
       lastMaintenanceType: this.metrics.lastMaintenanceType,
       lastMaintenanceStartedAt: this.metrics.lastMaintenanceStartedAt,
       lastMaintenanceCompletedAt: this.metrics.lastMaintenanceCompletedAt,

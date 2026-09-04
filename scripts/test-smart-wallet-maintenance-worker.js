@@ -81,6 +81,8 @@ async function main() {
     assert.strictEqual(health.maintenanceRunsCompleted, 2);
     assert.strictEqual(health.maintenanceRunsFailed, 0);
     assert.strictEqual(health.lastMaintenanceError, null);
+    assert.strictEqual(health.maintenanceWriteMode, 'MAIN_CONNECTION_ONLY');
+    assert.ok(health.maintenanceWritesApplied > 0);
     assert.ok(Number.isFinite(health.lastMaintenanceDurationMs));
 
     const row = store.db.prepare(`

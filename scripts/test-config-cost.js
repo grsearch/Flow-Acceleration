@@ -81,7 +81,7 @@ assert.strictEqual(config.smartWalletRegistry.votingSnapshotRefreshMs, 15 * 60_0
 assert.strictEqual(config.smartWalletRegistry.lastSeenWriteIntervalMs, 15 * 60_000);
 assert.strictEqual(config.smartWalletRegistry.actualEventBackfillBatchSize, 250);
 assert.strictEqual(config.smartWalletRegistry.actualEventBackfillIntervalMs, 5_000);
-assert.strictEqual(config.smartWalletRegistry.clusterRefreshMs, 60 * 60_000);
+assert.strictEqual(config.smartWalletRegistry.clusterRefreshMs, 6 * 60 * 60_000);
 assert.strictEqual(config.smartWalletConsensusOverlay.enabled, true);
 assert.strictEqual(config.smartWalletConsensusOverlay.gateWindowMs, 15 * 60_000);
 assert.strictEqual(config.smartWalletConsensusOverlay.gateFinalizeDelayMs, 60_000);
@@ -176,6 +176,13 @@ assert(strictEarlyBurstConsensus);
 assert.strictEqual(strictEarlyBurstConsensus.requiredClusters, 3);
 assert.strictEqual(strictEarlyBurstConsensus.minSelectionAClusters, 3);
 assert.strictEqual(strictEarlyBurstConsensus.selectionGradeOnly, 'S_A');
+assert.strictEqual(config.smartWalletConsensusFlowRunnerShadow.maxExitQuoteToMarketRatio, 5);
+assert.strictEqual(
+  config.smartWalletConsensusFlowRunnerShadow.maxHistoricalExitProceedsMultiple,
+  1_000,
+);
+assert.strictEqual(config.smartWalletRegistry.gradeDirtyRefreshMinMs, 6 * 60 * 60_000);
+assert.strictEqual(config.smartWalletRegistry.clusterRefreshMs, 6 * 60 * 60_000);
 assert.strictEqual(config.liveTrading.enabled, false);
 assert.strictEqual(config.liveTrading.requestedEnabled, false);
 assert.strictEqual(config.liveTrading.safetyLock, true);
@@ -203,6 +210,9 @@ const liveGe30R23F2G2 = config.liveTrading.strategies.find((strategy) => (
 const liveGe30V2Exec01 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'migrated_ge30_d25_32_r24_f1_exec01_v2_r2_h15_live'
 ));
+const liveGrtF3V2 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'migrated_grt_r23_f3_v2_xleg_live'
+));
 const liveGd25X8 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'migrated_gd25_35_x8_live'
 ));
@@ -223,6 +233,9 @@ const liveCobF = config.liveTrading.strategies.find((strategy) => (
 ));
 const liveGraduationRecovery = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_ho500_x60_recovery_live'
+));
+const liveGraduationP500 = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'graduation_accel_o_c80_p500_stair240_live'
 ));
 const liveQualityLeader = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'quality_leader_ql_strict_protected_live'
@@ -290,6 +303,8 @@ assert.strictEqual(liveGe30R23F2G2.entryBeijingStartHour, 4);
 assert.strictEqual(liveGe30R23F2G2.entryBeijingEndHour, 24);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshRetryCount, 1);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshMaxSignalAgeMs, 2_500);
+assert.strictEqual(liveGrtF3V2.entryEnabled, true);
+assert.strictEqual(liveGrtF3V2.maxEntriesPerMint, 1);
 assert.strictEqual(liveGe30V2Exec01.entryEnabled, false);
 assert.strictEqual(liveGe30V2Exec01.positionSizeSol, 0.1);
 assert.strictEqual(liveGe30V2Exec01.code, 'G-V2-EXEC01-R2-H15');
@@ -373,6 +388,8 @@ assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');
 assert.strictEqual(liveGraduationRecovery.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveGraduationRecovery.fixedHoldMs, 60_000);
 assert.strictEqual(liveGraduationRecovery.sourceShadowCohortId, 'O_C80_HO500_X60:1SOL');
+assert.strictEqual(liveGraduationP500.entryEnabled, false);
+assert.strictEqual(liveGraduationP500.positionSizeSol, 0.1);
 assert.strictEqual(liveV3.positionSizeSol, 0.1);
 assert.strictEqual(liveV3.entryEnabled, false);
 assert.strictEqual(liveGd25F1.positionSizeSol, 0.1);
@@ -428,7 +445,6 @@ assert.deepStrictEqual(
     'O90-M5-STAIR120',
     'QL-STRICT-GUARD',
     'O-C80-D5-B2-S0-NC',
-    'O-C80-P500-STAIR240',
   ],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);

@@ -128,6 +128,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       closed: 0,
       noEntry: 0,
       noExit: 0,
+      invalidExitQuotes: 0,
+      invalidHistoricalRowsQuarantined: 0,
       restartCensored: 0,
       rugLabelsObserved: 0,
       rugBlocksApplied: 0,
@@ -309,6 +311,25 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   start() {
     if (!this.config.enabled) return;
+    // Preserve the raw quote fields for forensics, but remove impossible legacy
+    // proceeds from performance aggregates. These rows were produced before
+    // quote/mark consistency validation existed.
+    const historicalMultiple = Math.max(
+      100,
+      finite(this.config.maxHistoricalExitProceedsMultiple, 1_000),
+    );
+    const quarantined = this.store.db.prepare(`
+      UPDATE smart_wallet_consensus_flow_runner_shadow_positions
+      SET status='INVALID_QUOTE',
+        exit_reason='EXIT_CAPACITY_QUOTE_MARK_PRICE_MISMATCH',
+        gross_return_pct=NULL,
+        net_return_pct=NULL,
+        updated_at=?
+      WHERE capital_in_sol>0
+        AND core_proceeds_sol>capital_in_sol*?
+        AND status IN ('RUNNER','EXIT_PENDING','CLOSED')
+    `).run(this.now(), historicalMultiple);
+    this.metrics.invalidHistoricalRowsQuarantined = quarantined.changes;
     const placeholders = ACTIVE_STATUSES.map(() => '?').join(',');
     const rows = this.store.db.prepare(`
       SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
@@ -1173,8 +1194,15 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   _sellCore(position, trade, price, at, exit) {
     const units = position.tokenUnits * exit.coreFraction;
-    const quote = executableSell(trade, units, price);
-    if (!quote.available || !(quote.proceedsSol >= 0)) return false;
+    const quote = executableSell(trade, units, price, {
+      maxQuoteToMarketRatio: finite(this.config.maxExitQuoteToMarketRatio, 5),
+    });
+    if (!quote.available || !(quote.proceedsSol >= 0)) {
+      if (quote.reason === 'EXIT_CAPACITY_QUOTE_MARK_PRICE_MISMATCH') {
+        this.metrics.invalidExitQuotes += 1;
+      }
+      return false;
+    }
     position.tokenUnits -= units;
     position.runnerUnits = position.tokenUnits;
     position.coreProceedsSol += quote.proceedsSol;
@@ -1201,7 +1229,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   _sellAll(position, trade, price, at) {
     const markReturn = (price / position.entryPrice - 1) * 100;
-    const quote = executableSell(trade, position.tokenUnits, price, { rugMarkReturnPct: markReturn });
+    const quote = executableSell(trade, position.tokenUnits, price, {
+      rugMarkReturnPct: markReturn,
+      maxQuoteToMarketRatio: finite(this.config.maxExitQuoteToMarketRatio, 5),
+    });
+    if (quote.reason === 'EXIT_CAPACITY_QUOTE_MARK_PRICE_MISMATCH') {
+      this.metrics.invalidExitQuotes += 1;
+    }
     if (!quote.available && !quote.conservative) return false;
     const remainingProceeds = finite(quote.proceedsSol, 0);
     position.exitTxCount += 1;

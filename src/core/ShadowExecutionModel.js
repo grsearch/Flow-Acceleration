@@ -98,6 +98,7 @@ function executableBuy(trade, positionSol, fallbackPrice = null) {
 function executableSell(trade, tokenUnits, fallbackPrice = null, {
   rugMarkReturnPct = null,
   conservativeMissingQuotePct = -100,
+  maxQuoteToMarketRatio = null,
 } = {}) {
   const marketPrice = finite(fallbackPrice);
   const units = finite(tokenUnits);
@@ -126,6 +127,23 @@ function executableSell(trade, tokenUnits, fallbackPrice = null, {
     const proceedsSol = Number(quoteOutRaw) / 1e9;
     const price = proceedsSol / units;
     if (!(price >= 0) || !Number.isFinite(price)) throw new Error('invalid quote output');
+    const quoteToMarketRatio = marketPrice > 0 ? price / marketPrice : null;
+    const maximumRatio = finite(maxQuoteToMarketRatio);
+    if (maximumRatio > 0 && quoteToMarketRatio > maximumRatio) {
+      return {
+        available: false,
+        price: marketPrice,
+        marketPrice,
+        proceedsSol: marketPrice > 0 ? marketPrice * units : null,
+        impactPct: null,
+        quoteToMarketRatio,
+        rugLike: rugLike || confirmedCliff,
+        rugClassification: classification,
+        conservative: false,
+        reason: 'EXIT_CAPACITY_QUOTE_MARK_PRICE_MISMATCH',
+        reserveSource: reserves.source,
+      };
+    }
     const impactPct = marketPrice > 0 ? ((price / marketPrice) - 1) * 100 : null;
     return {
       available: true,
@@ -133,6 +151,7 @@ function executableSell(trade, tokenUnits, fallbackPrice = null, {
       marketPrice,
       proceedsSol,
       impactPct,
+      quoteToMarketRatio,
       rugLike: rugLike || impactPct <= -25,
       rugClassification: classification,
       conservative: false,

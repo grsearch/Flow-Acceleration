@@ -29,6 +29,12 @@ const {
   SmartWalletConsensusFlowRunnerShadowSuite,
 } = require('./core/SmartWalletConsensusFlowRunnerShadowSuite');
 const { PublicFlowLeadShadowSuite } = require('./core/PublicFlowLeadShadowSuite');
+const {
+  PublicFlowAbsorptionRecoveryShadowSuite,
+} = require('./core/PublicFlowAbsorptionRecoveryShadowSuite');
+const {
+  IndividualSmartWalletShadowPortfolio,
+} = require('./core/IndividualSmartWalletShadowPortfolio');
 const { CyaSlotFlowShadowSuite } = require('./core/CyaSlotFlowShadowSuite');
 const { CyaOrganicBurstShadowSuite } = require('./core/CyaOrganicBurstShadowSuite');
 const { EarlyPureBuyBurstShadowSuite } = require('./core/EarlyPureBuyBurstShadowSuite');
@@ -135,6 +141,11 @@ function createRuntime(runtimeConfig = config) {
     ...(runtimeConfig.smartLikeEarlyShadow.walletClusters || [])
       .flatMap((cluster) => cluster.wallets || []),
   ]);
+  const individualTargetWallets = new Set(
+    (runtimeConfig.individualSmartWalletShadows?.profiles || [])
+      .map((profile) => profile.targetWallet)
+      .filter(Boolean),
+  );
   const preEntryRugRisk = new PreEntryRugRiskTracker({
     config: runtimeConfig.preEntryRugRisk,
     store,
@@ -211,6 +222,12 @@ function createRuntime(runtimeConfig = config) {
     rugRiskTracker: preEntryRugRisk,
   });
   smartWalletFirstOpenRightTailShadow.start();
+  const individualSmartWalletShadows = new IndividualSmartWalletShadowPortfolio({
+    config: runtimeConfig.individualSmartWalletShadows,
+    store,
+    rugRiskTracker: preEntryRugRisk,
+  });
+  individualSmartWalletShadows.start();
   const publicFlowLeadShadow = new PublicFlowLeadShadowSuite({
     config: {
       ...runtimeConfig.publicFlowLeadShadow,
@@ -220,6 +237,11 @@ function createRuntime(runtimeConfig = config) {
     rugRiskTracker: preEntryRugRisk,
   });
   publicFlowLeadShadow.start();
+  const publicFlowAbsorptionRecoveryShadow = new PublicFlowAbsorptionRecoveryShadowSuite({
+    config: runtimeConfig.publicFlowAbsorptionRecoveryShadow,
+    store,
+  });
+  publicFlowAbsorptionRecoveryShadow.start();
   const creatorAffinityShadow = new PublicFlowLeadShadowSuite({
     config: {
       ...runtimeConfig.creatorAffinityShadow,
@@ -389,7 +411,9 @@ function createRuntime(runtimeConfig = config) {
     smartResonanceShadow,
     smartWalletRugEscapeShadow,
     smartWalletFirstOpenRightTailShadow,
+    individualSmartWalletShadows,
     publicFlowLeadShadow,
+    publicFlowAbsorptionRecoveryShadow,
     creatorAffinityShadow,
     cyaSlotFlowShadow,
     cyaOrganicBurstShadow,
@@ -481,8 +505,10 @@ function createRuntime(runtimeConfig = config) {
       ...smartResonanceShadow.trackedMints(),
       ...smartWalletRugEscapeShadow.trackedMints(),
       ...smartWalletFirstOpenRightTailShadow.trackedMints(),
+      ...individualSmartWalletShadows.trackedMints(),
       ...smartWalletConsensusFlowRunnerShadow.trackedMints(),
       ...publicFlowLeadShadow.trackedMints(),
+      ...publicFlowAbsorptionRecoveryShadow.trackedMints(),
       ...creatorAffinityShadow.trackedMints(),
       ...cyaSlotFlowShadow.trackedMints(),
       ...cyaOrganicBurstShadow.trackedMints(),
@@ -618,6 +644,9 @@ function createRuntime(runtimeConfig = config) {
           const token = store.recordCreate(event);
           engine.handleCreate(token || event);
           observeShadow('launchQualityCreate', () => launchQualityObserver.onCreate(token || event));
+          observeShadow('publicFlowRecoveryCreate', () => (
+            publicFlowAbsorptionRecoveryShadow.onCreate(token || event)
+          ));
           observeShadow('graduationAccelerationCreate', () => (
             graduationAccelerationShadow.onCreate(token || event)
           ));
@@ -693,6 +722,9 @@ function createRuntime(runtimeConfig = config) {
 
         const trade = store.enrichTrade(event);
         const isLegacySmartWalletTrade = Boolean(trade.wallet && smartWallets.has(trade.wallet));
+        const isIndividualTargetWalletTrade = Boolean(
+          trade.wallet && individualTargetWallets.has(trade.wallet),
+        );
         const smartOpenContext = isLegacySmartWalletTrade
           ? engine.recentBuyContext(
             trade.mint,
@@ -726,7 +758,13 @@ function createRuntime(runtimeConfig = config) {
         observeShadow('smartWalletFirstOpenRightTail', () => (
           smartWalletFirstOpenRightTailShadow.observeTrade(trade)
         ));
+        observeShadow('individualSmartWallets', () => (
+          individualSmartWalletShadows.observeTrade(trade)
+        ));
         observeShadow('publicFlowLead', () => publicFlowLeadShadow.observeTrade(trade));
+        observeShadow('publicFlowRecovery', () => (
+          publicFlowAbsorptionRecoveryShadow.observeTrade(trade)
+        ));
         observeShadow('creatorAffinity', () => creatorAffinityShadow.observeTrade(trade));
         observeShadow('cyaSlotFlow', () => cyaSlotFlowShadow.observeTrade(trade));
         observeShadow('cyaOrganicBurst', () => cyaOrganicBurstShadow.observeTrade(trade));
@@ -759,10 +797,24 @@ function createRuntime(runtimeConfig = config) {
             trade.wallet, trade.timestampMs,
           ) : null;
         const isRegistryVotingWalletTrade = Boolean(registryVotingSnapshot);
-        if (isLegacySmartWalletTrade || isRegistryMonitoredWalletTrade) {
+        if (isLegacySmartWalletTrade || isRegistryMonitoredWalletTrade
+          || isIndividualTargetWalletTrade) {
           const smartEvent = store.recordSmartWalletEvent(trade);
           if (smartEvent?.inserted) {
             const normalizedSmartEvent = { ...trade, ...smartEvent, id: smartEvent.id };
+            observeShadow('individualSmartWalletEvent', () => (
+              individualSmartWalletShadows.onSmartWalletEvent(normalizedSmartEvent)
+            ));
+            observeShadow('publicFlowRecoverySmartLabel', () => (
+              publicFlowAbsorptionRecoveryShadow.onSmartWalletEvent(
+                normalizedSmartEvent,
+                {
+                  walletSnapshot: registryVotingSnapshot
+                    || registryMonitoringSnapshot
+                    || smartOpenContext,
+                },
+              )
+            ));
             if (isRegistryMonitoredWalletTrade) {
               observeShadow('smartWalletRegistryEvent', () => (
                 smartWalletRegistry.onSmartWalletEvent(
@@ -1009,7 +1061,9 @@ function createRuntime(runtimeConfig = config) {
         ['smartResonanceAdvance', smartResonanceShadow],
         ['smartWalletRugEscapeAdvance', smartWalletRugEscapeShadow],
         ['smartWalletFirstOpenRightTailAdvance', smartWalletFirstOpenRightTailShadow],
+        ['individualSmartWalletAdvance', individualSmartWalletShadows],
         ['publicFlowLeadAdvance', publicFlowLeadShadow],
+        ['publicFlowRecoveryAdvance', publicFlowAbsorptionRecoveryShadow],
         ['creatorAffinityAdvance', creatorAffinityShadow],
         ['cyaSlotFlowAdvance', cyaSlotFlowShadow],
         ['cyaOrganicBurstAdvance', cyaOrganicBurstShadow],
@@ -1086,7 +1140,9 @@ function createRuntime(runtimeConfig = config) {
     smartResonanceShadow.stop();
     smartWalletRugEscapeShadow.stop();
     smartWalletFirstOpenRightTailShadow.stop();
+    individualSmartWalletShadows.stop();
     publicFlowLeadShadow.stop();
+    publicFlowAbsorptionRecoveryShadow.stop();
     creatorAffinityShadow.stop();
     cyaSlotFlowShadow.stop();
     cyaOrganicBurstShadow.stop();
@@ -1133,7 +1189,9 @@ function createRuntime(runtimeConfig = config) {
       smartResonanceShadow: smartResonanceShadow.health(),
       smartWalletRugEscapeShadow: smartWalletRugEscapeShadow.health(),
       smartWalletFirstOpenRightTailShadow: smartWalletFirstOpenRightTailShadow.health(),
+      individualSmartWalletShadows: individualSmartWalletShadows.health(),
       publicFlowLeadShadow: publicFlowLeadShadow.health(),
+      publicFlowAbsorptionRecoveryShadow: publicFlowAbsorptionRecoveryShadow.health(),
       creatorAffinityShadow: creatorAffinityShadow.health(),
       cyaSlotFlowShadow: cyaSlotFlowShadow.health(),
       cyaOrganicBurstShadow: cyaOrganicBurstShadow.health(),
@@ -1165,7 +1223,8 @@ function createRuntime(runtimeConfig = config) {
     smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow,
     smartWalletRegistry, smartWalletConsensusFlowRunnerShadow,
     smartWalletRugEscapeShadow, smartWalletFirstOpenRightTailShadow,
-    publicFlowLeadShadow, creatorAffinityShadow,
+    individualSmartWalletShadows,
+    publicFlowLeadShadow, publicFlowAbsorptionRecoveryShadow, creatorAffinityShadow,
     cyaSlotFlowShadow, cyaOrganicBurstShadow, earlyPureBuyBurstShadow,
     sameSlotDumpBackrunShadow,
     launchPullbackShadow,

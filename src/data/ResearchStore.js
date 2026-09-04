@@ -529,6 +529,11 @@ class ResearchStore {
         table: 'public_flow_lead_shadow_positions',
         anchor: 'signal_at',
       },
+      'public-flow-recovery': {
+        label: 'Public Flow Absorption Recovery · PFAR',
+        table: 'public_flow_absorption_recovery_shadow_positions',
+        anchor: 'signal_at',
+      },
       'creator-affinity': {
         label: 'Creator Affinity + Public Flow · CAF',
         table: 'creator_affinity_shadow_positions',

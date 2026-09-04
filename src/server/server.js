@@ -69,7 +69,9 @@ class ResearchServer {
     smartResonanceShadow = null,
     smartWalletRugEscapeShadow = null,
     smartWalletFirstOpenRightTailShadow = null,
+    individualSmartWalletShadows = null,
     publicFlowLeadShadow = null,
+    publicFlowAbsorptionRecoveryShadow = null,
     creatorAffinityShadow = null,
     cyaSlotFlowShadow = null,
     cyaOrganicBurstShadow = null,
@@ -111,7 +113,9 @@ class ResearchServer {
     this.smartResonanceShadow = smartResonanceShadow;
     this.smartWalletRugEscapeShadow = smartWalletRugEscapeShadow;
     this.smartWalletFirstOpenRightTailShadow = smartWalletFirstOpenRightTailShadow;
+    this.individualSmartWalletShadows = individualSmartWalletShadows;
     this.publicFlowLeadShadow = publicFlowLeadShadow;
+    this.publicFlowAbsorptionRecoveryShadow = publicFlowAbsorptionRecoveryShadow;
     this.creatorAffinityShadow = creatorAffinityShadow;
     this.cyaSlotFlowShadow = cyaSlotFlowShadow;
     this.cyaOrganicBurstShadow = cyaOrganicBurstShadow;
@@ -223,7 +227,9 @@ class ResearchServer {
           'smart-consensus-overlay': enabled('smartWalletConsensusOverlay'),
           'smart-wallet-rug-escape': enabled('smartWalletRugEscapeShadow'),
           'smart-first-open-right-tail': enabled('smartWalletFirstOpenRightTailShadow'),
+          'individual-smart-wallets': enabled('individualSmartWalletShadows'),
           'public-flow-lead': enabled('publicFlowLeadShadow'),
+          'public-flow-recovery': enabled('publicFlowAbsorptionRecoveryShadow'),
           'creator-affinity': enabled('creatorAffinityShadow'),
           'launch-pullback': enabled('launchPullbackShadow'),
           'migrated-rebound': enabled('migratedDropReboundShadow'),
@@ -803,6 +809,22 @@ class ResearchServer {
       });
     });
 
+    this.app.get('/api/individual-smart-wallet-shadows', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        ...(this.individualSmartWalletShadows?.dashboard(
+          numeric(request.query.positionLimit, 100),
+        ) || {
+          enabled: false,
+          mode: 'SHADOW_INDIVIDUAL_SMART_WALLETS',
+          sendsTransactions: false,
+          pooledConsensus: false,
+          strategies: [],
+          health: { enabled: false },
+        }),
+      });
+    });
+
     this.app.get('/api/public-flow-lead-shadow', (request, response) => {
       response.json({
         generatedAt: Date.now(),
@@ -840,6 +862,28 @@ class ResearchServer {
         ...(this.cyaSlotFlowShadow?.dashboard({
           positionLimit: numeric(request.query.positionLimit, 100),
         }) || { cohorts: [], positions: [] }),
+      });
+    });
+
+    this.app.get('/api/public-flow-recovery-shadow', (request, response) => {
+      response.json({
+        generatedAt: Date.now(),
+        runtime: this.publicFlowAbsorptionRecoveryShadow?.health() || {
+          enabled: false,
+          mode: 'SHADOW_PUBLIC_FLOW_ABSORPTION_RECOVERY',
+          sendsTransactions: false,
+          entryProfiles: [],
+          exitProfiles: [],
+        },
+        timeSessions: this.publicFlowAbsorptionRecoveryShadow
+          ? this.store.shadowTimeSessionDashboard('public-flow-recovery')
+          : { sessions: [] },
+        ...(this.publicFlowAbsorptionRecoveryShadow?.dashboard({
+          positionLimit: numeric(request.query.positionLimit, 50),
+          observationLimit: numeric(request.query.observationLimit, 50),
+        }) || {
+          cohorts: [], positions: [], observations: [], observationStats: {},
+        }),
       });
     });
 
@@ -1083,7 +1127,11 @@ class ResearchServer {
         smartWalletRugEscapeShadow: this.smartWalletRugEscapeShadow?.health() || null,
         smartWalletFirstOpenRightTailShadow:
           this.smartWalletFirstOpenRightTailShadow?.health() || null,
+        individualSmartWalletShadows:
+          this.individualSmartWalletShadows?.health() || null,
         publicFlowLeadShadow: this.publicFlowLeadShadow?.health() || null,
+        publicFlowAbsorptionRecoveryShadow:
+          this.publicFlowAbsorptionRecoveryShadow?.health() || null,
         creatorAffinityShadow: this.creatorAffinityShadow?.health() || null,
         cyaSlotFlowShadow: this.cyaSlotFlowShadow?.health() || null,
         cyaOrganicBurstShadow: this.cyaOrganicBurstShadow?.health() || null,

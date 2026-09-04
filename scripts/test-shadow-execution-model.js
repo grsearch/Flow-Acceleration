@@ -41,6 +41,18 @@ function ammTrade(overrides = {}) {
 }
 
 {
+  const inconsistent = executableSell(
+    ammTrade(),
+    10_000,
+    0.000001,
+    { rugMarkReturnPct: 0, maxQuoteToMarketRatio: 5 },
+  );
+  assert.equal(inconsistent.available, false);
+  assert.equal(inconsistent.reason, 'EXIT_CAPACITY_QUOTE_MARK_PRICE_MISMATCH');
+  assert.ok(inconsistent.quoteToMarketRatio > 5);
+}
+
+{
   const missing = executableSell(
     { market: 'PUMP_AMM' },
     10_000,

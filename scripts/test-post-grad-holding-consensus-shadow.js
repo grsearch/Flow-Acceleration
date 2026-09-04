@@ -194,7 +194,36 @@ function main() {
   const suite = new SmartWalletConsensusFlowRunnerShadowSuite({
     config, store, registry, now: () => now,
   });
+  store.db.prepare(`
+    INSERT INTO smart_wallet_consensus_flow_runner_shadow_positions (
+      cohort_id, entry_profile_id, exit_profile_id, episode_id, mint, status,
+      signal_strength, signal_at, signal_market, signal_price,
+      required_clusters, available_clusters, distinct_clusters,
+      selection_a_clusters, copy_a_clusters, weighted_score, cluster_votes_json,
+      registry_version, position_sol, scout_fraction, configured_cost_pct,
+      capital_in_sol, core_proceeds_sol, gross_return_pct, net_return_pct,
+      created_at, updated_at
+    ) VALUES (
+      'LEGACY_BAD_QUOTE', 'POST_GRAD_HOLD3_FLOW2_60', 'CORE80_RUNNER30M',
+      'legacy-bad-quote', 'LegacyBadQuote111111111111111111111111111', 'CLOSED',
+      'HOLDING_STRONG', ?, 'PUMP_AMM', 0.001,
+      3, 4, 3, 0, 0, 1.5, '[]',
+      1, 1, 0, 0, 1, 5000, 499900, 499900, ?, ?
+    )
+  `).run(base - 5_000, base - 5_000, base - 5_000);
   suite.start();
+  const invalidLegacy = store.db.prepare(`
+    SELECT status, exit_reason, net_return_pct
+    FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE cohort_id='LEGACY_BAD_QUOTE'
+  `).get();
+  assert.strictEqual(invalidLegacy.status, 'INVALID_QUOTE');
+  assert.strictEqual(
+    invalidLegacy.exit_reason,
+    'EXIT_CAPACITY_QUOTE_MARK_PRICE_MISMATCH',
+  );
+  assert.strictEqual(invalidLegacy.net_return_pct, null);
+  assert.strictEqual(suite.health().invalidHistoricalRowsQuarantined, 1);
   assert.strictEqual(suite.health().restoredSmartHoldings, 6);
   assert(suite.trackedMints().includes(restoreMint),
     'three restored holder clusters must keep the mint subscribed for first AMM');

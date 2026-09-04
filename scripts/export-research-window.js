@@ -85,6 +85,21 @@ const EXPLICIT_FILTERS = Object.freeze({
   smart_like_early_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   smart_resonance_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   public_flow_lead_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
+  individual_smart_wallet_ardin_curve_shadow_positions: {
+    where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at',
+  },
+  individual_smart_wallet_4vw_curve_shadow_positions: {
+    where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at',
+  },
+  individual_smart_wallet_dz_amm_shadow_positions: {
+    where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at',
+  },
+  public_flow_absorption_recovery_shadow_positions: {
+    where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at',
+  },
+  public_flow_absorption_recovery_observations: {
+    where: 'observed_at >= ? AND observed_at < ?', anchor: 'observed_at',
+  },
   cya_slot_flow_shadow_positions: { where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at' },
   same_slot_dump_backrun_shadow_positions: {
     where: 'signal_at >= ? AND signal_at < ?', anchor: 'signal_at',

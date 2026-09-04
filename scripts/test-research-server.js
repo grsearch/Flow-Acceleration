@@ -450,9 +450,9 @@ async function main() {
     assert.strictEqual(ge30V2Exec01.code, 'G-V2-EXEC01-R2-H15');
     assert.strictEqual(grtF3V2.entryEnabled, true);
     assert.strictEqual(grtF3V2.positionSizeSol, 0.1);
-    assert.strictEqual(grtF3V2.maxEntriesPerMint, 3);
+    assert.strictEqual(grtF3V2.maxEntriesPerMint, 1);
     assert.strictEqual(grtF3V2.exitMode, 'LEGACY');
-    assert.strictEqual(oC80P500.entryEnabled, true);
+    assert.strictEqual(oC80P500.entryEnabled, false);
     assert.strictEqual(oC80P500.positionSizeSol, 0.1);
     assert.strictEqual(oC80P500.coreExitPct, 0);
     assert.strictEqual(oC80P500.maxPostGraduationHoldMs, 240_000);

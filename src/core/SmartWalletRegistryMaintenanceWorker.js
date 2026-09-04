@@ -6,14 +6,20 @@ const { SmartWalletRegistry } = require('./SmartWalletRegistry');
 
 function run() {
   const { dbPath, config, task } = workerData;
-  const db = new Database(dbPath, { fileMustExist: true });
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
+  // The worker owns the expensive historical scans, not database mutations.
+  // Keeping this connection read-only leaves the realtime ResearchStore as the
+  // sole writer and removes recurring SQLITE_BUSY collisions.
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma('query_only = ON');
   db.pragma('busy_timeout = 30000');
   const store = { db, config: { dbPath } };
   try {
     const registry = new SmartWalletRegistry({
-      config: { ...config, maintenanceWorkerEnabled: false },
+      config: {
+        ...config,
+        maintenanceWorkerEnabled: false,
+        skipStorageInit: true,
+      },
       store,
       now: () => task.at,
       fetchImpl: null,
@@ -21,12 +27,12 @@ function run() {
     });
     let value;
     if (task.type === 'CLUSTERS') {
-      value = registry.refreshClusters(task.at, { force: true });
+      value = registry.refreshClusters(task.at, { force: true, collectOnly: true });
     } else if (task.type === 'GRADES') {
-      registry.refreshGrades(task.at, task.options || {});
-      value = {
-        wallets: db.prepare('SELECT COUNT(*) count FROM smart_wallet_registry').get().count,
-      };
+      value = registry.refreshGrades(task.at, {
+        ...(task.options || {}),
+        collectOnly: true,
+      });
     } else {
       throw new Error(`Unsupported Smart Wallet maintenance task: ${task.type}`);
     }

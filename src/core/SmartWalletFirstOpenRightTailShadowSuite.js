@@ -33,6 +33,14 @@ class SmartWalletFirstOpenRightTailShadowSuite {
     this.store = store;
     this.rugRiskTracker = rugRiskTracker;
     this.now = now;
+    this.storageTable = /^[a-z][a-z0-9_]*$/i.test(config.storageTable || '')
+      ? config.storageTable : 'smart_wallet_first_open_right_tail_shadow_positions';
+    this.strategyCode = config.strategyCode || 'SWFO-S/B-RT';
+    this.strategyName = config.strategyName || 'Smart Wallet First OPEN Right-Tail';
+    this.modeCode = config.modeCode || 'SHADOW_SMART_FIRST_OPEN_RIGHT_TAIL';
+    this.targetWallet = config.targetWallet || null;
+    this.targetMarket = config.targetMarket || null;
+    this.allowCrossMarketExit = config.allowCrossMarketExit === true;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
@@ -50,6 +58,9 @@ class SmartWalletFirstOpenRightTailShadowSuite {
       coreExits: 0,
       closed: 0,
       noExit: 0,
+      ignoredWrongWallet: 0,
+      ignoredWrongMarket: 0,
+      walletExitSignals: 0,
       lastActionAt: null,
       lastError: null,
     };
@@ -57,8 +68,11 @@ class SmartWalletFirstOpenRightTailShadowSuite {
   }
 
   _initStorage() {
+    const table = this.storageTable;
+    const indexPrefix = table === 'smart_wallet_first_open_right_tail_shadow_positions'
+      ? 'swfo_rt' : table.replace(/_positions$/, '');
     this.store.db.exec(`
-      CREATE TABLE IF NOT EXISTS smart_wallet_first_open_right_tail_shadow_positions (
+      CREATE TABLE IF NOT EXISTS ${table} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cohort_id TEXT NOT NULL,
         entry_profile_id TEXT NOT NULL,
@@ -114,17 +128,17 @@ class SmartWalletFirstOpenRightTailShadowSuite {
         updated_at INTEGER NOT NULL,
         UNIQUE(smart_event_id, cohort_id)
       );
-      CREATE INDEX IF NOT EXISTS idx_swfo_rt_mint_time
-        ON smart_wallet_first_open_right_tail_shadow_positions(mint, signal_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_swfo_rt_profiles
-        ON smart_wallet_first_open_right_tail_shadow_positions(
+      CREATE INDEX IF NOT EXISTS idx_${indexPrefix}_mint_time
+        ON ${table}(mint, signal_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_${indexPrefix}_profiles
+        ON ${table}(
           entry_profile_id, exit_profile_id, signal_at DESC
         );
-      CREATE INDEX IF NOT EXISTS idx_swfo_rt_status
-        ON smart_wallet_first_open_right_tail_shadow_positions(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_${indexPrefix}_status
+        ON ${table}(status, updated_at DESC);
     `);
     const columns = new Set(this.store.db.prepare(
-      'PRAGMA table_info(smart_wallet_first_open_right_tail_shadow_positions)',
+      `PRAGMA table_info(${table})`,
     ).all().map((row) => row.name));
     const additions = [
       ['pre_repeated_buy_size_pct', 'REAL'],
@@ -135,12 +149,12 @@ class SmartWalletFirstOpenRightTailShadowSuite {
     for (const [name, definition] of additions) {
       if (!columns.has(name)) {
         this.store.db.exec(
-          `ALTER TABLE smart_wallet_first_open_right_tail_shadow_positions ADD COLUMN ${name} ${definition}`,
+          `ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`,
         );
       }
     }
     this.insertRow = this.store.db.prepare(`
-      INSERT OR IGNORE INTO smart_wallet_first_open_right_tail_shadow_positions (
+      INSERT OR IGNORE INTO ${table} (
         cohort_id, entry_profile_id, exit_profile_id, episode_id,
         smart_event_id, smart_wallet, mint, symbol, market, status,
         rejection_reason, position_sol, configured_cost_pct, signal_at,
@@ -159,11 +173,11 @@ class SmartWalletFirstOpenRightTailShadowSuite {
       )
     `);
     this.getInserted = this.store.db.prepare(`
-      SELECT id FROM smart_wallet_first_open_right_tail_shadow_positions
+      SELECT id FROM ${table}
       WHERE smart_event_id=? AND cohort_id=?
     `);
     this.updateRow = this.store.db.prepare(`
-      UPDATE smart_wallet_first_open_right_tail_shadow_positions SET
+      UPDATE ${table} SET
         status=@status, rejection_reason=@rejectionReason,
         entry_at=@entryAt, entry_price=@entryPrice, entry_impact_pct=@entryImpactPct,
         token_units=@tokenUnits, highest_price=@highestPrice, lowest_price=@lowestPrice,
@@ -194,8 +208,9 @@ class SmartWalletFirstOpenRightTailShadowSuite {
   start() {
     if (!this.config.enabled) return;
     const now = this.now();
+    const table = this.storageTable;
     this.store.db.prepare(`
-      UPDATE smart_wallet_first_open_right_tail_shadow_positions
+      UPDATE ${table}
       SET status='CENSORED_RESTART',
           rejection_reason=COALESCE(rejection_reason, 'PROCESS_RESTART'), updated_at=?
       WHERE status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING')
@@ -213,10 +228,28 @@ class SmartWalletFirstOpenRightTailShadowSuite {
 
   onSmartWalletEvent(event) {
     if (!this.config.enabled || !event?.mint) return;
+    if (this.targetWallet && event.wallet !== this.targetWallet) {
+      this.metrics.ignoredWrongWallet += 1;
+      return;
+    }
     this.metrics.smartEvents += 1;
     const phase = String(event.positionPhase || event.position_phase || '').toUpperCase();
-    if (String(event.side || '').toUpperCase() !== 'BUY' || phase !== 'OPEN') {
+    const side = String(event.side || '').toUpperCase();
+    if (side === 'SELL' && ['REDUCE', 'CLOSE'].includes(phase)) {
+      if (this.targetMarket && event.market !== this.targetMarket
+        && !this.allowCrossMarketExit) {
+        this.metrics.ignoredWrongMarket += 1;
+        return;
+      }
+      this._onWalletExit(event);
+      return;
+    }
+    if (side !== 'BUY' || phase !== 'OPEN') {
       if (phase === 'ADD') this.metrics.ignoredAdds += 1;
+      return;
+    }
+    if (this.targetMarket && event.market !== this.targetMarket) {
+      this.metrics.ignoredWrongMarket += 1;
       return;
     }
     const signalAt = finite(event.timestampMs ?? event.timestamp_ms);
@@ -232,18 +265,20 @@ class SmartWalletFirstOpenRightTailShadowSuite {
     const qualifiedRows = [];
     for (const entry of this.entryProfiles.values()) {
       this.metrics.evaluatedProfiles += 1;
-      const incomplete = preReturnPct == null || preMaxConsecutiveBuys == null;
-      const qualified = !incomplete
+      const riskGuardEnabled = entry.riskGuardEnabled !== false;
+      const incomplete = riskGuardEnabled
+        && (preReturnPct == null || preMaxConsecutiveBuys == null);
+      const qualified = !riskGuardEnabled || (!incomplete
         && preReturnPct <= entry.maxPreReturnPct
-        && preMaxConsecutiveBuys <= entry.maxConsecutiveBuys;
+        && preMaxConsecutiveBuys <= entry.maxConsecutiveBuys);
       if (qualified) this.metrics.qualifiedProfiles += 1;
       else this.metrics.rejectedProfiles += 1;
-      const rejectionReason = incomplete
+      const rejectionReason = !riskGuardEnabled ? null : (incomplete
         ? 'INCOMPLETE_PRE_ENTRY_RISK'
         : (preReturnPct > entry.maxPreReturnPct
           ? `PRE_RETURN_ABOVE_${entry.maxPreReturnPct}`
           : (preMaxConsecutiveBuys > entry.maxConsecutiveBuys
-            ? `BUY_RUN_ABOVE_${entry.maxConsecutiveBuys}` : null));
+            ? `BUY_RUN_ABOVE_${entry.maxConsecutiveBuys}` : null)));
       for (const exit of this.exitProfiles.values()) {
         const row = {
           id: null,
@@ -338,9 +373,43 @@ class SmartWalletFirstOpenRightTailShadowSuite {
     for (const id of [...ids]) {
       const episode = this.episodes.get(id);
       if (!episode || timestampMs < episode.signalAt) continue;
-      if (episode.market && trade.market && episode.market !== trade.market) continue;
+      const crossMarketExit = this.allowCrossMarketExit
+        && episode.market === 'PUMP_BONDING_CURVE'
+        && trade.market === 'PUMP_AMM'
+        && episode.rows.some((row) => ['OPEN', 'EXIT_PENDING'].includes(row.status));
+      if (episode.market && trade.market && episode.market !== trade.market && !crossMarketExit) {
+        continue;
+      }
       this._observeEpisode(episode, trade, timestampMs, markPrice);
     }
+  }
+
+  _onWalletExit(event) {
+    const timestampMs = finite(event.timestampMs ?? event.timestamp_ms);
+    if (!(timestampMs > 0)) return;
+    const ids = this.episodesByMint.get(event.mint);
+    if (!ids?.size) return;
+    let signaled = 0;
+    for (const id of ids) {
+      const episode = this.episodes.get(id);
+      if (!episode) continue;
+      for (const row of episode.rows) {
+        if (row.status === 'PENDING_ENTRY' && row.exit.mode === 'WALLET_EXIT') {
+          row.status = 'NO_ENTRY';
+          row.rejectionReason = 'TARGET_WALLET_EXITED_BEFORE_ENTRY';
+          this._save(row);
+          signaled += 1;
+        } else if (row.status === 'OPEN' && row.exit.mode === 'WALLET_EXIT') {
+          this._requestExit(row, timestampMs, `TARGET_WALLET_${String(
+            event.positionPhase || event.position_phase || 'SELL',
+          ).toUpperCase()}`);
+          this._save(row);
+          signaled += 1;
+        }
+      }
+    }
+    this.metrics.walletExitSignals += signaled;
+    if (signaled) this.metrics.lastActionAt = this.now();
   }
 
   _observeEpisode(episode, trade, timestampMs, markPrice) {
@@ -377,6 +446,15 @@ class SmartWalletFirstOpenRightTailShadowSuite {
     }
     const quote = executableBuy(trade, row.positionSol, markPrice);
     if (!quote.available || !(quote.price > 0) || !(quote.tokenUnits > 0)) return;
+    if (Number.isFinite(this.config.maxEntryImpactPct)
+      && Number.isFinite(quote.impactPct)
+      && quote.impactPct > this.config.maxEntryImpactPct) {
+      row.status = 'NO_ENTRY';
+      row.rejectionReason = `ENTRY_IMPACT_ABOVE_${this.config.maxEntryImpactPct}`;
+      row.entryImpactPct = quote.impactPct;
+      this._save(row);
+      return;
+    }
     row.status = 'OPEN';
     row.entryAt = timestampMs;
     row.entryPrice = quote.price;
@@ -507,6 +585,7 @@ class SmartWalletFirstOpenRightTailShadowSuite {
   }
 
   dashboard(limit = 100) {
+    const table = this.storageTable;
     const groups = this.store.db.prepare(`
       SELECT cohort_id, entry_profile_id, exit_profile_id,
         COUNT(*) signals, COUNT(DISTINCT mint) mints,
@@ -523,12 +602,12 @@ class SmartWalletFirstOpenRightTailShadowSuite {
         MAX(CASE WHEN status='CLOSED' THEN net_return_pct END) max_winner_pct,
         AVG(pre_return_pct) average_pre_return_pct,
         AVG(pre_max_consecutive_buys) average_pre_max_consecutive_buys
-      FROM smart_wallet_first_open_right_tail_shadow_positions
+      FROM ${table}
       GROUP BY cohort_id, entry_profile_id, exit_profile_id
       ORDER BY entry_profile_id, exit_profile_id
     `).all();
     const returnRows = this.store.db.prepare(`
-      SELECT net_return_pct FROM smart_wallet_first_open_right_tail_shadow_positions
+      SELECT net_return_pct FROM ${table}
       WHERE cohort_id=? AND status='CLOSED' AND net_return_pct IS NOT NULL
       ORDER BY net_return_pct DESC
     `);
@@ -545,15 +624,20 @@ class SmartWalletFirstOpenRightTailShadowSuite {
         ? values.slice(0, 5).reduce((sum, value) => sum + value, 0) / total * 100 : null;
     }
     const positions = this.store.db.prepare(`
-      SELECT * FROM smart_wallet_first_open_right_tail_shadow_positions
+      SELECT * FROM ${table}
       ORDER BY CASE WHEN status IN ('PENDING_ENTRY','OPEN','EXIT_PENDING') THEN 0 ELSE 1 END,
         signal_at DESC, id DESC LIMIT ?
     `).all(Math.max(1, Math.min(300, Number(limit) || 100)));
     return {
       enabled: this.config.enabled,
-      mode: 'SHADOW_SWFO_RT',
+      mode: this.modeCode,
       sendsTransactions: false,
       strategy: {
+        code: this.strategyCode,
+        name: this.strategyName,
+        targetWallet: this.targetWallet,
+        targetMarket: this.targetMarket,
+        storageTable: this.storageTable,
         firstOpenOnly: true,
         ignoresAdds: true,
         positionSizeSol: this.config.positionSizeSol,
@@ -569,7 +653,12 @@ class SmartWalletFirstOpenRightTailShadowSuite {
   health() {
     return {
       enabled: this.config.enabled,
-      mode: 'SHADOW_SMART_FIRST_OPEN_RIGHT_TAIL',
+      mode: this.modeCode,
+      strategyCode: this.strategyCode,
+      strategyName: this.strategyName,
+      targetWallet: this.targetWallet,
+      targetMarket: this.targetMarket,
+      storageTable: this.storageTable,
       firstOpenOnly: true,
       ignoresAdds: true,
       hotPath: 'TRACKED_MINTS_IN_MEMORY_ONLY',
