@@ -5426,6 +5426,82 @@ const config = {
         minReturn5sPct: null, maxReturn5sPct: null,
         maxReturn15sPct: null, minDrawdown15sPct: 2,
       },
+      // Strict forward-only RUG filter pair. Both arms use the exact COB-F
+      // public-flow signal, 0.1 SOL execution constraints and FIX30 exit. The
+      // baseline remains label-only; RUGX alone hard-blocks the three current
+      // high-specificity live Curve catastrophe signatures.
+      {
+        id: 'COB_F_LR01_FIX30',
+        label: 'COB-F-LR01 FIX30 · 0.1 SOL 高频RUG基准',
+        newEntriesEnabled: booleanEnv('FLOW_CYA_ORGANIC_BURST_RUG_PAIR_ENABLED', true),
+        liveReplay: true,
+        exclusiveGroup: 'COB_F_LR01_FIX30_BASELINE',
+        exitProfileIds: ['FIX30'],
+        positionSizeSol: numberEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_POSITION_SOL', 0.1, {
+          min: 0.001, max: 100,
+        }),
+        entryDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_DELAY_MS', 200, {
+          min: 0, max: 10_000,
+        }),
+        entryTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_TIMEOUT_MS', 1_500, {
+          min: 1, max: 30_000,
+        }),
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_JUMP_PCT', 15,
+          { min: 0, max: 1_000 },
+        ),
+        maxEntryPriceDropPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_DROP_PCT', 35,
+          { min: 0, max: 100 },
+        ),
+        maxEntryImpactPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_IMPACT_PCT', 10,
+          { min: 0, max: 1_000 },
+        ),
+        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
+        minBuyers5s: 10, minNetFlow5sSol: 7,
+        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
+        minReturn2sPct: 0, maxReturn2sPct: 40,
+        minReturn5sPct: null, maxReturn5sPct: null,
+        maxReturn15sPct: null, minDrawdown15sPct: 2,
+      },
+      {
+        id: 'COB_F_LR01_FIX30_RUGX',
+        label: 'COB-F-LR01 FIX30 RUGX · 同信号高置信灾难过滤',
+        newEntriesEnabled: booleanEnv('FLOW_CYA_ORGANIC_BURST_RUG_PAIR_ENABLED', true),
+        liveReplay: true,
+        pairedBaselineProfileId: 'COB_F_LR01_FIX30',
+        rugGuardMode: 'LIVE_CURVE_CATASTROPHE',
+        exclusiveGroup: 'COB_F_LR01_FIX30_RUGX',
+        exitProfileIds: ['FIX30'],
+        positionSizeSol: numberEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_POSITION_SOL', 0.1, {
+          min: 0.001, max: 100,
+        }),
+        entryDelayMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_DELAY_MS', 200, {
+          min: 0, max: 10_000,
+        }),
+        entryTimeoutMs: integerEnv('FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_ENTRY_TIMEOUT_MS', 1_500, {
+          min: 1, max: 30_000,
+        }),
+        maxEntryPriceJumpPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_JUMP_PCT', 15,
+          { min: 0, max: 1_000 },
+        ),
+        maxEntryPriceDropPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_DROP_PCT', 35,
+          { min: 0, max: 100 },
+        ),
+        maxEntryImpactPct: numberEnv(
+          'FLOW_CYA_ORGANIC_BURST_LIVE_REPLAY_MAX_ENTRY_IMPACT_PCT', 10,
+          { min: 0, max: 1_000 },
+        ),
+        minAgeMs: 2_000, maxAgeMs: 10_000, maxCurvePct: null,
+        minBuyers5s: 10, minNetFlow5sSol: 7,
+        minBuyTxSharePct: 70, maxBuyTxSharePct: 95,
+        minReturn2sPct: 0, maxReturn2sPct: 40,
+        minReturn5sPct: null, maxReturn5sPct: null,
+        maxReturn15sPct: null, minDrawdown15sPct: 2,
+      },
       {
         id: 'COB_D',
         label: 'COB-D · strict 5 SOL organic pullback',

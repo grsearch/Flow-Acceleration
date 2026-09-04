@@ -187,6 +187,10 @@ async function main() {
   assert.ok(dashboard.includes('id="cya-slot-flow-cohort-rows"'));
   assert.ok(dashboard.includes('id="cya-slot-flow-position-rows"'));
   assert.ok(dashboard.includes("loadDashboard('/api/cya-slot-flow-shadow?positionLimit=50'"));
+  assert.ok(dashboard.includes('id="cya-organic-burst-rug-pair-rows"'));
+  assert.ok(dashboard.includes('高频 RUG 过滤主对照'));
+  assert.ok(dashboard.includes("renderRugPairComparisons(\n        '#cya-organic-burst-rug-pair-rows'"));
+  assert.ok(dashboard.includes('EB-A + FIX20 保留用于判断过滤条件在极早入场时是否已有足够样本'));
   assert.ok(dashboard.includes('data-live-strategy="same-slot-dump-backrun"'));
   assert.ok(dashboard.includes('data-live-strategy-pane="same-slot-dump-backrun"'));
   assert.ok(dashboard.includes('id="same-slot-dump-backrun-cohort-rows"'));

@@ -11,6 +11,8 @@ const {
   exitCensorReason,
 } = require('./ShadowPoolQuote');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const { LIVE_CURVE_HARD_BLOCK_SIGNATURES } = require('./RugGuardPolicy');
+const { buildShadowRugPairComparison } = require('./ShadowRugPairComparison');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -230,6 +232,10 @@ class CyaOrganicBurstShadowSuite {
         ON cya_organic_burst_shadow_positions(mint, signal_at DESC);
       CREATE INDEX IF NOT EXISTS idx_cya_organic_burst_profiles
         ON cya_organic_burst_shadow_positions(entry_profile_id, exit_profile_id);
+      CREATE INDEX IF NOT EXISTS idx_cya_organic_burst_rug_pair
+        ON cya_organic_burst_shadow_positions(
+          entry_profile_id, exit_profile_id, signal_at, mint, position_sol
+        );
     `);
     const columns = new Set(this.store.db.prepare(
       'PRAGMA table_info(cya_organic_burst_shadow_positions)',
@@ -909,13 +915,29 @@ class CyaOrganicBurstShadowSuite {
   }
 
   _open(position, trade, marketPrice) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    const selectiveRugPair = profile?.rugGuardMode === 'LIVE_CURVE_CATASTROPHE';
     const rugGuard = evaluateUniversalRugGuard(this.store, {
       strategyId: `CYA_ORGANIC_BURST:${position.cohortId}`,
       mint: position.mint,
       timestampMs: trade.timestampMs,
+      source: 'SHADOW',
+      market: 'PUMP_BONDING_CURVE',
+      lifecycleStage: 'CURVE_EARLY',
+      ...(selectiveRugPair ? {
+        enforcementMode: 'HARD_BLOCK',
+        hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+        policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
+      } : {
+        enforcementMode: 'LABEL_ONLY',
+        policyReason: 'CYA_SHADOW_RESEARCH_LABEL_ONLY',
+      }),
     });
     if (rugGuard.blocked) {
-      this._patch(position.id, { status: STATUS.NO_ENTRY, rejectionReason: 'PRE_ENTRY_RUG_RISK' });
+      this._patch(position.id, {
+        status: STATUS.NO_ENTRY,
+        rejectionReason: rugGuard.reason || 'PRE_ENTRY_RUG_RISK',
+      });
       this.pendingEntries.delete(position.id);
       this._unindex(position);
       this.metrics.rugGuardRejected += 1;
@@ -930,7 +952,6 @@ class CyaOrganicBurstShadowSuite {
       return;
     }
     const jumpPct = returnPct(execution.price, position.signalPrice);
-    const profile = this.entryProfiles.get(position.entryProfileId);
     const maxEntryPriceJumpPct = profile?.maxEntryPriceJumpPct
       ?? this.config.maxEntryPriceJumpPct;
     const maxEntryPriceDropPct = profile?.maxEntryPriceDropPct
@@ -1280,7 +1301,49 @@ class CyaOrganicBurstShadowSuite {
         promotion_blockers: promotionBlockers,
       };
     });
-    return { cohorts, positions };
+    const rugPairRows = this.store.db.prepare(`
+      SELECT b.mint, b.signal_at,
+        b.status AS baseline_status,
+        CASE WHEN b.entry_market=b.exit_market THEN b.net_return_pct END
+          AS baseline_return_pct,
+        f.status AS filtered_status,
+        CASE WHEN f.entry_market=f.exit_market THEN f.net_return_pct END
+          AS filtered_return_pct,
+        f.rejection_reason AS filtered_reason
+      FROM cya_organic_burst_shadow_positions f
+      JOIN cya_organic_burst_shadow_positions b
+        ON b.mint = f.mint
+        AND b.signal_at = f.signal_at
+        AND b.position_sol = f.position_sol
+        AND b.exit_profile_id = f.exit_profile_id
+      WHERE b.entry_profile_id = 'COB_F_LR01_FIX30'
+        AND f.entry_profile_id = 'COB_F_LR01_FIX30_RUGX'
+        AND b.exit_profile_id = 'FIX30'
+        AND f.exit_profile_id = 'FIX30'
+      ORDER BY f.signal_at DESC
+    `).all();
+    const rugComparison = buildShadowRugPairComparison({
+      id: 'COB_F_LR01_FIX30_RUGX',
+      label: '高频 COB-F LR01 · 0.1 SOL FIX30',
+      baselineProfileId: 'COB_F_LR01_FIX30',
+      filteredProfileId: 'COB_F_LR01_FIX30_RUGX',
+      exitProfileId: 'FIX30',
+      rows: rugPairRows,
+    });
+    const guardStrategyId = 'CYA_ORGANIC_BURST:COB_F_LR01_FIX30_RUGX_FIX30';
+    const guardStats = this.store.preEntryRugRisk?.guardStrategies?.get(guardStrategyId);
+    if (guardStats) {
+      rugComparison.guardAudit = {
+        strategyId: guardStrategyId,
+        evaluated: Number(guardStats.evaluated || 0),
+        sampleReady: Number(guardStats.sampleReady || 0),
+        sampleInsufficient: Number(guardStats.sampleInsufficient || 0),
+        riskFlagged: Number(guardStats.riskFlagged || 0),
+        hardBlocked: Number(guardStats.hardBlocked || 0),
+      };
+    }
+    const rugComparisons = [rugComparison];
+    return { cohorts, positions, rugComparisons };
   }
 }
 

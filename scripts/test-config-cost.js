@@ -389,6 +389,27 @@ assert.deepStrictEqual(
     ['COB_D', ['FIX30', 'CORE25_R75_X120']],
   ],
 );
+const cobRugPairProfiles = new Map(config.cyaOrganicBurstShadow.entryProfiles
+  .filter((profile) => [
+    'COB_F_LR01_FIX30', 'COB_F_LR01_FIX30_RUGX',
+  ].includes(profile.id))
+  .map((profile) => [profile.id, profile]));
+assert.strictEqual(cobRugPairProfiles.size, 2);
+const cobRugBaseline = cobRugPairProfiles.get('COB_F_LR01_FIX30');
+const cobRugFiltered = cobRugPairProfiles.get('COB_F_LR01_FIX30_RUGX');
+assert.strictEqual(cobRugBaseline.newEntriesEnabled, true);
+assert.strictEqual(cobRugFiltered.newEntriesEnabled, true);
+assert.strictEqual(cobRugBaseline.positionSizeSol, 0.1);
+assert.strictEqual(cobRugFiltered.positionSizeSol, 0.1);
+assert.strictEqual(cobRugBaseline.entryDelayMs, cobRugFiltered.entryDelayMs);
+assert.strictEqual(cobRugBaseline.entryTimeoutMs, cobRugFiltered.entryTimeoutMs);
+assert.strictEqual(cobRugBaseline.maxEntryPriceJumpPct, cobRugFiltered.maxEntryPriceJumpPct);
+assert.strictEqual(cobRugBaseline.maxEntryPriceDropPct, cobRugFiltered.maxEntryPriceDropPct);
+assert.strictEqual(cobRugBaseline.maxEntryImpactPct, cobRugFiltered.maxEntryImpactPct);
+assert.deepStrictEqual(cobRugBaseline.exitProfileIds, ['FIX30']);
+assert.deepStrictEqual(cobRugFiltered.exitProfileIds, ['FIX30']);
+assert.strictEqual(cobRugFiltered.pairedBaselineProfileId, 'COB_F_LR01_FIX30');
+assert.strictEqual(cobRugFiltered.rugGuardMode, 'LIVE_CURVE_CATASTROPHE');
 assert.strictEqual(liveGraduationRecovery.entryEnabled, false);
 assert.strictEqual(liveGraduationRecovery.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');

@@ -3,6 +3,7 @@
 const assert = require('assert');
 const { ResearchStore } = require('../src/data/ResearchStore');
 const { CyaOrganicBurstShadowSuite } = require('../src/core/CyaOrganicBurstShadowSuite');
+const { config: runtimeConfig } = require('../src/config');
 
 function main() {
   const base = 1_801_000_000_000;
@@ -326,7 +327,137 @@ function main() {
   assert.strictEqual(guardedFixed30.closed_without_return, 1);
   assert.strictEqual(guardedFixed30.average_net_return_pct, null);
   store.close();
+  testHighFrequencyRugPairSharesSignalAndOnlyFiltersRugx();
   console.log('CYA Organic Burst Shadow tests: PASS');
+}
+
+function testHighFrequencyRugPairSharesSignalAndOnlyFiltersRugx() {
+  const base = 1_802_000_000_000;
+  let now = base;
+  const store = new ResearchStore({
+    dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
+    flushMs: 60_000, flushMax: 1_000,
+  }, { configuredTradingCostPct: 0 });
+  const pairProfileIds = new Set(['COB_F_LR01_FIX30', 'COB_F_LR01_FIX30_RUGX']);
+  const settings = {
+    ...runtimeConfig.cyaOrganicBurstShadow,
+    entryProfiles: runtimeConfig.cyaOrganicBurstShadow.entryProfiles
+      .filter((profile) => pairProfileIds.has(profile.id))
+      .map((profile) => ({ ...profile })),
+    exitProfiles: runtimeConfig.cyaOrganicBurstShadow.exitProfiles
+      .filter((profile) => profile.id === 'FIX30')
+      .map((profile) => ({ ...profile })),
+    stateRetentionMs: 60_000,
+  };
+  const guardCalls = [];
+  store.preEntryRugRisk = {
+    config: { enabled: true },
+    evaluateGuard: (options) => {
+      guardCalls.push(options);
+      const blocked = Array.isArray(options.hardBlockSignatures);
+      return {
+        ...options,
+        flagged: blocked,
+        blocked,
+        reason: blocked ? 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY' : 'RUG_RISK_LABEL_ONLY',
+      };
+    },
+  };
+  const suite = new CyaOrganicBurstShadowSuite({
+    config: settings,
+    store,
+    now: () => now,
+  });
+  suite.start();
+  const mint = 'CyaOrganicBurstRugPair111111111111111111111';
+  store.recordCreate({
+    mint, symbol: 'COBRUG', name: null, uri: null, bondingCurve: null,
+    creator: 'rug-pair-creator', createdAt: base - 5_000,
+    initialRealTokenReservesRaw: null, tokenTotalSupplyRaw: null,
+  });
+  const signalTrade = {
+    mint, symbol: 'COBRUG', timestampMs: base, receivedAtMs: base,
+    slot: 500, market: 'PUMP_BONDING_CURVE', side: 'BUY',
+    solAmount: 1, tokenAmount: 10_000_000, wallet: 'signal-wallet',
+    price: 0.0000001, reservePrice: 0.0000001,
+    virtualTokenReservesRaw: '1000000000000000',
+    virtualSolReservesRaw: '100000000000',
+    signature: 'cob-rug-signal', eventIndex: 0,
+  };
+  const features = {
+    ageMs: 5_000, curvePct: 40, buyers2s: 10, buyers5s: 12,
+    buyTx5s: 12, sellTx5s: 1, buyFlow5s: 9, sellFlow5s: 1,
+    netFlow5s: 8, buyTxSharePct: 92, return2sPct: 10,
+    return5sPct: 20, return15sPct: 30, runup15sPct: 35, drawdown15sPct: 3,
+  };
+  for (const profileId of pairProfileIds) {
+    const rows = suite._recordSignal(
+      suite.entryProfiles.get(profileId), signalTrade, signalTrade.price, features,
+    );
+    assert.strictEqual(rows.length, 1);
+  }
+  const signalRows = store.db.prepare(`
+    SELECT entry_profile_id, signal_at FROM cya_organic_burst_shadow_positions
+    WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.strictEqual(signalRows.length, 2);
+  assert.strictEqual(signalRows[0].signal_at, signalRows[1].signal_at,
+    'both COB-F LR01 FIX30 arms must share the exact signal');
+
+  now = base + 250;
+  suite.observeTrade({
+    ...signalTrade,
+    timestampMs: now,
+    receivedAtMs: now,
+    wallet: 'public-fill',
+    signature: 'cob-rug-fill',
+  });
+  const pairRows = store.db.prepare(`
+    SELECT entry_profile_id, exit_profile_id, status, rejection_reason, position_sol
+    FROM cya_organic_burst_shadow_positions WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.deepStrictEqual(pairRows.map((row) => row.status), ['OPEN', 'NO_ENTRY']);
+  assert.ok(pairRows.every((row) => row.exit_profile_id === 'FIX30'));
+  assert.ok(pairRows.every((row) => row.position_sol === 0.1));
+  assert.strictEqual(pairRows[1].rejection_reason, 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY');
+  const baselineCall = guardCalls.find((row) => (
+    row.strategyId.includes('COB_F_LR01_FIX30_FIX30')
+    && !row.strategyId.includes('RUGX')
+  ));
+  assert.strictEqual(baselineCall.enforcementMode, 'LABEL_ONLY');
+  assert.strictEqual(baselineCall.hardBlockSignatures, undefined);
+  const rugxCall = guardCalls.find((row) => row.strategyId.includes('FIX30_RUGX'));
+  assert.deepStrictEqual(rugxCall.hardBlockSignatures, [
+    'crossMintToxicWallets', 'crossMintToxicTemplate', 'extremeCoordinatedDumpability',
+  ]);
+
+  store.db.prepare(`
+    UPDATE cya_organic_burst_shadow_positions
+    SET status='CLOSED', exit_market=entry_market, net_return_pct=-90
+    WHERE mint=? AND entry_profile_id='COB_F_LR01_FIX30'
+  `).run(mint);
+  store.preEntryRugRisk.guardStrategies = new Map([[
+    'CYA_ORGANIC_BURST:COB_F_LR01_FIX30_RUGX_FIX30',
+    {
+      evaluated: 1, sampleReady: 1, sampleInsufficient: 0,
+      riskFlagged: 1, hardBlocked: 1,
+    },
+  ]]);
+  const comparison = suite.dashboard().rugComparisons[0];
+  assert.strictEqual(comparison.pairedSignals, 1);
+  assert.strictEqual(comparison.blocked, 1);
+  assert.strictEqual(comparison.avoidedRug50, 1);
+  assert.strictEqual(comparison.avoidedRug80, 1);
+  assert.strictEqual(comparison.averageNetReturnLiftPct, 90);
+  assert.deepStrictEqual(comparison.guardAudit, {
+    strategyId: 'CYA_ORGANIC_BURST:COB_F_LR01_FIX30_RUGX_FIX30',
+    evaluated: 1,
+    sampleReady: 1,
+    sampleInsufficient: 0,
+    riskFlagged: 1,
+    hardBlocked: 1,
+  });
+  store.close();
 }
 
 main();

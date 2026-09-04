@@ -1156,7 +1156,7 @@ class ResearchServer {
         },
         ...(this.cyaOrganicBurstShadow?.dashboard({
           positionLimit: numeric(request.query.positionLimit, 100),
-        }) || { cohorts: [], positions: [] }),
+        }) || { cohorts: [], positions: [], rugComparisons: [] }),
       });
     });
 
