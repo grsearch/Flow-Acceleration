@@ -982,6 +982,12 @@ function createRuntime(runtimeConfig = config) {
       + 'observer-only, no simulated positions, no extra RPC, sends transactions=false.',
     );
     console.log(
+      `PMO Shadow: ${runtimeConfig.migrationSecondLegShadow.cohorts
+        .filter((cohort) => cohort.enabled !== false && cohort.id.startsWith('PMO-FLOW-')).length} `
+      + `strict-pair cohorts at ${runtimeConfig.migrationSecondLegShadow.positionSizeSol} SOL; `
+      + 'hard stop + high-activation trailing + max hold; sends transactions=false.',
+    );
+    console.log(
       `Observed Holder Growth Shadow N: ${runtimeConfig.holderGrowthShadow.entryProfiles
         .map((profile) => `${profile.id}@${(profile.horizonMs
           || runtimeConfig.holderGrowthShadow.snapshotHorizonMs) / 1_000}s`).join('/')} x `

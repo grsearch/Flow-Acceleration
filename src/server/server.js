@@ -689,8 +689,8 @@ class ResearchServer {
           },
           runtimeShadow: this.migrationSecondLegShadow?.health() || {
             enabled: false,
-            mode: 'SHADOW_M2F_RESEARCH_MATRIX',
-            code: 'M2F-MATRIX',
+            mode: 'SHADOW_PMO_STRICT_PAIR_MATRIX',
+            code: 'PMO / PMO-RUGX',
             sendsTransactions: false,
             guardRequired: true,
           },

@@ -357,7 +357,7 @@ const lpsCohorts = lpsEntryTargets.flatMap(([
 ]) => holds.map((maxHoldMs) => ({
   id: `${prefix}-X${maxHoldMs / 1_000}`,
   label: `Late stabilization ${targetAgeMs / 1_000}s / fixed ${maxHoldMs / 1_000}s`,
-  enabled: booleanEnv(enabledEnv, true),
+  enabled: retiredResearchReopenEnabled && booleanEnv(enabledEnv, true),
   studyMode: 'LATE_POST_MIGRATION_STABILIZATION',
   confirmationMode: 'IMMEDIATE',
   positionSizeSol: lpsPositionSizeSol,
@@ -371,6 +371,83 @@ const lpsCohorts = lpsEntryTargets.flatMap(([
   maxHoldMs,
   thresholds: lpsThresholds(targetAgeMs),
 })));
+
+// PMO is a forward-only, strictly paired post-migration opportunity matrix.
+// The archived one-day screening selected public-flow continuation over the
+// two sparse pullback entries. Every exit is run twice on the exact same
+// signal: BASE only labels RUG risk, while RUGX blocks only the three current
+// high-confidence catastrophe signatures.
+const postMigrationOpportunityEnabled = booleanEnv(
+  'FLOW_POST_MIGRATION_OPPORTUNITY_SHADOW_ENABLED',
+  true,
+);
+const postMigrationOpportunityPositionSol = numberEnv(
+  'FLOW_POST_MIGRATION_OPPORTUNITY_POSITION_SOL',
+  0.1,
+  { min: 0.01, max: 10 },
+);
+const postMigrationOpportunityThresholds = Object.freeze({
+  minAgeMs: 10_000,
+  maxAgeMs: 120_000,
+  maxObservationLagMs: 2_000,
+  minCurrentImpulsePct: -20,
+  maxCurrentImpulsePct: 300,
+  minPeakImpulsePct: 0,
+  minPullbackPct: 0,
+  maxPullbackPct: 35,
+  minReboundPct: 0,
+  maxReboundPct: 100,
+  minNetFlow10sSol: 3,
+  minNetFlow3sSol: 0.5,
+  minBuyers10s: 6,
+  minBuyers3s: 2,
+  maxLargestBuyerSharePct: 50,
+  minBuySpeedRatio: -1_000,
+  minNetFlowAcceleration: -10_000,
+  maxSellDecelerationRatio: 1_000_000_000,
+  minHolderDiffusionIndex: -10_000,
+  minQuoteReserveSol: 5,
+  maxEstimatedImpact1SolPct: 15,
+});
+const postMigrationOpportunityExits = Object.freeze([
+  { id: 'H15-A30-D15-X120', hardStopPct: 15, trailingActivationPct: 30, trailingStopPct: 15, maxHoldMs: 120_000 },
+  { id: 'H20-A50-D20-X300', hardStopPct: 20, trailingActivationPct: 50, trailingStopPct: 20, maxHoldMs: 300_000 },
+  // Primary right-tail candidate from the one-day screen: activation is kept
+  // deliberately high so an ordinary +30% move cannot cut off a larger run.
+  { id: 'H20-A75-D25-X300', hardStopPct: 20, trailingActivationPct: 75, trailingStopPct: 25, maxHoldMs: 300_000 },
+  { id: 'H25-A100-D30-X600', hardStopPct: 25, trailingActivationPct: 100, trailingStopPct: 30, maxHoldMs: 600_000 },
+]);
+const postMigrationOpportunityCohorts = postMigrationOpportunityExits.flatMap((exit) => (
+  ['BASE', 'RUGX'].map((arm) => ({
+    ...exit,
+    id: `PMO-FLOW-${exit.id}${arm === 'RUGX' ? '-RUGX' : ''}`,
+    label: `PMO Flow · ${exit.id} · ${arm}`,
+    enabled: postMigrationOpportunityEnabled,
+    studyMode: arm === 'RUGX'
+      ? 'POST_MIGRATION_PUBLIC_FLOW_RUG_FILTERED'
+      : 'POST_MIGRATION_PUBLIC_FLOW_BASELINE',
+    confirmationMode: 'IMMEDIATE',
+    positionSizeSol: postMigrationOpportunityPositionSol,
+    entryDelayMs: 200,
+    entryTimeoutMs: 2_000,
+    exitDelayMs: 200,
+    exitTimeoutMs: 2_000,
+    maxEntryPriceJumpPct: 15,
+    maxNegativeEntryJumpPct: 30,
+    maxObservedPriceRatio: 100,
+    rugGuardMode: arm === 'RUGX' ? 'HARD_BLOCK' : 'LABEL_ONLY',
+    hardBlockSignatures: arm === 'RUGX' ? [
+      'crossMintToxicWallets',
+      'crossMintToxicTemplate',
+      'extremeCoordinatedDumpability',
+    ] : [],
+    rugPolicyReason: arm === 'RUGX'
+      ? 'PMO_STRICT_PAIR_HIGH_CONFIDENCE_RUGX'
+      : 'PMO_STRICT_PAIR_BASELINE_LABEL_ONLY',
+    requireCapacityMetrics: true,
+    thresholds: { ...postMigrationOpportunityThresholds },
+  }))
+));
 
 // The existing O-C80 live bridge deliberately keeps its 15% entry-move guard.
 // These new forward-only cohorts measure two different counterfactuals without
@@ -8307,8 +8384,8 @@ const config = {
   // M2F-OBS collects causal post-migration second-leg evidence only. It has
   // no position model, execution callback, RPC enrichment or transaction path.
   migrationSecondLegObserver: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_M2F_OBSERVER_ENABLED', false),
+    enabled: postMigrationOpportunityEnabled || (retiredResearchReopenEnabled
+      && booleanEnv('FLOW_M2F_OBSERVER_ENABLED', false)),
     maxAgeMs: integerEnv('FLOW_M2F_OBSERVER_MAX_AGE_MS', 480_000, {
       min: 60_000,
       max: 30 * 60_000,
@@ -8343,10 +8420,11 @@ const config = {
   // Reuse the independent eight-minute M2F-OBS tape for a separately named
   // late-stabilization matrix; old M2F rows remain untouched and queryable.
   migrationSecondLegShadow: {
-    enabled: retiredResearchReopenEnabled
-      && booleanEnv('FLOW_LPS_SHADOW_ENABLED', false),
-    newEntriesEnabled: booleanEnv('FLOW_LPS_SHADOW_NEW_ENTRIES_ENABLED', false),
-    strategyName: 'Late Post-Migration Stabilization LPS',
+    enabled: postMigrationOpportunityEnabled || (retiredResearchReopenEnabled
+      && booleanEnv('FLOW_LPS_SHADOW_ENABLED', false)),
+    newEntriesEnabled: postMigrationOpportunityEnabled
+      || booleanEnv('FLOW_LPS_SHADOW_NEW_ENTRIES_ENABLED', false),
+    strategyName: 'Post-Migration Opportunity PMO',
     // Labels the broad post-migration tape for Shadow research only. This
     // object is not consumed by LiveTradingManager or any live strategy.
     marketRegime: {
@@ -8375,10 +8453,12 @@ const config = {
       ),
     },
     cohortId: 'M2F-NH10-GUARD-B',
-    positionSizeSol: numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_POSITION_SOL', 1, {
-      min: 0.01,
-      max: 100,
-    }),
+    positionSizeSol: postMigrationOpportunityEnabled
+      ? postMigrationOpportunityPositionSol
+      : numberEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_POSITION_SOL', 1, {
+          min: 0.01,
+          max: 100,
+        }),
     entryDelayMs: integerEnv('FLOW_M2F_NEAR_HIGH_GUARD_B_ENTRY_DELAY_MS', 200, {
       min: 0,
       max: 10_000,
@@ -8535,10 +8615,11 @@ const config = {
         },
       })),
       ...lpsCohorts,
+      ...postMigrationOpportunityCohorts,
     ],
     costModel: normalizeCostModel({
       ...labelCostModel,
-      positionSizeSol: 1,
+      positionSizeSol: postMigrationOpportunityPositionSol,
     }),
   },
 

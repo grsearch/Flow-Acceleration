@@ -7464,7 +7464,7 @@ class ResearchStore {
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
-        COALESCE(SUM(rejection_reason = 'PRE_ENTRY_RUG_RISK'), 0) AS rug_rejected,
+        COALESCE(SUM(rejection_reason LIKE 'PRE_ENTRY_RUG_%'), 0) AS rug_rejected,
         AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
           AS average_net_return_pct,
         AVG(CASE WHEN status = 'CLOSED' THEN gross_return_pct END)
@@ -7493,7 +7493,7 @@ class ResearchStore {
         COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
         COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
         COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
-        COALESCE(SUM(rejection_reason = 'PRE_ENTRY_RUG_RISK'), 0) AS rug_rejected,
+        COALESCE(SUM(rejection_reason LIKE 'PRE_ENTRY_RUG_%'), 0) AS rug_rejected,
         COALESCE(SUM(status = 'CLOSED' AND net_return_pct > 0), 0)
           AS wins,
         AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
@@ -7535,6 +7535,66 @@ class ResearchStore {
         try { return JSON.parse(row.rug_guard_json || '{}'); } catch (_) { return {}; }
       })(),
     }));
+    const rugPairs = [
+      'H15-A30-D15-X120',
+      'H20-A50-D20-X300',
+      'H20-A75-D25-X300',
+      'H25-A100-D30-X600',
+    ];
+    const rugPairStatement = this.db.prepare(`
+      SELECT b.mint, b.signal_at,
+        b.status AS baseline_status, b.net_return_pct AS baseline_return_pct,
+        f.status AS filtered_status, f.net_return_pct AS filtered_return_pct,
+        f.rejection_reason AS filtered_reason
+      FROM migration_second_leg_shadow_positions b
+      JOIN migration_second_leg_shadow_positions f
+        ON f.mint = b.mint
+        AND f.signal_at = b.signal_at
+      WHERE b.cohort_id = ? AND f.cohort_id = ?
+      ORDER BY b.signal_at DESC
+    `);
+    const rugComparisons = rugPairs.map((exitProfileId) => {
+      const baselineProfileId = `PMO-FLOW-${exitProfileId}`;
+      const filteredProfileId = `${baselineProfileId}-RUGX`;
+      return buildShadowRugPairComparison({
+        id: filteredProfileId,
+        label: `PMO 公开资金流 · ${exitProfileId}`,
+        baselineProfileId,
+        filteredProfileId,
+        exitProfileId,
+        rows: rugPairStatement.all(baselineProfileId, filteredProfileId),
+      });
+    });
+    const pmoStats = this.db.prepare(`
+      SELECT COUNT(*) AS signals,
+        COUNT(DISTINCT mint) AS mints,
+        COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+        COALESCE(SUM(status IN ('OPEN', 'EXIT_PENDING')), 0) AS active_positions,
+        COALESCE(SUM(status = 'CLOSED'), 0) AS closed_positions,
+        COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+        COALESCE(SUM(status = 'PRICE_JUMP'), 0) AS price_jump,
+        COALESCE(SUM(status = 'NO_ENTRY'), 0) AS no_entry,
+        COALESCE(SUM(rejection_reason LIKE 'PRE_ENTRY_RUG_%'), 0) AS rug_rejected,
+        AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
+          AS average_net_return_pct,
+        COALESCE(SUM(status = 'CLOSED' AND net_return_pct > 0), 0) AS wins,
+        COALESCE(SUM(status = 'CLOSED' AND net_return_pct IS NOT NULL), 0)
+          AS resolved,
+        MAX(CASE WHEN status = 'CLOSED' THEN net_return_pct END)
+          AS maximum_winner_pct,
+        SUM(CASE WHEN status = 'CLOSED' AND net_return_pct > 0
+          THEN net_return_pct ELSE 0 END) AS gross_profit_pct,
+        ABS(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0
+          THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
+      FROM migration_second_leg_shadow_positions
+      WHERE cohort_id LIKE 'PMO-FLOW-%'
+    `).get();
+    const pmoResolved = Number(pmoStats.resolved) || 0;
+    const pmoWins = Number(pmoStats.wins) || 0;
+    const pmoLoss = Number(pmoStats.gross_loss_pct) || 0;
+    pmoStats.win_rate_pct = pmoResolved > 0 ? pmoWins / pmoResolved * 100 : null;
+    pmoStats.profit_factor = pmoLoss > 0
+      ? (Number(pmoStats.gross_profit_pct) || 0) / pmoLoss : null;
     return {
       stats: {
         ...stats,
@@ -7543,6 +7603,8 @@ class ResearchStore {
       },
       cohorts,
       positions,
+      rugComparisons,
+      pmoStats,
     };
   }
 

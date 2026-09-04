@@ -14,12 +14,13 @@ function makeStore(blockedMints = new Set()) {
   }, { configuredTradingCostPct: 0 });
   store.preEntryRugRisk = {
     config: { enabled: true },
-    evaluateGuard: ({ mint }) => ({
+    evaluateGuard: ({ mint, enforcementMode = 'HARD_BLOCK' }) => ({
       enabled: true,
-      blocked: blockedMints.has(mint),
+      blocked: blockedMints.has(mint) && enforcementMode === 'HARD_BLOCK',
       sampleReady: true,
       flagged: blockedMints.has(mint),
-      reason: blockedMints.has(mint) ? 'TEST_RUG' : 'HEALTHY',
+      reason: blockedMints.has(mint) && enforcementMode === 'HARD_BLOCK'
+        ? 'PRE_ENTRY_RUG_TEST' : 'HEALTHY',
     }),
   };
   return store;
@@ -68,11 +69,12 @@ function snapshot(mint, observedAt) {
 }
 
 function trade(mint, timestampMs, price = 1e-7) {
+  const quoteReserveRaw = String(Math.max(1, Math.round(price * 1.2e18)));
   return {
     mint, symbol: 'M2F-B', market: 'PUMP_AMM', side: 'BUY', timestampMs,
     price, reservePrice: price,
     poolBaseReservesRaw: '1200000000000000',
-    poolQuoteReservesRaw: '120000000000',
+    poolQuoteReservesRaw: quoteReserveRaw,
     virtualQuoteReservesRaw: '0',
   };
 }
@@ -225,3 +227,79 @@ function testShadowOnlyMarketRegime() {
 }
 
 testShadowOnlyMarketRegime();
+
+function testTrailingAndStrictRugPair() {
+  let now = 3_000_000;
+  const store = makeStore(new Set(['paired-rug-mint']));
+  const pairBase = {
+    ...config,
+    cohortId: undefined,
+    cohorts: [
+      {
+        id: 'PMO-FLOW-H20-A75-D25-X300',
+        label: 'PMO BASE',
+        rugGuardMode: 'LABEL_ONLY',
+        hardBlockSignatures: [],
+        hardStopPct: 20,
+        trailingActivationPct: 75,
+        trailingStopPct: 25,
+        maxHoldMs: 300_000,
+      },
+      {
+        id: 'PMO-FLOW-H20-A75-D25-X300-RUGX',
+        label: 'PMO RUGX',
+        rugGuardMode: 'HARD_BLOCK',
+        hardBlockSignatures: ['crossMintToxicWallets'],
+        hardStopPct: 20,
+        trailingActivationPct: 75,
+        trailingStopPct: 25,
+        maxHoldMs: 300_000,
+      },
+    ],
+  };
+  const suite = new MigrationSecondLegShadowSuite({ config: pairBase, store, now: () => now });
+  suite.start();
+
+  suite.onSnapshot(snapshot('paired-rug-mint', now), trade('paired-rug-mint', now));
+  now += 200;
+  suite.observeTrade(trade('paired-rug-mint', now));
+  assert.equal(suite.health().opened, 1, 'BASE opens while the strictly paired RUGX arm blocks');
+  assert.equal(suite.health().rugRejected, 1);
+  now += 100;
+  suite.observeTrade(trade('paired-rug-mint', now, 1e-8));
+  now += 200;
+  suite.observeTrade(trade('paired-rug-mint', now, 1e-8));
+
+  suite.onSnapshot(snapshot('trailing-mint', now), trade('trailing-mint', now));
+  now += 200;
+  suite.observeTrade(trade('trailing-mint', now));
+  now += 100;
+  suite.observeTrade(trade('trailing-mint', now, 2e-7));
+  now += 100;
+  suite.observeTrade(trade('trailing-mint', now, 1.4e-7));
+  now += 200;
+  suite.observeTrade(trade('trailing-mint', now, 1.35e-7));
+
+  const trailingRows = store.db.prepare(`
+    SELECT cohort_id, status, exit_reason FROM migration_second_leg_shadow_positions
+    WHERE mint = 'trailing-mint' ORDER BY cohort_id
+  `).all();
+  assert.equal(trailingRows.length, 2);
+  assert.ok(trailingRows.every((row) => row.status === 'CLOSED'));
+  assert.ok(trailingRows.every((row) => row.exit_reason === 'TRAILING_STOP_A75_D25'));
+
+  const dashboard = store.migrationSecondLegShadowDashboard();
+  const pair = dashboard.rugComparisons.find((row) => (
+    row.id === 'PMO-FLOW-H20-A75-D25-X300-RUGX'
+  ));
+  assert.equal(pair.pairedSignals, 2);
+  assert.equal(pair.blocked, 1);
+  assert.equal(pair.resolvedBlocked, 1);
+  assert.equal(pair.avoidedRug50, 1);
+  assert.equal(pair.blockedWinners, 0);
+  assert.equal(dashboard.pmoStats.signals, 4);
+  assert.equal(dashboard.pmoStats.rug_rejected, 1);
+  store.close();
+}
+
+testTrailingAndStrictRugPair();

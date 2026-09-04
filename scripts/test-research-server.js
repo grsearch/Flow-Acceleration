@@ -207,6 +207,8 @@ async function main() {
   assert.ok(dashboard.includes('id="m2f-observer-metrics"'));
   assert.ok(dashboard.includes('id="m2f-observation-rows"'));
   assert.ok(dashboard.includes('id="m2f-snapshot-rows"'));
+  assert.ok(dashboard.includes('id="m2f-rug-pair-rows"'));
+  assert.ok(dashboard.includes('PMO / PMO-RUGX'));
   assert.ok(dashboard.includes('已观测字段'));
   assert.ok(dashboard.includes('临时计算'));
   assert.ok(dashboard.includes('Gross-NFI10'));

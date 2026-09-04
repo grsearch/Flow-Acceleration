@@ -1184,7 +1184,9 @@ assert.ok(liveMigrationHandoffProfiles.every((profile) => (
   && profile.postMigrationEntryGate.waitForQualification === true
   && !profile.liveStrategyId
 )));
-assert.strictEqual(config.migrationSecondLegShadow.enabled, false);
+assert.strictEqual(config.migrationSecondLegObserver.enabled, true);
+assert.strictEqual(config.migrationSecondLegShadow.enabled, true);
+assert.strictEqual(config.migrationSecondLegShadow.newEntriesEnabled, true);
 assert.strictEqual(config.migrationSecondLegShadow.marketRegime.enabled, false);
 assert.strictEqual(config.migrationSecondLegShadow.maxObservedPriceRatio, 100);
 assert.deepStrictEqual(
@@ -1192,13 +1194,22 @@ assert.deepStrictEqual(
     .filter((cohort) => cohort.enabled !== false)
     .map((cohort) => cohort.id),
   [
-    'LPS-D150-X30', 'LPS-D150-X60', 'LPS-D150-X120',
-    'LPS-D180-X30', 'LPS-D240-X30', 'LPS-D300-X30',
+    'PMO-FLOW-H15-A30-D15-X120', 'PMO-FLOW-H15-A30-D15-X120-RUGX',
+    'PMO-FLOW-H20-A50-D20-X300', 'PMO-FLOW-H20-A50-D20-X300-RUGX',
+    'PMO-FLOW-H20-A75-D25-X300', 'PMO-FLOW-H20-A75-D25-X300-RUGX',
+    'PMO-FLOW-H25-A100-D30-X600', 'PMO-FLOW-H25-A100-D30-X600-RUGX',
   ],
 );
 assert.ok(config.migrationSecondLegShadow.cohorts
   .filter((cohort) => cohort.enabled !== false)
-  .every((cohort) => cohort.positionSizeSol === 1 && !cohort.liveStrategyId));
+  .every((cohort) => cohort.positionSizeSol === 0.1 && !cohort.liveStrategyId));
+assert.ok(config.migrationSecondLegShadow.cohorts
+  .filter((cohort) => cohort.id.startsWith('PMO-FLOW-') && cohort.id.endsWith('-RUGX'))
+  .every((cohort) => cohort.rugGuardMode === 'HARD_BLOCK'
+    && cohort.hardBlockSignatures.length === 3));
+assert.ok(config.migrationSecondLegShadow.cohorts
+  .filter((cohort) => cohort.id.startsWith('PMO-FLOW-') && !cohort.id.endsWith('-RUGX'))
+  .every((cohort) => cohort.rugGuardMode === 'LABEL_ONLY'));
 assert.deepStrictEqual(
   config.migrationSecondLegShadow.cohorts
     .filter((cohort) => cohort.id.startsWith('M2F-SSR-'))

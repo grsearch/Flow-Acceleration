@@ -3,6 +3,7 @@
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const { RUG_GUARD_ENFORCEMENT } = require('./RugGuardPolicy');
 
 const STATUS = Object.freeze({
   PENDING_ENTRY: 'PENDING_ENTRY',
@@ -41,6 +42,7 @@ function restore(row) {
     configuredCostPct: finite(valueOf(
       row, 'configured_cost_pct', 'configuredCostPct',
     ), 0),
+    migrationAt: valueOf(row, 'migration_at', 'migrationAt'),
     signalAt: valueOf(row, 'signal_at', 'signalAt'),
     signalPrice: valueOf(row, 'signal_price', 'signalPrice'),
     entryTargetAt: valueOf(row, 'entry_target_at', 'entryTargetAt'),
@@ -181,7 +183,13 @@ class MigrationSecondLegShadowSuite {
       maxNegativeEntryJumpPct: config.maxNegativeEntryJumpPct,
       maxObservedPriceRatio: config.maxObservedPriceRatio,
       hardStopPct: config.hardStopPct,
+      trailingActivationPct: config.trailingActivationPct,
+      trailingStopPct: config.trailingStopPct,
       maxHoldMs: config.maxHoldMs,
+      rugGuardMode: config.rugGuardMode || RUG_GUARD_ENFORCEMENT.HARD_BLOCK,
+      hardBlockSignatures: config.hardBlockSignatures || null,
+      rugPolicyReason: config.rugPolicyReason || null,
+      requireCapacityMetrics: config.requireCapacityMetrics !== false,
       thresholds: config.thresholds,
     };
     this.cohorts = (Array.isArray(config.cohorts) && config.cohorts.length
@@ -238,18 +246,24 @@ class MigrationSecondLegShadowSuite {
       studyMode: cohort.studyMode,
       confirmationMode: cohort.confirmationMode,
       hardStopPct: cohort.hardStopPct,
+      trailingActivationPct: cohort.trailingActivationPct,
+      trailingStopPct: cohort.trailingStopPct,
       maxHoldMs: cohort.maxHoldMs,
+      rugGuardMode: cohort.rugGuardMode,
+      hardBlockSignatures: cohort.hardBlockSignatures,
+      requireCapacityMetrics: cohort.requireCapacityMetrics,
       configuredCostPct: this.costsByCohort.get(cohort.id)?.deterministicCostPct ?? null,
     }));
     return {
       enabled: this.config.enabled,
       newEntriesEnabled: this.config.newEntriesEnabled !== false,
-      mode: 'SHADOW_LPS_RESEARCH_MATRIX',
+      mode: 'SHADOW_PMO_STRICT_PAIR_MATRIX',
       code: this.cohorts.map((cohort) => cohort.id).join(' / '),
       sendsTransactions: false,
       liveDecisionIntegration: 'DISABLED',
       marketRegimeUsage: 'SHADOW_ONLY_NEVER_LIVE',
       guardRequired: true,
+      strictRugPairs: true,
       pendingEntries: this.pendingEntries.size,
       activePositions: this.positions.size,
       strategy: {
@@ -261,7 +275,7 @@ class MigrationSecondLegShadowSuite {
         hardStopPct: this.config.hardStopPct,
         maxHoldMs: this.config.maxHoldMs,
         thresholds: this.config.thresholds,
-        configuredCostPct: this.costsByCohort.get(this.config.cohortId)
+        configuredCostPct: this.costsByCohort.get(this.cohorts[0]?.id)
           ?.deterministicCostPct ?? null,
         cohorts: cohortHealth,
         isolatedTable: 'migration_second_leg_shadow_positions',
@@ -408,7 +422,23 @@ class MigrationSecondLegShadowSuite {
       const gross = ((price / position.entryPrice) - 1) * 100;
       const heldMs = timestampMs - position.entryAt;
       if (gross <= -position.hardStopPct) this._requestExit(position, timestampMs, 'HARD_STOP');
-      else if (heldMs >= position.maxHoldMs) {
+      else {
+        const cohort = this._cohort(position);
+        const activationPct = finite(cohort.trailingActivationPct);
+        const drawdownLimitPct = finite(cohort.trailingStopPct);
+        const highReturnPct = ((position.highestPrice / position.entryPrice) - 1) * 100;
+        const peakDrawdownPct = (1 - price / position.highestPrice) * 100;
+        if (activationPct != null && drawdownLimitPct > 0
+          && highReturnPct >= activationPct
+          && peakDrawdownPct >= drawdownLimitPct) {
+          this._requestExit(
+            position,
+            timestampMs,
+            `TRAILING_STOP_A${activationPct}_D${drawdownLimitPct}`,
+          );
+        }
+      }
+      if (position.status === STATUS.OPEN && heldMs >= position.maxHoldMs) {
         this._requestExit(position, position.entryAt + position.maxHoldMs, 'FIXED_HOLD');
       }
       if (position.status === STATUS.EXIT_PENDING
@@ -466,7 +496,9 @@ class MigrationSecondLegShadowSuite {
       && finite(snapshot.sellDecelerationRatio, Infinity) <= t.maxSellDecelerationRatio
       && snapshot.observedHolderDiffusionIndex >= t.minHolderDiffusionIndex
       && finite(snapshot.quoteReserveSol, 0) >= finite(t.minQuoteReserveSol, 0)
-      && impact1Sol != null && impact1Sol <= t.maxEstimatedImpact1SolPct;
+      && (cohort.requireCapacityMetrics === false
+        ? impact1Sol == null || impact1Sol <= t.maxEstimatedImpact1SolPct
+        : impact1Sol != null && impact1Sol <= t.maxEstimatedImpact1SolPct);
   }
 
   _tryEntry(position, trade, price) {
@@ -478,11 +510,18 @@ class MigrationSecondLegShadowSuite {
       source: 'SHADOW',
       market: trade.market,
       lifecycleStage: 'POST_MIGRATION',
+      lifecycleAgeMs: Math.max(
+        0,
+        trade.timestampMs - finite(position.migrationAt, trade.timestampMs),
+      ),
+      enforcementMode: cohort.rugGuardMode,
+      hardBlockSignatures: cohort.hardBlockSignatures,
+      policyReason: cohort.rugPolicyReason,
     });
     if (rugGuard.blocked) {
       this.store.updateMigrationSecondLegShadowPosition(position.id, {
         status: STATUS.NO_ENTRY,
-        rejectionReason: 'PRE_ENTRY_RUG_RISK',
+        rejectionReason: rugGuard.reason || 'PRE_ENTRY_RUG_RISK',
         rugGuard,
       });
       this.pendingEntries.delete(position.id);

@@ -472,8 +472,8 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="launch-quality" data-strategy-code="E">
               <b><span class="strategy-code">E</span>Launch Quality</b><small>只观察选币、存活与首次回踩</small>
             </button>
-            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="migration-second-leg" data-strategy-code="M2F-OBS / LPS">
-              <b><span class="strategy-code">M2F-OBS / LPS</span>迁移后稳定化延迟</b><small>150秒主组 + 180/240/300秒延迟对照；1 SOL容量模拟，永不发链</small>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="migration-second-leg" data-strategy-code="PMO / PMO-RUGX">
+              <b><span class="strategy-code">PMO / PMO-RUGX</span>毕业后公开资金流</b><small>同信号严格配对 RUG 过滤；止损 + 高阈值移动止盈 + 最长持仓</small>
             </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="holder-growth" data-strategy-code="N/NQ">
               <b><span class="strategy-code">N/NQ</span>Observed Holder Growth</b><small>15秒控制组 + 留存/Curve/峰后资金流质量组</small>
@@ -783,14 +783,19 @@
               </div>
               <div class="strategy-expression" id="m2f-observer-expression">等待 M2F-OBS 配置…</div>
               <div class="strategy-metric-groups" id="m2f-observer-metrics"></div>
-              <div class="section-title"><h2>Late Post-Migration Stabilization Shadow LPS</h2><p>原 M2F 分组历史继续保留；新 LPS 只在迁移后 150/180/240/300 秒使用当时可见订单流建立独立模拟仓位，不参与任何实盘判定。</p></div>
+              <div class="section-title"><h2>Post-Migration Opportunity Shadow PMO</h2><p>毕业后 10～120 秒公开资金流延续入场；四组退出参数各设 BASE / RUGX 同信号严格配对，不参与任何实盘判定。</p></div>
               <div class="strategy-metric-groups" id="m2f-shadow-metrics"></div>
-              <div class="section-title"><h2>分组表现</h2><p>D150 为主研究组，分别固定持有 30/60/120 秒；D180、D240、D300 是低频延迟对照，固定持有 30 秒。全部按 1 SOL 容量冲击与成本计价。</p></div>
+              <div class="section-title"><h2>策略矩阵</h2><p>买入条件保持不变，对比 H15/A30/D15/X120、H20/A50/D20/X300、H20/A75/D25/X300 和 H25/A100/D30/X600；A=移动止盈激活，D=峰值回撤，X=最长持仓秒数。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>组别</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / PF</th><th>最大赢家</th><th>待入场 / 活动</th><th>拒绝 / 无退出</th></tr></thead>
                 <tbody id="m2f-shadow-cohort-rows"></tbody>
               </table></div>
-              <div class="section-title"><h2>最近模拟仓位</h2><p>每个 LPS cohort 独立保存，不覆盖原 M2F-NH10-GUARD-B、HOLD、CF2、SSR 历史数据。</p></div>
+              <div class="section-title"><h2>RUG 过滤严格配对</h2><p>每个 RUGX 与 BASE 共享同一 Mint、信号时刻和退出规则；被拦截组按空仓 0% 计，直接检验避险与误杀。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>配对组</th><th>配对 / 可比</th><th>拦截 / 已验证</th><th>避开 RUG50 / RUG80</th><th>误杀赢家 / 大赢家</th><th>BASE</th><th>RUGX</th><th>均值提升</th></tr></thead>
+                <tbody id="m2f-rug-pair-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>最近模拟仓位</h2><p>新 PMO cohort 独立保存，原 M2F/LPS 历史数据不覆盖。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>信号</th><th>状态 / Mint</th><th>AGE / 结构</th><th>资金流 / Buyers</th><th>集中度 / 扩散</th><th>信号 / 入场 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="m2f-shadow-position-rows"></tbody>
@@ -3120,38 +3125,47 @@
       ]);
 
       const shadow = data.shadow || {};
-      const shadowStats = shadow.stats || {};
+      const shadowStats = shadow.pmoStats || shadow.stats || {};
       const shadowStrategy = shadowRuntime.strategy || {};
       const marketRegime = shadowStrategy.marketRegime || {};
+      const activeCohorts = shadowStrategy.cohorts || [];
+      const primaryCohort = activeCohorts.find(row => String(row.id || '').includes('A75-D25'))
+        || activeCohorts[0] || {};
       renderMetricGroups('#m2f-shadow-metrics', [
-        ['运行模式', shadowRuntime.enabled ? 'LPS MATRIX' : '关闭', `${number((shadow.cohorts || []).length)} 个独立 cohort · 永不签名或发送交易`],
+        ['运行模式', shadowRuntime.enabled ? 'PMO STRICT PAIRS' : '关闭', `${number(activeCohorts.length)} 个前向 cohort · 永不签名或发送交易`],
         ['信号 / Mint', `${number(shadowStats.signals)} / ${number(shadowStats.mints)}`, `待入场 ${number(shadowStats.pending_entries)} · 活动 ${number(shadowStats.active_positions)}`],
         ['完成 / 胜率', `${number(shadowStats.resolved)} / ${pct(shadowStats.win_rate_pct)}`, `已关 ${number(shadowStats.closed_positions)} · NO_EXIT ${number(shadowStats.no_exit)}`],
         ['平均净收益', pct(shadowStats.average_net_return_pct), `PF ${number(shadowStats.profit_factor,2)} · 最大赢家 ${pct(shadowStats.maximum_winner_pct)}`],
-        ['RUG 拦截', number(shadowStats.rug_rejected), `全局 Guard 必须通过；其他无入场 ${number(shadowStats.no_entry)}`],
+        ['RUGX 拦截', number(shadowStats.rug_rejected), '仅三个高置信灾难特征硬拦截；BASE 只打标签'],
         ['价格跳变', number(shadowStats.price_jump), `200ms延迟 · 上冲≤${pct(shadowStrategy.maxEntryPriceJumpPct)}`],
         ['模拟仓位', `${number(shadowStrategy.positionSizeSol,2)} SOL`, `成本 ${pct(shadowStrategy.configuredCostPct)} · 容量冲击计入`],
         ['市场状态（仅Shadow）', escapeHtml(marketRegime.state || 'INSUFFICIENT'), `${number(marketRegime.sampleMints)} Mint · 正收益 ${pct(marketRegime.positiveReturnRatePct)} · RUG ${pct(marketRegime.rugCollapseRatePct)}`],
-        ['实盘影响', shadowRuntime.marketRegimeUsage === 'SHADOW_ONLY_NEVER_LIVE' ? '无' : '检查配置', '所有实盘策略均不读取 LPS / MRG'],
-        ['入场 / 退出', '150s / 180s / 240s / 300s', 'D150测试30/60/120秒；延迟对照固定30秒'],
+        ['实盘影响', shadowRuntime.marketRegimeUsage === 'SHADOW_ONLY_NEVER_LIVE' ? '无' : '检查配置', '所有实盘策略均不读取 PMO 结果'],
+        ['主右尾退出', primaryCohort.id || '等待配置', `止损 ${pct(primaryCohort.hardStopPct)} · +${pct(primaryCohort.trailingActivationPct)}激活 · 回撤${pct(primaryCohort.trailingStopPct)} · ${age(primaryCohort.maxHoldMs)}上限`],
       ]);
 
-      const shadowCohorts = shadow.cohorts || [];
+      const shadowCohorts = (shadow.cohorts || []).filter(row => (
+        String(row.cohort_id || '').startsWith('PMO-FLOW-')
+      ));
       document.querySelector('#m2f-shadow-cohort-rows').innerHTML = shadowCohorts.length
         ? shadowCohorts.map(row => {
           const rejects = Number(row.no_entry || 0) + Number(row.price_jump || 0);
           return `<tr><td><b>${escapeHtml(row.cohort_id || '—')}</b></td><td>${number(row.signals)} / ${number(row.mints)}</td><td>${number(row.resolved)} / ${pct(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${number(row.profit_factor,2)}</td><td class="${tone(row.maximum_winner_pct)}">${pct(row.maximum_winner_pct)}</td><td>${number(row.pending_entries)} / ${number(row.active_positions)}</td><td>${number(rejects)}<br><span class="table-note">RUG ${number(row.rug_rejected)} · NO_EXIT ${number(row.no_exit)}</span></td></tr>`;
         }).join('')
-        : '<tr><td colspan="7" class="empty">等待新的 LPS 前向样本；原 M2F 历史分组会继续保留</td></tr>';
+        : '<tr><td colspan="7" class="empty">等待新的 PMO 前向样本；原 M2F/LPS 历史分组继续保留</td></tr>';
 
-      const shadowPositions = shadow.positions || [];
+      renderRugPairComparisons('#m2f-rug-pair-rows', shadow.rugComparisons || []);
+
+      const shadowPositions = (shadow.positions || []).filter(row => (
+        String(row.cohort_id || '').startsWith('PMO-FLOW-')
+      ));
       document.querySelector('#m2f-shadow-position-rows').innerHTML = shadowPositions.length
         ? shadowPositions.map(row => {
           const features = row.features || {};
           const hold = row.hold_ms != null ? age(row.hold_ms) : '—';
           return `<tr><td>${dateTime(row.signal_at)}<br><span class="table-note">${escapeHtml(row.cohort_id || '')}</span></td><td>${statusChip(row.status)}<br>${mintLink(row.mint)}</td><td>${age(row.signal_age_ms)}<br><span class="table-note">峰值 ${pct(features.peakImpulsePct)} · 回撤 ${pct(features.pullbackPct)} · 反弹 ${pct(features.reboundPct)}</span></td><td>${number(features.netFlow3s,2)} / ${number(features.netFlow10s,2)} SOL<br><span class="table-note">${number(features.buyers3s)} / ${number(features.buyers10s)} Buyers</span></td><td>Top1 ${pct(features.largestBuyerShare10sPct)}<br><span class="table-note">DI ${number(features.holderDiffusionIndex)} · 1SOL冲击 ${pct(features.estimatedImpact1SolPct)} · MRG ${escapeHtml(features.marketRegime?.state || '—')}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)} · MAE ${pct(row.max_adverse_return_pct)}</span></td><td>${hold}<br><span class="table-note">${escapeHtml(row.exit_reason || row.rejection_reason || '—')}</span></td></tr>`;
         }).join('')
-        : '<tr><td colspan="8" class="empty">等待 LPS 的迁移后延迟前向信号；不会影响实盘策略</td></tr>';
+        : '<tr><td colspan="8" class="empty">等待 PMO 的毕业后公开资金流信号；不会影响实盘策略</td></tr>';
 
       const observations = data.observations || [];
       document.querySelector('#m2f-observation-rows').innerHTML = observations.length ? observations.map(row => (
