@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const { LIVE_CURVE_HARD_BLOCK_SIGNATURES } = require('./RugGuardPolicy');
 const { executableSell } = require('./ShadowExecutionModel');
 
 const STATUS = Object.freeze({
@@ -732,15 +733,24 @@ class GraduationAccelerationShadowSuite {
         if (trade.market !== 'PUMP_BONDING_CURVE'
           || trade.timestampMs < pending.entryTargetAt
           || trade.timestampMs > pending.entryDeadlineAt) continue;
+        const selectiveRugPair = profile?.rugGuardMode === 'LIVE_CURVE_CATASTROPHE';
         const rugGuard = evaluateUniversalRugGuard(this.store, {
           strategyId: `GRADUATION_ACCEL:${pending.cohortId}`,
           mint: pending.mint,
           timestampMs: trade.timestampMs,
+          source: 'SHADOW',
+          market: 'PUMP_BONDING_CURVE',
+          lifecycleStage: 'CURVE_MIGRATION',
+          ...(selectiveRugPair ? {
+            enforcementMode: 'HARD_BLOCK',
+            hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+            policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
+          } : {}),
         });
         if (rugGuard.blocked) {
           this.store.updateGraduationAccelerationShadowPosition(id, {
             status: STATUS.NO_ENTRY,
-            rejectionReason: 'PRE_ENTRY_RUG_RISK',
+            rejectionReason: rugGuard.reason || 'PRE_ENTRY_RUG_RISK',
           });
           this.pendingEntries.delete(id);
           this._unindex(pending);

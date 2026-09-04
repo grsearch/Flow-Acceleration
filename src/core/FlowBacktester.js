@@ -376,6 +376,8 @@ function calculateMetrics(rows, costs, options = {}) {
 }
 
 function runBacktest(db, options = {}) {
+  const rawTradeTable = options.rawTradeTable === 'raw_trades_all'
+    ? 'raw_trades_all' : 'raw_trades';
   const holdMs = Math.max(1, finite(options.holdMs, 5_000));
   const executionDelayMs = Math.max(0, finite(options.executionDelayMs, 200));
   const entryTimeoutMs = Math.max(1, finite(options.entryTimeoutMs, 2_000));
@@ -586,18 +588,18 @@ function runBacktest(db, options = {}) {
 
   const coverage = db.prepare(`
     SELECT MIN(timestamp_ms) AS min_timestamp_ms, MAX(timestamp_ms) AS max_timestamp_ms
-    FROM raw_trades WHERE timestamp_ms <= ?
+    FROM ${rawTradeTable} WHERE timestamp_ms <= ?
   `).get(dataCutoffMs);
   const firstCurveTradeBetween = db.prepare(`
     SELECT timestamp_ms, price, market, side, sol_amount, wallet
-    FROM raw_trades
+    FROM ${rawTradeTable}
     WHERE mint = ? AND market = 'PUMP_BONDING_CURVE'
       AND timestamp_ms >= ? AND timestamp_ms <= ? AND price > 0
     ORDER BY timestamp_ms, id LIMIT 1
   `);
   const pathBetween = db.prepare(`
     SELECT timestamp_ms, price, market, side, sol_amount, wallet
-    FROM raw_trades
+    FROM ${rawTradeTable}
     WHERE mint = ? AND timestamp_ms >= ? AND timestamp_ms <= ? AND price > 0
     ORDER BY timestamp_ms, id
   `);

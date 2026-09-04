@@ -3,13 +3,14 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const { RAW_COLUMNS, shanghaiDay } = require('../src/data/RawTradeShardManager');
 
 const EXPLICIT_FILTERS = Object.freeze({
   flow_tokens: {
     where: `(
       (updated_at >= ? AND updated_at < ?)
       OR mint IN (
-        SELECT mint FROM source.raw_trades WHERE timestamp_ms >= ? AND timestamp_ms < ?
+        SELECT mint FROM source_raw_trades WHERE timestamp_ms >= ? AND timestamp_ms < ?
         UNION
         SELECT mint FROM source.flow_signals WHERE timestamp_ms >= ? AND timestamp_ms < ?
       )
@@ -155,6 +156,11 @@ const FULL_STATE_TABLES = new Set([
   'smart_wallet_consensus_overlay_meta',
 ]);
 
+// A window export merges all matching raw shards back into its ordinary
+// raw_trades table. Copying the live shard pointer would make the portable
+// export depend on production-only files and could duplicate rows when opened.
+const SKIP_TABLES = new Set(['raw_trade_shard_meta']);
+
 const GENERIC_TIME_COLUMNS = [
   'timestamp_ms', 'signal_at', 'reference_at', 'smart_buy_at', 'smart_open_at',
   'rebound_at', 'observed_at', 'target_at', 'resolved_at', 'created_at', 'updated_at',
@@ -218,6 +224,50 @@ function createSchemaFile(databasePath, schemaPath) {
   }
 }
 
+function attachWindowRawShards(db, { sourcePath, startMs, endMs }) {
+  db.exec('DROP VIEW IF EXISTS temp.source_raw_trades');
+  const hasMeta = db.prepare(`
+    SELECT 1 AS present FROM source.sqlite_master
+    WHERE type='table' AND name='raw_trade_shard_meta'
+  `).get();
+  if (!hasMeta) {
+    // Historical and test archives may predate newer raw-trade columns. Preserve
+    // their exact schema instead of projecting the current production layout.
+    db.exec('CREATE TEMP VIEW source_raw_trades AS SELECT * FROM source.raw_trades');
+    return { enabled: false, aliases: [], files: [] };
+  }
+  const meta = db.prepare('SELECT * FROM source.raw_trade_shard_meta WHERE id=1').get();
+  if (!meta) {
+    db.exec('CREATE TEMP VIEW source_raw_trades AS SELECT * FROM source.raw_trades');
+    return { enabled: false, aliases: [], files: [] };
+  }
+  const columns = RAW_COLUMNS.join(', ');
+  const shardDir = path.resolve(meta.shard_dir || path.join(
+    path.dirname(path.resolve(sourcePath)), 'raw-daily',
+  ));
+  const days = new Set();
+  for (let cursor = startMs; cursor < endMs; cursor += 24 * 60 * 60_000) {
+    days.add(shanghaiDay(cursor));
+  }
+  days.add(shanghaiDay(Math.max(startMs, endMs - 1)));
+  const files = [...days].sort().map((day) => ({
+    day,
+    filePath: path.join(shardDir, `raw-trades-${day}-CST.db`),
+  })).filter(({ filePath }) => fs.existsSync(filePath));
+  const aliases = [];
+  for (const [index, item] of files.entries()) {
+    const alias = `source_raw_${index}`;
+    db.prepare(`ATTACH DATABASE ? AS ${alias}`).run(item.filePath);
+    aliases.push(alias);
+  }
+  const selects = [
+    `SELECT ${columns} FROM source.raw_trades WHERE timestamp_ms < ${Math.trunc(meta.enabled_at)}`,
+    ...aliases.map((alias) => `SELECT ${columns} FROM ${alias}.raw_trades`),
+  ];
+  db.exec(`CREATE TEMP VIEW source_raw_trades AS ${selects.join(' UNION ALL ')}`);
+  return { enabled: true, aliases, files };
+}
+
 function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, schemaPath = null }) {
   const source = path.resolve(sourcePath);
   const destination = path.resolve(destinationPath);
@@ -248,6 +298,7 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
     // SQLite ATTACH URI support varies across bundled Windows/Linux builds, so the
     // source is attached by its absolute path and treated as immutable by this code.
     db.prepare('ATTACH DATABASE ? AS source').run(source);
+    const rawShards = attachWindowRawShards(db, { sourcePath: source, startMs, endMs });
     db.exec('BEGIN');
 
     // The first source read pins one WAL snapshot for every copied table.
@@ -259,6 +310,7 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
     `).all();
 
     for (const table of tables) {
+      if (SKIP_TABLES.has(table.name)) continue;
       const columns = db.prepare(`PRAGMA source.table_info(${quoteIdentifier(table.name)})`)
         .all().map((column) => column.name);
       const filter = chooseFilter(table.name, columns);
@@ -266,10 +318,23 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
       const bind = filter.bind ? filter.bind(startMs, endMs) : (
         filter.fullTable ? [] : [startMs, endMs]
       );
-      const insert = db.prepare(`
-        INSERT INTO main.${quoteIdentifier(table.name)}
-        SELECT * FROM source.${quoteIdentifier(table.name)} WHERE ${filter.where}
-      `).run(...bind);
+      let insert;
+      if (table.name === 'raw_trades' && rawShards.enabled) {
+        const insertColumns = columns.filter((column) => column !== 'id');
+        const quotedColumns = insertColumns.map(quoteIdentifier).join(', ');
+        insert = db.prepare(`
+          INSERT OR IGNORE INTO main.${quoteIdentifier(table.name)} (${quotedColumns})
+          SELECT ${quotedColumns} FROM source_raw_trades WHERE ${filter.where}
+        `).run(...bind);
+      } else {
+        const sourceTable = table.name === 'raw_trades'
+          ? 'source_raw_trades'
+          : `source.${quoteIdentifier(table.name)}`;
+        insert = db.prepare(`
+          INSERT INTO main.${quoteIdentifier(table.name)}
+          SELECT * FROM ${sourceTable} WHERE ${filter.where}
+        `).run(...bind);
+      }
       let firstMs = null;
       let lastMs = null;
       if (filter.anchor && columns.includes(filter.anchor)) {
@@ -300,12 +365,17 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
 
     db.exec('COMMIT');
     committed = true;
+    db.exec('DROP VIEW IF EXISTS temp.source_raw_trades');
+    for (const alias of rawShards.aliases) db.exec(`DETACH DATABASE ${alias}`);
     db.exec('DETACH DATABASE source');
   } catch (error) {
     if (!committed) {
       try { db.exec('ROLLBACK'); } catch (_) {}
     }
-    try { db.exec('DETACH DATABASE source'); } catch (_) {}
+    for (const row of db.prepare('PRAGMA database_list').all()) {
+      if (row.name === 'main' || row.name === 'temp') continue;
+      try { db.exec(`DETACH DATABASE ${quoteIdentifier(row.name)}`); } catch (_) {}
+    }
     try { fs.rmSync(destination, { force: true }); } catch (_) {}
     throw error;
   } finally {

@@ -28,6 +28,12 @@ const HARD_BLOCK_FAMILIES = [
   'MIGRATION_SECOND_LEG:',
 ];
 
+const LIVE_CURVE_HARD_BLOCK_SIGNATURES = Object.freeze([
+  'crossMintToxicWallets',
+  'crossMintToxicTemplate',
+  'extremeCoordinatedDumpability',
+]);
+
 function normalized(value) {
   return String(value || '').trim().toUpperCase();
 }
@@ -57,6 +63,22 @@ function resolveRugGuardPolicy({
       && Number.isFinite(ageMs)
       && ageMs >= 0
       && ageMs <= earlyLimitMs);
+  const isCurve = normalizedMarket === 'PUMP_BONDING_CURVE'
+    || stage === 'PRE_MIGRATION'
+    || stage === 'LAUNCH'
+    || stage.startsWith('CURVE_');
+
+  // Live Curve entries block only high-specificity catastrophe evidence. The
+  // broad native stair-step labels remain research-only so normal right tails
+  // are not removed with the RUGs. Shadow behavior is intentionally unchanged.
+  if (normalizedSource === 'LIVE' && isCurve) {
+    return {
+      enforcementMode: RUG_GUARD_ENFORCEMENT.HARD_BLOCK,
+      policyReason: 'LIVE_CURVE_CATASTROPHE_SIGNATURES_HARD_BLOCK',
+      hardBlockSignatures: [...LIVE_CURVE_HARD_BLOCK_SIGNATURES],
+      requireHc2: false,
+    };
+  }
 
   // Keep the previously validated post-migration guards unchanged. G is
   // deliberately excluded: its broad AMM_EARLY rejection removed profitable
@@ -78,10 +100,7 @@ function resolveRugGuardPolicy({
     };
   }
 
-  if (normalizedMarket === 'PUMP_BONDING_CURVE'
-    || stage === 'PRE_MIGRATION'
-    || stage === 'LAUNCH'
-    || stage.startsWith('CURVE_')) {
+  if (isCurve) {
     return {
       enforcementMode: RUG_GUARD_ENFORCEMENT.LABEL_ONLY,
       policyReason: stage === 'LAUNCH'
@@ -127,6 +146,7 @@ function resolveRugGuardPolicy({
 }
 
 module.exports = {
+  LIVE_CURVE_HARD_BLOCK_SIGNATURES,
   RUG_GUARD_ENFORCEMENT,
   resolveRugGuardPolicy,
 };

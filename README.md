@@ -153,7 +153,7 @@ W3 = T-2s ~ T
 
 默认数据库为 `data/flow-research.db`，核心表为：
 
-- `raw_trades`：完整的毕业前 Bonding Curve 逐笔成交、标签所需 PumpSwap 成交，以及 Shadow G 对每个新毕业 Mint 前5分钟的完整 PumpSwap 成交；两类生命周期数据都可用于离线穷举超跌/反弹阈值。
+- `raw_trades` / `data/raw-daily/raw-trades-YYYY-MM-DD-CST.db`：切换前历史保留在主库，切换后的毕业前 Bonding Curve 逐笔成交、标签所需 PumpSwap 成交，以及 Shadow G 所需 PumpSwap 成交按北京时间自然日写入独立分片；每日导出会把窗口内分片重新合并为普通 `raw_trades` 表供离线研究。
 - `flow_signals`：三个窗口的买卖流、净流入、独立买家、买单数、绝对增量和 ratio。
 - `signal_returns`：1/2/3/5/8/10/15/20/30/60 秒 Raw Return、确定性成本后的 Net Return、每个 horizon 的观测 lag、`COMPLETE/RIGHT_CENSORED` 标签状态，以及 5/10/30 秒 MFE/MAE。某个 horizon 后首笔成交超过 `FLOW_LABEL_MAX_OBSERVATION_LAG_MS`，或 MFE/MAE 时间窗没有完整观测覆盖时，不会用旧价格或 0% 补值。
 - `smart_wallet_events`：两个研究钱包的成交、Curve、AGE、最近 Flow Signal 与时间差。
@@ -174,9 +174,9 @@ W3 = T-2s ~ T
 - `cya_early_pyramid_shadow_positions`：独立的 CYA Early Pyramid Shadow K；保存早期 Curve 订单流入场、分批加仓、两次减仓、尾仓退出及逐仓估算成本。
 - `flow_tokens`：创建时间、毕业时间、Bonding Curve、迁移池和 Curve 进度所需状态。
 
-SQLite 使用 WAL 和批量写入。Raw Trade 默认保留最近 48 小时热数据；主交易进程不再同步压缩、删除或执行 `PRAGMA optimize`，避免阻塞 gRPC、策略计算与 Dashboard。每日 COS 导出完成、SHA256 上传且远端对象验证成功后，独立低优先级维护进程才会分批删除超过 `FLOW_RETENTION_HOT_RAW_HOURS` 的 Raw Trade，并执行受限的数据库优化。Signals、Future Labels、Shadow 仓位和实盘仓位不会被该任务删除。启动期间由独立轻量进程显示“系统正在启动”页面；各 Shadow 共用一次近期交易回放，避免重复读取大型数据库。
+SQLite 使用 WAL 和批量写入。启用 `FLOW_RAW_SHARDING_ENABLED=true` 后，新 Raw Trade 不再写入持续膨胀的实时状态库，而是写入北京时间日分片；实时热读视图只暴露 `FLOW_RAW_SHARD_READ_DAYS` 指定的最近数据（包括切换前主库中的同窗口数据）。更早的切换前历史仍原样保留，但不再进入在线查询，也不会在服务启动时搬迁或删除。每日 COS 导出会在一致性读事务里把主库历史与窗口内分片合并；超过 `FLOW_RAW_SHARD_LOCAL_RETENTION_DAYS` 的日分片，必须同时存在覆盖其 00:00–07:00 和 07:00–24:00 的两次 COS 成功标记后才会删除。Signals、Future Labels、Smart Wallet、Shadow 和实盘状态始终留在实时状态库。主交易进程不执行大型 DELETE、压缩或 `PRAGMA optimize`，避免阻塞 gRPC 与策略计算。
 
-Dashboard 的详细数据库行数不再由 `/api/health` 在主线程即时扫描。独立只读 Worker 在启动稳定30秒后按 `FLOW_DB_HEALTH_REFRESH_MS`（默认15分钟）生成统计快照，HTTP 只读取缓存；部署与 systemd 存活检查统一使用 O(1) 的 `/health`。Shadow 定时维护拆成四组、每250ms错开一组，但每个策略仍保持每秒推进一次；AMM订阅集合每5秒刷新，并对超过100ms的运行任务及超过250ms的HTTP接口输出节流后的慢日志，便于准确定位剩余阻塞而不影响交易主循环。
+Dashboard 不再从实时写库同步计算 Overview、信号、Smart Wallet、实盘记录和常用 Shadow 统计。独立预聚合 Worker 只读研究库，并把结果写入专用的 `flow-dashboard.db`；HTTP 主线程以 `query_only` 连接只读取该小库，页面刷新不会占用实时库写锁。实盘页默认15秒刷新，Shadow 默认60秒，Smart Wallet/全局统计默认5分钟；刷新失败会继续提供上一次成功快照，并在 `/api/health` 的 `dashboardReadModel` 中暴露状态。详细数据库行数也由独立只读 Worker 按 `FLOW_DB_HEALTH_REFRESH_MS`（默认15分钟）生成统计快照；部署与 systemd 存活检查统一使用 O(1) 的 `/health`。
 
 ## 运行
 
@@ -872,7 +872,7 @@ systemctl list-timers flow-acceleration-backup.timer --all
 
 Timer 使用显式 `Asia/Shanghai` 时区，每天北京时间 07:00 运行，即使服务器位于其他时区也不会按当地时间偏移。`flock` 会阻止任务重叠；成功后还会写入按北京时间日期命名的完成标记，同一天再次误触发时直接退出，不会重新导出或上传。只有确需人工覆盖当天归档时才可临时设置 `FLOW_BACKUP_FORCE_RUN=1`。导出进程使用低 CPU/IO 优先级。COSCLI 配置在运行时写入私有临时文件并在结束时删除，SecretId/SecretKey 不进入压缩包和命令行参数。永久密钥应遵循最小权限原则，只授予私有 Bucket 前缀所需的上传和查询权限。
 
-远端验证通过后，每日导出任务直接进入 `DONE`，不会再从外部进程清理在线 SQLite 主库。`scripts/cleanup-research-retention.js` 仅保留为停服维护工具；必须在明确停止实时服务后手动执行。这样可避免大型 `DELETE` 持有写锁时，主服务恰好重启并因 `SQLITE_BUSY` 陷入崩溃循环。维护过程仍禁止 `wal_checkpoint` 或 `VACUUM`；已有大型数据库如需真正缩小，应另安排停服离线重建，不能在实时服务上直接压缩。
+远端验证通过后，每日导出任务不会从外部进程删除在线 SQLite 主库中的行，只会按 `FLOW_RAW_SHARD_LOCAL_RETENTION_DAYS`（默认7天）移除已经归档的旧日分片。`scripts/cleanup-research-retention.js` 仅保留为切换前旧主库的停服维护工具；必须在明确停止实时服务后手动执行。这样可避免大型 `DELETE` 持有写锁时，主服务恰好重启并因 `SQLITE_BUSY` 陷入崩溃循环。维护过程仍禁止在线 `VACUUM`；已有大型数据库如需真正缩小，应另安排停服离线重建。
 
 为避免大库维护长时间停机，同一份已验证 COS 归档在 24 小时内只允许完成一轮清理，且单轮硬上限为 5,000,000 行；即使传入更大的 `--max-rows` 也不会突破该上限。`--dry-run` 不覆盖最近一次正式维护记录。只有在明确批准的故障恢复场景下才能使用 `--force` 绕过同归档保护。System Health 会显示最近维护时间、实际删除行数和 SQLite 可复用空间。
 

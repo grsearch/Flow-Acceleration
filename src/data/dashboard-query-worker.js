@@ -3,6 +3,7 @@
 const { parentPort, workerData } = require('worker_threads');
 const Database = require('better-sqlite3');
 const { ResearchStore } = require('./ResearchStore');
+const { attachRawTradeReadView } = require('./RawTradeShardManager');
 
 function run() {
   const db = new Database(workerData.dbPath, {
@@ -10,6 +11,12 @@ function run() {
     fileMustExist: true,
   });
   db.pragma('busy_timeout = 5000');
+  db.pragma(`cache_size = -${Math.max(2_000, Number(workerData.cacheSizeKb) || 16_384)}`);
+  attachRawTradeReadView(db, {
+    dbPath: workerData.dbPath,
+    readDays: workerData.rawShardReadDays,
+  });
+  db.pragma('query_only = ON');
 
   const prototype = ResearchStore.prototype;
   const store = {

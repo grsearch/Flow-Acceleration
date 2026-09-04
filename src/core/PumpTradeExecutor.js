@@ -561,19 +561,23 @@ class PumpTradeExecutor {
     };
   }
 
-  _budgetInstructions() {
+  _budgetInstructions(priorityFeeMicroLamports = this.config.priorityFeeMicroLamports) {
     const instructions = [ComputeBudgetProgram.setComputeUnitLimit({
       units: this.config.computeUnitLimit,
     })];
-    if (this.config.priorityFeeMicroLamports > 0) {
+    if (priorityFeeMicroLamports > 0) {
       instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: this.config.priorityFeeMicroLamports,
+        microLamports: priorityFeeMicroLamports,
       }));
     }
     return instructions;
   }
 
-  async _send(instructions, { latestBlockhash = null, onStage = null } = {}) {
+  async _send(instructions, {
+    latestBlockhash = null,
+    onStage = null,
+    priorityFeeMicroLamports = this.config.priorityFeeMicroLamports,
+  } = {}) {
     const stage = (name) => {
       if (typeof onStage === 'function') onStage(name);
     };
@@ -585,7 +589,7 @@ class PumpTradeExecutor {
       blockhash: latest.blockhash,
       lastValidBlockHeight: latest.lastValidBlockHeight,
     });
-    transaction.add(...this._budgetInstructions(), ...instructions);
+    transaction.add(...this._budgetInstructions(priorityFeeMicroLamports), ...instructions);
     transaction.sign(this.signer);
     stage('signed_ms');
     let signature;
@@ -1106,8 +1110,20 @@ class PumpTradeExecutor {
     return snapshot.amount.toString();
   }
 
-  async sell({ mint: mintValue, tokenAmountRaw = null }) {
+  async sell({ mint: mintValue, tokenAmountRaw = null, emergency = false }) {
     const mint = new PublicKey(mintValue);
+    const sellSlippagePct = emergency
+      ? (this.config.emergencySellSlippagePct ?? 100)
+      : (this.config.sellSlippagePct ?? this.config.slippagePct);
+    const priorityFeeMicroLamports = emergency
+      ? (this.config.emergencyPriorityFeeMicroLamports
+        ?? this.config.priorityFeeMicroLamports)
+      : this.config.priorityFeeMicroLamports;
+    const execution = {
+      emergencyExit: Boolean(emergency),
+      sellSlippagePct,
+      priorityFeeMicroLamports,
+    };
     const tokenProgram = await this._tokenProgram(mint);
     const balanceSnapshot = await this._tokenBalanceSnapshot(mint, tokenProgram);
     if (!balanceSnapshot.observed) {
@@ -1155,18 +1171,19 @@ class PumpTradeExecutor {
         user: this.signer.publicKey,
         amount,
         quoteAmount,
-        slippage: this.config.sellSlippagePct ?? this.config.slippagePct,
+        slippage: sellSlippagePct,
         tokenProgram,
         quoteTokenProgram: TOKEN_PROGRAM_ID,
       });
-      const signature = await this._send(instructions);
-      return this._confirmedSellResult({
+      const signature = await this._send(instructions, { priorityFeeMicroLamports });
+      const confirmed = await this._confirmedSellResult({
         mint,
         tokenProgram,
         signature,
         venue: 'PUMP_BONDING_CURVE',
         soldRaw: sellRaw,
       });
+      return { ...confirmed, execution };
     } catch (error) {
       if (error.signature || !['CURVE_COMPLETE', 'MINT_NOT_FOUND'].includes(error.code)
         && !/complete|not found|Bonding curve/i.test(String(error.message))) throw error;
@@ -1177,16 +1194,17 @@ class PumpTradeExecutor {
     const instructions = await PUMP_AMM_SDK.sellBaseInput(
       state,
       amount,
-      this.config.sellSlippagePct ?? this.config.slippagePct,
+      sellSlippagePct,
     );
-    const signature = await this._send(instructions);
-    return this._confirmedSellResult({
+    const signature = await this._send(instructions, { priorityFeeMicroLamports });
+    const confirmed = await this._confirmedSellResult({
       mint,
       tokenProgram,
       signature,
       venue: 'PUMP_AMM',
       soldRaw: sellRaw,
     });
+    return { ...confirmed, execution };
   }
 }
 

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const { runBacktest } = require('../core/FlowBacktester');
+const { DashboardReadModel } = require('../data/DashboardReadModel');
 
 function numeric(value, fallback) {
   if (value == null || (typeof value === 'string' && value.trim() === '')) return fallback;
@@ -138,6 +139,26 @@ class ResearchServer {
     this.featureEdgeAudit = featureEdgeAudit;
     this.postMigrationSurvivor = postMigrationSurvivor;
     this.retentionMaintenance = loadRetentionMaintenance(this.store?.config?.dbPath);
+    this.dashboardReadModel = new DashboardReadModel({
+      config: this.config.dashboardCache || { enabled: false },
+      storage: this.config.storage || {},
+      smartWallets: this.config.smartWallets || [],
+      liveStrategies: this.config.liveTrading?.strategies || [],
+      shadowSettings: {
+        flowFirstBigWinnerPct: this.config.flowFirstShadow?.bigWinnerPct ?? 50,
+        smartPullbackBigWinnerPct: this.config.smartPullbackShadow?.bigWinnerPct ?? 50,
+        smartOpenBigWinnerPct: this.config.smartOpenShadow?.bigWinnerPct ?? 50,
+        migratedBigWinnerPct: this.config.migratedDropReboundShadow?.bigWinnerPct ?? 50,
+        holderGrowthBigWinnerPct: this.config.holderGrowthShadow?.bigWinnerPct ?? 50,
+        qualityLeaderBigWinnerPct: this.config.qualityLeaderShadow?.bigWinnerPct ?? 100,
+        bondingMomentumBigWinnerPct: this.config.bondingCurveMomentumShadow?.bigWinnerPct ?? 50,
+        graduationHoldBigWinnerPct: this.config.graduationHoldShadow?.bigWinnerPct ?? 50,
+        graduationAccelerationBigWinnerPct:
+          this.config.graduationAccelerationShadow?.bigWinnerPct ?? 50,
+      },
+      smartWalletRegistryConfig: this.config.smartWalletRegistry || {},
+      smartWalletConsensusOverlayConfig: this.config.smartWalletConsensusOverlay || {},
+    });
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -181,6 +202,31 @@ class ResearchServer {
     return null;
   }
 
+  _dashboardSnapshot(key, directRead) {
+    if (!this.dashboardReadModel.enabled) {
+      return {
+        value: directRead(),
+        metadata: { status: 'DIRECT' },
+      };
+    }
+    const cached = this.dashboardReadModel.read(key);
+    return {
+      value: cached?.value || {
+        timeSessions: { sessions: [] },
+        cohorts: [],
+        positions: [],
+        observations: [],
+        snapshots: [],
+        stats: {},
+      },
+      metadata: cached ? {
+        status: 'READY',
+        generatedAt: cached.generatedAt,
+        durationMs: cached.durationMs,
+      } : { status: 'PREPARING' },
+    };
+  }
+
   _routes() {
     const publicDir = path.join(__dirname, 'public');
     this.app.disable('x-powered-by');
@@ -200,11 +246,33 @@ class ResearchServer {
     });
 
     this.app.get('/api/overview', (_request, response) => {
-      response.json(this.store.overview(Date.now(), this.engine.stats().candidateCount));
+      const cached = this.dashboardReadModel.read('overview');
+      if (!this.dashboardReadModel.enabled) {
+        response.json(this.store.overview(Date.now(), this.engine.stats().candidateCount));
+        return;
+      }
+      response.json({
+        ...(cached?.value || {
+          rawTradesToday: 0,
+          activeTokens: 0,
+          flowSignalsToday: 0,
+          shadowSignalsToday: 0,
+          earlyThresholdSignalsToday: 0,
+          smartWalletTradesToday: 0,
+        }),
+        candidateCount: this.engine.stats().candidateCount,
+        dashboardSnapshot: cached ? {
+          status: 'READY', generatedAt: cached.generatedAt, durationMs: cached.durationMs,
+        } : { status: 'PREPARING' },
+      });
     });
 
     this.app.get('/api/signals', (request, response) => {
-      response.json(this.store.recentSignals(numeric(request.query.limit, 200)));
+      const limit = Math.min(200, Math.max(1, numeric(request.query.limit, 200)));
+      const cached = this.dashboardReadModel.read('recent-signals');
+      response.json(this.dashboardReadModel.enabled
+        ? (cached?.value || []).slice(0, limit)
+        : this.store.recentSignals(limit));
     });
 
     // Keep the sidebar state tied to the configuration that is actually loaded
@@ -261,6 +329,7 @@ class ResearchServer {
         ? 0
         : this.config.strategy.minAccelerationRatio;
       const result = runBacktest(this.store.db, {
+        rawTradeTable: 'raw_trades_all',
         holdMs: numeric(request.query.holdMs, 60_000),
         executionDelayMs: numeric(
           request.query.executionDelayMs,
@@ -354,25 +423,31 @@ class ResearchServer {
     });
 
     this.app.get('/api/smart-wallets', (_request, response) => {
-      response.json(this.store.smartWalletStats(this.config.smartWallets));
+      const cached = this.dashboardReadModel.read('smart-wallets');
+      response.json(this.dashboardReadModel.enabled
+        ? (cached?.value || [])
+        : this.store.smartWalletStats(this.config.smartWallets));
     });
 
     this.app.get('/api/smart-wallet-registry', (request, response) => {
-      response.json({
-        generatedAt: Date.now(),
-        ...(this.smartWalletRegistry?.dashboard(numeric(request.query.limit, 100)) || {
+      const cached = this._dashboardSnapshot('smart-wallet-registry', () => (
+        this.smartWalletRegistry?.dashboard(numeric(request.query.limit, 100)) || {
           enabled: false,
           observerOnly: true,
           sendsTransactions: false,
           wallets: [],
-        }),
+        }
+      ));
+      response.json({
+        generatedAt: Date.now(),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/smart-consensus-overlay', (request, response) => {
-      response.json({
-        generatedAt: Date.now(),
-        ...(this.smartWalletConsensusOverlay?.dashboard(
+      const cached = this._dashboardSnapshot('smart-consensus-overlay', () => (
+        this.smartWalletConsensusOverlay?.dashboard(
           numeric(request.query.limit, 100),
         ) || {
           enabled: false,
@@ -380,12 +455,25 @@ class ResearchServer {
           sendsTransactions: false,
           profiles: [],
           recent: [],
-        }),
+        }
+      ));
+      response.json({
+        generatedAt: Date.now(),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/signal-repetition', (_request, response) => {
-      response.json(this.store.signalRepetitionStats());
+      const cached = this.dashboardReadModel.read('signal-repetition');
+      response.json(this.dashboardReadModel.enabled
+        ? (cached?.value || {
+          primarySignals: 0,
+          uniqueMints: 0,
+          signalEpisodes: 0,
+          laterSignals: 0,
+        })
+        : this.store.signalRepetitionStats());
     });
 
     this.app.get('/api/live-trading', (request, response) => {
@@ -399,21 +487,41 @@ class ResearchServer {
         || runtime.strategies?.[0]?.id
         || null;
       const strategy = runtime.strategies?.find((row) => row.id === strategyId) || null;
+      const cached = strategyId
+        ? this.dashboardReadModel.read(`live-trading:${strategyId}`)
+        : null;
+      const databaseDashboard = this.dashboardReadModel.enabled
+        ? (cached?.value || {
+          stats: {}, positions: [], orders: [], decisions: [], entryLocks: [], strategyId,
+        })
+        : this.store.liveTradingDashboard({
+          strategyId,
+          positionLimit: numeric(request.query.positionLimit, 30),
+          orderLimit: numeric(request.query.orderLimit, 30),
+          decisionLimit: numeric(request.query.decisionLimit, 30),
+        });
       response.json({
         generatedAt: Date.now(),
         runtime,
         monitoredWallets: this.config.smartWallets,
         sourceDiagnostics: this._liveSourceDiagnostics(strategy),
-        ...this.store.liveTradingDashboard({
-          strategyId,
-          positionLimit: numeric(request.query.positionLimit, 30),
-          orderLimit: numeric(request.query.orderLimit, 30),
-          decisionLimit: numeric(request.query.decisionLimit, 30),
-        }),
+        ...databaseDashboard,
+        dashboardSnapshot: this.dashboardReadModel.enabled
+          ? (cached ? {
+            status: 'READY', generatedAt: cached.generatedAt, durationMs: cached.durationMs,
+          } : { status: 'PREPARING' })
+          : { status: 'DIRECT' },
       });
     });
 
     this.app.get('/api/primary-signal-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:primary', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('primary-shadow'),
+        ...this.store.primarySignalShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.signalShadow?.health() || {
@@ -422,15 +530,20 @@ class ResearchServer {
           activePositions: 0,
           pendingEntries: 0,
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('primary-shadow'),
-        ...this.store.primarySignalShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/flow-first-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:flow-first', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('flow-first'),
+        ...this.store.flowFirstShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.flowFirstShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.flowFirstShadow?.health() || {
@@ -439,16 +552,20 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('flow-first'),
-        ...this.store.flowFirstShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          bigWinnerPct: this.config.flowFirstShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/smart-pullback-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:smart-pullback', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('smart-pullback'),
+        ...this.store.smartPullbackShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.smartPullbackShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.smartPullbackShadow?.health() || {
@@ -457,16 +574,20 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('smart-pullback'),
-        ...this.store.smartPullbackShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          bigWinnerPct: this.config.smartPullbackShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/smart-open-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:smart-open', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('smart-open'),
+        ...this.store.smartOpenShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.smartOpenShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.smartOpenShadow?.health() || {
@@ -475,16 +596,18 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('smart-open'),
-        ...this.store.smartOpenShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          bigWinnerPct: this.config.smartOpenShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/launch-quality-observer', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:launch-quality', () => (
+        this.store.launchQualityDashboard({
+          observationLimit: numeric(request.query.observationLimit, 30),
+          snapshotLimit: numeric(request.query.snapshotLimit, 60),
+        })
+      ));
       response.json({
         generatedAt: Date.now(),
         runtime: this.launchQualityObserver?.health() || {
@@ -493,10 +616,8 @@ class ResearchServer {
           sendsTransactions: false,
           opensSimulatedPositions: false,
         },
-        ...this.store.launchQualityDashboard({
-          observationLimit: numeric(request.query.observationLimit, 30),
-          snapshotLimit: numeric(request.query.snapshotLimit, 60),
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
@@ -578,6 +699,14 @@ class ResearchServer {
     });
 
     this.app.get('/api/migrated-drop-rebound-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:migrated-rebound', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('migrated-rebound'),
+        ...this.store.migratedDropReboundShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.migratedDropReboundShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.migratedDropReboundShadow?.health() || {
@@ -587,16 +716,20 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('migrated-rebound'),
-        ...this.store.migratedDropReboundShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          bigWinnerPct: this.config.migratedDropReboundShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/holder-growth-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:holder-growth', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('holder-growth'),
+        ...this.store.holderGrowthShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          bigWinnerPct: this.config.holderGrowthShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.holderGrowthShadow?.health() || {
@@ -606,16 +739,19 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('holder-growth'),
-        ...this.store.holderGrowthShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 100),
-          bigWinnerPct: this.config.holderGrowthShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/quality-leader-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:quality-leader', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('quality-leader'),
+        ...this.store.qualityLeaderShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          bigWinnerPct: this.config.qualityLeaderShadow?.bigWinnerPct ?? 100,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.qualityLeaderShadow?.health() || {
@@ -625,11 +761,8 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('quality-leader'),
-        ...this.store.qualityLeaderShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 100),
-          bigWinnerPct: this.config.qualityLeaderShadow?.bigWinnerPct ?? 100,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
@@ -653,19 +786,32 @@ class ResearchServer {
     });
 
     this.app.get('/api/migration-continuity-shadow', (request, response) => {
-      response.json({
-        runtime: this.migrationContinuityShadow?.health() || {
-          enabled: false, mode: 'SHADOW_M', sendsTransactions: false,
-        },
+      const cached = this._dashboardSnapshot('shadow:migration-continuity', () => ({
         timeSessions: this.store.shadowTimeSessionDashboard('migration-continuity'),
         ...this.store.migrationContinuityShadowDashboard({
           positionLimit: numeric(request.query.positionLimit, 100),
           cacheStats: true,
         }),
+      }));
+      response.json({
+        runtime: this.migrationContinuityShadow?.health() || {
+          enabled: false, mode: 'SHADOW_M', sendsTransactions: false,
+        },
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/bonding-curve-momentum-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:bonding-momentum', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('bonding-momentum'),
+        ...this.store.bondingCurveMomentumShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          snapshotLimit: numeric(request.query.snapshotLimit, 40),
+          bigWinnerPct: this.config.bondingCurveMomentumShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.bondingCurveMomentumShadow?.health() || {
@@ -675,17 +821,19 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('bonding-momentum'),
-        ...this.store.bondingCurveMomentumShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          snapshotLimit: numeric(request.query.snapshotLimit, 40),
-          bigWinnerPct: this.config.bondingCurveMomentumShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/range-scalper-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:range-scalper', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('range-scalper'),
+        ...this.store.rangeScalperShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.rangeScalperShadow?.health() || {
@@ -695,15 +843,19 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('range-scalper'),
-        ...this.store.rangeScalperShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 100),
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/flow-smart-confirm-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:flow-smart-confirm', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('flow-smart-confirm'),
+        ...this.store.flowSmartConfirmShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.flowSmartConfirmShadow?.health() || {
@@ -712,11 +864,8 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('flow-smart-confirm'),
-        ...this.store.flowSmartConfirmShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
@@ -982,6 +1131,13 @@ class ResearchServer {
     });
 
     this.app.get('/api/cya-early-pyramid-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:cya-early-pyramid', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('cya-early-pyramid'),
+        ...this.store.cyaEarlyPyramidShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          cacheStats: true,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.cyaEarlyPyramidShadow?.health() || {
@@ -991,15 +1147,19 @@ class ResearchServer {
           entryProfiles: [],
           exitProfiles: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('cya-early-pyramid'),
-        ...this.store.cyaEarlyPyramidShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 100),
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/graduation-hold-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:graduation-hold', () => ({
+        timeSessions: this.store.shadowTimeSessionDashboard('graduation-hold'),
+        ...this.store.graduationHoldShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 30),
+          bigWinnerPct: this.config.graduationHoldShadow?.bigWinnerPct ?? 50,
+        }),
+      }));
       response.json({
         generatedAt: Date.now(),
         runtime: this.graduationHoldShadow?.health() || {
@@ -1008,15 +1168,19 @@ class ResearchServer {
           sendsTransactions: false,
           cohorts: [],
         },
-        timeSessions: this.store.shadowTimeSessionDashboard('graduation-hold'),
-        ...this.store.graduationHoldShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 30),
-          bigWinnerPct: this.config.graduationHoldShadow?.bigWinnerPct ?? 50,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
     this.app.get('/api/graduation-acceleration-shadow', (request, response) => {
+      const cached = this._dashboardSnapshot('shadow:graduation-acceleration', () => (
+        this.store.graduationAccelerationShadowDashboard({
+          positionLimit: numeric(request.query.positionLimit, 100),
+          bigWinnerPct: this.config.graduationAccelerationShadow?.bigWinnerPct ?? 50,
+          cacheStats: true,
+        })
+      ));
       response.json({
         generatedAt: Date.now(),
         runtime: this.graduationAccelerationShadow?.health() || {
@@ -1026,11 +1190,8 @@ class ResearchServer {
           entryProfiles: [],
           capacitySols: [],
         },
-        ...this.store.graduationAccelerationShadowDashboard({
-          positionLimit: numeric(request.query.positionLimit, 100),
-          bigWinnerPct: this.config.graduationAccelerationShadow?.bigWinnerPct ?? 50,
-          cacheStats: true,
-        }),
+        ...cached.value,
+        dashboardSnapshot: cached.metadata,
       });
     });
 
@@ -1111,6 +1272,7 @@ class ResearchServer {
           ...database,
           retentionMaintenance: this.retentionMaintenance,
         },
+        dashboardReadModel: this.dashboardReadModel.health(),
         trading: this.trader?.health() || null,
         signalShadow: this.signalShadow?.health() || null,
         flowFirstShadow: this.flowFirstShadow?.health() || null,
@@ -1177,6 +1339,7 @@ class ResearchServer {
 
   start() {
     if (this.httpServer) return Promise.resolve();
+    this.dashboardReadModel.start();
     return new Promise((resolve, reject) => {
       const server = this.app.listen(this.config.server.port, this.config.server.host, () => {
         this.httpServer = server;
@@ -1186,14 +1349,18 @@ class ResearchServer {
     });
   }
 
-  stop() {
-    if (!this.httpServer) return Promise.resolve();
-    return new Promise((resolve) => {
+  async stop() {
+    if (!this.httpServer) {
+      await this.dashboardReadModel.stop();
+      return;
+    }
+    await new Promise((resolve) => {
       this.httpServer.close(() => {
         this.httpServer = null;
         resolve();
       });
     });
+    await this.dashboardReadModel.stop();
   }
 }
 

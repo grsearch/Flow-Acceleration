@@ -676,7 +676,7 @@ async function main() {
         .filter((profile) => profile.id.startsWith('GRT_R23_'))
         .map((profile) => [profile.id, profile.newEntriesEnabled, profile.exitProfileIds]),
       [
-        ['GRT_R23_F3_V2', true, ['GRT_F3_XLEG_V2']],
+        ['GRT_R23_F3_V2', true, ['GRT_F3_XLEG_V2', 'GRT_F3_XLEG_H20_FWD']],
         ['GRT_R23_F2_ONLY_V2', true, ['GRT_F2_XLEG_V2']],
       ],
     );
@@ -704,7 +704,7 @@ async function main() {
         'G_DUMP_NB_X8', 'X3', 'X8', 'XLEG',
         'GEXEC_XLEG', 'G2_XLEG', 'GRT_F3_XLEG_V2', 'GRT_F2_XLEG_V2',
         'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG',
-        'G2_XLEG_H20_FWD', 'GQ_XLEG',
+        'G2_XLEG_H20_FWD', 'GRT_F3_XLEG_H20_FWD', 'GQ_XLEG',
         'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
         'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
         'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',

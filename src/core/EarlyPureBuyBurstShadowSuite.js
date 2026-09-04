@@ -11,6 +11,8 @@ const {
   exitCensorReason,
 } = require('./ShadowPoolQuote');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const { LIVE_CURVE_HARD_BLOCK_SIGNATURES } = require('./RugGuardPolicy');
+const { buildShadowRugPairComparison } = require('./ShadowRugPairComparison');
 const {
   initializeVotingSnapshotStorage,
   persistVotingSnapshot,
@@ -420,6 +422,17 @@ class EarlyPureBuyBurstShadowSuite {
         };
         emitted.push(...this._emit('EB_A', trade, state.anchor, features));
         for (const profile of this.entryProfiles.values()) {
+          if (profile.pairedBaselineProfileId !== 'EB_A'
+            || profile.newEntriesEnabled === false) continue;
+          emitted.push(...this._emit(
+            profile.id,
+            trade,
+            state.anchor,
+            features,
+            { pairedBaselineProfileId: 'EB_A' },
+          ));
+        }
+        for (const profile of this.entryProfiles.values()) {
           if (profile.sourceProfileId !== 'EB_A' || profile.newEntriesEnabled === false) continue;
           const smartConsensus = this._smartConsensus(state, trade.timestampMs, profile);
           if (!smartConsensus) continue;
@@ -480,9 +493,17 @@ class EarlyPureBuyBurstShadowSuite {
     if (position.status === 'PENDING_ENTRY') {
       if (timestampMs < position.entryTargetAt) return;
       if (timestampMs > position.entryDeadlineAt) return this._finish(position, 'NO_ENTRY', 'ENTRY_TIMEOUT');
+      const profile = this.entryProfiles.get(position.entryProfileId);
+      const selectiveRugPair = profile?.rugGuardMode === 'LIVE_CURVE_CATASTROPHE';
       const guard = evaluateUniversalRugGuard(this.store, {
         strategyId: `EARLY_PURE_BUY:${position.entryProfileId}`,
         mint: position.mint, timestampMs, source: 'SHADOW',
+        market: MARKET, lifecycleStage: 'CURVE_EARLY',
+        ...(selectiveRugPair ? {
+          enforcementMode: 'HARD_BLOCK',
+          hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+          policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
+        } : {}),
       });
       if (guard.blocked) {
         this.counters.blockedByRugGuard += 1;
@@ -755,6 +776,30 @@ class EarlyPureBuyBurstShadowSuite {
       SELECT * FROM early_pure_buy_burst_shadow_positions
       ORDER BY signal_at DESC, id DESC LIMIT ?
     `).all(Math.max(1, Math.min(500, positionLimit)));
+    const rugPairRows = this.store.db.prepare(`
+      SELECT b.mint, b.signal_at,
+        b.status AS baseline_status, b.net_return_pct AS baseline_return_pct,
+        f.status AS filtered_status, f.net_return_pct AS filtered_return_pct,
+        f.rejection_reason AS filtered_reason
+      FROM early_pure_buy_burst_shadow_positions f
+      JOIN early_pure_buy_burst_shadow_positions b
+        ON b.mint = f.mint
+        AND b.signal_at = f.signal_at
+        AND b.exit_profile_id = f.exit_profile_id
+      WHERE b.entry_profile_id = 'EB_A'
+        AND f.entry_profile_id = 'EB_A_RUGX'
+        AND b.exit_profile_id = 'FIX20'
+        AND f.exit_profile_id = 'FIX20'
+      ORDER BY f.signal_at DESC
+    `).all();
+    const rugComparisons = [buildShadowRugPairComparison({
+      id: 'EB_A_FIX20_RUGX',
+      label: '高频 EB-A · FIX20',
+      baselineProfileId: 'EB_A',
+      filteredProfileId: 'EB_A_RUGX',
+      exitProfileId: 'FIX20',
+      rows: rugPairRows,
+    })];
     return {
       health: this.health(),
       strategy: {
@@ -763,7 +808,7 @@ class EarlyPureBuyBurstShadowSuite {
         missingExitPolicy: 'NO_EXIT_EXCLUDED_FROM_RETURN_STATS',
         positionSizeSol: this.config.positionSizeSol,
       },
-      cohorts, positions,
+      cohorts, positions, rugComparisons,
     };
   }
 }

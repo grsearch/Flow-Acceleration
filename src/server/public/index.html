@@ -735,6 +735,11 @@
               </div>
               <div class="strategy-expression" id="graduation-acceleration-expression">等待 Graduation Acceleration 配置…</div>
               <div class="strategy-metric-groups" id="graduation-acceleration-metrics"></div>
+              <div class="section-title"><h2>当前 RUG 过滤严格配对</h2><p>原策略与 RUGX 使用同一信号、成交、退出和成本；跳过交易按 0% 计入配对组合，只比较这三个高置信灾难条件。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>配对组</th><th>同源信号 / 可比结果</th><th>拦截 / 已验证</th><th>避开 RUG50 / RUG80</th><th>误杀赢家 / 大赢家</th><th>原策略</th><th>RUGX</th><th>配对均值改善</th></tr></thead>
+                <tbody id="graduation-acceleration-rug-pair-rows"></tbody>
+              </table></div>
               <div class="section-title"><h2>入场 × 容量表现</h2><p>NO_EXIT 单独统计，不强制按 -100% 污染真实盈亏</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>入场 / 容量</th><th>信号 / Mint</th><th>迁移 / 可退出</th><th>完成 / 胜率</th><th>平均 / 中位净收益</th><th>去Top1 / PF</th><th>Top3贡献 / 大赢家</th><th>入场冲击 / MFE / MAE</th></tr></thead>
@@ -1186,6 +1191,11 @@
               </div>
               <div class="strategy-expression" id="early-pure-buy-burst-expression">AGE&lt;10s / Curve&lt;50% / W3 3–5 SOL / Buyers 2–4 / 纯买流 × 固定5/20/30秒</div>
               <div class="strategy-metric-groups" id="early-pure-buy-burst-metrics"></div>
+              <div class="section-title"><h2>高频 RUG 过滤严格配对</h2><p>EB-A + FIX20 每天提供较多样本；基准组与 RUGX 组完全同源，唯一差异是当前三个高置信灾难条件。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>配对组</th><th>同源信号 / 可比结果</th><th>拦截 / 已验证</th><th>避开 RUG50 / RUG80</th><th>误杀赢家 / 大赢家</th><th>原策略</th><th>RUGX</th><th>配对均值改善</th></tr></thead>
+                <tbody id="early-pure-buy-burst-rug-pair-rows"></tbody>
+              </table></div>
               <div class="section-title"><h2>确认路径 × 可执行退出</h2><p>EB-A立即模拟，EB-B等待300–500ms延续确认，EB-C等待1–3秒健康回踩收复；NO_EXIT 不计入收益统计。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>入场 / 退出</th><th>信号</th><th>完成 / 胜率</th><th>平均 / 中位</th><th>PF / 最大赢家</th><th>Big50 / 100</th><th>RUG50</th><th>活动 / 无入场 / 无退出</th></tr></thead>
@@ -1405,6 +1415,21 @@
           `).join('')}</div>
         </section>
       `;
+    }
+    function renderRugPairComparisons(selector, comparisons) {
+      const target = document.querySelector(selector);
+      if (!target) return;
+      const rows = comparisons || [];
+      target.innerHTML = rows.length ? rows.map(row => {
+        const baseline = row.comparableBaseline || {};
+        const filtered = row.comparableFiltered || {};
+        const evidence = number(row.resolvedBlocked) >= 30
+          ? '样本已可初判'
+          : number(row.pairedSignals) > 0
+            ? `仍需积累，已验证拦截 ${number(row.resolvedBlocked)}/30`
+            : '部署后开始前向采集';
+        return `<tr><td><b>${escapeHtml(row.label || row.id)}</b><br><span class="table-note">${escapeHtml(row.baselineProfileId)} → ${escapeHtml(row.filteredProfileId)}${row.exitProfileId ? ` · ${escapeHtml(row.exitProfileId)}` : ''}</span></td><td>${number(row.pairedSignals)} / ${number(row.comparableResolved)}<br><span class="table-note">${escapeHtml(evidence)}</span></td><td>${number(row.blocked)} / ${number(row.resolvedBlocked)}<br><span class="table-note">拦截精度 ${rate(row.blockPrecisionPct)}</span></td><td>${number(row.avoidedRug50)} / ${number(row.avoidedRug80)}</td><td>${number(row.blockedWinners)} / ${number(row.blockedBig50)}<br><span class="table-note">误杀率 ${rate(row.falsePositiveRatePct)}</span></td><td class="${tone(baseline.averageNetReturnPct)}">均值 ${pct(baseline.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(baseline.winRatePct)} · PF ${number(baseline.profitFactor,2)} · RUG50 ${rate(baseline.rug50RatePct)}</span></td><td class="${tone(filtered.averageNetReturnPct)}">均值 ${pct(filtered.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(filtered.winRatePct)} · PF ${number(filtered.profitFactor,2)} · RUG50 ${rate(filtered.rug50RatePct)}</span></td><td class="${tone(row.averageNetReturnLiftPct)}">${pct(row.averageNetReturnLiftPct)}<br><span class="table-note">被拦截按空仓 0% 计</span></td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">等待严格配对前向样本。</td></tr>';
     }
     async function json(url, { signal } = {}) {
       const response = await fetch(url, { signal });
@@ -2531,9 +2556,13 @@
         ['观察成交 / 候选', `${number(runtime.trades)} / ${number(runtime.candidates)}`, `排除监控钱包成交 ${number(runtime.excludedSmartTrades)}`],
         ['信号 / 已开 / 已关', `${number(runtime.signals)} / ${number(runtime.opened)} / ${number(runtime.closed)}`, `活动 ${number(runtime.activePositions)}`],
         ['无入场 / 无退出', `${number(runtime.noEntry)} / ${number(runtime.noExit)}`, 'NO_EXIT 不进入胜率与收益均值'],
-        ['RUG Guard 拦截', number(runtime.blockedByRugGuard), '使用当前通用前置RUG风控；不增加RPC'],
+        ['RUGX 配对拦截', number(runtime.blockedByRugGuard), '仅RUGX硬过滤；原EB-A保持不变，不增加RPC'],
         ['队列 / 仓位', `${number(runtime.boundedPerMintTradeQueue)} / ${number(runtime.positionSizeSol,2)} SOL`, '每Mint成交状态严格限长'],
       ], []);
+      renderRugPairComparisons(
+        '#early-pure-buy-burst-rug-pair-rows',
+        data.rugComparisons,
+      );
       const cohorts = data.cohorts || [];
       document.querySelector('#early-pure-buy-burst-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
         `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)}</td><td>${number(row.completed)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averageNetReturnPct)}">${pct(row.averageNetReturnPct)} / ${pct(row.medianNetReturnPct)}</td><td>${number(row.profitFactor,2)} / —</td><td>${rate(row.big50RatePct)} / ${rate(row.big100RatePct)}</td><td>${rate(row.rug50RatePct)}</td><td>${number(row.active)} / ${number(row.no_entry)} / ${number(row.no_exit)}</td></tr>`
@@ -2973,6 +3002,10 @@
         ['毕业 / Core / Runner', `${number(runtime.graduated)} / ${number(runtime.coreExits)} / ${number(runtime.runnerExits)}`, `NO_EXIT ${number(runtime.noExit)} · 跳价 ${number(runtime.priceJump)}`],
         ['PumpSwap 5秒门槛', `${number(runtime.postMigrationGatePassed)} 通过 / ${number(runtime.postMigrationGateFailed)} 失败`, 'O90 系 Runner 使用；Core 毕业时仍退出50%'],
       ]);
+      renderRugPairComparisons(
+        '#graduation-acceleration-rug-pair-rows',
+        data.rugComparisons,
+      );
 
       const cohorts = data.cohorts || [];
       document.querySelector('#graduation-acceleration-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (

@@ -896,14 +896,22 @@ class SmartWalletRegistry {
 
   _historyDailyUsage(at = this.now()) {
     const dayStartAt = this._historyDayStart(at);
-    this.store.db.prepare(`
-      INSERT OR IGNORE INTO smart_wallet_history_backfill_daily (
-        day_start_at, wallets_started, pages_fetched, credits_spent, updated_at
-      ) VALUES (?, 0, 0, 0, ?)
-    `).run(dayStartAt, at);
+    if (this.config.readOnlyDashboard !== true) {
+      this.store.db.prepare(`
+        INSERT OR IGNORE INTO smart_wallet_history_backfill_daily (
+          day_start_at, wallets_started, pages_fetched, credits_spent, updated_at
+        ) VALUES (?, 0, 0, 0, ?)
+      `).run(dayStartAt, at);
+    }
     return this.store.db.prepare(`
       SELECT * FROM smart_wallet_history_backfill_daily WHERE day_start_at=?
-    `).get(dayStartAt);
+    `).get(dayStartAt) || {
+      day_start_at: dayStartAt,
+      wallets_started: 0,
+      pages_fetched: 0,
+      credits_spent: 0,
+      updated_at: at,
+    };
   }
 
   _claimHistoryBackfill(at = this.now()) {
@@ -1957,7 +1965,7 @@ class SmartWalletRegistry {
   _localAgeEvidence(wallet, cutoffAt) {
     const row = this.store.db.prepare(`
       SELECT MIN(observed_at) first_activity_at FROM (
-        SELECT MIN(timestamp_ms) observed_at FROM raw_trades WHERE wallet=?
+        SELECT MIN(timestamp_ms) observed_at FROM raw_trades_all WHERE wallet=?
         UNION ALL
         SELECT MIN(signal_at) observed_at FROM smart_wallet_forward_labels WHERE wallet=?
       )
@@ -2827,7 +2835,7 @@ class SmartWalletRegistry {
         SUM(CASE WHEN side='BUY' THEN sol_amount ELSE 0 END) buy_sol,
         SUM(CASE WHEN side='SELL' THEN sol_amount ELSE 0 END) sell_sol,
         MIN(CASE WHEN side='BUY' THEN curve_pct END) first_curve_pct
-      FROM raw_trades
+      FROM raw_trades_all
       WHERE mint=? AND market='PUMP_BONDING_CURVE' AND timestamp_ms<=?
         AND wallet IS NOT NULL AND wallet<>''
       GROUP BY wallet

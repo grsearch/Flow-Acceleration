@@ -11,9 +11,17 @@ function evaluateUniversalRugGuard(store, {
   lifecycleStage = null,
   lifecycleAgeMs = null,
   enforcementMode = null,
+  hardBlockSignatures = null,
+  policyReason = null,
 }) {
   const policy = enforcementMode
-    ? { enforcementMode, policyReason: 'CALLER_OVERRIDE' }
+    ? {
+        enforcementMode,
+        policyReason: policyReason || 'CALLER_OVERRIDE',
+        ...(Array.isArray(hardBlockSignatures)
+          ? { hardBlockSignatures: [...hardBlockSignatures] }
+          : {}),
+      }
     : resolveRugGuardPolicy({
       strategyId, source, market, lifecycleStage, lifecycleAgeMs,
     });

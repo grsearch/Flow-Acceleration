@@ -50,6 +50,7 @@ rsync -a \
   --exclude='data/*.db*' \
   --exclude='data/archive/*' \
   --exclude='data/exports/*' \
+  --exclude='data/raw-daily/*' \
   --exclude='logs/*' \
   --exclude='.env' \
   "$PROJECT_DIR/" "$INSTALL_DIR/"

@@ -5,7 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { PreEntryRugRiskTracker } = require('../src/core/PreEntryRugRiskTracker');
 const { evaluateUniversalRugGuard } = require('../src/core/UniversalRugGuard');
-const { resolveRugGuardPolicy } = require('../src/core/RugGuardPolicy');
+const {
+  LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+  resolveRugGuardPolicy,
+} = require('../src/core/RugGuardPolicy');
 
 const config = {
   enabled: true,
@@ -109,8 +112,70 @@ assert.equal(health.guardHardBlocked, 2);
 assert.equal(health.guardLabelOnly, 2);
 assert.equal(
   health.enforcement,
-  'EXISTING_GUARDS_PLUS_LIFECYCLE_CANDIDATES_FORWARD_LABEL_ONLY',
+  'LIVE_CURVE_CATASTROPHE_SELECTIVE_HARD_BLOCK',
 );
+
+const curveLivePolicy = resolveRugGuardPolicy({
+  strategyId: 'CURVE-LIVE', source: 'LIVE', market: 'PUMP_BONDING_CURVE',
+  lifecycleStage: 'CURVE_MIGRATION', lifecycleAgeMs: 4_000,
+});
+assert.equal(curveLivePolicy.enforcementMode, 'HARD_BLOCK');
+assert.equal(curveLivePolicy.policyReason, 'LIVE_CURVE_CATASTROPHE_SIGNATURES_HARD_BLOCK');
+assert.deepEqual(curveLivePolicy.hardBlockSignatures, LIVE_CURVE_HARD_BLOCK_SIGNATURES);
+
+// A broad native stair-step warning remains observable on Live Curve entries,
+// but only a high-specificity catastrophe signature may reject it.
+const broadCurveLive = evaluateUniversalRugGuard(store, {
+  strategyId: 'CURVE-LIVE', mint: 'rug', timestampMs: 9_040, source: 'LIVE',
+  market: 'PUMP_BONDING_CURVE', lifecycleStage: 'CURVE_MIGRATION',
+});
+assert.equal(broadCurveLive.riskFlagged, true);
+assert.equal(broadCurveLive.blocked, false);
+assert.equal(broadCurveLive.reason, 'RUG_RISK_NOT_IN_HARD_BLOCK_SIGNATURES');
+
+const toxicTracker = new PreEntryRugRiskTracker({ config });
+const toxicStore = { preEntryRugRisk: toxicTracker };
+const toxicAmounts = [20.01, 20.07, 19.16, 19.25];
+toxicAmounts.forEach((solAmount, index) => toxicTracker.observeTrade({
+  mint: 'toxic-origin', side: 'BUY', wallet: `toxic-${index}`, solAmount,
+  timestampMs: 20_000 + index * 10, price: 1 + index * 0.2,
+}));
+toxicTracker.observeTrade({
+  mint: 'toxic-origin', side: 'SELL', wallet: 'dumper', solAmount: 70,
+  timestampMs: 21_000, price: 0.2,
+});
+toxicAmounts.forEach((solAmount, index) => toxicTracker.observeTrade({
+  mint: 'toxic-copy', side: 'BUY', market: 'PUMP_BONDING_CURVE',
+  wallet: `rotated-${index}`, solAmount,
+  timestampMs: 22_000 + index * 10, price: 1 + index * 0.2,
+}));
+const toxicCurveLive = evaluateUniversalRugGuard(toxicStore, {
+  strategyId: 'CURVE-LIVE', mint: 'toxic-copy', timestampMs: 22_100, source: 'LIVE',
+  market: 'PUMP_BONDING_CURVE', lifecycleStage: 'CURVE_MIGRATION',
+});
+assert.equal(toxicCurveLive.blocked, true);
+assert.equal(toxicCurveLive.reason, 'PRE_ENTRY_RUG_CROSS_MINT_TOXIC');
+assert.deepEqual(toxicCurveLive.matchedHardBlockSignatures, ['crossMintToxicTemplate']);
+
+let callerOverride;
+const overrideStore = {
+  preEntryRugRisk: {
+    config: { enabled: true },
+    evaluateGuard: (options) => {
+      callerOverride = options;
+      return { ...options, blocked: false, reason: 'RUG_GUARD_PASS' };
+    },
+  },
+};
+evaluateUniversalRugGuard(overrideStore, {
+  strategyId: 'SHADOW-RUGX', mint: 'rugx', timestampMs: 22_200,
+  source: 'SHADOW', market: 'PUMP_BONDING_CURVE', lifecycleStage: 'CURVE_EARLY',
+  enforcementMode: 'HARD_BLOCK',
+  hardBlockSignatures: LIVE_CURVE_HARD_BLOCK_SIGNATURES,
+  policyReason: 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED',
+});
+assert.deepEqual(callerOverride.hardBlockSignatures, LIVE_CURVE_HARD_BLOCK_SIGNATURES);
+assert.equal(callerOverride.policyReason, 'SHADOW_LIVE_CURVE_CATASTROPHE_PAIRED');
 
 assert.equal(tracker._firstCliffStageCandidate('CURVE_LATE', {
   top3RecoveryPct: 2,
@@ -164,7 +229,12 @@ const entryFiles = [
 for (const file of entryFiles) {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', file), 'utf8');
   assert.match(source, /evaluateUniversalRugGuard/, `${file} must evaluate the universal guard`);
-  assert.match(source, /PRE_ENTRY_RUG_RISK/, `${file} must record the universal rejection reason`);
+  if (file === 'LiveTradingManager.js') {
+    assert.match(source, /rugGuard\.reason/,
+      `${file} must persist the tracker-specific universal rejection reason`);
+  } else {
+    assert.match(source, /PRE_ENTRY_RUG_RISK/, `${file} must record the universal rejection reason`);
+  }
 }
 
 console.log('universal RUG guard tests passed');

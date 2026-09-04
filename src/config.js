@@ -589,11 +589,20 @@ const config = {
     }),
     buySlippagePct: numberEnv('FLOW_LIVE_BUY_SLIPPAGE_PCT', 10, { min: 0.1, max: 50 }),
     sellSlippagePct: numberEnv('FLOW_LIVE_SELL_SLIPPAGE_PCT', 15, { min: 0.1, max: 50 }),
+    // Catastrophe exits deliberately prefer execution certainty over price
+    // certainty. At 100%, Pump/PumpSwap encode a zero minimum SOL output; this
+    // path is used only after a HARD_STOP/RUG trigger, never for normal exits.
+    emergencySellSlippagePct: numberEnv(
+      'FLOW_LIVE_EMERGENCY_SELL_SLIPPAGE_PCT', 100, { min: 15, max: 100 },
+    ),
     computeUnitLimit: integerEnv('FLOW_LIVE_COMPUTE_UNIT_LIMIT', 250_000, {
       min: 100_000,
       max: 1_400_000,
     }),
     priorityFeeSol: numberEnv('FLOW_LIVE_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
+    emergencyPriorityFeeSol: numberEnv(
+      'FLOW_LIVE_EMERGENCY_PRIORITY_FEE_SOL', 0.002, { min: 0 },
+    ),
     // The transaction stream is processed-level. Quote against the same newest view,
     // but retain confirmed-level finality for position state and reconciliation.
     readCommitment: process.env.FLOW_LIVE_READ_COMMITMENT || 'processed',
@@ -821,7 +830,7 @@ const config = {
         id: 'migrated_ge30_r23_f2_only_g2_xleg_live',
         code: 'POST-GE30-R23-F2-G2-XLEG',
         label: 'Lifecycle Drop/Rebound G · 第二次机会 XLEG',
-        ruleVersion: 'migrated_ge30_r23_f2_only_g2_xleg_live_v1',
+        ruleVersion: 'migrated_ge30_r23_f2_only_g2_xleg_live_v2',
         signalSource: 'MIGRATED_GE30_R23_F2_ONLY_G2_XLEG',
         enabled: booleanEnv('FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENABLED', true),
         entryEnabled: booleanEnv(
@@ -879,6 +888,11 @@ const config = {
         exitMode: 'LEGACY',
         trailingActivationPct: 8,
         trailingStopPct: 3,
+        hardStopPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_HARD_STOP_PCT',
+          20,
+          { min: 0.1, max: 100 },
+        ),
         fastTakeProfitPct: 18,
         fastTakeProfitWindowMs: 5_000,
         lossCheckAtMs: 6_000,
@@ -889,7 +903,7 @@ const config = {
         id: 'migrated_grt_r23_f3_v2_xleg_live',
         code: 'GRT-R23-F3-V2-XLEG',
         label: 'Lifecycle Drop/Rebound G · GRT前三次机会前向 XLEG',
-        ruleVersion: 'migrated_grt_r23_f3_v2_xleg_live_v1',
+        ruleVersion: 'migrated_grt_r23_f3_v2_xleg_live_v2',
         signalSource: 'MIGRATED_GRT_R23_F3_V2_XLEG',
         enabled: booleanEnv('FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_ENABLED', true),
         entryEnabled: booleanEnv(
@@ -934,6 +948,11 @@ const config = {
         exitMode: 'LEGACY',
         trailingActivationPct: 8,
         trailingStopPct: 3,
+        hardStopPct: numberEnv(
+          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_HARD_STOP_PCT',
+          20,
+          { min: 0.1, max: 100 },
+        ),
         fastTakeProfitPct: 18,
         fastTakeProfitWindowMs: 5_000,
         lossCheckAtMs: 6_000,
@@ -2219,6 +2238,23 @@ const config = {
     dumpTop3ReserveWarnPct: numberEnv(
       'FLOW_PRE_ENTRY_RUG_DUMP_TOP3_RESERVE_WARN_PCT', 50, { min: 0, max: 1_000 },
     ),
+    // A first-occurrence catastrophe guard. It does not wait for the generic
+    // ten-trade sample: a sub-500ms coordinated capital burst plus highly
+    // concentrated inventory and an unexecutable post-dump exit is sufficient.
+    extremeDumpabilityEnabled: booleanEnv(
+      'FLOW_PRE_ENTRY_RUG_EXTREME_DUMPABILITY_ENABLED', true,
+    ),
+    extremeDumpabilityMinObservedWallets: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_EXTREME_MIN_OBSERVED_WALLETS', 4, { min: 2, max: 32 },
+    ),
+    extremeDumpabilityTop3ObservedSharePct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_EXTREME_TOP3_OBSERVED_SHARE_PCT', 70,
+      { min: 0, max: 100 },
+    ),
+    extremeDumpabilityTop3RecoveryMaxPct: numberEnv(
+      'FLOW_PRE_ENTRY_RUG_EXTREME_TOP3_RECOVERY_MAX_PCT', 20,
+      { min: 0, max: 100 },
+    ),
     // Paired counterfactual only: evaluate two pre-first-cliff filters on every
     // entry opportunity that the current guard passes. No entry is blocked and
     // no RPC/SQLite lookup is added to the hot path.
@@ -2338,9 +2374,22 @@ const config = {
     toxicCollapseWindowMs: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_COLLAPSE_WINDOW_MS', 30_000, {
       min: 1_000, max: 120_000,
     }),
-    toxicRetentionMs: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_RETENTION_MS', 86_400_000, {
-      min: 60_000, max: 7 * 86_400_000,
+    // Keep the legacy combined key readable for older tooling. The split keys
+    // intentionally default to longer independent windows even when an old
+    // deployment still overrides the former 24-hour value.
+    toxicRetentionMs: integerEnv('FLOW_PRE_ENTRY_RUG_TOXIC_RETENTION_MS', 60 * 86_400_000, {
+      min: 60_000, max: 365 * 86_400_000,
     }),
+    toxicWalletRetentionMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_TOXIC_WALLET_RETENTION_MS',
+      60 * 86_400_000,
+      { min: 60_000, max: 365 * 86_400_000 },
+    ),
+    toxicTemplateRetentionMs: integerEnv(
+      'FLOW_PRE_ENTRY_RUG_TOXIC_TEMPLATE_RETENTION_MS',
+      30 * 86_400_000,
+      { min: 60_000, max: 365 * 86_400_000 },
+    ),
     toxicMemoryPath: process.env.FLOW_PRE_ENTRY_RUG_TOXIC_MEMORY_PATH
       || './data/pre-entry-rug-toxic-memory.json',
     toxicPersistIntervalMs: integerEnv(
@@ -5522,6 +5571,14 @@ const config = {
     },
     entryProfiles: [
       { id: 'EB_A', label: 'EB-A · immediate pure-buy burst', newEntriesEnabled: true },
+      {
+        id: 'EB_A_RUGX',
+        label: 'EB-A RUGX · 同信号 + 当前高置信灾难过滤 · FIX20',
+        newEntriesEnabled: true,
+        pairedBaselineProfileId: 'EB_A',
+        rugGuardMode: 'LIVE_CURVE_CATASTROPHE',
+        exitProfileIds: ['FIX20'],
+      },
       { id: 'EB_B', label: 'EB-B · 300-500ms continuation', newEntriesEnabled: true },
       { id: 'EB_C', label: 'EB-C · 1-3s pullback reclaim', newEntriesEnabled: true },
       booleanEnv('FLOW_EARLY_PURE_BUY_BURST_SWC_R2_W300_ENABLED', true) && {
@@ -6169,7 +6226,7 @@ const config = {
         reboundTimeoutMs: 1_000,
         maxLifecycleAgeMs: 30_000,
         maxSignalsPerMint: 3,
-        exitProfileIds: ['GRT_F3_XLEG_V2'],
+        exitProfileIds: ['GRT_F3_XLEG_V2', 'GRT_F3_XLEG_H20_FWD'],
         liveExitStrategies: {
           GRT_F3_XLEG_V2: 'migrated_grt_r23_f3_v2_xleg_live',
         },
@@ -6536,6 +6593,20 @@ const config = {
         id: 'G2_XLEG_H20_FWD',
         label: '第二次机会 XLEG + 20%硬止损（前向）',
         entryProfileIds: ['GE30_R23_F2_ONLY'],
+        exitMode: 'RISK_XLEG',
+        trailingActivationPct: 8,
+        trailingStopPct: 3,
+        hardStopPct: 20,
+        fastTakeProfitPct: 18,
+        fastTakeProfitWindowMs: 5_000,
+        lossCheckAtMs: 6_000,
+        lossCheckRecoveryPct: 1,
+        maxHoldMs: 15_000,
+      },
+      {
+        id: 'GRT_F3_XLEG_H20_FWD',
+        label: 'GRT前三次机会 XLEG + 20%硬止损（前向对照）',
+        entryProfileIds: ['GRT_R23_F3_V2'],
         exitMode: 'RISK_XLEG',
         trailingActivationPct: 8,
         trailingStopPct: 3,
@@ -7952,6 +8023,26 @@ const config = {
         runnerExitMode,
         runnerMaxHoldMs,
       })),
+      {
+        id: 'O_C80_P500_STAIR240_RUGX',
+        label: 'O_C80_P500_STAIR240 RUGX · 同信号 + 当前高置信灾难过滤',
+        mode: 'CURVE_MILESTONE_PERSISTENCE',
+        thresholdPct: 80,
+        recentWindowMs: 5_000,
+        minCurveDeltaPct: 5,
+        minBuyers: 2,
+        maxSellTx: 0,
+        requireNoCreatorSell: true,
+        capacityAwareExit: true,
+        persistenceMs: 500,
+        maxPersistenceSellTx: 0,
+        maxPersistencePullbackPct: 5,
+        coreExitPct: 0,
+        runnerExitMode: 'TIERED_TRAILING',
+        runnerMaxHoldMs: 240_000,
+        pairedBaselineProfileId: 'O_C80_P500_STAIR240',
+        rugGuardMode: 'LIVE_CURVE_CATASTROPHE',
+      },
       ...[
         ['O90_M5_X60', 'FIXED_HOLD', 60_000],
         ['O90_M5_X120', 'FIXED_HOLD', 120_000],
@@ -8456,9 +8547,19 @@ const config = {
     dbPath: process.env.FLOW_DB_PATH || './data/flow-research.db',
     rawRetentionHours: numberEnv('FLOW_RAW_RETENTION_HOURS', 48, { min: 24 }),
     archiveDir: process.env.FLOW_ARCHIVE_DIR || './data/archive',
+    cacheSizeKb: integerEnv('FLOW_DB_CACHE_SIZE_KB', 65_536, {
+      min: 2_000,
+      max: 512 * 1_024,
+    }),
     busyTimeoutMs: integerEnv('FLOW_DB_BUSY_TIMEOUT_MS', 5_000, {
       min: 50,
       max: 30_000,
+    }),
+    rawShardingEnabled: booleanEnv('FLOW_RAW_SHARDING_ENABLED', true),
+    rawShardDir: process.env.FLOW_RAW_SHARD_DIR || './data/raw-daily',
+    rawShardReadDays: integerEnv('FLOW_RAW_SHARD_READ_DAYS', 3, {
+      min: 2,
+      max: 7,
     }),
     writeRetryMinMs: integerEnv('FLOW_DB_WRITE_RETRY_MIN_MS', 250, {
       min: 50,
@@ -8484,6 +8585,31 @@ const config = {
     }),
   },
 
+  dashboardCache: {
+    enabled: booleanEnv('FLOW_DASHBOARD_CACHE_ENABLED', true),
+    dbPath: process.env.FLOW_DASHBOARD_DB_PATH || './data/flow-dashboard.db',
+    fastRefreshMs: integerEnv('FLOW_DASHBOARD_FAST_REFRESH_MS', 15_000, {
+      min: 1_000,
+      max: 60_000,
+    }),
+    shadowRefreshMs: integerEnv('FLOW_DASHBOARD_SHADOW_REFRESH_MS', 60_000, {
+      min: 10_000,
+      max: 15 * 60_000,
+    }),
+    slowRefreshMs: integerEnv('FLOW_DASHBOARD_SLOW_REFRESH_MS', 5 * 60_000, {
+      min: 10_000,
+      max: 15 * 60_000,
+    }),
+    maxSnapshotAgeMs: integerEnv('FLOW_DASHBOARD_MAX_SNAPSHOT_AGE_MS', 15 * 60_000, {
+      min: 30_000,
+      max: 24 * 60 * 60_000,
+    }),
+    cacheSizeKb: integerEnv('FLOW_DASHBOARD_CACHE_SIZE_KB', 16_384, {
+      min: 2_000,
+      max: 128 * 1_024,
+    }),
+  },
+
   server: {
     port: integerEnv('FLOW_DASHBOARD_PORT', 3001, { min: 1, max: 65_535 }),
     host: process.env.FLOW_BIND_HOST || '0.0.0.0',
@@ -8494,6 +8620,10 @@ const config = {
 // fee per transaction. Derive one shared buy/sell CU price from the SOL target.
 config.liveTrading.priorityFeeMicroLamports = priorityFeeMicroLamports(
   config.liveTrading.priorityFeeSol,
+  config.liveTrading.computeUnitLimit,
+);
+config.liveTrading.emergencyPriorityFeeMicroLamports = priorityFeeMicroLamports(
+  config.liveTrading.emergencyPriorityFeeSol,
   config.liveTrading.computeUnitLimit,
 );
 

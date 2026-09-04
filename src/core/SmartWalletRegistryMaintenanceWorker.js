@@ -3,6 +3,7 @@
 const { parentPort, workerData } = require('worker_threads');
 const Database = require('better-sqlite3');
 const { SmartWalletRegistry } = require('./SmartWalletRegistry');
+const { attachRawTradeReadView } = require('../data/RawTradeShardManager');
 
 function run() {
   const { dbPath, config, task } = workerData;
@@ -10,8 +11,12 @@ function run() {
   // Keeping this connection read-only leaves the realtime ResearchStore as the
   // sole writer and removes recurring SQLITE_BUSY collisions.
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  db.pragma('query_only = ON');
   db.pragma('busy_timeout = 30000');
+  attachRawTradeReadView(db, {
+    dbPath,
+    readDays: config.rawShardReadDays,
+  });
+  db.pragma('query_only = ON');
   const store = { db, config: { dbPath } };
   try {
     const registry = new SmartWalletRegistry({

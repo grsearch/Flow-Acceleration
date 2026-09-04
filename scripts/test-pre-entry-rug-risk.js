@@ -41,6 +41,10 @@ const config = {
   dumpabilityPositionSol: 1,
   dumpTop1ReserveWarnPct: 25,
   dumpTop3ReserveWarnPct: 50,
+  extremeDumpabilityEnabled: true,
+  extremeDumpabilityMinObservedWallets: 4,
+  extremeDumpabilityTop3ObservedSharePct: 70,
+  extremeDumpabilityTop3RecoveryMaxPct: 20,
   firstCliffCounterfactualEnabled: true,
   firstCliffHorizonMs: 30_000,
   firstCliffMaxPending: 10_000,
@@ -70,6 +74,8 @@ const config = {
   toxicCollapsePct: 60,
   toxicCollapseWindowMs: 30_000,
   toxicRetentionMs: 86_400_000,
+  toxicWalletRetentionMs: 60 * 86_400_000,
+  toxicTemplateRetentionMs: 30 * 86_400_000,
   toxicWalletOverlapMin: 2,
   maxToxicWallets: 4_096,
   maxToxicTemplates: 1_024,
@@ -147,6 +153,51 @@ const config = {
   assert.ok(snapshot.dumpability.top1RecoveryPct < 100);
   assert.ok(snapshot.researchWarnings.includes('OBSERVED_TOP1_DUMPABLE_INVENTORY'));
   assert.equal(tracker.health().dumpabilityWarnings, 1);
+}
+
+{
+  // Regression for the 4zu5-style first attack: only nine trades exist, so the
+  // generic ten-trade sample is not ready. The coordinated burst and post-top3
+  // recovery calculation must still produce a high-specificity hard-block signal.
+  const tracker = new PreEntryRugRiskTracker({ config });
+  const base = 10_000;
+  const largeSol = [17.0184, 15.8488, 16.9740, 16.1467];
+  for (let index = 0; index < 9; index += 1) {
+    tracker.observeTrade({
+      mint: 'first-occurrence-extreme',
+      side: 'BUY',
+      market: 'PUMP_BONDING_CURVE',
+      wallet: `extreme-wallet-${index}`,
+      solAmount: index < 4 ? largeSol[index] : 0.1,
+      tokenAmount: index < 4 ? 600_000_000 : 1_000_000,
+      timestampMs: base + (index < 4 ? index * 90 : 400 + index * 100),
+      price: 0.00000003 * (1 + index * 0.1),
+      virtualTokenReservesRaw: '1000000000000000',
+      virtualSolReservesRaw: '30000000000',
+      realTokenReservesRaw: '600000000000000',
+      realSolReservesRaw: '10000000000',
+      curvePct: 95,
+    });
+  }
+  const risk = tracker.snapshot('first-occurrence-extreme', base + 1_300);
+  assert.equal(risk.sampleReady, false);
+  assert.equal(risk.templateLargeBuyCount, 4);
+  assert.ok(risk.dumpability.top3ObservedSharePct >= 70);
+  assert.ok(risk.dumpability.top3RecoveryPct <= 20);
+  assert.equal(risk.signatures.extremeCoordinatedDumpability, true);
+  assert.equal(risk.flagged, true);
+  const decision = tracker.evaluateGuard({
+    strategyId: 'CURVE-LIVE',
+    mint: 'first-occurrence-extreme',
+    timestampMs: base + 1_300,
+    source: 'LIVE',
+    market: 'PUMP_BONDING_CURVE',
+    enforcementMode: 'HARD_BLOCK',
+    hardBlockSignatures: ['extremeCoordinatedDumpability'],
+  });
+  assert.equal(decision.blocked, true);
+  assert.equal(decision.reason, 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY');
+  assert.equal(tracker.health().guardExtremeDumpabilityRejected, 1);
 }
 
 {
@@ -459,9 +510,16 @@ const config = {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-rug-memory-'));
   const memoryPath = path.join(temporaryDirectory, 'toxic-memory.json');
   const base = Date.UTC(2026, 7, 23, 5, 0, 0);
+  const toxicHistory = [];
   try {
     const first = new PreEntryRugRiskTracker({
       config: { ...config, toxicMemoryPath: memoryPath, toxicPersistIntervalMs: 60_000 },
+      store: {
+        recordPreEntryRugToxicHistory(rows) {
+          toxicHistory.push(...rows);
+          return rows.length;
+        },
+      },
       now: () => base + 2_000,
     });
     first.start();
@@ -474,6 +532,16 @@ const config = {
       mint: 'persistent-toxic', side: 'SELL', wallet: 'dump-wallet', solAmount: 70,
       timestampMs: base + 1_000, price: 0.2,
     });
+    assert.equal(toxicHistory.length, 5);
+    assert.equal(
+      toxicHistory.find((row) => row.kind === 'WALLET').expiresAt,
+      base + 1_000 + 60 * 86_400_000,
+    );
+    assert.equal(
+      toxicHistory.find((row) => row.kind === 'TEMPLATE').expiresAt,
+      base + 1_000 + 30 * 86_400_000,
+    );
+    assert.equal(first.health().toxicHistoryPersisted, 5);
     first.stop();
     assert.equal(fs.existsSync(memoryPath), true);
 

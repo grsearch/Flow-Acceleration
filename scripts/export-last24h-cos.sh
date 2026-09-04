@@ -16,6 +16,7 @@ RETENTION_DAYS="${FLOW_BACKUP_LOCAL_RETENTION_DAYS:-2}"
 MAX_LOCAL_ARCHIVES="${FLOW_BACKUP_MAX_LOCAL_ARCHIVES:-2}"
 MIN_FREE_GB="${FLOW_BACKUP_MIN_FREE_GB:-20}"
 ORPHAN_MAX_AGE_MINUTES="${FLOW_BACKUP_ORPHAN_MAX_AGE_MINUTES:-360}"
+RAW_SHARD_RETENTION_DAYS="${FLOW_RAW_SHARD_LOCAL_RETENTION_DAYS:-7}"
 THREADS="${FLOW_BACKUP_COS_THREADS:-4}"
 LOG_LINES="${FLOW_BACKUP_LOG_LINES:-20000}"
 EXPORT_TIMEOUT="${FLOW_BACKUP_EXPORT_TIMEOUT:-2h}"
@@ -44,7 +45,7 @@ case "$EXPORT_DIR" in
   *) echo "Refusing unsafe export directory: $EXPORT_DIR" >&2; exit 1 ;;
 esac
 
-for numeric_setting in RETENTION_DAYS MAX_LOCAL_ARCHIVES MIN_FREE_GB ORPHAN_MAX_AGE_MINUTES; do
+for numeric_setting in RETENTION_DAYS MAX_LOCAL_ARCHIVES MIN_FREE_GB ORPHAN_MAX_AGE_MINUTES RAW_SHARD_RETENTION_DAYS; do
   value="${!numeric_setting}"
   [[ "$value" =~ ^[0-9]+$ ]] || {
     echo "$numeric_setting must be a non-negative integer, received: $value" >&2
@@ -273,13 +274,35 @@ ARCHIVE_SHA="$(cut -d' ' -f1 "$SHA_FILE")"
 # an explicit offline-maintenance command, outside the daily export timer.
 RETENTION_RESULT=not_run_online
 
+# A calendar-day shard is split across the 07:00 export boundaries of its own
+# day and the next day. Delete it only when both archives have verified markers;
+# a later successful run must never erase a shard whose earlier export failed.
+RAW_SHARD_DIR="${FLOW_RAW_SHARD_DIR:-$PROJECT_DIR/data/raw-daily}"
+if [[ "$RAW_SHARD_DIR" != /* ]]; then
+  RAW_SHARD_DIR="$PROJECT_DIR/$RAW_SHARD_DIR"
+fi
+if [[ -d "$RAW_SHARD_DIR" ]]; then
+  while IFS= read -r -d '' shard; do
+    shard_name="$(basename "$shard")"
+    shard_day="${shard_name#raw-trades-}"
+    shard_day="${shard_day%-CST.db}"
+    [[ "$shard_day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+    next_day="$(date -d "$shard_day + 1 day" +%F)"
+    [[ -f "$EXPORT_DIR/.daily-export-$shard_day.done" ]] || continue
+    [[ -f "$EXPORT_DIR/.daily-export-$next_day.done" ]] || continue
+    rm -f -- "$shard" "$shard-wal" "$shard-shm"
+  done < <(find "$RAW_SHARD_DIR" -maxdepth 1 -type f \
+    -name 'raw-trades-*-CST.db' -mtime "+$RAW_SHARD_RETENTION_DAYS" -print0)
+fi
+
 find "$EXPORT_DIR" -maxdepth 1 -type f \
   \( -name 'flow-acceleration-last24h-*.tar.gz' \
   -o -name 'flow-acceleration-last24h-*.tar.gz.sha256' \
   -o -name 'flow-acceleration-last24h-*.tar.gz.uploaded' \) \
   -mtime "+$RETENTION_DAYS" -delete
+DONE_MARKER_RETENTION_DAYS=$((RAW_SHARD_RETENTION_DAYS + 2))
 find "$EXPORT_DIR" -maxdepth 1 -type f -name '.daily-export-*.done' \
-  -mtime "+$RETENTION_DAYS" -delete
+  -mtime "+$DONE_MARKER_RETENTION_DAYS" -delete
 
 # A successful retry supersedes any earlier same-day archive. Remove those
 # local duplicates only after the current object has been verified in COS.

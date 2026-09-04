@@ -127,6 +127,58 @@ function rawSol(value) {
   }
 }
 
+function rugGuardAuditSnapshot(guard) {
+  if (!guard || typeof guard !== 'object') return null;
+  const dumpability = guard.dumpability || null;
+  return {
+    observedAt: guard.observedAt || null,
+    enforcementMode: guard.enforcementMode || null,
+    policyReason: guard.policyReason || null,
+    reason: guard.reason || null,
+    blocked: Boolean(guard.blocked),
+    riskFlagged: Boolean(guard.riskFlagged),
+    sampleReady: Boolean(guard.sampleReady),
+    sampleSize: Number(guard.sampleSize) || 0,
+    lifecycleStage: guard.lifecycleStage || null,
+    lifecycleAgeMs: Number.isFinite(Number(guard.lifecycleAgeMs))
+      ? Number(guard.lifecycleAgeMs) : null,
+    hardBlockSignatures: guard.hardBlockSignatures || null,
+    matchedHardBlockSignatures: guard.matchedHardBlockSignatures || [],
+    flaggedReasons: guard.flaggedReasons || [],
+    signatures: guard.signatures || {},
+    crossMintToxic: Boolean(guard.crossMintToxic),
+    toxicWalletOverlap: Number(guard.toxicWalletOverlap) || 0,
+    toxicTemplateMatch: guard.toxicTemplateMatch || null,
+    extremeCoordinatedDumpability: Boolean(guard.extremeCoordinatedDumpability),
+    templateFingerprint: guard.templateFingerprint || null,
+    templateLargeBuyCount: Number(guard.templateLargeBuyCount) || 0,
+    templateBuySol: Number.isFinite(Number(guard.templateBuySol))
+      ? Number(guard.templateBuySol) : null,
+    templateBurstSpanMs: Number.isFinite(Number(guard.templateBurstSpanMs))
+      ? Number(guard.templateBurstSpanMs) : null,
+    uniqueBuyers: Number(guard.uniqueBuyers) || 0,
+    returnPct: Number.isFinite(Number(guard.returnPct)) ? Number(guard.returnPct) : null,
+    maxBuyImpactPct: Number.isFinite(Number(guard.maxBuyImpactPct))
+      ? Number(guard.maxBuyImpactPct) : null,
+    dumpability: dumpability ? {
+      observedWallets: Number(dumpability.observedWallets) || 0,
+      top1ObservedSharePct: Number.isFinite(Number(dumpability.top1ObservedSharePct))
+        ? Number(dumpability.top1ObservedSharePct) : null,
+      top3ObservedSharePct: Number.isFinite(Number(dumpability.top3ObservedSharePct))
+        ? Number(dumpability.top3ObservedSharePct) : null,
+      top1ReservePct: Number.isFinite(Number(dumpability.top1ReservePct))
+        ? Number(dumpability.top1ReservePct) : null,
+      top3ReservePct: Number.isFinite(Number(dumpability.top3ReservePct))
+        ? Number(dumpability.top3ReservePct) : null,
+      top1RecoveryPct: Number.isFinite(Number(dumpability.top1RecoveryPct))
+        ? Number(dumpability.top1RecoveryPct) : null,
+      top3RecoveryPct: Number.isFinite(Number(dumpability.top3RecoveryPct))
+        ? Number(dumpability.top3RecoveryPct) : null,
+      warnings: dumpability.warnings || [],
+    } : null,
+  };
+}
+
 function emptyStrategyRuntimeMetrics() {
   return {
     receivedSignals: 0,
@@ -519,9 +571,12 @@ class LiveTradingManager {
       minWalletReserveSol: this.config.minWalletReserveSol,
       buySlippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
       sellSlippagePct: this.config.sellSlippagePct ?? this.config.slippagePct,
+      emergencySellSlippagePct: this.config.emergencySellSlippagePct,
       computeUnitLimit: this.config.computeUnitLimit,
       priorityFeeSol: this.config.priorityFeeSol,
       priorityFeeMicroLamports: this.config.priorityFeeMicroLamports,
+      emergencyPriorityFeeSol: this.config.emergencyPriorityFeeSol,
+      emergencyPriorityFeeMicroLamports: this.config.emergencyPriorityFeeMicroLamports,
       trackedMints: this.tracked.size,
       activePositions: this.positions.size,
       activeMintEntryLocks,
@@ -1114,10 +1169,23 @@ class LiveTradingManager {
           ?? event.features?.ageMs,
       ),
     });
+    const rugGuardAudit = rugGuardAuditSnapshot(rugGuard);
+    if (typeof this.store.updateLiveStrategyDecisionAudit === 'function') {
+      this.store.updateLiveStrategyDecisionAudit(decision.id, {
+        features: {
+          ...(event.features || {}),
+          maxEntryPriceJumpPct: strategy.maxEntryPriceJumpPct,
+          maxEntrySelfImpactPct: strategy.maxEntrySelfImpactPct
+            ?? this.config.maxEntrySelfImpactPct,
+          preEntryRugRisk: rugGuardAudit,
+        },
+        rejectionReasons: rugGuard.blocked ? [rugGuard.reason] : [],
+      });
+    }
     if (rugGuard.blocked) {
       this.metrics.riskRejected += 1;
-      this._noteStrategyOutcome(strategy.id, 'riskRejected', 'PRE_ENTRY_RUG_RISK');
-      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', 'PRE_ENTRY_RUG_RISK');
+      this._noteStrategyOutcome(strategy.id, 'riskRejected', rugGuard.reason);
+      this.store.updateLiveStrategyDecision(decision.id, 'RISK_REJECTED', rugGuard.reason);
       return;
     }
     const riskReason = this._riskReason(event);
@@ -2093,6 +2161,7 @@ class LiveTradingManager {
 
   async _exit(position, reason, observedPrice) {
     const attempts = this.config.exitRetryCount + 1;
+    const emergency = /HARD_STOP|RUG/i.test(String(reason || ''));
     let lastError = null;
     for (let attempt = 1; attempt <= attempts && !this.stopping; attempt += 1) {
       const submittedAt = this.now();
@@ -2108,6 +2177,7 @@ class LiveTradingManager {
           : await this.executor.sell({
             mint: position.mint,
             tokenAmountRaw: position.tokenAmountRaw,
+            ...(emergency ? { emergency: true } : {}),
           });
         if (result.alreadyEmpty
           && ['ENTRY_CONFIRMATION_UNKNOWN', 'RESTART_RECOVERY'].includes(reason)) {
@@ -2151,7 +2221,10 @@ class LiveTradingManager {
           signature: result.signature,
           walletSolDelta: settlement?.walletSolDelta,
           networkFeeSol: settlement?.networkFeeSol,
-          execution: settlement ? { settlement } : null,
+          execution: {
+            ...(result.execution || {}),
+            settlement,
+          },
           error: incompleteReason,
           submittedAt,
           confirmedAt: closedAt,
@@ -2221,7 +2294,16 @@ class LiveTradingManager {
           error: errorText(error),
           walletSolDelta: settlement?.walletSolDelta,
           networkFeeSol: settlement?.networkFeeSol,
-          execution: error.execution || null,
+          execution: {
+            ...(error.execution || {}),
+            emergencyExit: emergency,
+            sellSlippagePct: emergency
+              ? this.config.emergencySellSlippagePct
+              : this.config.sellSlippagePct,
+            priorityFeeMicroLamports: emergency
+              ? this.config.emergencyPriorityFeeMicroLamports
+              : this.config.priorityFeeMicroLamports,
+          },
           submittedAt,
         });
         if (position.mode === 'LIVE' && !settlement && error.signature) {

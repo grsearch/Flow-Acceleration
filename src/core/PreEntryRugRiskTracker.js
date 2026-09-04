@@ -116,9 +116,12 @@ class PreEntryRugRiskTracker {
       toxicMemorySaved: 0,
       toxicMemoryLoadErrors: 0,
       toxicMemorySaveErrors: 0,
+      toxicHistoryPersisted: 0,
+      toxicHistoryErrors: 0,
       toxicFuzzyMatches: 0,
       flaggedCrossMintWallets: 0,
       flaggedCrossMintTemplates: 0,
+      flaggedExtremeDumpability: 0,
       cliffCandidates: 0,
       cliffConfirmed: 0,
       cliffPairedArtifactsIgnored: 0,
@@ -147,6 +150,7 @@ class PreEntryRugRiskTracker {
       guardLabelOnly: 0,
       guardSampleInsufficient: 0,
       guardCrossMintRejected: 0,
+      guardExtremeDumpabilityRejected: 0,
       liveCacheHits: 0,
       liveCacheMisses: 0,
       lastActionAt: null,
@@ -346,6 +350,19 @@ class PreEntryRugRiskTracker {
     const crossMintToxicWallets = toxicWalletOverlap
       >= this._cfg('toxicWalletOverlapMin', 2);
     const crossMintToxicTemplate = Boolean(toxicTemplateMatch);
+    const extremeCoordinatedDumpability = Boolean(
+      this._cfg('extremeDumpabilityEnabled', true) !== false
+      && template
+      && template.largeBuyCount >= this._cfg('templateMinLargeBuys', 4)
+      && template.totalBuySol >= this._cfg('templateMinTotalBuySol', 40)
+      && template.burstSpanMs <= this._cfg('templateMaxBurstSpanMs', 500)
+      && finite(dumpability?.observedWallets, 0)
+        >= this._cfg('extremeDumpabilityMinObservedWallets', 4)
+      && finite(dumpability?.top3ObservedSharePct, -1)
+        >= this._cfg('extremeDumpabilityTop3ObservedSharePct', 70)
+      && finite(dumpability?.top3RecoveryPct, 101)
+        <= this._cfg('extremeDumpabilityTop3RecoveryMaxPct', 20)
+    );
     const checks = {
       buyShare: buySharePct >= this.config.minBuySharePct,
       consecutiveBuys: maxConsecutiveBuys >= this.config.minConsecutiveBuys,
@@ -377,14 +394,16 @@ class PreEntryRugRiskTracker {
         && repeatedBuySizeSharePct >= this.config.chaseRepeatedMinSizeSharePct,
       crossMintToxicWallets,
       crossMintToxicTemplate,
+      extremeCoordinatedDumpability,
     };
     const flaggedReasons = Object.entries(signatures)
       .filter(([, matched]) => matched)
       .map(([name]) => name);
     const nativeFlagged = sampleReady && Object.entries(signatures)
-      .some(([name, matched]) => !name.startsWith('crossMint') && matched);
+      .some(([name, matched]) => !name.startsWith('crossMint')
+        && name !== 'extremeCoordinatedDumpability' && matched);
     const crossMintToxic = crossMintToxicWallets || crossMintToxicTemplate;
-    const flagged = nativeFlagged || crossMintToxic;
+    const flagged = nativeFlagged || crossMintToxic || extremeCoordinatedDumpability;
     this.metrics.evaluations += 1;
     if (sampleReady) this.metrics.sampleReady += 1;
     if (flagged) {
@@ -413,6 +432,7 @@ class PreEntryRugRiskTracker {
       maxBuyImpactPct,
       lastPrice: rows[rows.length - 1]?.price || null,
       crossMintToxic,
+      extremeCoordinatedDumpability,
       toxicWalletOverlap,
       toxicTemplateMatch: toxicTemplateMatch?.fingerprint || null,
       templateFingerprint: template?.fingerprint || null,
@@ -445,6 +465,7 @@ class PreEntryRugRiskTracker {
     enforcementMode = 'HARD_BLOCK',
     policyReason = 'TRACKER_DEFAULT_HARD_BLOCK',
     requireHc2 = false,
+    hardBlockSignatures = null,
   }) {
     const normalizedStrategyId = String(strategyId || 'UNKNOWN');
     const normalizedSource = String(source || 'SHADOW').toUpperCase();
@@ -466,8 +487,15 @@ class PreEntryRugRiskTracker {
     } else risk = this.snapshot(mint, timestampMs);
     const riskFlagged = Boolean(this.config.enabled && risk.flagged);
     const hc2Matched = Boolean(risk.firstCliffCounterfactual?.hc2Matched);
+    const selectiveHardBlock = Array.isArray(hardBlockSignatures);
+    const matchedHardBlockSignatures = selectiveHardBlock
+      ? hardBlockSignatures.filter((name) => Boolean(risk.signatures?.[name]))
+      : [];
+    const hardBlockSignatureMatched = !selectiveHardBlock
+      || matchedHardBlockSignatures.length > 0;
     const blocked = Boolean(riskFlagged
       && enforcementMode === 'HARD_BLOCK'
+      && hardBlockSignatureMatched
       && (!requireHc2 || hc2Matched));
     const stats = this.guardStrategies.get(normalizedStrategyId) || {
       strategyId: normalizedStrategyId,
@@ -495,6 +523,7 @@ class PreEntryRugRiskTracker {
     stats.lifecycleStage = lifecycleStage;
     stats.lifecycleAgeMs = lifecycleAgeMs;
     stats.requireHc2 = Boolean(requireHc2);
+    stats.hardBlockSignatures = selectiveHardBlock ? [...hardBlockSignatures] : null;
     stats.evaluated += 1;
     stats.lastEvaluatedAt = timestampMs;
     if (risk.sampleReady) stats.sampleReady += 1;
@@ -521,6 +550,18 @@ class PreEntryRugRiskTracker {
     if (!risk.sampleReady) this.metrics.guardSampleInsufficient += 1;
     if (blocked) this.metrics.guardRejected += 1;
     if (blocked && risk.crossMintToxic) this.metrics.guardCrossMintRejected += 1;
+    if (blocked && risk.extremeCoordinatedDumpability) {
+      this.metrics.guardExtremeDumpabilityRejected += 1;
+    }
+
+    let decisionReason;
+    if (blocked && risk.crossMintToxic) decisionReason = 'PRE_ENTRY_RUG_CROSS_MINT_TOXIC';
+    else if (blocked && risk.extremeCoordinatedDumpability) {
+      decisionReason = 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY';
+    } else if (blocked) decisionReason = 'PRE_ENTRY_RUG_RISK';
+    else if (riskFlagged) decisionReason = selectiveHardBlock
+      ? 'RUG_RISK_NOT_IN_HARD_BLOCK_SIGNATURES' : 'RUG_RISK_LABEL_ONLY';
+    else decisionReason = risk.sampleReady ? 'RUG_GUARD_PASS' : 'RUG_GUARD_SAMPLE_INSUFFICIENT';
 
     const decision = {
       strategyId: normalizedStrategyId,
@@ -533,14 +574,12 @@ class PreEntryRugRiskTracker {
       lifecycleStage,
       lifecycleAgeMs,
       requireHc2: Boolean(requireHc2),
+      hardBlockSignatures: selectiveHardBlock ? [...hardBlockSignatures] : null,
+      matchedHardBlockSignatures,
       hc2Matched,
       riskFlagged,
       blocked,
-      reason: blocked ? 'PRE_ENTRY_RUG_RISK' : (
-        riskFlagged ? 'RUG_RISK_LABEL_ONLY' : (
-          risk.sampleReady ? 'RUG_GUARD_PASS' : 'RUG_GUARD_SAMPLE_INSUFFICIENT'
-        )
-      ),
+      reason: decisionReason,
       ...risk,
     };
     if (riskFlagged) {
@@ -598,9 +637,9 @@ class PreEntryRugRiskTracker {
       enabled: this.config.enabled,
       mode: 'UNIVERSAL_PRE_ENTRY_RUG_GUARD',
       scope: 'LIFECYCLE_AND_STRATEGY_TIERED',
-      enforcement: 'EXISTING_GUARDS_PLUS_LIFECYCLE_CANDIDATES_FORWARD_LABEL_ONLY',
+      enforcement: 'LIVE_CURVE_CATASTROPHE_SELECTIVE_HARD_BLOCK',
       outcomeLabels: 'CLIFF_DROP_50/CLIFF_RUG_70/CLIFF_RUG_80/SLOW_RUG_30',
-      dumpabilityMode: 'RESEARCH_ONLY_NO_ENTRY_BLOCK',
+      dumpabilityMode: 'RESEARCH_WARNINGS_PLUS_EXTREME_LIVE_CURVE_HARD_BLOCK',
       firstCliffCounterfactualMode: 'PAIRED_SHADOW_NO_ENTRY_BLOCK',
       firstCliffLifecycleMode: 'STAGE_SPECIFIC_PAIRED_SHADOW_NO_ENTRY_BLOCK',
       livePath: 'MEMORY_ONLY_BOUNDED_CACHE_REFRESH',
@@ -640,6 +679,13 @@ class PreEntryRugRiskTracker {
         dumpabilityPositionSol: this._cfg('dumpabilityPositionSol', 1),
         dumpTop1ReserveWarnPct: this._cfg('dumpTop1ReserveWarnPct', 25),
         dumpTop3ReserveWarnPct: this._cfg('dumpTop3ReserveWarnPct', 50),
+        extremeDumpabilityEnabled: this._cfg('extremeDumpabilityEnabled', true),
+        extremeDumpabilityMinObservedWallets:
+          this._cfg('extremeDumpabilityMinObservedWallets', 4),
+        extremeDumpabilityTop3ObservedSharePct:
+          this._cfg('extremeDumpabilityTop3ObservedSharePct', 70),
+        extremeDumpabilityTop3RecoveryMaxPct:
+          this._cfg('extremeDumpabilityTop3RecoveryMaxPct', 20),
         firstCliffCounterfactualEnabled: this._cfg('firstCliffCounterfactualEnabled', true),
         firstCliffHorizonMs: this._cfg('firstCliffHorizonMs', 30_000),
         firstCliffEffectiveBuyersMax: this._cfg('firstCliffEffectiveBuyersMax', 3),
@@ -676,6 +722,12 @@ class PreEntryRugRiskTracker {
         toxicCollapsePct: this._cfg('toxicCollapsePct', 60),
         toxicCollapseWindowMs: this._cfg('toxicCollapseWindowMs', 30_000),
         toxicRetentionMs: this._cfg('toxicRetentionMs', 86_400_000),
+        toxicWalletRetentionMs: this._cfg(
+          'toxicWalletRetentionMs', this._cfg('toxicRetentionMs', 60 * 86_400_000),
+        ),
+        toxicTemplateRetentionMs: this._cfg(
+          'toxicTemplateRetentionMs', this._cfg('toxicRetentionMs', 30 * 86_400_000),
+        ),
         toxicAmountTolerancePct: this._cfg('toxicAmountTolerancePct', 2),
         toxicBurstToleranceMs: this._cfg('toxicBurstToleranceMs', 100),
         toxicWalletOverlapMin: this._cfg('toxicWalletOverlapMin', 2),
@@ -717,6 +769,7 @@ class PreEntryRugRiskTracker {
       maxBuyImpactPct: null,
       lastPrice: null,
       crossMintToxic: false,
+      extremeCoordinatedDumpability: false,
       toxicWalletOverlap: 0,
       toxicTemplateMatch: null,
       templateFingerprint: null,
@@ -751,6 +804,9 @@ class PreEntryRugRiskTracker {
     if (risk.signatures?.chaseRepeatedSize) this.metrics.flaggedChaseRepeatedSize += 1;
     if (risk.signatures?.crossMintToxicWallets) this.metrics.flaggedCrossMintWallets += 1;
     if (risk.signatures?.crossMintToxicTemplate) this.metrics.flaggedCrossMintTemplates += 1;
+    if (risk.signatures?.extremeCoordinatedDumpability) {
+      this.metrics.flaggedExtremeDumpability += 1;
+    }
     if (risk.beijingRiskWindow && risk.score >= this.config.beijingRiskMinFlags
       && risk.score < this.config.minFlags) this.metrics.flaggedBeijingRiskWindow += 1;
   }
@@ -1550,26 +1606,35 @@ class PreEntryRugRiskTracker {
     const collapsePct = (1 - price / state.templatePeakPrice) * 100;
     if (collapsePct < this._cfg('toxicCollapsePct', 60)) return;
     state.templateToxicLabeled = true;
-    const expiresAt = timestampMs + this._cfg('toxicRetentionMs', 86_400_000);
+    const fallbackRetentionMs = this._cfg('toxicRetentionMs', 60 * 86_400_000);
+    const templateExpiresAt = timestampMs + this._cfg(
+      'toxicTemplateRetentionMs', fallbackRetentionMs,
+    );
+    const walletExpiresAt = timestampMs + this._cfg(
+      'toxicWalletRetentionMs', fallbackRetentionMs,
+    );
     const record = {
       mint,
       fingerprint: template.fingerprint,
       labeledAt: timestampMs,
-      expiresAt,
       collapsePct,
       totalBuySol: template.totalBuySol,
       largeBuyCount: template.largeBuyCount,
       burstSpanMs: template.burstSpanMs,
       amounts: [...template.amounts],
     };
-    this.toxicTemplates.set(template.fingerprint, record);
-    this._indexToxicTemplate(record);
+    const templateRecord = { ...record, expiresAt: templateExpiresAt };
+    this.toxicTemplates.set(template.fingerprint, templateRecord);
+    this._indexToxicTemplate(templateRecord);
     this._boundToxicTemplates(this._cfg('maxToxicTemplates', 1_024));
     let learnedWallets = 0;
+    const historyRows = [{ kind: 'TEMPLATE', subject: template.fingerprint, ...templateRecord }];
     for (const wallet of template.wallets) {
       if (!wallet) continue;
       if (!this.toxicWallets.has(wallet)) learnedWallets += 1;
-      this.toxicWallets.set(wallet, { ...record, wallet });
+      const walletRecord = { ...record, wallet, expiresAt: walletExpiresAt };
+      this.toxicWallets.set(wallet, walletRecord);
+      historyRows.push({ kind: 'WALLET', subject: wallet, ...walletRecord });
     }
     this._boundMap(this.toxicWallets, this._cfg('maxToxicWallets', 4_096));
     this.metrics.toxicCollapsesLabeled += 1;
@@ -1577,6 +1642,16 @@ class PreEntryRugRiskTracker {
     this.metrics.toxicWalletsLearned += learnedWallets;
     this.toxicVersion += 1;
     this.toxicMemoryDirty = true;
+    if (typeof this.store?.recordPreEntryRugToxicHistory === 'function') {
+      try {
+        this.metrics.toxicHistoryPersisted += Number(
+          this.store.recordPreEntryRugToxicHistory(historyRows),
+        ) || 0;
+      } catch (error) {
+        this.metrics.toxicHistoryErrors += 1;
+        this.metrics.lastError = `toxic history: ${error.message}`;
+      }
+    }
   }
 
   _toxicWalletOverlap(wallets, timestampMs) {
@@ -1689,9 +1764,15 @@ class PreEntryRugRiskTracker {
 
   _memorySnapshot(now = this.now()) {
     return {
-      version: 1,
+      version: 2,
       savedAt: now,
       retentionMs: this._cfg('toxicRetentionMs', 86_400_000),
+      walletRetentionMs: this._cfg(
+        'toxicWalletRetentionMs', this._cfg('toxicRetentionMs', 60 * 86_400_000),
+      ),
+      templateRetentionMs: this._cfg(
+        'toxicTemplateRetentionMs', this._cfg('toxicRetentionMs', 30 * 86_400_000),
+      ),
       templates: [...this.toxicTemplates.values()].filter((row) => row.expiresAt > now),
       wallets: [...this.toxicWallets.values()].filter((row) => row.expiresAt > now),
     };

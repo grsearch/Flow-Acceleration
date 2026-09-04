@@ -983,3 +983,79 @@ function testLiveMigrationFailureHandoffWaitsForOrganicPumpSwapFlow() {
 }
 
 testLiveMigrationFailureHandoffWaitsForOrganicPumpSwapFlow();
+
+function testP500RugPairSharesSignalAndOnlyFiltersRugx() {
+  const store = makeStore();
+  store.preEntryRugRisk = {
+    config: { enabled: true },
+    evaluateGuard: (options) => {
+      const blocked = Array.isArray(options.hardBlockSignatures);
+      return {
+        ...options,
+        flagged: blocked,
+        blocked,
+        reason: blocked ? 'PRE_ENTRY_RUG_CROSS_MINT_TOXIC' : 'RUG_RISK_LABEL_ONLY',
+      };
+    },
+  };
+  const now = 10_000_000;
+  const settings = config();
+  settings.capacitySols = [1];
+  const shared = {
+    mode: 'CURVE_MILESTONE_PERSISTENCE', thresholdPct: 80,
+    recentWindowMs: 5_000, minCurveDeltaPct: 5, minBuyers: 2,
+    maxSellTx: 0, requireNoCreatorSell: true, persistenceMs: 500,
+    maxPersistenceSellTx: 0, maxPersistencePullbackPct: 5,
+    coreExitPct: 0, capacityAwareExit: true,
+    runnerExitMode: 'TIERED_TRAILING', runnerMaxHoldMs: 240_000,
+  };
+  settings.entryProfiles = [
+    { id: 'O_C80_P500_STAIR240', label: 'baseline', ...shared },
+    {
+      id: 'O_C80_P500_STAIR240_RUGX', label: 'filtered', ...shared,
+      pairedBaselineProfileId: 'O_C80_P500_STAIR240',
+      rugGuardMode: 'LIVE_CURVE_CATASTROPHE',
+    },
+  ];
+  const suite = new GraduationAccelerationShadowSuite({
+    config: settings, store, now: () => now,
+  });
+  suite.start();
+  const mint = 'curve80-p500-rug-pair';
+  suite.onCreate({ mint, symbol: 'RUGX', creator: 'rugx-creator', createdAt: now });
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 100, curvePct: 20, wallet: 'rugx-buyer-0',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 1_000, curvePct: 80, wallet: 'rugx-buyer-1',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 1_500, curvePct: 82, wallet: 'rugx-buyer-2',
+  }));
+  suite.observeTrade(trade({
+    mint, timestampMs: now + 1_700, curvePct: 83, wallet: 'rugx-fill',
+  }));
+  const rows = store.db.prepare(`
+    SELECT entry_profile_id, signal_at, status, rejection_reason
+    FROM graduation_acceleration_shadow_positions
+    WHERE mint=? ORDER BY entry_profile_id
+  `).all(mint);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].signal_at, rows[1].signal_at, 'both arms must share the exact signal');
+  assert.deepEqual(rows.map((row) => row.status), [STATUS.OPEN, STATUS.NO_ENTRY]);
+  assert.equal(rows[1].rejection_reason, 'PRE_ENTRY_RUG_CROSS_MINT_TOXIC');
+  store.db.prepare(`
+    UPDATE graduation_acceleration_shadow_positions
+    SET status='CLOSED', net_return_pct=-75
+    WHERE mint=? AND entry_profile_id='O_C80_P500_STAIR240'
+  `).run(mint);
+  const comparison = store.graduationAccelerationShadowDashboard().rugComparisons[0];
+  assert.equal(comparison.pairedSignals, 1);
+  assert.equal(comparison.blocked, 1);
+  assert.equal(comparison.avoidedRug50, 1);
+  assert.equal(comparison.avoidedRug80, 0);
+  assert.equal(comparison.averageNetReturnLiftPct, 75);
+  store.close();
+}
+
+testP500RugPairSharesSignalAndOnlyFiltersRugx();

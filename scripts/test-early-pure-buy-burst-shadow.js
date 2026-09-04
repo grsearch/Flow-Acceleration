@@ -84,15 +84,21 @@ function config() {
   };
 }
 
-function setup(base) {
+function setup(base, settings = config(), guardEvaluator = null) {
   let now = base;
   let sequence = 0;
   const store = new ResearchStore({
     dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
     flushMs: 60_000, flushMax: 1_000,
   }, { configuredTradingCostPct: 0 });
+  if (guardEvaluator) {
+    store.preEntryRugRisk = {
+      config: { enabled: true },
+      evaluateGuard: guardEvaluator,
+    };
+  }
   const suite = new EarlyPureBuyBurstShadowSuite({
-    config: config(), store, now: () => now,
+    config: settings, store, now: () => now,
   });
   suite.start();
   const send = ({ mint, offset, side = 'BUY', sol = 0.1, wallet, price = 0.0000001,
@@ -314,10 +320,66 @@ function testCausalSmartWalletConsensusOverlay() {
   store.close();
 }
 
+function testHighFrequencyRugPairSharesSignalAndOnlyFiltersRugx() {
+  const base = 1_853_000_000_000;
+  const settings = config();
+  settings.entryProfiles.push({
+    id: 'EB_A_RUGX', label: 'paired catastrophe filter',
+    newEntriesEnabled: true, pairedBaselineProfileId: 'EB_A',
+    rugGuardMode: 'LIVE_CURVE_CATASTROPHE', exitProfileIds: ['FIX20'],
+  });
+  const guardCalls = [];
+  const { store, suite, send } = setup(base, settings, (options) => {
+    guardCalls.push(options);
+    const blocked = Array.isArray(options.hardBlockSignatures);
+    return {
+      ...options,
+      flagged: blocked,
+      blocked,
+      reason: blocked ? 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY' : 'RUG_RISK_LABEL_ONLY',
+    };
+  });
+  const mint = 'EarlyPureBuyRugPair11111111111111111111111';
+  send({ mint, offset: -500, sol: 1.25, wallet: `${mint}-buyer-1` });
+  send({ mint, offset: -250, sol: 1.25, wallet: `${mint}-buyer-2` });
+  const signal = send({ mint, offset: 0, sol: 1.5, wallet: `${mint}-buyer-3` });
+  assert.strictEqual(signal.signals.length, 4,
+    'the high-frequency pair adds one FIX20 row to the three EB-A controls');
+  assert.strictEqual(signal.signals.find((row) => row.entryProfileId === 'EB_A').signalAt,
+    signal.signals.find((row) => row.entryProfileId === 'EB_A_RUGX').signalAt);
+  send({ mint, offset: 250, sol: 0.1, wallet: `${mint}-fill` });
+  const pairRows = store.db.prepare(`
+    SELECT entry_profile_id, exit_profile_id, status, rejection_reason
+    FROM early_pure_buy_burst_shadow_positions
+    WHERE mint=? AND exit_profile_id='FIX20'
+      AND entry_profile_id IN ('EB_A', 'EB_A_RUGX')
+    ORDER BY entry_profile_id
+  `).all(mint);
+  assert.deepStrictEqual(pairRows.map((row) => row.status), ['OPEN', 'NO_ENTRY']);
+  assert.strictEqual(pairRows[1].rejection_reason, 'PRE_ENTRY_RUG_EXTREME_DUMPABILITY');
+  const rugxCall = guardCalls.find((row) => row.strategyId.includes('EB_A_RUGX'));
+  assert.deepStrictEqual(rugxCall.hardBlockSignatures, [
+    'crossMintToxicWallets', 'crossMintToxicTemplate', 'extremeCoordinatedDumpability',
+  ]);
+  store.db.prepare(`
+    UPDATE early_pure_buy_burst_shadow_positions
+    SET status='CLOSED', net_return_pct=-90
+    WHERE mint=? AND entry_profile_id='EB_A' AND exit_profile_id='FIX20'
+  `).run(mint);
+  const comparison = suite.dashboard().rugComparisons[0];
+  assert.strictEqual(comparison.pairedSignals, 1);
+  assert.strictEqual(comparison.blocked, 1);
+  assert.strictEqual(comparison.avoidedRug50, 1);
+  assert.strictEqual(comparison.avoidedRug80, 1);
+  assert.strictEqual(comparison.averageNetReturnLiftPct, 90);
+  store.close();
+}
+
 function main() {
   testEntryPathsAndExecutableExits();
   testIdlePoolUsesPersistedReserveQuote();
   testCausalSmartWalletConsensusOverlay();
+  testHighFrequencyRugPairSharesSignalAndOnlyFiltersRugx();
   console.log('Early pure-buy burst shadow test passed.');
 }
 

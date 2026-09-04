@@ -169,6 +169,13 @@ assert.strictEqual(earlyBurstConsensus.sourceProfileId, 'EB_A');
 assert.strictEqual(earlyBurstConsensus.requiredClusters, 2);
 assert.strictEqual(earlyBurstConsensus.consensusWindowMs, 300_000);
 assert.deepStrictEqual(earlyBurstConsensus.exitProfileIds, ['FIX20', 'FIX30']);
+const earlyBurstRugPair = config.earlyPureBuyBurstShadow.entryProfiles.find(
+  (profile) => profile.id === 'EB_A_RUGX',
+);
+assert(earlyBurstRugPair);
+assert.strictEqual(earlyBurstRugPair.pairedBaselineProfileId, 'EB_A');
+assert.strictEqual(earlyBurstRugPair.rugGuardMode, 'LIVE_CURVE_CATASTROPHE');
+assert.deepStrictEqual(earlyBurstRugPair.exitProfileIds, ['FIX20']);
 const strictEarlyBurstConsensus = config.earlyPureBuyBurstShadow.entryProfiles.find(
   (profile) => profile.id === 'EB_A_SWC_PA3_W300',
 );
@@ -428,6 +435,9 @@ assert.strictEqual(config.liveTrading.strategies
   .find((strategy) => strategy.id === 'post_gd25_35_xleg').entryEnabled, false);
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);
 assert.strictEqual(config.liveTrading.sellSlippagePct, 15);
+assert.strictEqual(config.liveTrading.emergencySellSlippagePct, 100);
+assert.strictEqual(config.liveTrading.emergencyPriorityFeeSol, 0.002);
+assert.strictEqual(config.liveTrading.emergencyPriorityFeeMicroLamports, 8_000_000);
 assert.strictEqual(config.liveTrading.emergencyExitRetryDelayMs, 100);
 assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
 assert.strictEqual(config.liveTrading.expiredEntryReleaseMs, 10 * 60_000);
@@ -453,6 +463,23 @@ assert.strictEqual(config.preEntryRugRisk.templateMinTotalBuySol, 40);
 assert.strictEqual(config.preEntryRugRisk.templateMaxBurstSpanMs, 500);
 assert.strictEqual(config.preEntryRugRisk.toxicCollapsePct, 60);
 assert.strictEqual(config.preEntryRugRisk.toxicWalletOverlapMin, 2);
+assert.strictEqual(config.preEntryRugRisk.extremeDumpabilityEnabled, true);
+assert.strictEqual(config.preEntryRugRisk.extremeDumpabilityTop3ObservedSharePct, 70);
+assert.strictEqual(config.preEntryRugRisk.extremeDumpabilityTop3RecoveryMaxPct, 20);
+assert.strictEqual(config.preEntryRugRisk.toxicWalletRetentionMs, 60 * 86_400_000);
+assert.strictEqual(config.preEntryRugRisk.toxicTemplateRetentionMs, 30 * 86_400_000);
+assert.strictEqual(config.liveTrading.strategies.find(
+  (strategy) => strategy.id === 'migrated_ge30_r23_f2_only_g2_xleg_live',
+).hardStopPct, 20);
+assert.strictEqual(config.liveTrading.strategies.find(
+  (strategy) => strategy.id === 'migrated_ge30_r23_f2_only_g2_xleg_live',
+).ruleVersion, 'migrated_ge30_r23_f2_only_g2_xleg_live_v2');
+assert.strictEqual(config.liveTrading.strategies.find(
+  (strategy) => strategy.id === 'migrated_grt_r23_f3_v2_xleg_live',
+).hardStopPct, 20);
+assert.strictEqual(config.liveTrading.strategies.find(
+  (strategy) => strategy.id === 'migrated_grt_r23_f3_v2_xleg_live',
+).ruleVersion, 'migrated_grt_r23_f3_v2_xleg_live_v2');
 assert.strictEqual(config.signalShadow.enabled, false);
 assert.deepStrictEqual(
   config.signalShadow.profiles.map((profile) => [
@@ -773,7 +800,7 @@ assert.deepStrictEqual(
     'G_DUMP_NB_X8', 'X3', 'X8', 'XLEG',
     'GEXEC_XLEG', 'G2_XLEG', 'GRT_F3_XLEG_V2', 'GRT_F2_XLEG_V2',
     'G3EXEC_XLEG', 'G2EXEC_XLEG', 'GTIME_XLEG',
-    'G2_XLEG_H20_FWD', 'GQ_XLEG',
+    'G2_XLEG_H20_FWD', 'GRT_F3_XLEG_H20_FWD', 'GQ_XLEG',
     'G1XQ_X8', 'G1XQ_X30', 'G1XQ_X60',
     'GFR_X8', 'GFR_X15', 'GFR_HS20_H30',
     'G1_E2_H6', 'G1_E2_H8', 'G1_E3_H8',
@@ -1056,6 +1083,7 @@ assert.deepStrictEqual(
     'O_C80_LIVE_MIG_X20', 'O_C80_LIVE_MIG_X30',
     'O_C80_P500_STAIR240', 'O_C80_P1000_X60',
     'O_C80_P1000_X120', 'O_C80_P1000_STAIR240',
+    'O_C80_P500_STAIR240_RUGX',
     'O90_M5_X60', 'O90_M5_X120', 'O90_M5_STAIR120',
     'O90_Q70_D30_X60', 'O90_Q70_D30_STAIR120',
     'O90_DAY0818_STAIR120', 'O_C80_DAY1218_STAIR240',
@@ -1094,6 +1122,12 @@ assert.deepStrictEqual(
     .find((profile) => profile.id === 'GE30_R23_F3_EXEC').positionSols,
   [0.05, 0.1, 0.25, 0.5, 1],
 );
+const p500RugPair = config.graduationAccelerationShadow.entryProfiles
+  .find((profile) => profile.id === 'O_C80_P500_STAIR240_RUGX');
+assert(p500RugPair);
+assert.strictEqual(p500RugPair.pairedBaselineProfileId, 'O_C80_P500_STAIR240');
+assert.strictEqual(p500RugPair.rugGuardMode, 'LIVE_CURVE_CATASTROPHE');
+assert.strictEqual(p500RugPair.liveStrategyId, undefined);
 const persistenceGraduationProfiles = config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.id.startsWith('O_C80_P'));
 assert.ok(persistenceGraduationProfiles.every((profile) => profile.capacityAwareExit === true));

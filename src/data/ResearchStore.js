@@ -5,6 +5,8 @@ const path = require('path');
 const { Worker } = require('worker_threads');
 const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
+const { buildShadowRugPairComparison } = require('../core/ShadowRugPairComparison');
+const { RawTradeShardManager } = require('./RawTradeShardManager');
 
 const MIGRATION_SOURCE = Object.freeze({
   CHAIN_EVENT: 'CHAIN_EVENT',
@@ -115,11 +117,18 @@ class ResearchStore {
     this.db = new Database(storageConfig.dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    this.cacheSizeKb = Math.max(2_000, Number(storageConfig.cacheSizeKb) || 65_536);
+    this.db.pragma(`cache_size = -${this.cacheSizeKb}`);
     this.busyTimeoutMs = Math.max(50, Number(storageConfig.busyTimeoutMs) || 5_000);
     this.db.pragma(`busy_timeout = ${this.busyTimeoutMs}`);
     console.log(`[Startup:DB] connection ready in ${Date.now() - startupStartedAt}ms; initializing schema`);
     const schemaStartedAt = Date.now();
     this._initSchema();
+    this.rawTradeShards = new RawTradeShardManager({
+      db: this.db,
+      dbPath: storageConfig.dbPath,
+      config: storageConfig,
+    });
     console.log(`[Startup:DB] schema ready in ${Date.now() - schemaStartedAt}ms; preparing statements`);
     const prepareStartedAt = Date.now();
     this._prepare();
@@ -193,7 +202,7 @@ class ResearchStore {
       lastWriteError: null,
       lastQueuedTradeAt: null,
       lastPersistedTradeAt: Number(this.db.prepare(`
-        SELECT timestamp_ms FROM raw_trades ORDER BY id DESC LIMIT 1
+        SELECT timestamp_ms FROM raw_trades_all ORDER BY timestamp_ms DESC, id DESC LIMIT 1
       `).get()?.timestamp_ms) || null,
       firstPendingWriteAt: null,
       lastArchiveAt: null,
@@ -305,6 +314,8 @@ class ResearchStore {
           dbPath: path.resolve(this.config.dbPath),
           task,
           args,
+          cacheSizeKb: this.config.cacheSizeKb,
+          rawShardReadDays: this.config.rawShardReadDays,
         },
       });
       const promise = new Promise((resolve, reject) => {
@@ -401,7 +412,11 @@ class ResearchStore {
       lastError: null,
     };
     const worker = new Worker(path.join(__dirname, 'database-health-worker.js'), {
-      workerData: { dbPath: path.resolve(this.config.dbPath) },
+      workerData: {
+        dbPath: path.resolve(this.config.dbPath),
+        cacheSizeKb: this.config.cacheSizeKb,
+        rawShardReadDays: this.config.rawShardReadDays,
+      },
     });
     let settle;
     const promise = new Promise((resolve) => { settle = resolve; });
@@ -767,6 +782,28 @@ class ResearchStore {
         ON pre_entry_rug_first_cliff_audits(resolved_at);
       CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_first_cliff_strategy
         ON pre_entry_rug_first_cliff_audits(strategy_id, resolved_at);
+
+      CREATE TABLE IF NOT EXISTS pre_entry_rug_toxic_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_key TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        fingerprint TEXT,
+        wallet TEXT,
+        labeled_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        collapse_pct REAL,
+        total_buy_sol REAL,
+        large_buy_count INTEGER,
+        burst_span_ms INTEGER,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_toxic_history_labeled
+        ON pre_entry_rug_toxic_history(labeled_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_pre_entry_rug_toxic_history_subject
+        ON pre_entry_rug_toxic_history(kind, subject, labeled_at DESC);
 
       CREATE TABLE IF NOT EXISTS flow_signals (
         signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3000,6 +3037,17 @@ class ResearchStore {
           @markLagMs, @createdAt
         )
       `),
+      insertPreEntryRugToxicHistory: this.db.prepare(`
+        INSERT OR IGNORE INTO pre_entry_rug_toxic_history (
+          event_key, kind, subject, mint, fingerprint, wallet, labeled_at,
+          expires_at, collapse_pct, total_buy_sol, large_buy_count,
+          burst_span_ms, details_json, created_at
+        ) VALUES (
+          @eventKey, @kind, @subject, @mint, @fingerprint, @wallet, @labeledAt,
+          @expiresAt, @collapsePct, @totalBuySol, @largeBuyCount,
+          @burstSpanMs, @detailsJson, @createdAt
+        )
+      `),
       insertSignal: this.db.prepare(`
         INSERT INTO flow_signals (
           timestamp_ms, slot, signature, mint, symbol, age_ms, curve_pct, p0,
@@ -3046,7 +3094,7 @@ class ResearchStore {
       `),
       labelSamples: this.db.prepare(`
         SELECT timestamp_ms, price, market
-        FROM raw_trades
+        FROM raw_trades_all
         WHERE mint = ? AND timestamp_ms >= ? AND timestamp_ms <= ? AND price > 0
         ORDER BY timestamp_ms, id
       `),
@@ -3065,7 +3113,7 @@ class ResearchStore {
           market, mint, wallet, side, sol_amount AS solAmount,
           token_amount AS tokenAmount, price, reserve_price AS reservePrice,
           curve_pct AS curvePct, virtual_sol_reserves_raw AS virtualSolReservesRaw
-        FROM raw_trades
+        FROM raw_trades_all
         WHERE market = 'PUMP_BONDING_CURVE' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
       `),
@@ -3091,7 +3139,7 @@ class ResearchStore {
           market, mint, wallet, side, sol_amount AS solAmount,
           token_amount AS tokenAmount, price, reserve_price AS reservePrice,
           curve_pct AS curvePct
-        FROM raw_trades
+        FROM raw_trades_all
         WHERE market = 'PUMP_AMM' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
       `),
@@ -3201,6 +3249,13 @@ class ResearchStore {
         UPDATE live_strategy_decisions SET
           action_status = @actionStatus,
           action_reason = @actionReason,
+          updated_at = @updatedAt
+        WHERE id = @id
+      `),
+      updateLiveStrategyDecisionAudit: this.db.prepare(`
+        UPDATE live_strategy_decisions SET
+          features_json = @featuresJson,
+          rejection_reasons_json = @rejectionReasonsJson,
           updated_at = @updatedAt
         WHERE id = @id
       `),
@@ -4536,7 +4591,9 @@ class ResearchStore {
 
     this._writeTrades = this.db.transaction((trades) => {
       for (const trade of trades) {
-        const result = this.stmts.insertRawTrade.run(trade);
+        const result = this.rawTradeShards.enabled
+          ? this.rawTradeShards.insert(trade)
+          : this.stmts.insertRawTrade.run(trade);
         if (result.changes > 0) {
           this.stmts.updateTokenTrade.run(trade);
           this.metrics.tradesWritten += 1;
@@ -4589,6 +4646,13 @@ class ResearchStore {
     this._writePreEntryRugFirstCliffAudits = this.db.transaction((rows) => {
       for (const row of rows) this.stmts.insertPreEntryRugFirstCliffAudit.run(row);
     });
+    this._writePreEntryRugToxicHistory = this.db.transaction((rows) => {
+      let inserted = 0;
+      for (const row of rows) {
+        inserted += this.stmts.insertPreEntryRugToxicHistory.run(row).changes;
+      }
+      return inserted;
+    });
   }
 
   recordPreEntryRugFirstCliffAudits(rows = []) {
@@ -4622,6 +4686,30 @@ class ResearchStore {
     }));
     this._writePreEntryRugFirstCliffAudits(normalized);
     return normalized.length;
+  }
+
+  recordPreEntryRugToxicHistory(rows = []) {
+    if (!Array.isArray(rows) || rows.length === 0) return 0;
+    const createdAt = Date.now();
+    const normalized = rows.map((row) => ({
+      eventKey: `${row.mint}|${row.labeledAt}|${row.kind}|${row.subject}`,
+      kind: String(row.kind || 'UNKNOWN'),
+      subject: String(row.subject || ''),
+      mint: String(row.mint || ''),
+      fingerprint: row.fingerprint || null,
+      wallet: row.wallet || null,
+      labeledAt: Number(row.labeledAt),
+      expiresAt: Number(row.expiresAt),
+      collapsePct: finiteOrNull(row.collapsePct),
+      totalBuySol: finiteOrNull(row.totalBuySol),
+      largeBuyCount: Number.isFinite(Number(row.largeBuyCount))
+        ? Number(row.largeBuyCount) : null,
+      burstSpanMs: Number.isFinite(Number(row.burstSpanMs))
+        ? Number(row.burstSpanMs) : null,
+      detailsJson: JSON.stringify({ amounts: row.amounts || [] }),
+      createdAt,
+    }));
+    return this._writePreEntryRugToxicHistory(normalized);
   }
 
   recordCreate(event) {
@@ -4917,6 +5005,7 @@ class ResearchStore {
     const trades = this.rawBuffer.splice(0, batchSize);
     const started = Date.now();
     try {
+      this.rawTradeShards.prepareBatch(trades);
       this._writeTrades(trades);
       this.metrics.lastFlushAt = Date.now();
       this.metrics.lastFlushMs = this.metrics.lastFlushAt - started;
@@ -5344,6 +5433,17 @@ class ResearchStore {
       id,
       actionStatus,
       actionReason,
+      updatedAt: Date.now(),
+    });
+  }
+
+  updateLiveStrategyDecisionAudit(id, { features = {}, rejectionReasons = [] } = {}) {
+    this.stmts.updateLiveStrategyDecisionAudit.run({
+      id,
+      featuresJson: JSON.stringify(features || {}),
+      rejectionReasonsJson: JSON.stringify(
+        Array.isArray(rejectionReasons) ? rejectionReasons : [],
+      ),
       updatedAt: Date.now(),
     });
   }
@@ -8307,7 +8407,28 @@ class ResearchStore {
     const cohorts = cacheStats
       ? this._cachedDashboardStats(`graduation-accel:${threshold}`, 60_000, computeCohorts)
       : computeCohorts();
-    return { cohorts, positions };
+    const rugPairRows = this.db.prepare(`
+      SELECT b.mint, b.signal_at,
+        b.status AS baseline_status, b.net_return_pct AS baseline_return_pct,
+        f.status AS filtered_status, f.net_return_pct AS filtered_return_pct,
+        f.rejection_reason AS filtered_reason
+      FROM graduation_acceleration_shadow_positions f
+      JOIN graduation_acceleration_shadow_positions b
+        ON b.mint = f.mint
+        AND b.signal_at = f.signal_at
+        AND b.position_sol = f.position_sol
+      WHERE b.entry_profile_id = 'O_C80_P500_STAIR240'
+        AND f.entry_profile_id = 'O_C80_P500_STAIR240_RUGX'
+      ORDER BY f.signal_at DESC
+    `).all();
+    const rugComparisons = [buildShadowRugPairComparison({
+      id: 'O_C80_P500_STAIR240_RUGX',
+      label: '低频 O-C80 P500 · STAIR240',
+      baselineProfileId: 'O_C80_P500_STAIR240',
+      filteredProfileId: 'O_C80_P500_STAIR240_RUGX',
+      rows: rugPairRows,
+    })];
+    return { cohorts, positions, rugComparisons };
   }
 
   holderGrowthShadowDashboard({
@@ -9191,7 +9312,7 @@ class ResearchStore {
     const since = localStart.getTime();
     const activeSince = now - 10 * 60_000;
     return {
-      rawTradesToday: this.db.prepare('SELECT COUNT(*) AS n FROM raw_trades WHERE timestamp_ms >= ?').get(since).n,
+      rawTradesToday: this.db.prepare('SELECT COUNT(*) AS n FROM raw_trades_all WHERE timestamp_ms >= ?').get(since).n,
       activeTokens: this.db.prepare('SELECT COUNT(*) AS n FROM flow_tokens WHERE last_trade_at >= ?').get(activeSince).n,
       candidateCount,
       flowSignalsToday: this.db.prepare(`
@@ -9318,7 +9439,7 @@ class ResearchStore {
   }
 
   health() {
-    const rawRows = this.db.prepare('SELECT COUNT(*) AS n FROM raw_trades').get().n;
+    const rawRows = this.db.prepare('SELECT COUNT(*) AS n FROM raw_trades_all').get().n;
     const signalRows = this.db.prepare('SELECT COUNT(*) AS n FROM flow_signals').get().n;
     const primarySignalRows = this.db.prepare(`
       SELECT COUNT(*) AS n FROM flow_signals WHERE is_primary = 1
@@ -9556,6 +9677,10 @@ class ResearchStore {
       migrationSecondLegObservations,
       labels: labelRows,
       dbPath: path.resolve(this.config.dbPath),
+      rawTradeStorage: this.rawTradeShards?.health?.() || {
+        enabled: false,
+        mode: 'LEGACY_MAIN_TABLE',
+      },
     };
   }
 
