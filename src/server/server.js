@@ -5,6 +5,51 @@ const path = require('path');
 const express = require('express');
 const { runBacktest } = require('../core/FlowBacktester');
 const { DashboardReadModel } = require('../data/DashboardReadModel');
+const { installDashboardAssets } = require('./DashboardHttpAssets');
+const { DashboardQueryRunner } = require('./DashboardQueryRunner');
+
+function snapshotMetadata(cached) {
+  return cached ? { status: cached.status || 'READY', generatedAt: cached.generatedAt,
+    durationMs: cached.durationMs, ageMs: cached.ageMs, error: cached.error || null }
+    : { status: 'PREPARING' };
+}
+
+// Limit transport rows, never cohort totals or the underlying cached snapshot.
+function transportRows(value, query, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 3) return value;
+  if (Array.isArray(value)) return value;
+  const limits = { positions: ['positionLimit', 30], orders: ['orderLimit', 30],
+    decisions: ['decisionLimit', 30], observations: ['observationLimit', 40],
+    snapshots: ['snapshotLimit', 60] };
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => {
+    if (limits[key] && Array.isArray(child)) {
+      const [parameter, fallback] = limits[key];
+      return [key, child.slice(0, Math.max(1, Math.min(200, numeric(query[parameter], fallback))))];
+    }
+    return [key, transportRows(child, query, depth + 1)];
+  }));
+}
+
+const SNAPSHOT_ROUTES = {
+  '/api/big-winner-shadow': ['big-winner', 'bigWinnerShadow'],
+  '/api/smart-like-early-shadow': ['smart-like-early', 'smartLikeEarlyShadow'],
+  '/api/smart-resonance-shadow': ['smart-resonance', 'smartResonanceShadow'],
+  '/api/smart-consensus-v2-shadow': ['smart-consensus-v2', 'smartWalletConsensusFlowRunnerShadow'],
+  '/api/smart-wallet-rug-escape-shadow': ['smart-wallet-rug-escape', 'smartWalletRugEscapeShadow'],
+  '/api/smart-first-open-right-tail-shadow': ['smart-first-open-right-tail', 'smartWalletFirstOpenRightTailShadow'],
+  '/api/individual-smart-wallet-shadows': ['individual-smart-wallets', 'individualSmartWalletShadows'],
+  '/api/public-flow-lead-shadow': ['public-flow-lead', 'publicFlowLeadShadow'],
+  '/api/cya-slot-flow-shadow': ['cya-slot-flow', 'cyaSlotFlowShadow'],
+  '/api/public-flow-recovery-shadow': ['public-flow-recovery', 'publicFlowAbsorptionRecoveryShadow'],
+  '/api/creator-affinity-shadow': ['creator-affinity', 'creatorAffinityShadow'],
+  '/api/feature-edge-audit': ['feature-edge-audit', 'featureEdgeAudit'],
+  '/api/post-migration-survivor': ['post-migration-survivor', 'postMigrationSurvivor'],
+  '/api/cya-organic-burst-shadow': ['cya-organic-burst', 'cyaOrganicBurstShadow'],
+  '/api/early-pure-buy-burst-shadow': ['early-pure-buy-burst', 'earlyPureBuyBurstShadow'],
+  '/api/same-slot-dump-backrun-shadow': ['same-slot-dump-backrun', 'sameSlotDumpBackrunShadow'],
+  '/api/launch-pullback-shadow': ['launch-pullback', 'launchPullbackShadow'],
+  '/api/migration-second-leg-observer': ['migration-second-leg', 'migrationSecondLegObserver'],
+};
 
 function numeric(value, fallback) {
   if (value == null || (typeof value === 'string' && value.trim() === '')) return fallback;
@@ -103,7 +148,7 @@ function loadRetentionMaintenance(dbPath) {
 
 class ResearchServer {
   constructor({
-    config, runtimeIdentity = null, store, engine, stream, labeler,
+    config, runtimeIdentity = null, runtimeSnapshotState = null, store, engine, stream, labeler,
     trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     flowSmartConfirmShadow = null,
@@ -141,6 +186,7 @@ class ResearchServer {
   }) {
     this.config = config;
     this.runtimeIdentity = runtimeIdentity;
+    this.runtimeSnapshotState = runtimeSnapshotState;
     this.store = store;
     this.engine = engine;
     this.stream = stream;
@@ -203,7 +249,11 @@ class ResearchServer {
       },
       smartWalletRegistryConfig: this.config.smartWalletRegistry || {},
       smartWalletConsensusOverlayConfig: this.config.smartWalletConsensusOverlay || {},
+      shadowConfigs: Object.fromEntries(Object.entries(this.config)
+        .filter(([key]) => /Shadow|Shadows|Observer|featureEdgeAudit/.test(key))),
     });
+    this.queryRunner = this.config.storage?.dbPath && this.config.storage.dbPath !== ':memory:'
+      ? new DashboardQueryRunner(this.config.storage) : null;
     this.app = express();
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -264,11 +314,7 @@ class ResearchServer {
         snapshots: [],
         stats: {},
       },
-      metadata: cached ? {
-        status: 'READY',
-        generatedAt: cached.generatedAt,
-        durationMs: cached.durationMs,
-      } : { status: 'PREPARING' },
+      metadata: snapshotMetadata(cached),
     };
   }
 
@@ -276,6 +322,33 @@ class ResearchServer {
     const publicDir = path.join(__dirname, 'public');
     this.app.disable('x-powered-by');
     this.app.use(express.json({ limit: '64kb' }));
+    installDashboardAssets(this.app, publicDir);
+    this.app.use('/api', (request, response, next) => {
+      const json = response.json.bind(response);
+      response.json = (value) => {
+        const payload = transportRows(value, request.query);
+        if (this.runtimeSnapshotState && payload && !Array.isArray(payload) && typeof payload === 'object') {
+          payload.runtimeSnapshot = this.runtimeSnapshotState();
+        }
+        return json(payload);
+      };
+      next();
+    });
+    // In file-backed production these routes must never construct strategy
+    // objects or synchronously query the trading database on an HTTP request.
+    this.app.use((request, response, next) => {
+      const descriptor = SNAPSHOT_ROUTES[request.path];
+      if (request.method !== 'GET' || !descriptor || !this.dashboardReadModel.enabled) return next();
+      const [key, component] = descriptor;
+      const cached = this._dashboardSnapshot(`shadow:${key}`, () => ({}));
+      const runtime = this[component]?.health() || { enabled: false, sendsTransactions: false };
+      const value = { ...cached.value, generatedAt: cached.metadata.generatedAt || null,
+        runtime, dashboardSnapshot: cached.metadata };
+      if (Object.hasOwn(value, 'health')) value.health = runtime;
+      if (key === 'smart-consensus-v2') Object.assign(value, runtime);
+      if (key === 'migration-second-leg') value.runtimeShadow = this.migrationSecondLegShadow?.health() || null;
+      response.json(value);
+    });
     this.app.use((request, response, next) => {
       const startedAt = process.hrtime.bigint();
       response.once('finish', () => {
@@ -306,9 +379,7 @@ class ResearchServer {
           smartWalletTradesToday: 0,
         }),
         candidateCount: this.engine.stats().candidateCount,
-        dashboardSnapshot: cached ? {
-          status: 'READY', generatedAt: cached.generatedAt, durationMs: cached.durationMs,
-        } : { status: 'PREPARING' },
+        dashboardSnapshot: snapshotMetadata(cached),
       });
     });
 
@@ -327,6 +398,13 @@ class ResearchServer {
       const enabled = (key) => Boolean(this.config[key]?.enabled);
       response.set('Cache-Control', 'no-store');
       response.json({
+        live: (this.config.liveTrading?.strategies || []).map((row) => ({
+          id: row.id, code: row.code, label: row.label, enabled: row.enabled !== false,
+          entryEnabled: row.entryEnabled !== false, market: row.market,
+          positionSizeSol: row.positionSizeSol, signalSource: row.signalSource,
+        })),
+        runtime: this.runtimeIdentity,
+        configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         shadows: {
           'smart-open': enabled('smartOpenShadow'),
           'flow-smart-confirm': enabled('flowSmartConfirmShadow'),
@@ -367,13 +445,14 @@ class ResearchServer {
       });
     });
 
-    this.app.get('/api/backtest', (request, response) => {
+    this.app.get('/api/backtest', async (request, response, next) => {
+      try {
       const defaultCosts = this.config.labels.costModel || {};
       const signalVariant = request.query.signalVariant || 'primary_3w';
       const defaultMinFlowAccel = ['shadow_netflow_breakout', '*'].includes(signalVariant)
         ? 0
         : this.config.strategy.minAccelerationRatio;
-      const result = runBacktest(this.store.db, {
+      const args = {
         rawTradeTable: 'raw_trades_all',
         holdMs: numeric(request.query.holdMs, 60_000),
         executionDelayMs: numeric(
@@ -461,10 +540,14 @@ class ResearchServer {
         toMs: request.query.toMs,
         dataCutoffMs: request.query.dataCutoffMs,
         splitRatio: numeric(request.query.splitRatio, 0.7),
-        bootstrapSamples: numeric(request.query.bootstrapSamples, 500),
+        bootstrapSamples: Math.min(1000, Math.max(0, numeric(request.query.bootstrapSamples, 500))),
         includeRows: false,
-      });
+      };
+      const result = this.queryRunner
+        ? await this.queryRunner.query('backtest', args)
+        : runBacktest(this.store.db, args);
       response.json(result);
+      } catch (error) { next(error); }
     });
 
     this.app.get('/api/smart-wallets', (_request, response) => {
@@ -483,9 +566,19 @@ class ResearchServer {
           wallets: [],
         }
       ));
+      const runtime = this.smartWalletRegistry?.health() || null;
       response.json({
         generatedAt: Date.now(),
         ...cached.value,
+        runtime,
+        // The read worker intentionally has no RPC credentials. Preserve its
+        // historical counts, but report provider configuration from the owner.
+        ...(runtime && cached.value.health ? { health: { ...cached.value.health,
+          historyRpcConfigured: runtime.historyRpcConfigured ?? null } } : {}),
+        ...(runtime && cached.value.historyBackfillPolicy ? {
+          historyBackfillPolicy: { ...cached.value.historyBackfillPolicy,
+            rpcConfigured: runtime.historyRpcConfigured ?? null },
+        } : {}),
         dashboardSnapshot: cached.metadata,
       });
     });
@@ -531,7 +624,8 @@ class ResearchServer {
       const strategyId = request.query.strategyId
         || runtime.strategies?.[0]?.id
         || null;
-      const strategy = runtime.strategies?.find((row) => row.id === strategyId) || null;
+      const strategy = runtime.strategies?.find((row) => row.id === strategyId)
+        || this.config.liveTrading?.strategies?.find((row) => row.id === strategyId) || null;
       const cached = strategyId
         ? this.dashboardReadModel.read(`live-trading:${strategyId}`)
         : null;
@@ -549,13 +643,12 @@ class ResearchServer {
       response.json({
         generatedAt: Date.now(),
         runtime,
+        configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         monitoredWallets: this.config.smartWallets,
         sourceDiagnostics: this._liveSourceDiagnostics(strategy),
         ...databaseDashboard,
         dashboardSnapshot: this.dashboardReadModel.enabled
-          ? (cached ? {
-            status: 'READY', generatedAt: cached.generatedAt, durationMs: cached.durationMs,
-          } : { status: 'PREPARING' })
+          ? snapshotMetadata(cached)
           : { status: 'DIRECT' },
       });
     });
@@ -669,7 +762,9 @@ class ResearchServer {
 
     this.app.get('/api/migration-second-leg-observer', async (request, response, next) => {
       try {
-        const dashboard = await this.store.dashboardQueryInWorker(
+        const dashboard = await (this.queryRunner
+          ? this.queryRunner.query.bind(this.queryRunner)
+          : this.store.dashboardQueryInWorker.bind(this.store))(
           'migrationSecondLegDashboard',
           {
             observationLimit: numeric(request.query.observationLimit, 40),
@@ -720,7 +815,9 @@ class ResearchServer {
 
     this.app.get('/api/launch-pullback-shadow', async (request, response, next) => {
       try {
-        const result = await this.store.dashboardQueryInWorker(
+        const result = await (this.queryRunner
+          ? this.queryRunner.query.bind(this.queryRunner)
+          : this.store.dashboardQueryInWorker.bind(this.store))(
           'launchPullbackDashboardBundle',
           {
             positionLimit: numeric(request.query.positionLimit, 30),
@@ -1247,15 +1344,18 @@ class ResearchServer {
       const stream = this.stream.health();
       const database = this.store.healthSnapshot();
       const migratedRebound = this.migratedDropReboundShadow?.health() || {};
-      const streaming = stream.regions.some((region) => region.state === 'connected');
+      const streaming = (stream.regions || []).some((region) => region.state === 'connected');
       const databaseReady = databaseOperational(database.writeStatus);
+      const runtimeSnapshot = this.runtimeSnapshotState?.() || { status: 'DIRECT' };
       response.set('Cache-Control', 'no-store');
       response.json({
         // Keep the liveness status tied to the stream so an external watchdog
         // cannot create a restart loop for a database lock. Readiness and the
         // detailed API expose the degraded database state separately.
         status: streaming ? 'streaming' : 'waiting',
-        ready: databaseReady,
+        ready: databaseReady && runtimeSnapshot.status !== 'STALE' && !(runtimeSnapshot.errors?.length),
+        runtimeSnapshot,
+        configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         uptimeMs: now - this.startedAt,
         dataLatencyMs: engine.lastTradeAt ? Math.max(0, now - engine.lastTradeAt) : null,
         databaseWriteStatus: database.writeStatus,
@@ -1303,14 +1403,17 @@ class ResearchServer {
       const engine = this.engine.stats();
       const stream = this.stream.health();
       const database = this.store.healthSnapshot();
-      const streaming = stream.regions.some((region) => region.state === 'connected');
+      const streaming = (stream.regions || []).some((region) => region.state === 'connected');
+      const runtimeSnapshot = this.runtimeSnapshotState?.() || { status: 'DIRECT' };
       response.json({
-        status: streaming
+        status: runtimeSnapshot.status === 'STALE' || runtimeSnapshot.errors?.length ? 'stale' : streaming
           ? (databaseOperational(database.writeStatus) ? 'streaming' : 'degraded')
           : 'waiting',
         uptimeMs: now - this.startedAt,
         dataLatencyMs: engine.lastTradeAt ? Math.max(0, now - engine.lastTradeAt) : null,
         runtime: this.runtimeIdentity,
+        runtimeSnapshot,
+        configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         engine,
         labels: this.labeler.stats(),
         stream,
@@ -1396,6 +1499,7 @@ class ResearchServer {
   }
 
   async stop() {
+    await this.queryRunner?.stop();
     if (!this.httpServer) {
       await this.dashboardReadModel.stop();
       return;

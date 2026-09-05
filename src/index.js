@@ -2,8 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
 const { config, validateConfig, streamTokenFor } = require('./config');
+const { collectRuntimeIntegrity } = require('./runtime/RuntimeIntegrity');
 const { PumpEventParser } = require('./core/PumpEventParser');
 const PumpFlowStream = require('./core/PumpFlowStream');
 const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
@@ -73,19 +73,18 @@ const { PumpTradeExecutor } = require('./core/PumpTradeExecutor');
 const { PreEntryRugRiskTracker } = require('./core/PreEntryRugRiskTracker');
 const { ResearchStore } = require('./data/ResearchStore');
 const ResearchServer = require('./server/server');
+const { DashboardProcessServer } = require('./server/DashboardProcessServer');
 const { launchStartupDashboard } = require('./server/startup-dashboard');
 
 function createRuntime(runtimeConfig = config) {
   const runtimeStartedAt = Date.now();
   const runtimeCwd = fs.realpathSync.native(process.cwd());
-  let gitCommit = null;
-  try {
-    gitCommit = execFileSync('git', ['-C', runtimeCwd, 'rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
-    }).trim() || null;
-  } catch (_) {}
+  // Capture source/configuration evidence once, before constructing services.
+  // Resolve against the loaded source tree, not a potentially unrelated cwd.
+  const configurationIntegrity = collectRuntimeIntegrity({
+    projectDir: path.resolve(__dirname, '..'),
+    runtimeConfig,
+  });
   const runtimeIdentity = {
     pid: process.pid,
     cwd: runtimeCwd,
@@ -93,7 +92,8 @@ function createRuntime(runtimeConfig = config) {
     dbPath: runtimeConfig.storage.dbPath === ':memory:'
       ? ':memory:'
       : path.resolve(runtimeConfig.storage.dbPath),
-    gitCommit,
+    gitCommit: configurationIntegrity.headCommit,
+    configurationIntegrity,
     startedAt: runtimeStartedAt,
   };
   console.log(
@@ -390,7 +390,11 @@ function createRuntime(runtimeConfig = config) {
   });
   store.releaseStartupTradeReplay();
   console.log(`[Startup] all strategy state restored in ${Date.now() - runtimeStartedAt}ms`);
-  const server = new ResearchServer({
+  const DashboardServer = runtimeConfig.storage.dbPath !== ':memory:'
+    && runtimeConfig.dashboardCache?.enabled
+    && runtimeConfig.dashboardCache.processEnabled !== false
+    ? DashboardProcessServer : ResearchServer;
+  const server = new DashboardServer({
     config: runtimeConfig,
     runtimeIdentity,
     store,

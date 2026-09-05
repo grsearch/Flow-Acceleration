@@ -6,7 +6,9 @@ const { Worker } = require('worker_threads');
 const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 const { buildShadowRugPairComparison } = require('../core/ShadowRugPairComparison');
-const { RawTradeShardManager, ensureRawExecutionColumns } = require('./RawTradeShardManager');
+const {
+  RawTradeShardManager, ensureRawExecutionColumns, normalizeRawExecutionContext,
+} = require('./RawTradeShardManager');
 
 const MIGRATION_SOURCE = Object.freeze({
   CHAIN_EVENT: 'CHAIN_EVENT',
@@ -63,6 +65,21 @@ function isSqliteContention(error) {
   return error?.code === 'SQLITE_BUSY'
     || error?.code === 'SQLITE_LOCKED'
     || /database (?:is )?locked/i.test(String(error?.message || ''));
+}
+
+function classifyWriteError(error) {
+  const message = String(error?.message || error);
+  const missingParameter = /Missing named parameter ["']([A-Za-z_][A-Za-z0-9_]*)["']/.exec(message)?.[1] || null;
+  if (missingParameter) return { kind: 'BINDING', code: 'SQLITE_BINDING', missingParameter };
+  if (isSqliteContention(error)) {
+    return { kind: 'CONTENTION', code: error?.code || 'SQLITE_BUSY', missingParameter: null };
+  }
+  const code = error?.code || null;
+  const kind = /^SQLITE_CONSTRAINT/.test(code || '') ? 'CONSTRAINT'
+    : /(?:no such (?:table|column)|has no column named|database schema)/i.test(message) ? 'SCHEMA'
+      : /^SQLITE_(?:IOERR|FULL|CANTOPEN|READONLY|CORRUPT|NOTADB)/.test(code || '') ? 'STORAGE'
+        : code?.startsWith('SQLITE_') ? 'SQLITE' : 'APPLICATION';
+  return { kind, code, missingParameter: null };
 }
 
 function receivedTimestampMs(value, eventTimestampMs) {
@@ -200,6 +217,8 @@ class ResearchStore {
       lastWriteSuccessAt: null,
       lastWriteErrorAt: null,
       lastWriteErrorCode: null,
+      lastWriteErrorKind: null,
+      lastWriteMissingParameter: null,
       lastWriteError: null,
       lastQueuedTradeAt: null,
       lastPersistedTradeAt: Number(this.db.prepare(`
@@ -4718,7 +4737,8 @@ class ResearchStore {
     };
 
     this._writeTrades = this.db.transaction((trades) => {
-      for (const trade of trades) {
+      for (const queuedTrade of trades) {
+        const trade = normalizeRawExecutionContext(queuedTrade);
         const result = this.rawTradeShards.enabled
           ? this.rawTradeShards.insert(trade)
           : this.stmts.insertRawTrade.run(trade);
@@ -5205,7 +5225,10 @@ class ResearchStore {
     const contention = isSqliteContention(error);
     if (contention) this.metrics.sqliteBusyErrors += 1;
     this.metrics.lastWriteErrorAt = now;
-    this.metrics.lastWriteErrorCode = error?.code || (contention ? 'SQLITE_BUSY' : null);
+    const classification = classifyWriteError(error);
+    this.metrics.lastWriteErrorCode = classification.code;
+    this.metrics.lastWriteErrorKind = classification.kind;
+    this.metrics.lastWriteMissingParameter = classification.missingParameter;
     this.metrics.lastWriteError = String(error?.message || error);
     const exponent = Math.min(8, Math.max(0, this.metrics.consecutiveWriteErrors - 1));
     const retryMs = Math.min(this.writeRetryMaxMs, this.writeRetryMinMs * (2 ** exponent));

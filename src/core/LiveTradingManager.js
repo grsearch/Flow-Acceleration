@@ -258,6 +258,7 @@ class LiveTradingManager {
     this.stopping = false;
     this.strategyMetrics = new Map([...this.strategies.keys()]
       .map((strategyId) => [strategyId, emptyStrategyRuntimeMetrics()]));
+    this.activeMintEntryLocksSnapshot = { count: null, updatedAt: null };
     this.metrics = {
       evaluated: 0,
       matched: 0,
@@ -605,9 +606,19 @@ class LiveTradingManager {
     this._track(sweep);
   }
 
-  health() {
-    const activeMintEntryLocks = typeof this.store.activeLiveMintEntryLocks === 'function'
-      ? this.store.activeLiveMintEntryLocks(1_000).length : 0;
+  health({ includeDatabase = true } = {}) {
+    let activeMintEntryLocksStatus = this.activeMintEntryLocksSnapshot.updatedAt == null
+      ? 'UNAVAILABLE' : 'CACHED';
+    if (includeDatabase && typeof this.store.activeLiveMintEntryLocks === 'function') {
+      this.activeMintEntryLocksSnapshot = {
+        count: this.store.activeLiveMintEntryLocks(1_000).length,
+        updatedAt: this.now(),
+      };
+      activeMintEntryLocksStatus = 'LIVE';
+    }
+    // Lightweight IPC health must not touch SQLite, even on the first call.
+    const activeMintEntryLocks = this.activeMintEntryLocksSnapshot.count
+      ?? (includeDatabase ? 0 : null);
     return {
       mode: this.mode,
       enabled: this.config.enabled,
@@ -636,6 +647,8 @@ class LiveTradingManager {
       trackedMints: this.tracked.size,
       activePositions: this.positions.size,
       activeMintEntryLocks,
+      activeMintEntryLocksStatus,
+      activeMintEntryLocksUpdatedAt: this.activeMintEntryLocksSnapshot.updatedAt,
       killSwitchActive: this._killSwitchActive(),
       ...this.metrics,
     };

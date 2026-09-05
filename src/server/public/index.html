@@ -343,6 +343,7 @@
         </form>
       </article>
       <div class="notice" id="backtest-warning" hidden></div>
+      <div class="notice" id="backtest-query-status" role="status" aria-live="polite" hidden></div>
       <div class="grid result-grid" id="backtest-results"><div class="card empty">点击“运行回测”后计算结果；页面加载时不再自动执行回测。</div></div>
     </section>
 
@@ -385,10 +386,9 @@
           <p>运行中策略优先显示；绿色标题为运行中，灰色标题为已停止。</p>
           <div class="strategy-nav-heading">实盘策略</div>
           <div class="strategy-selector" id="live-execution-strategy-selector">
-            <button class="strategy-nav-item" type="button" aria-current="true" data-strategy-state="stopped" data-live-strategy="execution" data-live-execution-strategy="quality_leader_ql_strict_protected_live" data-strategy-code="QL-STRICT-PR">
-              <b><span class="strategy-code">QL-STRICT-PR</span>Quality Leader Protected Runner（已停）</b><small>历史与存量退出保留 · 禁止新开仓</small>
-            </button>
+            <p class="muted">正在读取服务器策略目录…</p>
           </div>
+          <p id="strategy-catalog-status" class="muted" role="status" aria-live="polite">目录尚未加载</p>
           <div class="strategy-nav-heading">Shadow 策略</div>
           <div class="strategy-selector" id="shadow-strategy-selector">
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="smart-open" data-strategy-code="D0/D1/D2">
@@ -497,15 +497,15 @@
         </aside>
 
         <div class="strategy-content">
-          <div class="strategy-code-bar"><span>当前策略编号</span><b id="active-strategy-code">QL-STRICT-PR</b></div>
+          <div class="strategy-code-bar"><span>当前策略编号</span><b id="active-strategy-code">—</b></div>
           <div class="strategy-load-status" id="strategy-load-status" role="status" aria-live="polite" hidden></div>
           <div class="strategy-pane" data-live-strategy-pane="execution">
             <div class="grid live-summary">
               <article class="card mode-card disabled" id="live-mode-card">
                 <p class="eyebrow">Execution state</p>
-                <div class="mode-badge disabled" id="live-mode-badge">DISABLED</div>
-                <h2 id="live-mode-title">实盘执行已关闭</h2>
-                <p class="mode-description" id="live-mode-description">仅记录策略判定和完整研究数据，不会签名或发送链上交易。</p>
+                <div class="mode-badge disabled" id="live-mode-badge">待加载</div>
+                <h2 id="live-mode-title">等待服务器执行状态</h2>
+                <p class="mode-description" id="live-mode-description">尚未取得运行状态，不能据此判断实盘已开启或关闭。</p>
                 <div class="runtime-strip" id="live-runtime-strip"></div>
               </article>
               <article class="card">
@@ -1358,6 +1358,7 @@
     </section>
   </main>
 
+  <script src="/dashboard-runtime.js"></script>
   <script>
     const escapeHtml = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     const number = (value, digits = 0) => Number.isFinite(value) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value) : '—';
@@ -1368,6 +1369,9 @@
       ? `${number(ms/86400000,1)}d` : (ms >= 3600000 ? `${number(ms/3600000,1)}h` : age(ms));
     const time = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
     const dateTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : '—';
+    const runtimeSnapshotStale = data => data?.runtimeSnapshot?.status === 'STALE'
+      || (Number.isFinite(data?.runtimeSnapshot?.sampledAt)
+        && Date.now() - data.runtimeSnapshot.sampledAt > 15_000);
     const tone = value => Number.isFinite(value) ? (value >= 0 ? 'positive' : 'negative') : 'muted';
     const yesNo = value => value ? '开启' : '关闭';
     const enabledPct = (value, prefix = '') => Number.isFinite(value) && value > 0 ? `${prefix}${rate(value)}` : '关闭';
@@ -1445,11 +1449,7 @@
         return `<tr><td><b>${escapeHtml(row.label || row.id)}</b><br><span class="table-note">${escapeHtml(row.baselineProfileId)} → ${escapeHtml(row.filteredProfileId)}${row.exitProfileId ? ` · ${escapeHtml(row.exitProfileId)}` : ''}</span></td><td>${number(row.pairedSignals)} / ${number(row.comparableResolved)}<br><span class="table-note">${escapeHtml(evidence)}</span>${readiness}</td><td>${number(row.blocked)} / ${number(row.resolvedBlocked)}<br><span class="table-note">拦截精度 ${rate(row.blockPrecisionPct)}</span></td><td>${number(row.avoidedRug50)} / ${number(row.avoidedRug80)}</td><td>${number(row.blockedWinners)} / ${number(row.blockedBig50)}<br><span class="table-note">误杀率 ${rate(row.falsePositiveRatePct)}</span></td><td class="${tone(baseline.averageNetReturnPct)}">均值 ${pct(baseline.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(baseline.winRatePct)} · PF ${number(baseline.profitFactor,2)} · RUG50 ${rate(baseline.rug50RatePct)}</span></td><td class="${tone(filtered.averageNetReturnPct)}">均值 ${pct(filtered.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(filtered.winRatePct)} · PF ${number(filtered.profitFactor,2)} · RUG50 ${rate(filtered.rug50RatePct)}</span></td><td class="${tone(row.averageNetReturnLiftPct)}">${pct(row.averageNetReturnLiftPct)}<br><span class="table-note">被拦截按空仓 0% 计</span></td></tr>`;
       }).join('') : '<tr><td colspan="8" class="empty">等待严格配对前向样本。</td></tr>';
     }
-    async function json(url, { signal } = {}) {
-      const response = await fetch(url, { signal });
-      if (!response.ok) throw new Error(`${response.status}`);
-      return response.json();
-    }
+    const json = DashboardRuntime.createJsonClient({ fetchImpl: (...args) => fetch(...args) });
 
     const tabs = [...document.querySelectorAll('[role="tab"]')];
     const liveStrategyButtons = () => [...document.querySelectorAll('[data-live-strategy]')];
@@ -1473,20 +1473,73 @@
       });
       sortStrategySelector('#shadow-strategy-selector');
     }
-    async function loadStrategyStatusCatalog(context) {
-      try {
-        const data = await json('/api/strategy-status', { signal: context.signal });
-        if (context.generation !== refreshGeneration) return;
-        renderStrategyStatusCatalog(data);
-      } catch (error) {
-        if (error?.name !== 'AbortError') console.warn('[Dashboard] strategy status unavailable');
+    let liveStrategyCatalog = [];
+    let catalogUpdatedAt = null;
+    let catalogRuntimeKey = null;
+    let catalogGeneration = 0;
+    let catalogController = null;
+    let catalogRequest = null;
+    function renderLiveStrategyCatalog(data) {
+      if (!Array.isArray(data.live)) throw new Error('服务器尚未提供实盘策略目录');
+      const previousId = activeExecutionStrategyId;
+      const runtimeKey = JSON.stringify(data.runtime || {});
+      const restarted = catalogRuntimeKey !== null && catalogRuntimeKey !== runtimeKey;
+      catalogRuntimeKey = runtimeKey;
+      if (restarted) strategyViewCache.clear();
+      liveStrategyCatalog = DashboardRuntime.normalizeLiveCatalog(data.live);
+      activeExecutionStrategyId = DashboardRuntime.pickLiveStrategy(liveStrategyCatalog, previousId);
+      document.querySelector('#live-execution-strategy-selector').innerHTML = liveStrategyCatalog.length
+        ? liveStrategyCatalog.map(item => {
+          const stopped = item.enabled === false || item.entryEnabled === false;
+          const state = item.enabled === false ? '配置已禁用' : item.entryEnabled === false ? '停止新开仓' : '允许新开仓（以执行状态为准）';
+          return `<button class="strategy-nav-item" type="button" aria-current="${activeLiveStrategyId === 'execution' && item.id === activeExecutionStrategyId}" data-strategy-state="${stopped ? 'stopped' : 'active'}" data-live-strategy="execution" data-live-execution-strategy="${escapeHtml(item.id)}" data-strategy-code="${escapeHtml(item.code || item.id)}"><b><span class="strategy-code">${escapeHtml(item.code || item.id)}</span>${escapeHtml(item.label || item.id)}</b><small>${escapeHtml(item.market || '—')} · ${number(item.positionSizeSol,4)} SOL · ${state}</small></button>`;
+        }).join('')
+        : '<p class="muted">服务器未配置实盘策略</p>';
+      renderStrategyStatusCatalog(data);
+      syncActiveStrategyCode();
+      catalogUpdatedAt = Date.now();
+      const integrity = data.configurationIntegrity || {};
+      const warnings = Array.isArray(integrity.warnings) ? integrity.warnings : [];
+      const issues = Array.isArray(integrity.issues) ? integrity.issues.length : warnings.length;
+      const mismatchedFiles = integrity.mismatchedFiles || integrity.mismatches;
+      const mismatches = Array.isArray(mismatchedFiles) ? mismatchedFiles.length : 0;
+      const warning = issues || mismatches || ['MISMATCH','ERROR','DEGRADED'].includes(integrity.status);
+      const missingHo500 = warnings.includes('HO500_STRATEGY_MISSING') ? ' · HO500 未配置' : '';
+      document.querySelector('#strategy-catalog-status').textContent = `目录 ${dateTime(catalogUpdatedAt)} · ${data.runtime?.gitCommit?.slice(0,7) || '版本未知'}${warning ? ` · 配置异常 ${integrity.status || ''}（差异 ${mismatches} / 问题 ${issues}）` : ''}${missingHo500}${runtimeSnapshotStale(data) ? ' · 交易状态快照已过期' : ''}`;
+      document.querySelector('#strategy-catalog-status').className = warning ? 'error' : 'muted';
+      if (activeLiveStrategyId === 'execution' && (previousId !== activeExecutionStrategyId || restarted)) {
+        renderCachedStrategyView();
+        if (activeTabId === 'live-trading') void refresh(true);
       }
+    }
+    function refreshStrategyCatalog(force = false) {
+      if (document.hidden && !force) return Promise.resolve();
+      if (catalogRequest && !force) return catalogRequest;
+      if (force) catalogController?.abort();
+      const generation = ++catalogGeneration;
+      const controller = new AbortController();
+      catalogController = controller;
+      catalogRequest = (async () => {
+        try {
+          const data = await json('/api/strategy-status', { signal: controller.signal, timeoutMs: 3_000 });
+          if (generation !== catalogGeneration) return;
+          renderLiveStrategyCatalog(data);
+        } catch (error) {
+          if (generation !== catalogGeneration || error?.name === 'AbortError') return;
+          document.querySelector('#strategy-catalog-status').textContent = `${catalogUpdatedAt ? 'STALE' : 'ERROR'} · 目录${error.message} · ${catalogUpdatedAt ? `上次更新 ${dateTime(catalogUpdatedAt)}` : '尚无成功结果'}；将自动重试`;
+          document.querySelector('#strategy-catalog-status').className = 'error';
+        } finally {
+          if (generation === catalogGeneration) {
+            catalogRequest = null;
+            catalogController = null;
+          }
+        }
+      })();
+      return catalogRequest;
     }
     let activeTabId = 'overview';
     let activeLiveStrategyId = 'execution';
-    let activeExecutionStrategyId = document.querySelector(
-      '[data-live-execution-strategy][aria-current="true"]',
-    )?.dataset.liveExecutionStrategy || null;
+    let activeExecutionStrategyId = null;
     let refreshInFlight = false;
     let refreshGeneration = 0;
     let activeRefreshController = null;
@@ -1511,9 +1564,12 @@
     }
     function renderCachedStrategyView() {
       const cached = strategyViewCache.get(activeViewKey());
-      if (!cached) return false;
+      if (!cached) {
+        if (activeLiveStrategyId === 'execution') renderLivePending();
+        return false;
+      }
       cached.render(cached.data);
-      setStrategyLoadStatus('已显示最近一次结果，正在后台更新…');
+      setStrategyLoadStatus(`STALE · 已保留上次成功结果 ${dateTime(cached.updatedAt || cached.storedAt)}，正在更新…`, 'muted');
       return true;
     }
     function selectTab(id) {
@@ -1793,20 +1849,39 @@
       target.innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">配置种子钱包</p><div class="wallet-address">${walletLink(row.wallet, true)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
+    function renderLivePending(message = '正在读取此策略的运行状态与历史统计。', runtime = null) {
+      const strategy = liveStrategyCatalog.find(item => item.id === activeExecutionStrategyId);
+      document.querySelector('#live-mode-card').className = 'card mode-card disabled';
+      document.querySelector('#live-mode-badge').className = 'mode-badge disabled';
+      document.querySelector('#live-mode-badge').textContent = strategy?.enabled === false ? '配置禁用' : runtime?.mode || '待加载';
+      document.querySelector('#live-mode-title').textContent = strategy?.label || '等待服务器策略目录';
+      document.querySelector('#live-mode-description').textContent = message;
+      document.querySelector('#live-runtime-strip').innerHTML = '';
+      document.querySelector('#live-strategy-expression').textContent = strategy
+        ? `${strategy.code || strategy.id} · ${strategy.market || '市场待确认'} · 单笔 ${number(strategy.positionSizeSol,4)} SOL`
+        : '尚未取得所选策略配置，不推断交易状态。';
+      document.querySelector('#live-monitored-wallets').textContent = strategy
+        ? (strategy.enabled === false ? '目录配置：已禁用' : strategy.entryEnabled === false ? '目录配置：停止新开仓' : '目录配置：允许新开仓；实际执行状态待确认')
+        : '等待策略配置…';
+      document.querySelector('#live-metrics').innerHTML = '<article class="card empty">统计尚未加载，暂无可展示的数值。</article>';
+      document.querySelector('#live-strategy-cards').innerHTML = '<article class="card empty">完整规则参数待加载；不使用其他策略的参数。</article>';
+      document.querySelector('#live-order-summary').textContent = '订单统计待加载';
+      for (const [selector, columns] of [['#live-position-rows',10], ['#live-order-rows',9], ['#live-decision-rows',9]]) {
+        document.querySelector(selector).innerHTML = `<tr><td colspan="${columns}" class="empty">此策略数据待加载</td></tr>`;
+      }
+    }
+
     function renderLiveTrading(data) {
       const runtime = data.runtime || {};
-      const liveStrategies = [...(runtime.strategies || [])].sort((left, right) => (
-        Number(left.entryEnabled === false) - Number(right.entryEnabled === false)
-      ));
-      if (!activeExecutionStrategyId || !liveStrategies.some(item => item.id === activeExecutionStrategyId)) {
-        activeExecutionStrategyId = data.strategyId || liveStrategies[0]?.id || null;
+      const strategy = (runtime.strategies || []).find(item => item.id === activeExecutionStrategyId);
+      if (!strategy || data.dashboardSnapshot?.status === 'PREPARING') {
+        const reason = !strategy
+          ? '目录已加载；此策略的完整执行配置尚不可用（配置禁用时管理器不加载该策略）。'
+          : '历史统计正在后台生成；尚不能展示仓位、订单或收益数值。';
+        renderLivePending(`${reason}${runtimeSnapshotStale(data) ? '交易状态快照已过期，不能确认当前执行状态。' : ''}`,
+          runtimeSnapshotStale(data) ? null : runtime);
+        return;
       }
-      document.querySelector('#live-execution-strategy-selector').innerHTML = liveStrategies.length
-        ? liveStrategies.map(item => `<button class="strategy-nav-item" type="button" aria-current="${activeLiveStrategyId === 'execution' && item.id === activeExecutionStrategyId}" data-strategy-state="${item.entryEnabled === false ? 'stopped' : 'active'}" data-live-strategy="execution" data-live-execution-strategy="${escapeHtml(item.id)}" data-strategy-code="${escapeHtml(item.code || item.id)}"><b><span class="strategy-code">${escapeHtml(item.code || item.id)}</span>${escapeHtml(item.label || item.id)}</b><small>${escapeHtml(item.market || '—')} · ${number(item.positionSizeSol,4)} SOL${item.entryEnabled === false ? ' · 停止新开仓' : ' · 运行中'}</small></button>`).join('')
-        : '<button class="strategy-nav-item" type="button" aria-current="true" data-strategy-state="stopped" data-live-strategy="execution" data-strategy-code="—"><b><span class="strategy-code">—</span>未配置实盘策略</b><small>完整研究采集不受影响</small></button>';
-      syncActiveStrategyCode();
-      const strategy = (runtime.strategies || []).find(item => item.id === data.strategyId)
-        || (runtime.strategies || [])[0] || {};
       const execution = {
         buySlippagePct: runtime.buySlippagePct,
         sellSlippagePct: runtime.sellSlippagePct,
@@ -1828,6 +1903,13 @@
       document.querySelector('#live-mode-description').textContent = modeCopy[1];
       if (runtime.safetyLock) {
         document.querySelector('#live-mode-description').textContent = '实盘安全锁已开启：即使旧 .env 仍配置 ENABLED=true，也不会签名或发送链上交易。';
+      }
+      if (runtimeSnapshotStale(data)) {
+        modeCard.className = 'card mode-card disabled';
+        badge.className = 'mode-badge disabled';
+        badge.textContent = `${mode}（旧快照）`;
+        document.querySelector('#live-mode-title').textContent = '交易状态快照已过期';
+        document.querySelector('#live-mode-description').textContent = `以下为上次采样的 ${mode} 状态，不能据此确认当前交易进程仍在线；采样时间 ${dateTime(data.runtimeSnapshot?.sampledAt)}。`;
       }
       const strategyRuntime = strategy.runtimeMetrics || {};
       document.querySelector('#live-runtime-strip').innerHTML = [
@@ -1881,7 +1963,7 @@
         strategyExpression = 'PBR-A：第一波≥40% → 回撤12%–25% → 反弹2%–10% + 3秒净流入≥3 SOL / Buyers≥4 → +20%卖50%，余仓15/20/25%自适应回撤';
       }
       if (isGraduationHandoffLive) {
-        strategyExpression = `毕业前Curve≥80%质量候选 → 毕业后等待500ms + PumpSwap公共资金确认 → 0.1 SOL入场 / ${rate(strategy.hardStopPct)}硬止损 / 最长${age(strategy.maxHoldMs)}整仓退出`;
+        strategyExpression = `毕业前Curve≥80%质量候选 → 毕业后等待500ms + PumpSwap公共资金确认 → ${number(strategy.positionSizeSol,4)} SOL入场 / ${rate(strategy.hardStopPct)}硬止损 / 最长${age(strategy.maxHoldMs)}整仓退出`;
       }
       if (isCyaOrganicBurstLive) {
         strategyExpression = isCobFLive
@@ -2065,7 +2147,7 @@
         const rejection = (row.rejection_reasons || []).join(', ') || row.action_reason || '—';
         const f = row.features || {};
         return `<tr><td>${dateTime(row.timestamp_ms)}</td><td>${statusChip(row.rule_matched ? 'MATCHED' : 'NOT_MATCHED')}</td><td>${statusChip(row.action_status)}</td><td>${mintLink(row.mint)}</td><td>${escapeHtml(row.strategy_id || '—')}<br><span class="table-note">${escapeHtml(row.episode_id || '')}</span></td><td>${pct(f.dropPct)}</td><td>${pct(f.reboundPct)}</td><td>${age(f.migrationAgeMs)}</td><td class="wrap-cell">${escapeHtml(rejection)}</td></tr>`;
-      }).join('') : '<tr><td colspan="9" class="empty">暂无策略判定；毕业后独立深跌反弹周期出现后会自动记录</td></tr>';
+      }).join('') : '<tr><td colspan="9" class="empty">该策略暂无判定记录</td></tr>';
     }
 
     function renderSmartLikeEarlyShadow(data) {
@@ -3674,9 +3756,10 @@
           return `<tr><td>${dateTime(row.observedAt)}</td><td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.source || 'SHADOW')} · ${escapeHtml(row.policyReason || '—')}</span></td><td>${mintLink(row.mint)}</td><td class="negative wrap-cell">${escapeHtml(reasons)}</td><td>${number(row.score)} / ${number(row.maxScore)}</td><td>${rate(row.buySharePct)}</td><td>${number(row.maxConsecutiveBuys)}</td><td>${number(row.buysPerBuyer,2)}<br><span class="table-note">${number(row.uniqueBuyers)} Buyers</span></td><td>${rate(row.repeatedBuySizeSharePct)}</td><td>${rate(row.maxBuyImpactPct)}</td><td class="negative">${pct(row.returnPct)}</td><td>${statusChip(row.blocked ? 'BLOCKED' : 'LABELED')}</td></tr>`;
         }).join('')
         : '<tr><td colspan="12" class="empty">尚无 RUG Guard 高风险判定</td></tr>';
-      const live = data.status === 'streaming';
+      const live = data.status === 'streaming' && !runtimeSnapshotStale(data);
       document.querySelector('#status-dot').classList.toggle('live', live);
-      document.querySelector('#status-text').textContent = live ? '链上数据流运行中' : '等待数据流';
+      document.querySelector('#status-text').textContent = runtimeSnapshotStale(data)
+        ? '交易状态快照已过期' : live ? '链上数据流运行中' : '等待数据流';
     }
 
     const signalVariantInput = document.querySelector('[name="signalVariant"]');
@@ -3686,31 +3769,86 @@
       else if (!['shadow_netflow_breakout','*'].includes(signalVariantInput.value) && minFlowAccelInput.value === '0') minFlowAccelInput.value = '1.2';
     });
 
+    let backtestGeneration = 0;
+    let backtestController = null;
+    let backtestLastResult = null;
+    function setBacktestQueryStatus(message, error = false) {
+      const status = document.querySelector('#backtest-query-status');
+      status.hidden = false;
+      status.className = error ? 'notice error' : 'notice';
+      status.textContent = message;
+    }
+    async function requestBacktest(query) {
+      const queryKey = String(query);
+      const generation = ++backtestGeneration;
+      backtestController?.abort();
+      const controller = new AbortController();
+      backtestController = controller;
+      const target = document.querySelector('#backtest-results');
+      const previous = () => backtestLastResult
+        ? `保留上次结果 ${dateTime(backtestLastResult.updatedAt)}${backtestLastResult.queryKey !== queryKey ? '（参数不同，并非本次结果）' : '（旧结果）'}`
+        : '尚无成功回测结果';
+      if (!backtestLastResult) target.innerHTML = '<div class="card empty">等待后台计算结果，暂不展示收益数值。</div>';
+      setBacktestQueryStatus(`正在请求后台回测；${previous()}。`);
+      try {
+        const result = await json(`/api/backtest?${queryKey}`, { signal: controller.signal });
+        if (generation !== backtestGeneration) return;
+        const state = result.dashboardQuery?.status || 'READY';
+        if (!['READY','STALE'].includes(state)) {
+          const message = { PREPARING: '后台正在计算', BUSY: '后台计算队列正忙', ERROR: '后台计算失败' }[state] || '后台状态尚不可用';
+          setBacktestQueryStatus(`${state} · ${message}${result.dashboardQuery?.error ? `：${result.dashboardQuery.error}` : ''}；${previous()}。请稍后再次点击“运行三层策略回测”查询或重试。`, state === 'ERROR');
+          return;
+        }
+        if (!result.metrics || !result.parameters) throw new Error('后台未返回完整回测统计');
+        renderBacktest(result);
+        backtestLastResult = { queryKey, result,
+          updatedAt: result.dashboardQuery?.generatedAt || result.generatedAt || Date.now() };
+        setBacktestQueryStatus(`${state} · ${state === 'STALE' ? '以下为旧回测结果' : '回测完成'} · 数据时间 ${dateTime(backtestLastResult.updatedAt)}${state === 'STALE' ? '；请稍后再次点击查询新结果。' : ''}`);
+      } catch (error) {
+        if (generation !== backtestGeneration || error?.name === 'AbortError') return;
+        setBacktestQueryStatus(`ERROR · ${error.message}；${previous()}。请再次点击重试。`, true);
+      } finally {
+        if (generation === backtestGeneration) backtestController = null;
+      }
+    }
     document.querySelector('#backtest-form').addEventListener('submit', async event => {
       event.preventDefault();
-      const query = new URLSearchParams(new FormData(event.currentTarget));
-      const target = document.querySelector('#backtest-results');
-      target.innerHTML = '<div class="card empty">正在计算三层过滤和动态退出…</div>';
-      try { renderBacktest(await json(`/api/backtest?${query}`)); }
-      catch (error) { target.innerHTML = `<div class="card empty error">回测失败：${escapeHtml(error.message)}</div>`; }
+      await requestBacktest(new URLSearchParams(new FormData(event.currentTarget)));
     });
 
     async function loadDashboard(url, render, context) {
       const data = await json(url, { signal: context.signal });
       if (context.generation !== refreshGeneration || context.viewKey !== activeViewKey()) return;
+      if (render === renderLiveTrading && data.strategyId !== context.strategyId) {
+        throw new Error('服务器返回的策略与所选策略不一致');
+      }
+      const cached = strategyViewCache.get(context.viewKey);
+      if (data.dashboardSnapshot?.status === 'PREPARING') {
+        if (cached) cached.render(runtimeSnapshotStale(data)
+          ? { ...cached.data, runtimeSnapshot: data.runtimeSnapshot } : cached.data);
+        else if (render === renderLiveTrading) renderLivePending(`历史统计正在后台生成；数值和明细尚不可用。${runtimeSnapshotStale(data) ? '交易状态快照已过期。' : ''}`,
+          runtimeSnapshotStale(data) ? null : data.runtime);
+        const status = cached
+          ? `STALE · 后台重新生成统计，保留上次成功结果 ${dateTime(cached.updatedAt || cached.storedAt)}`
+          : 'PREPARING · 历史统计正在后台生成；暂无可展示的数值。';
+        setStrategyLoadStatus(`${status}${runtimeSnapshotStale(data) ? ' · 交易状态快照已过期，不能据此确认交易进程在线' : ''}`, 'muted');
+        return;
+      }
       render(data);
-      strategyViewCache.set(context.viewKey, { data, render, storedAt: Date.now() });
+      const updatedAt = data.dashboardSnapshot?.generatedAt || data.generatedAt || Date.now();
+      strategyViewCache.set(context.viewKey, { data, render, storedAt: Date.now(), updatedAt });
       if (activeTabId === 'live-trading') {
-        if (data.dashboardSnapshot?.status === 'PREPARING') {
-          setStrategyLoadStatus('历史统计正在后台生成；实时策略状态已可用。', 'muted');
-        } else {
-          setStrategyLoadStatus();
-        }
+        const runtimeStale = runtimeSnapshotStale(data);
+        const stale = Date.now() - updatedAt > 60_000;
+        setStrategyLoadStatus(`${stale || runtimeStale ? 'STALE' : 'READY'} · 数据更新时间 ${dateTime(updatedAt)}${stale ? ' · 后台统计延迟，以下并非当前实时值' : ''}${runtimeStale ? ' · 交易状态快照已过期，不能据此确认交易进程在线' : ''}`, 'muted');
       }
     }
 
     async function refresh(force = false) {
       if (document.hidden && !force) return;
+      // The small catalog has its own deadline and lock, including on Shadow
+      // pages. It must neither wait for nor cancel a selected detail request.
+      void refreshStrategyCatalog();
       if (refreshInFlight && !force) return;
       if (force) activeRefreshController?.abort();
       const generation = ++refreshGeneration;
@@ -3720,15 +3858,16 @@
         generation,
         signal: controller.signal,
         viewKey: activeViewKey(),
+        strategyId: activeExecutionStrategyId,
       };
       refreshInFlight = true;
       if (activeTabId === 'live-trading' && !strategyViewCache.has(context.viewKey)) {
         setStrategyLoadStatus('正在加载所选策略…');
       }
       const liveStrategyRequests = {
-        execution: requestContext => [
+        execution: requestContext => activeExecutionStrategyId ? [
           loadDashboard(`/api/live-trading?strategyId=${encodeURIComponent(activeExecutionStrategyId || '')}&positionLimit=30&orderLimit=30&decisionLimit=30`, renderLiveTrading, requestContext),
-        ],
+        ] : [],
         'smart-open': requestContext => [
           loadDashboard('/api/smart-open-shadow?positionLimit=30', renderSmartOpenShadow, requestContext),
         ],
@@ -3847,7 +3986,6 @@
           loadDashboard('/api/signal-repetition', renderSignalQuality, requestContext),
         ],
         'live-trading': requestContext => [
-          loadStrategyStatusCatalog(requestContext),
           ...(liveStrategyRequests[activeLiveStrategyId] || (() => []))(requestContext),
         ],
         health: requestContext => [
@@ -3861,7 +3999,8 @@
           result.status === 'rejected' && result.reason?.name !== 'AbortError'
         ));
         if (failure && generation === refreshGeneration && activeTabId === 'live-trading') {
-          setStrategyLoadStatus(`加载失败：${failure.reason?.message || '接口无响应'}。请再次点击该策略重试。`, 'error');
+          const cached = strategyViewCache.get(context.viewKey);
+          setStrategyLoadStatus(`${cached ? 'STALE / ERROR' : 'ERROR'} · ${failure.reason?.message || '接口无响应'} · ${cached ? `保留上次成功结果 ${dateTime(cached.updatedAt || cached.storedAt)}` : '尚无成功结果'}；将自动重试，也可再次点击。`, 'error');
         }
       } finally {
         if (generation === refreshGeneration) {

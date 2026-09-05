@@ -103,6 +103,7 @@ class SmartWalletConsensusOverlayObserver {
     this.now = now;
     this.lastSyncAt = 0;
     this.startedAt = 0;
+    this.databaseHealthSnapshot = null;
     this.metrics = {
       syncs: 0,
       classified: 0,
@@ -454,22 +455,30 @@ class SmartWalletConsensusOverlayObserver {
     };
   }
 
-  health() {
-    const counts = this.store.db.prepare(`
-      SELECT gate_status, COUNT(*) count
-      FROM smart_wallet_consensus_overlay_rows
-      WHERE model_version=? GROUP BY gate_status
-    `).all(MODEL_VERSION);
-    const byGate = Object.fromEntries(counts.map((row) => [row.gate_status, row.count]));
+  health({ includeDatabase = true } = {}) {
+    if (includeDatabase) {
+      const counts = this.store.db.prepare(`
+        SELECT gate_status, COUNT(*) count
+        FROM smart_wallet_consensus_overlay_rows
+        WHERE model_version=? GROUP BY gate_status
+      `).all(MODEL_VERSION);
+      this.databaseHealthSnapshot = { generatedAt: this.now(),
+        byGate: Object.fromEntries(counts.map((row) => [row.gate_status, row.count])) };
+    }
+    const snapshot = this.databaseHealthSnapshot;
+    const byGate = snapshot?.byGate;
     return {
       enabled: this.config.enabled,
       mode: MODEL_VERSION,
       observerOnly: true,
       sendsTransactions: false,
       profiles: this._profiles().length,
-      classified: (byGate.PASS || 0) + (byGate.NO_CONSENSUS || 0),
-      consensusPassed: byGate.PASS || 0,
-      noConsensus: byGate.NO_CONSENSUS || 0,
+      classified: byGate ? (byGate.PASS || 0) + (byGate.NO_CONSENSUS || 0) : null,
+      consensusPassed: byGate ? byGate.PASS || 0 : null,
+      noConsensus: byGate ? byGate.NO_CONSENSUS || 0 : null,
+      databaseSnapshot: { status: includeDatabase ? 'READY' : snapshot ? 'CACHED' : 'UNAVAILABLE',
+        generatedAt: snapshot?.generatedAt ?? null,
+        ageMs: snapshot ? Math.max(0, this.now() - snapshot.generatedAt) : null },
       lastSyncAt: this.lastSyncAt || null,
       ...this.metrics,
     };

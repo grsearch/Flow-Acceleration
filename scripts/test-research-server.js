@@ -91,7 +91,7 @@ async function main() {
   assert.ok(dashboard.includes("json('/api/strategy-status'"));
   assert.ok(dashboard.includes('data-strategy-state="stopped" data-live-strategy="smart-like-early"'));
   assert.ok(dashboard.includes('data-strategy-state="stopped" data-live-strategy="cya-slot-flow"'));
-  assert.ok(dashboard.includes('Number(left.entryEnabled === false) - Number(right.entryEnabled === false)'));
+  assert.ok(dashboard.includes('DashboardRuntime.normalizeLiveCatalog'));
   assert.ok(dashboard.includes('.strategy-nav-item[data-strategy-state="active"] > b'));
   assert.ok(dashboard.includes('.strategy-nav-item[data-strategy-state="stopped"] > b'));
   assert.ok(dashboard.includes('item.code || item.id'));

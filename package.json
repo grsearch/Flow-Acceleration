@@ -6,7 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "pretest": "node scripts/test-dashboard-read-model.js && node scripts/test-raw-trade-sharding.js",
-    "posttest": "node scripts/test-raw-execution-context.js && node scripts/test-runtime-diagnostics-export.js && node scripts/test-live-timing-freshness.js && node scripts/test-ho500-live-promotion.js",
+    "posttest": "node scripts/test-raw-execution-context.js && node scripts/test-runtime-diagnostics-export.js && node scripts/test-live-timing-freshness.js && node scripts/test-ho500-live-promotion.js && node scripts/test-raw-write-boundary-compatibility.js && node scripts/test-runtime-integrity.js && node scripts/test-dashboard-ui-state.js && node scripts/test-dashboard-http-isolation.js && node scripts/test-dashboard-isolation.js && node scripts/test-dashboard-runtime-sampling.js && node scripts/test-dashboard-process-server.js",
     "start": "node src/index.js",
     "dev": "node --trace-warnings src/index.js",
     "backtest": "node scripts/backtest-flow.js",

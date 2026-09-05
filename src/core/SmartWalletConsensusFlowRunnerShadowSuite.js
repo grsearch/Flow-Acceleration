@@ -391,7 +391,28 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     return [...mints];
   }
 
-  health() {
+  health({ includeDatabase = true } = {}) {
+    const at = this.now();
+    let dynamicThresholds;
+    if (includeDatabase) {
+      this.healthHoldingSnapshot = { generatedAt: at, count: this.trackedMints().filter(
+        (mint) => !this.rowsByMint.has(mint),
+      ).length };
+      dynamicThresholds = this._thresholdSnapshot(at);
+    } else {
+      // Never call registry accessors or holding-vote evaluation from IPC
+      // sampling: legacy accessors may query SQL or refresh eligibility.
+      const snapshot = this.registry.walletEligibilitySnapshot;
+      const counts = snapshot?.generatedAt > 0 ? snapshot.clusterCounts : null;
+      const tiers = this.config.dynamicThresholds || [];
+      const tier = counts ? tiers.find(row => counts.eligible <= row.maxEligibleClusters)
+        || tiers[tiers.length - 1] : null;
+      dynamicThresholds = counts ? { ...counts, ordinary: tier?.ordinary || 2,
+        strong: tier?.strong || 3, generatedAt: snapshot.generatedAt,
+        status: snapshot.expiresAt <= at ? 'STALE' : 'CACHED' }
+        : { eligible: null, selectionA: null, ordinary: null, strong: null,
+          generatedAt: null, status: 'UNAVAILABLE' };
+    }
     return {
       executionPolicyVersion: 'CAUSAL_CORE_POOL_V2',
       enabled: this.config.enabled,
@@ -401,10 +422,12 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       rugPolicy: 'OBSERVE_ONLY_NOT_AN_ENTRY_FILTER',
       activePositions: this.positions.size,
       trackedMints: this.rowsByMint.size,
-      holdingSubscriptionMints: this.trackedMints().filter(
-        (mint) => !this.rowsByMint.has(mint),
-      ).length,
-      dynamicThresholds: this._thresholdSnapshot(this.now()),
+      holdingSubscriptionMints: this.healthHoldingSnapshot?.count ?? null,
+      holdingSubscriptionSnapshot: {
+        status: includeDatabase ? 'READY' : this.healthHoldingSnapshot ? 'CACHED' : 'UNAVAILABLE',
+        generatedAt: this.healthHoldingSnapshot?.generatedAt ?? null,
+      },
+      dynamicThresholds,
       entryProfiles: [...this.entryProfiles.values()],
       exitProfiles: [...this.exitProfiles.values()],
       table: 'smart_wallet_consensus_flow_runner_shadow_positions',

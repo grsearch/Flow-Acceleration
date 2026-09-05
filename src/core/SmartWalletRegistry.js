@@ -109,6 +109,7 @@ class SmartWalletRegistry {
     this.maintenanceWorker = null;
     this.maintenanceWorkerTimer = null;
     this.activeClusterCountsCache = null;
+    this.databaseHealthSnapshot = null;
     this.walletEligibilitySnapshot = {
       generatedAt: 0,
       expiresAt: 0,
@@ -3538,34 +3539,47 @@ class SmartWalletRegistry {
     };
   }
 
-  health() {
+  health({ includeDatabase = true } = {}) {
     const now = this.now();
-    // Health polling must stay O(1) between scheduled snapshot refreshes even
-    // while discovery and background maintenance mark the snapshot dirty.
-    this._refreshWalletEligibilitySnapshot(now, {
-      force: !this._maintenanceWorkerEnabled() && this.walletEligibilitySnapshotDirty,
-    });
+    // IPC sampling is strictly observational: it must not refresh voting state,
+    // expire/rebuild caches, run aggregation SQL, or initialize a daily ledger.
+    if (includeDatabase) {
+      this._refreshWalletEligibilitySnapshot(now, {
+        force: !this._maintenanceWorkerEnabled() && this.walletEligibilitySnapshotDirty,
+      });
+      const clusterEvaluationCounts = Object.fromEntries(this.store.db.prepare(`
+        SELECT status, COUNT(*) count
+        FROM smart_wallet_cluster_evaluations
+        GROUP BY status
+      `).all().map((row) => [row.status, row.count]));
+      const historyCounts = Object.fromEntries(this.store.db.prepare(`
+        SELECT status, COUNT(*) count FROM smart_wallet_history_backfills GROUP BY status
+      `).all().map((row) => [row.status, row.count]));
+      const historyTotals = this.store.db.prepare(`
+        SELECT COALESCE(SUM(pages_fetched), 0) pages,
+          COALESCE(SUM(credits_spent), 0) credits,
+          COALESCE(SUM(transactions_seen), 0) transactions,
+          COALESCE(SUM(inserted_events), 0) events
+        FROM smart_wallet_history_backfills
+      `).get();
+      const historyDaily = this._historyDailyUsage(now);
+      const historyLedgerIncomplete = this.store.db.prepare(`
+        SELECT COUNT(*) n FROM smart_wallet_history_backfills
+        WHERE status='COMPLETE' AND ledger_complete=0
+      `).get().n;
+      this.databaseHealthSnapshot = { generatedAt: now, clusterEvaluationCounts,
+        historyCounts, historyTotals, historyDaily, historyLedgerIncomplete };
+    }
     const eligibility = this.walletEligibilitySnapshot;
-    const pnlCounts = eligibility.pnlCounts;
-    const ageCounts = eligibility.ageCounts;
-    const statusCounts = eligibility.statusCounts;
-    const selectionGradeCounts = eligibility.selectionGradeCounts || {};
-    const clusterEvaluationCounts = Object.fromEntries(this.store.db.prepare(`
-      SELECT status, COUNT(*) count
-      FROM smart_wallet_cluster_evaluations
-      GROUP BY status
-    `).all().map((row) => [row.status, row.count]));
-    const historyCounts = Object.fromEntries(this.store.db.prepare(`
-      SELECT status, COUNT(*) count FROM smart_wallet_history_backfills GROUP BY status
-    `).all().map((row) => [row.status, row.count]));
-    const historyTotals = this.store.db.prepare(`
-      SELECT COALESCE(SUM(pages_fetched), 0) pages,
-        COALESCE(SUM(credits_spent), 0) credits,
-        COALESCE(SUM(transactions_seen), 0) transactions,
-        COALESCE(SUM(inserted_events), 0) events
-      FROM smart_wallet_history_backfills
-    `).get();
-    const historyDaily = this._historyDailyUsage(now);
+    const eligibilityAvailable = includeDatabase || eligibility.generatedAt > 0;
+    const pnlCounts = eligibilityAvailable ? eligibility.pnlCounts : null;
+    const ageCounts = eligibilityAvailable ? eligibility.ageCounts : null;
+    const statusCounts = eligibilityAvailable ? eligibility.statusCounts : null;
+    const selectionGradeCounts = eligibilityAvailable ? eligibility.selectionGradeCounts || {} : null;
+    const database = this.databaseHealthSnapshot;
+    const clusterEvaluationCounts = database?.clusterEvaluationCounts;
+    const historyCounts = database?.historyCounts;
+    const count = (counts, key) => counts ? counts[key] || 0 : null;
     return {
       enabled: this.config.enabled,
       mode: 'SMART_WALLET_ROLLING_REGISTRY',
@@ -3582,6 +3596,13 @@ class SmartWalletRegistry {
       eligibilitySnapshotGeneratedAt: eligibility.generatedAt || null,
       eligibilitySnapshotExpiresAt: eligibility.expiresAt || null,
       eligibilitySnapshotDirty: this.walletEligibilitySnapshotDirty,
+      eligibilitySnapshotStatus: !eligibility.generatedAt ? 'UNAVAILABLE'
+        : eligibility.expiresAt <= now ? 'STALE' : 'READY',
+      databaseSnapshot: {
+        status: includeDatabase ? 'READY' : database ? 'CACHED' : 'UNAVAILABLE',
+        generatedAt: database?.generatedAt ?? null,
+        ageMs: database ? Math.max(0, now - database.generatedAt) : null,
+      },
       eventMonitoringRequiresResolvedAge:
         this.config.eventMonitoringRequiresResolvedAge !== false,
       actualEventBackfillPending: this.actualEventBackfillPending,
@@ -3593,58 +3614,55 @@ class SmartWalletRegistry {
         1_000,
         finite(this.config.actualEventBackfillIntervalMs, 5_000),
       ),
-      registryVersion: eligibility.registryVersion,
-      wallets: eligibility.all.size,
-      active: statusCounts.ACTIVE || 0,
-      probation: statusCounts.PROBATION || 0,
-      quarantined: statusCounts.QUARANTINED || 0,
+      registryVersion: eligibilityAvailable ? eligibility.registryVersion : null,
+      wallets: eligibilityAvailable ? eligibility.all.size : null,
+      active: count(statusCounts, 'ACTIVE'),
+      probation: count(statusCounts, 'PROBATION'),
+      quarantined: count(statusCounts, 'QUARANTINED'),
       pendingLabels: this.labels.size,
       pendingLegacyLabels: this.labels.size,
-      pnlProfitable: pnlCounts.PNL_PROFITABLE || 0,
-      pnlElite60d: pnlCounts.PNL_ELITE_60D || 0,
-      pnlLossBlocked: pnlCounts.LOSS_BLOCKED || 0,
-      pnlPending: pnlCounts.PNL_PENDING || 0,
-      pnlBypassed: pnlCounts.PNL_BYPASS || 0,
-      ageEligible: ageCounts.ELIGIBLE || 0,
-      ageTooNew: ageCounts.TOO_NEW || 0,
-      ageProbation: ageCounts.PROBATION || 0,
-      ageUnknown: (ageCounts.UNKNOWN || 0) + (ageCounts.PENDING || 0),
-      ageBypassed: ageCounts.BYPASSED || 0,
+      pnlProfitable: count(pnlCounts, 'PNL_PROFITABLE'),
+      pnlElite60d: count(pnlCounts, 'PNL_ELITE_60D'),
+      pnlLossBlocked: count(pnlCounts, 'LOSS_BLOCKED'),
+      pnlPending: count(pnlCounts, 'PNL_PENDING'),
+      pnlBypassed: count(pnlCounts, 'PNL_BYPASS'),
+      ageEligible: count(ageCounts, 'ELIGIBLE'),
+      ageTooNew: count(ageCounts, 'TOO_NEW'),
+      ageProbation: count(ageCounts, 'PROBATION'),
+      ageUnknown: ageCounts ? (ageCounts.UNKNOWN || 0) + (ageCounts.PENDING || 0) : null,
+      ageBypassed: count(ageCounts, 'BYPASSED'),
       ageChecksInFlight: this.ageChecks.size,
       clusterConfirmedIndependent:
-        clusterEvaluationCounts.CONFIRMED_INDEPENDENT || 0,
-      clusterConfirmedRelated: clusterEvaluationCounts.CONFIRMED_RELATED || 0,
-      clusterObserving: clusterEvaluationCounts.OBSERVING || 0,
+        count(clusterEvaluationCounts, 'CONFIRMED_INDEPENDENT'),
+      clusterConfirmedRelated: count(clusterEvaluationCounts, 'CONFIRMED_RELATED'),
+      clusterObserving: count(clusterEvaluationCounts, 'OBSERVING'),
       clusterInsufficientActivity:
-        clusterEvaluationCounts.INSUFFICIENT_ACTIVITY || 0,
-      clusterConfiguredSeeds: clusterEvaluationCounts.CONFIG_SEED || 0,
+        count(clusterEvaluationCounts, 'INSUFFICIENT_ACTIVITY'),
+      clusterConfiguredSeeds: count(clusterEvaluationCounts, 'CONFIG_SEED'),
       lastClusterRefreshAt: this.lastClusterRefreshAt || null,
-      monitored: eligibility.monitoring.size,
-      votingEligible: eligibility.voting.size,
-      broadControlVotingEligible: eligibility.controlVoting.size,
-      predictionGradeA: selectionGradeCounts.S_A || 0,
-      predictionGradeB: selectionGradeCounts.S_B || 0,
-      predictionGradeC: selectionGradeCounts.S_C || 0,
-      observationOnly: Math.max(0, eligibility.monitoring.size - eligibility.voting.size),
+      monitored: eligibilityAvailable ? eligibility.monitoring.size : null,
+      votingEligible: eligibilityAvailable ? eligibility.voting.size : null,
+      broadControlVotingEligible: eligibilityAvailable ? eligibility.controlVoting.size : null,
+      predictionGradeA: count(selectionGradeCounts, 'S_A'),
+      predictionGradeB: count(selectionGradeCounts, 'S_B'),
+      predictionGradeC: count(selectionGradeCounts, 'S_C'),
+      observationOnly: eligibilityAvailable ? Math.max(0, eligibility.monitoring.size - eligibility.voting.size) : null,
       historyBackfillEnabled: this.config.historyBackfillEnabled === true,
       historyRpcConfigured: Boolean(this.config.historyRpcUrl),
       historyInFlight: this.historyBackfills.size,
-      historyPending: historyCounts.PENDING || 0,
-      historyRunning: historyCounts.RUNNING || 0,
-      historyPaused: historyCounts.PAUSED || 0,
-      historyComplete: historyCounts.COMPLETE || 0,
-      historyFailed: historyCounts.FAILED || 0,
-      historyLedgerIncomplete: this.store.db.prepare(`
-        SELECT COUNT(*) n FROM smart_wallet_history_backfills
-        WHERE status='COMPLETE' AND ledger_complete=0
-      `).get().n,
-      historyPagesTotal: historyTotals.pages,
-      historyCreditsTotal: historyTotals.credits,
-      historyTransactionsTotal: historyTotals.transactions,
-      historyEventsTotal: historyTotals.events,
-      historyDailyWalletsStarted: historyDaily.wallets_started,
-      historyDailyPages: historyDaily.pages_fetched,
-      historyDailyCredits: historyDaily.credits_spent,
+      historyPending: count(historyCounts, 'PENDING'),
+      historyRunning: count(historyCounts, 'RUNNING'),
+      historyPaused: count(historyCounts, 'PAUSED'),
+      historyComplete: count(historyCounts, 'COMPLETE'),
+      historyFailed: count(historyCounts, 'FAILED'),
+      historyLedgerIncomplete: database?.historyLedgerIncomplete ?? null,
+      historyPagesTotal: database?.historyTotals.pages ?? null,
+      historyCreditsTotal: database?.historyTotals.credits ?? null,
+      historyTransactionsTotal: database?.historyTotals.transactions ?? null,
+      historyEventsTotal: database?.historyTotals.events ?? null,
+      historyDailyWalletsStarted: database?.historyDaily.wallets_started ?? null,
+      historyDailyPages: database?.historyDaily.pages_fetched ?? null,
+      historyDailyCredits: database?.historyDaily.credits_spent ?? null,
       ...this.metrics,
     };
   }

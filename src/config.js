@@ -8807,6 +8807,26 @@ const config = {
 
   dashboardCache: {
     enabled: booleanEnv('FLOW_DASHBOARD_CACHE_ENABLED', true),
+    processEnabled: booleanEnv('FLOW_DASHBOARD_PROCESS_ENABLED', true),
+    runtimeRefreshMs: integerEnv('FLOW_DASHBOARD_RUNTIME_REFRESH_MS', 5_000, {
+      min: 1_000,
+      max: 60_000,
+    }),
+    httpHeapMb: integerEnv('FLOW_DASHBOARD_HTTP_HEAP_MB', 256, {
+      min: 128,
+      max: 2_048,
+    }),
+    maxSnapshotBytes: integerEnv('FLOW_DASHBOARD_MAX_SNAPSHOT_BYTES', 4 * 1024 * 1024, {
+      min: 64 * 1024, max: 16 * 1024 * 1024,
+    }),
+    maxMemoryBytes: integerEnv('FLOW_DASHBOARD_MAX_MEMORY_BYTES', 32 * 1024 * 1024, {
+      min: 1024 * 1024, max: 128 * 1024 * 1024,
+    }),
+    fastWorkerHeapMb: integerEnv('FLOW_DASHBOARD_FAST_WORKER_HEAP_MB', 128, { min: 64, max: 512 }),
+    historyWorkerHeapMb: integerEnv('FLOW_DASHBOARD_HISTORY_WORKER_HEAP_MB', 256, { min: 128, max: 1024 }),
+    idleStrategyRefreshMs: integerEnv('FLOW_DASHBOARD_IDLE_STRATEGY_REFRESH_MS', 300_000, {
+      min: 60_000, max: 3_600_000,
+    }),
     dbPath: process.env.FLOW_DASHBOARD_DB_PATH || './data/flow-dashboard.db',
     fastRefreshMs: integerEnv('FLOW_DASHBOARD_FAST_REFRESH_MS', 15_000, {
       min: 1_000,

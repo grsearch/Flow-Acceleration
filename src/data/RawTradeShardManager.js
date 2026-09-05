@@ -38,6 +38,22 @@ const EXECUTION_COLUMNS = Object.freeze([
   'pool', 'pool_base_reserves_raw', 'pool_quote_reserves_raw', 'virtual_quote_reserves_raw',
 ]);
 
+// Normalize at the final write boundary too: an older producer or an already
+// queued object may predate these optional columns. Never infer pool state,
+// coerce reserve integers through Number, or mutate the retry queue's objects.
+function normalizeRawExecutionContext(trade) {
+  return {
+    ...trade,
+    pool: trade.pool ?? null,
+    poolBaseReservesRaw: trade.poolBaseReservesRaw == null
+      ? null : String(trade.poolBaseReservesRaw),
+    poolQuoteReservesRaw: trade.poolQuoteReservesRaw == null
+      ? null : String(trade.poolQuoteReservesRaw),
+    virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw == null
+      ? null : String(trade.virtualQuoteReservesRaw),
+  };
+}
+
 function rawColumnSet(db, schema = 'main') {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(schema)) throw new Error('Invalid raw schema');
   return new Set(db.prepare(`PRAGMA ${schema}.table_info(raw_trades)`).all()
@@ -327,7 +343,7 @@ class RawTradeShardManager {
       `);
       this.insertStatements.set(day, statement);
     }
-    const result = statement.run(trade);
+    const result = statement.run(normalizeRawExecutionContext(trade));
     if (result.changes > 0) {
       this.metrics.tradesWritten += 1;
       this.metrics.lastWriteAt = this.now();
@@ -359,6 +375,7 @@ module.exports = {
   DAY_MS,
   RAW_COLUMNS,
   EXECUTION_COLUMNS,
+  normalizeRawExecutionContext,
   ensureRawExecutionColumns,
   rawSelectProjection,
   RawTradeShardManager,
