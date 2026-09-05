@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "pretest": "node scripts/test-dashboard-read-model.js && node scripts/test-raw-trade-sharding.js",
+    "posttest": "node scripts/test-raw-execution-context.js && node scripts/test-runtime-diagnostics-export.js && node scripts/test-live-timing-freshness.js && node scripts/test-ho500-live-promotion.js",
     "start": "node src/index.js",
     "dev": "node --trace-warnings src/index.js",
     "backtest": "node scripts/backtest-flow.js",
@@ -34,7 +35,7 @@
     "test:flow": "node scripts/test-flow-acceleration.js",
     "test:labels": "node scripts/test-signal-labeler.js",
     "test:backtest": "node scripts/test-flow-backtest.js",
-    "test:live": "node scripts/test-post-migration-live.js && node scripts/test-live-shadow-promotion.js && node scripts/test-live-safety-repairs.js",
+    "test:live": "node scripts/test-post-migration-live.js && node scripts/test-live-shadow-promotion.js && node scripts/test-live-safety-repairs.js && node scripts/test-live-timing-freshness.js && node scripts/test-ho500-live-promotion.js",
     "test:shadow": "node scripts/test-primary-signal-shadow.js && node scripts/test-flow-first-shadow.js && node scripts/test-smart-pullback-shadow.js && node scripts/test-smart-open-shadow.js && node scripts/test-flow-smart-confirm-shadow.js && node scripts/test-smart-like-early-shadow.js && node scripts/test-smart-resonance-shadow.js && node scripts/test-individual-smart-wallet-shadow.js && node scripts/test-public-flow-lead-shadow.js && node scripts/test-public-flow-absorption-recovery-shadow.js && node scripts/test-creator-affinity-shadow.js && node scripts/test-early-pure-buy-burst-shadow.js && node scripts/test-cya-slot-flow-shadow.js && node scripts/test-cya-organic-burst-shadow.js && node scripts/test-same-slot-dump-backrun-shadow.js && node scripts/test-launch-quality-observer.js && node scripts/test-migration-second-leg-observer.js && node scripts/test-migration-second-leg-shadow.js && node scripts/test-holder-growth-shadow.js && node scripts/test-quality-leader-shadow.js && node scripts/test-big-winner-shadow.js && node scripts/test-launch-pullback-shadow.js && node scripts/test-migrated-drop-rebound-shadow.js && node scripts/test-migration-continuity-shadow.js && node scripts/test-cya-early-pyramid-shadow.js && node scripts/test-bonding-curve-momentum-shadow.js && node scripts/test-graduation-hold-shadow.js && node scripts/test-graduation-acceleration-shadow.js",
     "backtest:post-migration-opportunity": "node scripts/backtest-post-migration-opportunity.js",
     "test:smart-resonance": "node scripts/test-smart-resonance-shadow.js && node scripts/test-smart-wallet-rug-escape-shadow.js && node scripts/test-smart-wallet-first-open-right-tail-shadow.js && node scripts/test-individual-smart-wallet-shadow.js && node scripts/test-smart-consensus-v2-shadow.js",

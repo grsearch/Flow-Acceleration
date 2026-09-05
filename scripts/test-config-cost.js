@@ -241,6 +241,9 @@ const liveCobF = config.liveTrading.strategies.find((strategy) => (
 const liveGraduationRecovery = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_ho500_x60_recovery_live'
 ));
+const liveGraduationHandoff = config.liveTrading.strategies.find((strategy) => (
+  strategy.id === 'graduation_accel_o_c80_ho500_x60_live'
+));
 const liveGraduationP500 = config.liveTrading.strategies.find((strategy) => (
   strategy.id === 'graduation_accel_o_c80_p500_stair240_live'
 ));
@@ -411,6 +414,18 @@ assert.deepStrictEqual(cobRugFiltered.exitProfileIds, ['FIX30']);
 assert.strictEqual(cobRugFiltered.pairedBaselineProfileId, 'COB_F_LR01_FIX30');
 assert.strictEqual(cobRugFiltered.rugGuardMode, 'LIVE_CURVE_CATASTROPHE');
 assert.strictEqual(liveGraduationRecovery.entryEnabled, false);
+assert.strictEqual(liveGraduationHandoff.entryEnabled, true);
+assert.strictEqual(liveGraduationHandoff.positionSizeSol, 0.1);
+assert.strictEqual(liveGraduationHandoff.market, 'PUMP_AMM');
+assert.strictEqual(liveGraduationHandoff.sourceShadowCohortId, 'O_C80_HO500_X60:0_1SOL');
+assert.strictEqual(liveGraduationHandoff.fixedHoldMs, 60_000);
+assert.strictEqual(liveGraduationHandoff.maxHoldMs, 60_000);
+assert.strictEqual(liveGraduationHandoff.hardStopPct, 30);
+assert.strictEqual(liveGraduationHandoff.exitMode, 'FIXED_HOLD');
+assert.strictEqual(liveGraduationHandoff.maxEntriesPerMint, 1);
+assert.strictEqual(liveGraduationHandoff.requireChainTimestamp, true);
+assert.strictEqual(liveGraduationHandoff.requireEntrySlot, true);
+assert.strictEqual(liveGraduationHandoff.requireSignalPool, true);
 assert.strictEqual(liveGraduationRecovery.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationRecovery.market, 'PUMP_AMM');
 assert.strictEqual(liveGraduationRecovery.exitMode, 'FIXED_HOLD');
@@ -476,6 +491,7 @@ assert.deepStrictEqual(
     'O90-M5-STAIR120',
     'QL-STRICT-GUARD',
     'O-C80-D5-B2-S0-NC',
+    'O-C80-HO500-X60',
   ],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
@@ -1147,7 +1163,8 @@ assert.strictEqual(relaxedGraduationProfiles
 const recoveryBridgeProfiles = relaxedGraduationProfiles
   .filter((profile) => profile.handoffLiveStrategyId);
 assert.deepStrictEqual(recoveryBridgeProfiles.map((profile) => profile.id), ['O_C80_HO500_X60']);
-assert.strictEqual(recoveryBridgeProfiles[0].liveBridgeCapacitySol, 1);
+assert.strictEqual(recoveryBridgeProfiles[0].liveBridgeCapacitySol, 0.1);
+assert.strictEqual(recoveryBridgeProfiles[0].handoffLiveStrategyId, liveGraduationHandoff.id);
 assert.deepStrictEqual(
   config.migratedDropReboundShadow.entryProfiles
     .find((profile) => profile.id === 'GE30_R23_F3_EXEC').positionSols,

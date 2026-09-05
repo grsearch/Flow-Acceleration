@@ -298,6 +298,11 @@ function main() {
   `).get(mint).status, 'OPEN');
   trade(mint, 3_600, 'BUY', 'public-rise', 1_400);
   assert.strictEqual(store.db.prepare(`
+    SELECT core_sold_at FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_FLOW2_60'
+  `).get(mint).core_sold_at, null, 'core orders cannot fill on their activation event');
+  trade(mint, 3_700, 'BUY', 'public-core-execution', 1_400);
+  assert.strictEqual(store.db.prepare(`
     SELECT status FROM smart_wallet_consensus_flow_runner_shadow_positions
     WHERE mint=? AND entry_profile_id='POST_GRAD_HOLD3_FLOW2_60'
   `).get(mint).status, 'RUNNER');

@@ -653,12 +653,23 @@ const config = {
     timestampMs: base + 1_000, price: 0.2,
     market: 'PUMP_BONDING_CURVE', curvePct: 85,
   });
+  const storedHistory = store.loadActivePreEntryRugToxicHistory(base + 2_000);
+  assert.equal(storedHistory.length, 6);
+  assert.ok(storedHistory.every((row) => row.lifecycleStage === 'CURVE_MIGRATION'
+    && row.market === 'PUMP_BONDING_CURVE'));
+  assert.equal(storedHistory.filter((row) => row.walletRole === 'DUMP_SELLER').length, 1);
+  assert.equal(first.health().toxicTemplateCandidates, 1);
+  assert.ok(first.health().toxicCollapseChecks >= 1);
+  assert.equal(first.health().toxicLastCollapseAt, base + 1_000);
   first.stop();
 
   const restored = new PreEntryRugRiskTracker({ config, store, now: () => base + 3_000 });
   restored.start();
   assert.ok(restored.health().toxicMemoryDbLoaded >= 6);
   assert.equal(restored.health().toxicLegacyQuarantined, 0);
+  assert.deepEqual(restored.health().toxicMemoryByScope['CURVE_MIGRATION|PUMP_BONDING_CURVE'], {
+    wallets: 5, templates: 1, roles: { COORDINATED_BUYER: 4, DUMP_SELLER: 1 },
+  });
   [20.01, 20.07, 19.16, 19.25].forEach((solAmount, index) => restored.observeTrade({
     mint: 'db-toxic-copy', side: 'BUY', wallet: `db-fresh-${index}`, solAmount,
     timestampMs: base + 2_100 + index * 10, price: 1 + index * 0.1,
@@ -672,6 +683,27 @@ const config = {
   assert.equal(decision.blocked, true);
   restored.stop();
   store.close();
+}
+
+{
+  const tracker = new PreEntryRugRiskTracker({ config });
+  const base = Date.UTC(2026, 8, 5);
+  const observe = (elapsedMs, ageMs) => tracker.observeTrade({
+    mint: 'missing-lifecycle-age', side: 'BUY', market: 'PUMP_BONDING_CURVE',
+    wallet: 'public-buyer', solAmount: 0.1, price: 1,
+    timestampMs: base + elapsedMs, ageMs, curvePct: 30,
+  });
+  observe(0, undefined);
+  observe(6_000, null);
+  assert.equal(tracker.snapshot('missing-lifecycle-age', base + 6_000)
+    .firstCliffCounterfactual.lifecycleStage, 'CURVE_EARLY');
+  observe(31_000, undefined);
+  assert.equal(tracker.snapshot('missing-lifecycle-age', base + 31_000)
+    .firstCliffCounterfactual.lifecycleStage, 'CURVE_LATE');
+  // A reported zero is real launch age, unlike a missing timestamp/age.
+  observe(32_000, 0);
+  assert.equal(tracker.snapshot('missing-lifecycle-age', base + 32_000)
+    .firstCliffCounterfactual.lifecycleStage, 'LAUNCH');
 }
 
 console.log('pre-entry RUG risk tests passed');

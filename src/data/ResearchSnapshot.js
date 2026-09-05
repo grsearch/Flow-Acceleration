@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { RAW_COLUMNS } = require('./RawTradeShardManager');
+const { RAW_COLUMNS, rawSelectProjection } = require('./RawTradeShardManager');
 
 function snapshotName(now = new Date()) {
   const stamp = now.toISOString().replace(/[:.]/g, '-');
@@ -38,7 +38,7 @@ function mergeRawShards(snapshotPath) {
       try {
         const result = db.prepare(`
           INSERT OR IGNORE INTO main.raw_trades (${quoted})
-          SELECT ${quoted} FROM raw_snapshot_shard.raw_trades
+          SELECT ${rawSelectProjection(db, 'raw_snapshot_shard', columns)} FROM raw_snapshot_shard.raw_trades
         `).run();
         mergedRows += result.changes;
         mergedShards += 1;

@@ -60,9 +60,11 @@ function config() {
 function trade({
   mint, timestampMs, price = 1e-7, curvePct, side = 'BUY', wallet,
   market = 'PUMP_BONDING_CURVE', solAmount = 1,
+  slot, chainTimestampMs, signature, eventIndex, pool,
 }) {
   return {
     mint,
+    slot, chainTimestampMs, signature, eventIndex, pool,
     timestampMs,
     price,
     reservePrice: price,
@@ -748,8 +750,8 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
       maxSellTx: 0,
       requireNoCreatorSell: true,
       migrationHandoff: true,
-      handoffLiveStrategyId: 'graduation_accel_o_c80_ho500_x60_recovery_live',
-      liveBridgeCapacitySol: 1,
+      handoffLiveStrategyId: 'graduation_accel_o_c80_ho500_x60_live',
+      liveBridgeCapacitySol: 0.1,
       capacityAwareExit: true,
       capacitySols: [0.1, 1],
       coreExitPct: 0,
@@ -785,8 +787,14 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
     }));
     suite.onGraduated({ mint, graduated_at: 7_002_000 });
     suite.observeTrade(trade({
+      mint, timestampMs: 7_002_100, price: 5e-7, market: 'PUMP_AMM',
+      side: 'BUY', wallet: 'foreign-pool-buyer', solAmount: 8, pool: 'foreign-pool',
+    }));
+    suite.observeTrade(trade({
       mint, timestampMs: 7_002_600, price: 1e-7, market: 'PUMP_AMM',
       side: 'BUY', wallet: 'first-amm-buyer', solAmount: 0.2,
+      slot: 42, chainTimestampMs: 7_002_000, signature: 'handoff-signature',
+      eventIndex: 1, pool: 'handoff-pool',
     }));
     const rows = store.db.prepare(`
       SELECT status, entry_market, position_sol, entry_impact_pct
@@ -798,12 +806,21 @@ function testRelaxedFailedEntryCohortsRemainCapacityAwareAndShadowOnly() {
     assert.ok(rows[1].entry_impact_pct > rows[0].entry_impact_pct,
       '1 SOL handoff models more AMM impact than 0.1 SOL');
     assert.equal(suite.health().migrationHandoffPassed, 2);
-    assert.equal(liveSignals.length, 1, 'only the selected 1 SOL cohort bridges to recovery live');
+    assert.equal(liveSignals.length, 1, 'only the audited 0.1 SOL cohort bridges to new live');
     assert.equal(
       liveSignals[0].strategyId,
-      'graduation_accel_o_c80_ho500_x60_recovery_live',
+      'graduation_accel_o_c80_ho500_x60_live',
     );
     assert.equal(liveSignals[0].market, 'PUMP_AMM');
+    assert.equal(liveSignals[0].features.sourceShadowCohortId, 'O_C80_HO500_X60:0_1SOL');
+    assert.equal(liveSignals[0].slot, 42);
+    assert.equal(liveSignals[0].chainTimestampMs, 7_002_000);
+    assert.equal(liveSignals[0].signature, 'handoff-signature');
+    assert.equal(liveSignals[0].eventIndex, 1);
+    assert.equal(liveSignals[0].pool, 'handoff-pool');
+    assert.equal(liveSignals[0].features.handoffBuyers, 1,
+      'other pools must not contribute buyers, prices or flow to the handoff gate');
+    assert.equal(liveSignals[0].features.handoffNetFlowSol, 0.2);
     assert.ok(liveSignals[0].features.shadowEntryImpactPct > 0);
     store.close();
   }

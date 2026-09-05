@@ -947,6 +947,7 @@ setImmediate(() => {
   assert.deepStrictEqual(recoveredSellRequest, {
     mint: legacyMint,
     tokenAmountRaw: '134585106701',
+    expectedMarket: 'PUMP_AMM',
   });
   assert.strictEqual(store.db.prepare('SELECT requested_token_raw FROM live_orders WHERE id = ?')
     .get(legacyOrderId).requested_token_raw, '134585106701');

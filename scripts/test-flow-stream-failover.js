@@ -126,20 +126,36 @@ async function testDisconnectFailover() {
 }
 
 async function testStaleFailover() {
-  const fakes = fakeConnections({ connectedAtOffsetMs: 50 });
+  const fakes = fakeConnections();
   const stream = new PumpFlowStream({
     config: testConfig({ staleTimeoutMs: 20, staleCheckMs: 5 }),
     tokenForEndpoint: () => 'token',
     connectionFactory: fakes.factory,
   });
 
-  await stream.start();
-  await waitFor(() => fakes.instances.length === 2, 'stale connection did not fail over');
-  assert.strictEqual(stream.health().activeEndpoint, SLC);
-  assert.strictEqual(stream.health().staleFailovers, 1);
-  assert.strictEqual(fakes.maxActiveCount(), 1);
+  try {
+    await stream.start();
+    // Drive watchdog time explicitly. A 5ms real timer can fire every 15–16ms
+    // on Windows, correctly crossing this fixture's 10ms event-loop deferral
+    // threshold and making an otherwise healthy test host defer every check.
+    clearInterval(stream.watchdogTimer);
+    stream.watchdogTimer = null;
+    fakes.instances[0].connectedAt = 1_000;
+    stream.lastWatchdogCheckAt = 1_014;
+    stream._checkStale(1_019);
+    assert.strictEqual(stream.health().staleFailovers, 0,
+      'activity inside the stale timeout must not fail over');
+    assert.strictEqual(fakes.instances[0].connected, true);
 
-  await stream.stop();
+    stream._checkStale(1_024);
+    assert.strictEqual(stream.health().watchdogEventLoopDeferrals, 0);
+    await waitFor(() => fakes.instances.length === 2, 'stale connection did not fail over');
+    assert.strictEqual(stream.health().activeEndpoint, SLC);
+    assert.strictEqual(stream.health().staleFailovers, 1);
+    assert.strictEqual(fakes.maxActiveCount(), 1);
+  } finally {
+    await stream.stop();
+  }
 }
 
 function testEventLoopStallDefersOnlyOneStaleCheck() {

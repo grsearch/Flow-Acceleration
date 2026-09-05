@@ -177,6 +177,10 @@ write_state EXPORTING
 systemctl show flow-acceleration.service -p ActiveState -p MainPID -p ExecMainStartTimestamp \
   > "$STAGE/service-before.txt" 2>&1 || true
 PID_BEFORE="$(systemctl show flow-acceleration.service -p MainPID --value 2>/dev/null || true)"
+# Best-effort local counters and source hashes; this never opens the research DB.
+# Each capture has its own timestamp and cannot be mistaken for the 07:00 cutoff.
+timeout --foreground 8s "$NODE_BIN" "$PROJECT_DIR/scripts/export-runtime-diagnostics.js" \
+  "--out=$STAGE/runtime-before.json" || echo "Warning: initial runtime diagnostics unavailable." >&2
 timeout --foreground "$EXPORT_TIMEOUT" nice -n 10 "$NODE_BIN" "$PROJECT_DIR/scripts/export-research-window.js" \
   "--db=$DB_PATH" \
   "--out=$DB_EXPORT" \
@@ -198,6 +202,9 @@ fi
   echo "git_commit=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "git_describe=$(git -C "$PROJECT_DIR" describe --always --dirty 2>/dev/null || echo unknown)"
 } > "$STAGE/version.txt"
+
+timeout --foreground 8s "$NODE_BIN" "$PROJECT_DIR/scripts/export-runtime-diagnostics.js" \
+  "--out=$STAGE/runtime-after.json" || echo "Warning: final runtime diagnostics unavailable." >&2
 
 systemctl --no-pager --full status flow-acceleration.service > "$STAGE/service-status.txt" 2>&1 || true
 journalctl -u flow-acceleration.service --since '24 hours ago' --no-pager \

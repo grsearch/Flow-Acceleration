@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { RAW_COLUMNS, shanghaiDay } = require('../src/data/RawTradeShardManager');
+const { rawSelectProjection, shanghaiDay } = require('../src/data/RawTradeShardManager');
 
 const EXPLICIT_FILTERS = Object.freeze({
   flow_tokens: {
@@ -320,7 +320,6 @@ function attachWindowRawShards(db, { sourcePath, startMs, endMs }) {
     db.exec('CREATE TEMP VIEW source_raw_trades AS SELECT * FROM source.raw_trades');
     return { enabled: false, aliases: [], files: [] };
   }
-  const columns = RAW_COLUMNS.join(', ');
   const shardDir = path.resolve(meta.shard_dir || path.join(
     path.dirname(path.resolve(sourcePath)), 'raw-daily',
   ));
@@ -340,8 +339,8 @@ function attachWindowRawShards(db, { sourcePath, startMs, endMs }) {
     aliases.push(alias);
   }
   const selects = [
-    `SELECT ${columns} FROM source.raw_trades WHERE timestamp_ms < ${Math.trunc(meta.enabled_at)}`,
-    ...aliases.map((alias) => `SELECT ${columns} FROM ${alias}.raw_trades`),
+    `SELECT ${rawSelectProjection(db, 'source')} FROM source.raw_trades WHERE timestamp_ms < ${Math.trunc(meta.enabled_at)}`,
+    ...aliases.map((alias) => `SELECT ${rawSelectProjection(db, alias)} FROM ${alias}.raw_trades`),
   ];
   db.exec(`CREATE TEMP VIEW source_raw_trades AS ${selects.join(' UNION ALL ')}`);
   return { enabled: true, aliases, files };

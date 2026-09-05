@@ -1023,6 +1023,7 @@ class GraduationAccelerationShadowSuite {
     const rows = this.postMigrationTrades.get(trade.mint) || [];
     rows.push({
       timestampMs,
+      pool: trade.pool || null,
       side: trade.side,
       wallet: trade.wallet || null,
       solAmount: finite(trade.solAmount, 0),
@@ -1039,7 +1040,7 @@ class GraduationAccelerationShadowSuite {
     if (trade.market !== 'PUMP_AMM' || !(pending.graduatedAt > 0)
       || trade.timestampMs < pending.entryTargetAt
       || trade.timestampMs > pending.entryDeadlineAt) return;
-    const gate = this._postMigrationEntryGateDecision(pending, profile, trade.timestampMs);
+    const gate = this._postMigrationEntryGateDecision(pending, profile, trade.timestampMs, trade.pool);
     if (!gate) return;
     if (profile.postMigrationEntryGate?.waitForQualification
       && gate.retryable
@@ -1167,6 +1168,10 @@ class GraduationAccelerationShadowSuite {
         symbol: position.symbol,
         price,
         slot: trade.slot,
+        signature: trade.signature || null,
+        eventIndex: trade.eventIndex ?? null,
+        chainTimestampMs: trade.chainTimestampMs ?? null,
+        pool: trade.pool || null,
         timestampMs: trade.timestampMs,
         receivedAtMs: trade.receivedAtMs || trade.timestampMs,
         market: 'PUMP_AMM',
@@ -1261,7 +1266,7 @@ class GraduationAccelerationShadowSuite {
     this.metrics.lastActionAt = failedAt;
   }
 
-  _postMigrationEntryGateDecision(position, profile, now) {
+  _postMigrationEntryGateDecision(position, profile, now, entryPool = null) {
     const gate = profile?.postMigrationEntryGate;
     if (!gate || !(position.graduatedAt > 0)) return null;
     const targetAt = position.graduatedAt + finite(gate.entryDelayMs, gate.windowMs);
@@ -1269,6 +1274,7 @@ class GraduationAccelerationShadowSuite {
     const evaluatedAt = gate.evaluateAtFill ? now : position.graduatedAt + gate.windowMs;
     const rows = (this.postMigrationTrades.get(position.mint) || []).filter((row) => (
       row.timestampMs >= position.graduatedAt && row.timestampMs <= evaluatedAt
+      && (!entryPool || row.pool === entryPool)
     ));
     const buys = rows.filter((row) => row.side === 'BUY');
     const sells = rows.filter((row) => row.side === 'SELL');
@@ -1298,6 +1304,7 @@ class GraduationAccelerationShadowSuite {
     const reason = failed?.[0] || 'PASSED';
     return {
       evaluatedAt,
+      pool: entryPool || null,
       trades: rows.length,
       buyTx: buys.length,
       buyers,

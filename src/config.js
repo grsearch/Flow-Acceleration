@@ -450,8 +450,8 @@ const postMigrationOpportunityCohorts = postMigrationOpportunityExits.flatMap((e
 ));
 
 // The existing O-C80 live bridge deliberately keeps its 15% entry-move guard.
-// These new forward-only cohorts measure two different counterfactuals without
-// changing, signing or submitting any live order:
+// These forward-only cohorts measure two entry counterfactuals. Only the
+// selected 0.1 SOL HO500-X60 cohort feeds the separately gated live strategy:
 // 1) wait for the first executable PumpSwap tape after graduation; and
 // 2) accept selected 40-70% curve repricing bands only after a fresh public BUY.
 const graduationRelaxedEntryShadowEnabled = booleanEnv(
@@ -478,11 +478,13 @@ const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
         requireNoCreatorSell: true,
         migrationHandoff: true,
         handoffLiveStrategyId: handoffDelayMs === 500 && runnerMaxHoldMs === 60_000
-          ? 'graduation_accel_o_c80_ho500_x60_recovery_live'
+          ? 'graduation_accel_o_c80_ho500_x60_live'
           : null,
-        liveBridgeCapacitySol: 1,
+        liveBridgeCapacitySol: 0.1,
         capacityAwareExit: true,
-        capacitySols: graduationRelaxedCapacitySols,
+        capacitySols: handoffDelayMs === 500 && runnerMaxHoldMs === 60_000
+          ? [...new Set([0.1, ...graduationRelaxedCapacitySols])]
+          : graduationRelaxedCapacitySols,
         coreExitPct: 0,
         postMigrationEntryGate: {
           windowMs: handoffDelayMs,
@@ -648,6 +650,7 @@ const config = {
     contextFallbackRpcUrl: process.env.FLOW_LIVE_CONTEXT_FALLBACK_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
     maxSignalAgeMs: integerEnv('FLOW_LIVE_MAX_SIGNAL_AGE_MS', 1_500, { min: 100 }),
+    maxPositionTradeAgeMs: integerEnv('FLOW_LIVE_MAX_POSITION_TRADE_AGE_MS', 3_000, { min: 1_000 }),
     maxConcurrentPositions: integerEnv('FLOW_LIVE_MAX_POSITIONS', 10, { min: 1, max: 20 }),
     maxConcurrentPositionsPerMint: integerEnv(
       'FLOW_LIVE_MAX_CONCURRENT_POSITIONS_PER_MINT',
@@ -920,6 +923,8 @@ const config = {
       },
       {
         id: 'migrated_ge30_r23_f2_only_g2_xleg_live',
+        requireChainTimestamp: true,
+        requireEntrySlot: true,
         code: 'POST-GE30-R23-F2-G2-XLEG',
         label: 'Lifecycle Drop/Rebound G · 第二次机会 XLEG',
         ruleVersion: 'migrated_ge30_r23_f2_only_g2_xleg_live_v2',
@@ -993,6 +998,8 @@ const config = {
       },
       {
         id: 'migrated_grt_r23_f3_v2_xleg_live',
+        requireChainTimestamp: true,
+        requireEntrySlot: true,
         code: 'GRT-R23-F3-V2-XLEG',
         label: 'Lifecycle Drop/Rebound G · GRT前三次机会前向 XLEG',
         ruleVersion: 'migrated_grt_r23_f3_v2_xleg_live_v2',
@@ -1573,6 +1580,34 @@ const config = {
           { activationPct: 300, drawdownPct: 30 },
         ],
         sourceShadowCohortId: 'O_C80_P500_STAIR240:1SOL',
+      },
+      {
+        // New experiment ID: do not mix the historical disabled recovery
+        // strategy (1 SOL shadow source) with the audited 0.1 SOL cohort.
+        id: 'graduation_accel_o_c80_ho500_x60_live',
+        requireChainTimestamp: true,
+        requireEntrySlot: true,
+        requireSignalPool: true,
+        code: 'O-C80-HO500-X60',
+        label: 'Graduation O · 毕业后500ms接入 / 固定60秒 / 0.1 SOL',
+        ruleVersion: 'graduation_accel_o_c80_ho500_x60_live_v2',
+        signalSource: 'GRADUATION_ACCEL_O_C80_HO500_X60',
+        enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_HO500_X60_ENABLED', true),
+        entryEnabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_HO500_X60_ENTRY_ENABLED', true),
+        market: 'PUMP_AMM',
+        positionSizeSol: 0.1,
+        maxSignalAgeMs: 1_500,
+        maxEntriesPerMint: 1,
+        reentryCooldownMs: 0,
+        maxEntryPriceJumpPct: 15,
+        maxEntryPriceDropPct: 15,
+        maxEntrySelfImpactPct: 10,
+        maxShadowEntryImpactPct: 10,
+        exitMode: 'FIXED_HOLD',
+        fixedHoldMs: 60_000,
+        hardStopPct: 30,
+        maxHoldMs: 60_000,
+        sourceShadowCohortId: 'O_C80_HO500_X60:0_1SOL',
       },
       {
         id: 'graduation_accel_o_c80_ho500_x60_recovery_live',

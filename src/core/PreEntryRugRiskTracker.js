@@ -9,6 +9,9 @@ const {
 } = require('./ShadowExecutionModel');
 
 function finite(value, fallback = null) {
+  // Missing age/reserve observations must stay unknown; Number(null) is zero
+  // and otherwise defeats lifecycle fallbacks or manufactures zero recovery.
+  if (value == null || value === '') return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
@@ -117,7 +120,11 @@ class PreEntryRugRiskTracker {
       flaggedSparseBreadth: 0,
       flaggedChaseRepeatedSize: 0,
       flaggedBeijingRiskWindow: 0,
+      toxicTemplateCandidates: 0,
+      toxicCollapseChecks: 0,
       toxicCollapsesLabeled: 0,
+      toxicLastTemplateAt: null,
+      toxicLastCollapseAt: null,
       toxicWalletsLearned: 0,
       toxicTemplatesLearned: 0,
       toxicMemoryLoaded: 0,
@@ -660,11 +667,16 @@ class PreEntryRugRiskTracker {
 
   health() {
     const toxicMemoryByStage = {};
+    const toxicMemoryByScope = {};
     for (const record of this.toxicTemplates.values()) {
       const stage = record.lifecycleStage || LEGACY_GLOBAL_STAGE;
       const row = toxicMemoryByStage[stage] || { wallets: 0, templates: 0, roles: {} };
       row.templates += 1;
       toxicMemoryByStage[stage] = row;
+      const scope = `${stage}|${record.market || UNKNOWN_MARKET}`;
+      const scoped = toxicMemoryByScope[scope] || { wallets: 0, templates: 0, roles: {} };
+      scoped.templates += 1;
+      toxicMemoryByScope[scope] = scoped;
     }
     for (const record of this.toxicWallets.values()) {
       const stage = record.lifecycleStage || LEGACY_GLOBAL_STAGE;
@@ -673,6 +685,11 @@ class PreEntryRugRiskTracker {
       const role = record.walletRole || TOXIC_WALLET_ROLES.COORDINATED_BUYER;
       row.roles[role] = (row.roles[role] || 0) + 1;
       toxicMemoryByStage[stage] = row;
+      const scope = `${stage}|${record.market || UNKNOWN_MARKET}`;
+      const scoped = toxicMemoryByScope[scope] || { wallets: 0, templates: 0, roles: {} };
+      scoped.wallets += 1;
+      scoped.roles[role] = (scoped.roles[role] || 0) + 1;
+      toxicMemoryByScope[scope] = scoped;
     }
     return {
       enabled: this.config.enabled,
@@ -689,6 +706,9 @@ class PreEntryRugRiskTracker {
       toxicWallets: this.toxicWallets.size,
       toxicTemplates: this.toxicTemplates.size,
       toxicMemoryByStage,
+      toxicMemoryByScope,
+      toxicMemoryDirty: this.toxicMemoryDirty,
+      toxicMemorySaveInFlight: Boolean(this.toxicPersistPromise),
       toxicMemoryPath: this._cfg('toxicMemoryPath', null),
       toxicMemoryPersistence: 'ASYNC_JSON_HOT_PATH_SQLITE_RECOVERY',
       thresholds: {
@@ -1630,6 +1650,8 @@ class PreEntryRugRiskTracker {
       market,
     };
     if (!prior || prior.fingerprint !== fingerprint || prior.observedAt !== observedAt) {
+      this.metrics.toxicTemplateCandidates += 1;
+      this.metrics.toxicLastTemplateAt = timestampMs;
       state.templatePeakPrice = price;
       state.templateToxicLabeled = false;
     } else if (price > state.templatePeakPrice) state.templatePeakPrice = price;
@@ -1659,6 +1681,7 @@ class PreEntryRugRiskTracker {
     if (!template || !(timestampMs > 0) || !(price > 0) || state.templateToxicLabeled
       || String(event?.market || UNKNOWN_MARKET) !== market
       || timestampMs - template.observedAt > this._cfg('toxicCollapseWindowMs', 30_000)) return;
+    this.metrics.toxicCollapseChecks += 1;
     if (!(state.templatePeakPrice > 0) || price > state.templatePeakPrice) {
       state.templatePeakPrice = price;
       return;
@@ -1714,6 +1737,7 @@ class PreEntryRugRiskTracker {
     }
     this._boundMap(this.toxicWallets, this._cfg('maxToxicWallets', 4_096));
     this.metrics.toxicCollapsesLabeled += 1;
+    this.metrics.toxicLastCollapseAt = timestampMs;
     this.metrics.toxicTemplatesLearned += 1;
     this.metrics.toxicWalletsLearned += learnedWallets;
     this.toxicVersion += 1;

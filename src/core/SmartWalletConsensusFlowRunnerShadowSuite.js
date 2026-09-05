@@ -75,6 +75,7 @@ function rowToPosition(row) {
     exitTargetAt: row.exit_target_at,
     exitDeadlineAt: row.exit_deadline_at,
     exitReason: row.exit_reason,
+    executionState: json(row.execution_state_json, {}),
   };
 }
 
@@ -129,6 +130,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       noEntry: 0,
       noExit: 0,
       invalidExitQuotes: 0,
+      unconfirmedQuoteJumps: 0,
+      incompatiblePoolQuotes: 0,
+      coreExitRequested: 0,
       invalidHistoricalRowsQuarantined: 0,
       restartCensored: 0,
       rugLabelsObserved: 0,
@@ -194,6 +198,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         gross_return_pct REAL,
         net_return_pct REAL,
         estimated_cost_sol REAL,
+        execution_state_json TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(cohort_id, episode_id)
@@ -236,6 +241,12 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       this.store.db.exec(`
         ALTER TABLE smart_wallet_consensus_flow_runner_shadow_positions
         ADD COLUMN signal_curve_pct REAL
+      `);
+    }
+    if (!columns.has('execution_state_json')) {
+      this.store.db.exec(`
+        ALTER TABLE smart_wallet_consensus_flow_runner_shadow_positions
+        ADD COLUMN execution_state_json TEXT
       `);
     }
     this.insert = this.store.db.prepare(`
@@ -283,6 +294,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         exit_target_at=@exitTargetAt,
         exit_deadline_at=@exitDeadlineAt,
         exit_reason=@exitReason,
+        execution_state_json=@executionStateJson,
         updated_at=@updatedAt
       WHERE id=@id
     `);
@@ -291,7 +303,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         status=@status, exit_tx_count=@exitTxCount, exit_at=@exitAt,
         exit_market=@exitMarket, exit_price=@exitPrice, exit_reason=@exitReason,
         gross_return_pct=@grossReturnPct, net_return_pct=@netReturnPct,
-        estimated_cost_sol=@estimatedCostSol, updated_at=@updatedAt
+        estimated_cost_sol=@estimatedCostSol, execution_state_json=@executionStateJson,
+        updated_at=@updatedAt
       WHERE id=@id
     `);
     this.insertHoldingEvaluation = this.store.db.prepare(`
@@ -380,6 +393,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   health() {
     return {
+      executionPolicyVersion: 'CAUSAL_CORE_POOL_V2',
       enabled: this.config.enabled,
       mode: 'SHADOW_SMART_CONSENSUS_FLOW_RUNNER_V2',
       observerOnly: true,
@@ -685,6 +699,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         );
       } else if (position.status === 'EXIT_PENDING' && now > position.exitDeadlineAt) {
         this._closeNoExit(position, 'NO_EXIT_QUOTE');
+      } else if (position.executionState?.corePending
+        && now > position.executionState.corePending.deadlineAt) {
+        this._closeNoExit(position, 'CORE_EXIT_TIMEOUT');
       } else if (['OPEN', 'RUNNER'].includes(position.status)) {
         const exit = this.exitProfiles.get(position.exitProfileId);
         if (now > position.entryAt + exit.maxHoldMs) {
@@ -997,6 +1014,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
   }
 
   _observePosition(position, trade, at, price, state) {
+    // A reserve-derived mark and its executable quote can share the same bad
+    // event. Check against an earlier accepted observation before this event
+    // can move a stop, inflate a peak, or supply an execution quote.
+    if (!this._acceptExecutionObservation(position, trade, at, price)) {
+      this._save(position);
+      return;
+    }
     position.lastObservedAt = at;
     position.lastMarket = trade.market;
     position.lastPrice = price;
@@ -1049,28 +1073,114 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     position.highestReturnPct = Math.max(position.highestReturnPct, markReturn);
     const exit = this.exitProfiles.get(position.exitProfileId);
     if (position.status !== 'EXIT_PENDING' && markReturn <= -Math.abs(exit.hardStopPct)) {
-      this._requestExit(position, at, 'HARD_STOP');
+      this._requestExit(position, at, 'HARD_STOP', trade);
     } else if (position.status === 'SCOUT_OPEN'
       && finite(exit.scoutProtectActivationPct, Infinity) <= position.highestReturnPct) {
       const protectionFloor = Math.max(
         finite(exit.scoutProtectFloorPct, 0),
         position.highestReturnPct - finite(exit.scoutProtectTrailPct, Infinity),
       );
-      if (markReturn <= protectionFloor) this._requestExit(position, at, 'SCOUT_PROTECT');
+      if (markReturn <= protectionFloor) this._requestExit(position, at, 'SCOUT_PROTECT', trade);
     } else if (position.status === 'OPEN') {
       if (exit.mode === 'FIXED_HOLD' && at >= position.entryAt + exit.fixedHoldMs) {
-        this._requestExit(position, at, 'FIXED_HOLD');
+        this._requestExit(position, at, 'FIXED_HOLD', trade);
       } else if (exit.mode === 'CORE_RUNNER'
         && markReturn >= exit.coreActivationPct && !position.coreSoldAt) {
-        this._sellCore(position, trade, price, at, exit);
+        this._requestCoreExit(position, trade, at, exit);
       }
     } else if (position.status === 'RUNNER') {
       const drawdown = position.highestReturnPct - markReturn;
-      if (drawdown >= exit.runnerTrailPct) this._requestExit(position, at, 'RUNNER_TRAIL');
+      if (drawdown >= exit.runnerTrailPct) this._requestExit(position, at, 'RUNNER_TRAIL', trade);
     }
-    if (position.status === 'EXIT_PENDING' && at >= position.exitTargetAt
-      && at <= position.exitDeadlineAt) this._sellAll(position, trade, price, at);
+    const pendingCore = position.executionState.corePending;
+    if (position.status === 'OPEN' && pendingCore
+      && this._canExecuteAfter(pendingCore, trade, at)) {
+      this._sellCore(position, trade, price, at, exit);
+    }
+    if (position.status === 'EXIT_PENDING' && this._canExecuteAfter({
+      triggerAt: position.exitTriggerAt,
+      targetAt: position.exitTargetAt,
+      deadlineAt: position.exitDeadlineAt,
+      signature: position.executionState.exitTriggerSignature,
+    }, trade, at)) this._sellAll(position, trade, price, at);
     else this._save(position);
+  }
+
+  _acceptExecutionObservation(position, trade, at, price) {
+    const execution = position.executionState || (position.executionState = {});
+    execution.policyVersion = 'CAUSAL_CORE_POOL_V2';
+    const observation = {
+      at, price, market: trade.market, pool: trade.pool || null,
+      signature: trade.signature || null, eventIndex: trade.eventIndex ?? null,
+    };
+    // Old rows have no verified pool/quote state. An entry price is a bounded
+    // fallback reference, not proof of pool identity or historical validity.
+    const reference = execution.reference || ((position.entryPrice || position.signalPrice) > 0 ? {
+      at: position.entryAt || position.signalAt,
+      price: position.entryPrice || position.signalPrice,
+      market: position.entryMarket || position.signalMarket, pool: null, signature: null,
+    } : null);
+    let reason = null;
+    if (reference && at < reference.at) reason = 'OUT_OF_ORDER_QUOTE';
+    else if (reference?.market === 'PUMP_AMM' && trade.market !== 'PUMP_AMM') {
+      reason = 'EXIT_MARKET_REGRESSION';
+    } else if (reference?.market === 'PUMP_AMM' && trade.market === 'PUMP_AMM'
+      && reference.pool && reference.pool !== observation.pool) {
+      reason = observation.pool ? 'EXIT_POOL_MISMATCH' : 'EXIT_POOL_UNVERIFIED';
+      this.metrics.incompatiblePoolQuotes += 1;
+    }
+    if (reason) {
+      execution.lastRejected = { ...observation, reason };
+      return false;
+    }
+    const maxStepRatio = Math.max(1, finite(this.config.maxExitQuoteToMarketRatio, 5));
+    if (reference?.price > 0 && price / reference.price > maxStepRatio) {
+      const candidate = execution.candidate;
+      const exit = this.exitProfiles.get(position.exitProfileId);
+      const delayMs = Math.max(1, finite(exit?.exitDelayMs, finite(this.config.exitDelayMs, 200)));
+      const timeoutMs = Math.max(delayMs, finite(
+        exit?.exitTimeoutMs, finite(this.config.exitTimeoutMs, 5_000),
+      ));
+      const agrees = candidate && candidate.market === observation.market
+        && candidate.pool === observation.pool
+        && Math.abs(price / candidate.price - 1) <= 0.2;
+      const independent = agrees && candidate.signature && observation.signature
+        && candidate.signature !== observation.signature;
+      if (!(independent && at >= candidate.at + delayMs
+        && at <= candidate.at + timeoutMs)) {
+        // Never let another event from the same signature confirm a jump.
+        // Missing signatures cannot confirm a jump. A missing pool remains
+        // explicitly unknown in the saved reference; time/price confirmation
+        // does not establish pool identity. Trade size is not a capacity cap.
+        if (!agrees || at > candidate.at + timeoutMs) execution.candidate = observation;
+        execution.lastRejected = { ...observation, reason: 'UNCONFIRMED_UPWARD_QUOTE_JUMP' };
+        this.metrics.unconfirmedQuoteJumps += 1;
+        return false;
+      }
+    }
+    execution.reference = observation;
+    execution.candidate = null;
+    return true;
+  }
+
+  _canExecuteAfter(pending, trade, at) {
+    if (!(at > pending.triggerAt && at >= pending.targetAt && at <= pending.deadlineAt)) {
+      return false;
+    }
+    if (pending.signature) return Boolean(trade.signature && pending.signature !== trade.signature);
+    return pending.requireIndependentSignature !== true;
+  }
+
+  _requestCoreExit(position, trade, at, exit) {
+    const execution = position.executionState;
+    if (execution.corePending || position.coreSoldAt) return;
+    const delayMs = Math.max(0, finite(exit?.exitDelayMs, finite(this.config.exitDelayMs, 200)));
+    const timeoutMs = Math.max(0, finite(exit?.exitTimeoutMs, finite(this.config.exitTimeoutMs, 5_000)));
+    execution.corePending = {
+      triggerAt: at, targetAt: at + delayMs, deadlineAt: at + delayMs + timeoutMs,
+      signature: trade.signature || null, requireIndependentSignature: true,
+    };
+    this.metrics.coreExitRequested += 1;
   }
 
   _buy(position, trade, price, sol, leg) {
@@ -1193,6 +1303,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
   }
 
   _sellCore(position, trade, price, at, exit) {
+    const pending = position.executionState?.corePending;
+    if (!pending || !this._canExecuteAfter(pending, trade, at)) return false;
     const units = position.tokenUnits * exit.coreFraction;
     const quote = executableSell(trade, units, price, {
       maxQuoteToMarketRatio: finite(this.config.maxExitQuoteToMarketRatio, 5),
@@ -1209,12 +1321,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     position.coreSoldAt = at;
     position.exitTxCount += 1;
     position.status = 'RUNNER';
+    position.executionState.corePending = null;
     this.metrics.coreSold += 1;
     this._save(position);
     return true;
   }
 
-  _requestExit(position, at, reason) {
+  _requestExit(position, at, reason, trade = null) {
     if (position.status === 'EXIT_PENDING') return;
     const exit = this.exitProfiles.get(position.exitProfileId);
     const exitDelayMs = finite(exit?.exitDelayMs, this.config.exitDelayMs);
@@ -1224,6 +1337,12 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     position.exitTargetAt = at + exitDelayMs;
     position.exitDeadlineAt = position.exitTargetAt + exitTimeoutMs;
     position.exitReason = reason;
+    const execution = position.executionState || (position.executionState = {});
+    if (execution.corePending) {
+      execution.cancelledCore = { ...execution.corePending, cancelledAt: at, reason };
+      execution.corePending = null;
+    }
+    execution.exitTriggerSignature = trade?.signature || null;
     this._save(position);
   }
 
@@ -1255,6 +1374,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       grossReturnPct: gross,
       netReturnPct: net,
       estimatedCostSol,
+      executionStateJson: JSON.stringify(position.executionState || {}),
       updatedAt: this.now(),
     });
     this.metrics.closed += 1;
@@ -1282,6 +1402,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       grossReturnPct: null,
       netReturnPct: null,
       estimatedCostSol: position.capitalInSol > 0 ? this._estimatedCostSol(position) : 0,
+      executionStateJson: JSON.stringify(position.executionState || {}),
       updatedAt: this.now(),
     });
     this.metrics.noEntry += 1;
@@ -1300,6 +1421,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       grossReturnPct: null,
       netReturnPct: null,
       estimatedCostSol: this._estimatedCostSol(position),
+      executionStateJson: JSON.stringify(position.executionState || {}),
       updatedAt: this.now(),
     });
     this.metrics.noExit += 1;
@@ -1333,6 +1455,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       exitTargetAt: position.exitTargetAt ?? null,
       exitDeadlineAt: position.exitDeadlineAt ?? null,
       exitReason: position.exitReason ?? null,
+      executionStateJson: JSON.stringify(position.executionState || {}),
       updatedAt: this.now(),
     });
   }

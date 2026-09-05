@@ -8,6 +8,7 @@ const {
 } = require('../src/core/SmartWalletConsensusFlowRunnerShadowSuite');
 
 async function main() {
+  require('./test-smart-consensus-execution-integrity').runExecutionIntegrityTests();
   const base = 1_900_000_000_000;
   let now = base;
   let sequence = 0;
@@ -228,6 +229,11 @@ async function main() {
   ), true);
 
   trade(2_400, 'PUMP_AMM', 'BUY', 'public-rise', 2_000);
+  assert.strictEqual(store.db.prepare(`
+    SELECT core_sold_at FROM smart_wallet_consensus_flow_runner_shadow_positions
+    WHERE exit_profile_id='RUNNER'
+  `).get().core_sold_at, null, 'core activation must wait for an executable later trade');
+  trade(2_500, 'PUMP_AMM', 'BUY', 'public-core-execution', 2_000);
   assert.strictEqual(store.db.prepare(`
     SELECT COUNT(*) n FROM smart_wallet_consensus_flow_runner_shadow_positions
     WHERE exit_profile_id='RUNNER' AND status='RUNNER' AND core_sold_at IS NOT NULL

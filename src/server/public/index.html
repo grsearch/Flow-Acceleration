@@ -1842,7 +1842,10 @@
       ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
 
       const isContinuityLive = String(strategy.signalSource || '').startsWith('MIGRATION_CONTINUITY_MC_C5');
-      const isGraduationAccelLive = String(strategy.signalSource || '').startsWith('GRADUATION_ACCEL_');
+      const isGraduationHandoffLive = String(strategy.signalSource || '')
+        .startsWith('GRADUATION_ACCEL_O_C80_HO500_X60');
+      const isGraduationAccelLive = !isGraduationHandoffLive
+        && String(strategy.signalSource || '').startsWith('GRADUATION_ACCEL_');
       const isO90Live = strategy.signalSource === 'GRADUATION_ACCEL_O90_M5_STAIR120';
       const isGfrLive = strategy.signalSource === 'MIGRATED_GFR_300_CONFIRMED';
       const isQualityLeaderLive = strategy.signalSource === 'QUALITY_LEADER_QL_STRICT_PROTECTED';
@@ -1876,6 +1879,9 @@
       }
       if (isPbrLive) {
         strategyExpression = 'PBR-A：第一波≥40% → 回撤12%–25% → 反弹2%–10% + 3秒净流入≥3 SOL / Buyers≥4 → +20%卖50%，余仓15/20/25%自适应回撤';
+      }
+      if (isGraduationHandoffLive) {
+        strategyExpression = `毕业前Curve≥80%质量候选 → 毕业后等待500ms + PumpSwap公共资金确认 → 0.1 SOL入场 / ${rate(strategy.hardStopPct)}硬止损 / 最长${age(strategy.maxHoldMs)}整仓退出`;
       }
       if (isCyaOrganicBurstLive) {
         strategyExpression = isCobFLive
@@ -1950,6 +1956,13 @@
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', 'Launch 首轮回踩 FO-RB10'], ['市场', 'PUMP_BONDING_CURVE'],
         ['参考回踩 / 反弹', '7.5% / 3%'], ['净流入', '≥5 SOL'], ['Creator份额', '≤5%'], ['最近买家', '≥10'],
         ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isGraduationHandoffLive ? [
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'],
+        ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['市场', 'PUMP_AMM'],
+        ['候选条件', 'Curve≥80%，5秒Δ≥5，买家≥2，无卖出'], ['毕业后等待', '500ms'],
+        ['公共流门槛', '买家≥1，净流入≥0，Sell/Buy≤1，回撤≤20%'],
+        ['源Shadow', strategy.sourceShadowCohortId || '—'],
+        ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
       ] : isGraduationAccelLive ? [
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', '首次Curve80加速'], ['市场', 'PUMP_BONDING_CURVE'],
         ['Curve阈值', isO90Live ? '≥90%' : '首次≥80%'], ['最近5秒ΔCurve', isO90Live ? '毕业概率 M5' : '≥5%'], ['独立买家', isO90Live ? 'PumpSwap 5秒≥25' : '≥2'], ['卖单 / Creator卖出', isO90Live ? '由毕业概率信号筛选' : '0 / 否'],
@@ -1992,6 +2005,10 @@
         ['策略模式', '固定持有'], ['固定持仓', age(strategy.fixedHoldMs)],
         ['固定止盈', '无'], ['移动止盈', '无'], ['硬止损', '无'],
         ['最大持仓兜底', age(strategy.maxHoldMs)],
+      ] : isGraduationHandoffLive ? [
+        ['策略模式', '固定持有 + 硬止损'], ['固定持仓', age(strategy.fixedHoldMs)],
+        ['硬止损触发', rate(strategy.hardStopPct)], ['最大持仓兜底', age(strategy.maxHoldMs)],
+        ['移动止盈', '无（对齐HO500-X60影子）'], ['卖出比例', '当前策略仓位100%'],
       ] : isGraduationAccelLive ? [
         ['策略模式', '毕业核心 + Runner'], ['毕业时核心卖出', rate(strategy.coreExitPct)],
         ['PumpSwap门控', isO90Live ? '5秒 Buyers≥25' : '无'],

@@ -8,6 +8,28 @@ const path = require('path');
 
 const LIVE_RULE_VERSION = 'post_migration_drop_rebound_xleg';
 
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function executionOf(order) {
+  try { return order?.execution || JSON.parse(order?.execution_json || '{}'); } catch (_) { return {}; }
+}
+
+function tradeEvidence(trade) {
+  return {
+    market: trade?.market || null,
+    pool: trade?.pool || trade?.poolAddress || null,
+    slot: positiveNumber(trade?.slot),
+    signature: trade?.signature || null,
+    eventIndex: trade?.eventIndex ?? null,
+    chainTimestampMs: positiveNumber(trade?.chainTimestampMs),
+    receivedAtMs: positiveNumber(trade?.receivedAtMs ?? trade?.timestampMs),
+    timestampMs: positiveNumber(trade?.timestampMs),
+  };
+}
+
 function errorText(error) {
   return String(error?.message || error || 'Unknown error')
     .replace(/([?&](?:api-key|api_key|token)=)[^&\s]+/gi, '$1[REDACTED]')
@@ -28,6 +50,9 @@ function orderExecution(execution, event, submittedAt, finishedAt) {
       signalEpisodeId: event.signalEpisodeId || null,
       signalSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
       signalTimestampMs: event.timestampMs || null,
+      signalChainTimestampMs: positiveNumber(event.chainTimestampMs),
+      signalChainAgeMs: positiveNumber(event.chainTimestampMs)
+        ? submittedAt - Number(event.chainTimestampMs) : null,
       signalPersistedAtMs: event.receivedAtMs || null,
       signalToEntryStartMs: Number.isFinite(event.timestampMs)
         ? submittedAt - event.timestampMs
@@ -216,6 +241,7 @@ class LiveTradingManager {
     this.tracked = new Map();
     this.detectors = new Map([...this.detectorStrategies.keys()].map((id) => [id, new Map()]));
     this.ammPriceStates = new Map();
+    this.signalTradeContexts = new Map();
     this.positions = new Map();
     this.timers = new Map();
     this.pending = new Set();
@@ -258,6 +284,8 @@ class LiveTradingManager {
       lastError: null,
       candidates: 0,
       signals: 0,
+      rejectedPositionTrades: 0,
+      takeProfitQuoteRejected: 0,
     };
   }
 
@@ -369,6 +397,14 @@ class LiveTradingManager {
     for (const row of this.store.activeLivePositions()) {
       const position = restoredPosition(row);
       position.strategy = this.strategies.get(position.strategyId) || null;
+      const entryOrder = this.store.latestLiveOrderForPositionSide(position.id, 'BUY');
+      const entryExecution = executionOf(entryOrder);
+      position.entrySlot = positiveNumber(entryExecution.entrySlot
+        ?? entryExecution.settlement?.transactionSlot);
+      position.entryWalletCostSol = row.entry_sol_delta < 0 ? -row.entry_sol_delta : row.position_sol;
+      position.entryWalletCostVerified = row.entry_sol_delta < 0;
+      position.entryPool = entryExecution.pool || null;
+      position.entryExecution = entryExecution;
       if (['GRADUATION_CORE_RUNNER', 'PBR_CORE_RUNNER', 'CORE_RUNNER']
         .includes(position.strategy?.exitMode)) {
         const token = this.store.getToken(position.mint);
@@ -383,6 +419,11 @@ class LiveTradingManager {
         if (position.coreExited) position.highestPrice = Number(row.highest_price) || 0;
       }
       this._addPosition(position);
+      if (position.mode === 'LIVE' && !position.entrySlot && entryOrder?.signature) {
+        this._track(this._reconcileOrderSettlement({
+          orderId: entryOrder.id, positionId: position.id, signature: entryOrder.signature,
+        }));
+      }
       if (position.mode === 'LIVE' && this.mode !== 'LIVE') {
         this.metrics.lastError = 'ACTIVE_LIVE_POSITION_REQUIRES_LIVE_MODE';
         continue;
@@ -460,6 +501,21 @@ class LiveTradingManager {
           const settlement = await this.executor.transactionSettlement(signature);
           if (settlement && Number.isFinite(settlement.walletSolDelta)) {
             this.store.updateLiveOrderSettlement(orderId, settlement);
+            const position = this.positions.get(Number(positionId));
+            if (position && signature === position.entrySignature) {
+              position.entrySlot = positiveNumber(settlement.transactionSlot) || position.entrySlot;
+              position.entryWalletCostSol = -settlement.walletSolDelta;
+              position.entryWalletCostVerified = settlement.walletSolDelta < 0;
+              const execution = { ...(position.entryExecution || {}), settlement,
+                entrySlot: position.entrySlot || null };
+              position.entryExecution = execution;
+              this.store.updateLiveOrder(orderId, { execution });
+              if (position.deferredPositionTrade && position.entrySlot) {
+                const deferredTrade = position.deferredPositionTrade;
+                position.deferredPositionTrade = null;
+                this._observePositionTrade(position, deferredTrade);
+              }
+            }
             return this.store.refreshLivePositionSettlement(positionId);
           }
         } catch (error) {
@@ -592,6 +648,12 @@ class LiveTradingManager {
   }
 
   onExternalStrategySignal(event) {
+    const sourceTrade = this.signalTradeContexts.get(event?.mint);
+    if (sourceTrade && sourceTrade.timestampMs === event?.timestampMs
+      && (event.slot == null || Number(event.slot) === Number(sourceTrade.slot))) {
+      event = { ...event, chainTimestampMs: event.chainTimestampMs ?? sourceTrade.chainTimestampMs,
+        slot: event.slot ?? sourceTrade.slot, pool: event.pool ?? sourceTrade.pool };
+    }
     const strategy = this.strategies.get(event?.strategyId);
     if (!strategy || !event?.mint || !event?.episodeId) return null;
     this._noteReceivedStrategySignal(strategy, event);
@@ -607,6 +669,7 @@ class LiveTradingManager {
       referencePrice: event.price,
       features: {
         ...(event.features || {}),
+        signalTiming: tradeEvidence(event),
         maxEntryPriceJumpPct: strategy.maxEntryPriceJumpPct,
         maxEntrySelfImpactPct: strategy.maxEntrySelfImpactPct
           ?? this.config.maxEntrySelfImpactPct,
@@ -668,6 +731,13 @@ class LiveTradingManager {
   }
 
   observeTrade(trade) {
+    if (trade?.mint) {
+      this.signalTradeContexts.delete(trade.mint);
+      this.signalTradeContexts.set(trade.mint, tradeEvidence(trade));
+      if (this.signalTradeContexts.size > 4096) {
+        this.signalTradeContexts.delete(this.signalTradeContexts.keys().next().value);
+      }
+    }
     const ammPrice = Number(trade?.reservePrice) > 0
       ? Number(trade.reservePrice)
       : Number(trade?.price);
@@ -693,10 +763,26 @@ class LiveTradingManager {
   }
 
   _observePositionTrade(position, observedTrade) {
+    if (position.status === 'OPENING' || position.status === 'EXITING') {
+      if (!position.confirmationTrade || Number(observedTrade.slot || 0)
+        >= Number(position.confirmationTrade.slot || 0)) position.confirmationTrade = observedTrade;
+      return;
+    }
     if (position.status !== 'OPEN') return;
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     const graduatedAt = Number(this.store.getToken(observedTrade.mint)?.graduated_at)
       || position.graduatedAt;
+    const rejected = this._positionTradeRejection(position, observedTrade, graduatedAt);
+    if (rejected) {
+      this.metrics.rejectedPositionTrades += 1;
+      position.lastRejectedTrade = { ...tradeEvidence(observedTrade), reason: rejected };
+      if (rejected === 'ENTRY_SLOT_UNAVAILABLE') position.deferredPositionTrade = observedTrade;
+      return;
+    }
+    position.lastAcceptedSlot = positiveNumber(observedTrade.slot) || position.lastAcceptedSlot;
+    position.lastAcceptedChainTimestampMs = positiveNumber(observedTrade.chainTimestampMs)
+      || position.lastAcceptedChainTimestampMs;
+    position.lastAcceptedTrade = observedTrade;
     if (position.entryPrice > 0) {
       position.lastObservedAt = observedTrade.timestampMs;
       const immediateStop = this._immediateHardStopReason(
@@ -769,6 +855,35 @@ class LiveTradingManager {
     );
   }
 
+  _positionTradeRejection(position, trade, graduatedAt) {
+    const strategy = position.strategy || this.strategies.get(position.strategyId);
+    const market = graduatedAt || position.entryMarket === 'PUMP_AMM'
+      ? 'PUMP_AMM' : (position.entryMarket || trade.market);
+    if (trade.market !== market) return 'POSITION_MARKET_MISMATCH';
+    const tradePool = trade.pool || trade.poolAddress;
+    if (position.entryPool && tradePool && String(tradePool) !== String(position.entryPool)) {
+      return 'POSITION_POOL_MISMATCH';
+    }
+    if (strategy?.requireSignalPool && market === 'PUMP_AMM' && !tradePool) return 'POSITION_POOL_MISSING';
+    const slot = positiveNumber(trade.slot);
+    const chainAt = positiveNumber(trade.chainTimestampMs);
+    const now = this.now();
+    const maxAge = Math.max(1000, Number(this.config.maxPositionTradeAgeMs) || 3000);
+    if (strategy?.requireChainTimestamp && !chainAt) return 'POSITION_CHAIN_TIME_MISSING';
+    if (strategy?.requireEntrySlot && (!slot || !position.entrySlot)) return 'ENTRY_SLOT_UNAVAILABLE';
+    if (chainAt && (now - chainAt > maxAge || chainAt > now + 1000)) return 'STALE_POSITION_CHAIN_TIME';
+    if (slot && position.entrySlot && slot <= position.entrySlot) return 'PRE_ENTRY_SLOT';
+    if (slot && position.lastAcceptedSlot && slot < position.lastAcceptedSlot) return 'OUT_OF_ORDER_SLOT';
+    if (chainAt && position.lastAcceptedChainTimestampMs
+      && chainAt < position.lastAcceptedChainTimestampMs) return 'OUT_OF_ORDER_CHAIN_TIME';
+    if (position.mode === 'LIVE' && slot && !position.entrySlot) return 'ENTRY_SLOT_UNAVAILABLE';
+    if (Number(trade.timestampMs) < Number(position.lastObservedAt
+      || (position.entrySlot ? 0 : position.openedAt) || 0)) {
+      return 'OUT_OF_ORDER_RECEIVE_TIME';
+    }
+    return null;
+  }
+
   advanceTime(now = this.now()) {
     this._scheduleSettlementReconciliation(now);
     this._scheduleMintLockRecheck(now);
@@ -780,6 +895,10 @@ class LiveTradingManager {
     }
     for (const position of this.positions.values()) {
       if (position.status === 'OPEN' && position.lastObservedPrice > 0) {
+        if (position.lastAcceptedTrade && this._positionTradeRejection(
+          position, position.lastAcceptedTrade,
+          this.store.getToken(position.mint)?.graduated_at || position.graduatedAt,
+        )) continue;
         const strategy = position.strategy || this.strategies.get(position.strategyId);
         if (strategy?.exitMode === 'GRADUATION_CORE_RUNNER'
           && strategy.postMigrationGate && position.graduatedAt) {
@@ -1015,6 +1134,7 @@ class LiveTradingManager {
       price: trade.price,
       slot: trade.slot,
       timestampMs: trade.timestampMs,
+      chainTimestampMs: trade.chainTimestampMs,
       receivedAtMs: trade.receivedAtMs || trade.timestampMs,
       market: 'PUMP_AMM',
       poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
@@ -1093,6 +1213,15 @@ class LiveTradingManager {
       return 'SHADOW_ENTRY_IMPACT';
     }
     const maxSignalAgeMs = strategy?.maxSignalAgeMs || this.config.maxSignalAgeMs;
+    const chainAt = positiveNumber(event.chainTimestampMs);
+    if (strategy.requireChainTimestamp && !chainAt) return 'SIGNAL_CHAIN_TIME_MISSING';
+    if (strategy.requireEntrySlot && !positiveNumber(event.slot)) return 'SIGNAL_SLOT_MISSING';
+    if (strategy.requireSignalPool && (event.market || strategy.market) === 'PUMP_AMM'
+      && !(event.pool || event.poolAddress)) return 'SIGNAL_POOL_MISSING';
+    // Chain block time has one-second granularity; account for that, not stream backlog.
+    if (chainAt && (now - chainAt > maxSignalAgeMs + 1000 || chainAt > now + 1000)) {
+      return 'STALE_SIGNAL_CHAIN_TIME';
+    }
     if (Number.isFinite(receivedAt)
       && now - receivedAt > maxSignalAgeMs) return 'STALE_SIGNAL';
     const maxPerMint = Math.max(
@@ -1174,6 +1303,7 @@ class LiveTradingManager {
       this.store.updateLiveStrategyDecisionAudit(decision.id, {
         features: {
           ...(event.features || {}),
+          signalTiming: tradeEvidence(event),
           maxEntryPriceJumpPct: strategy.maxEntryPriceJumpPct,
           maxEntrySelfImpactPct: strategy.maxEntrySelfImpactPct
             ?? this.config.maxEntrySelfImpactPct,
@@ -1215,6 +1345,7 @@ class LiveTradingManager {
       position.tokenAmountRaw = null;
       position.openedAt = null;
       position.strategy = strategy;
+      position.entryMarket = event.market || strategy.market;
       this._addPosition(position);
     } catch (error) {
       this.metrics.riskRejected += 1;
@@ -1254,6 +1385,8 @@ class LiveTradingManager {
             buyMode: `DRY_RUN_${venue}_FIXED_SOL`,
             positionSol: strategy.positionSizeSol,
             signalSlot: Number.isSafeInteger(Number(event.slot)) ? Number(event.slot) : null,
+            entrySlot: positiveNumber(event.slot),
+            pool: event.pool || event.poolAddress || null,
             readCommitment: this.config.readCommitment || 'processed',
             confirmationCommitment: this.config.confirmationCommitment
               || this.config.commitment
@@ -1267,6 +1400,8 @@ class LiveTradingManager {
           referencePrice: event.price,
           maxPriceJumpPct: strategy.maxEntryPriceJumpPct,
           signalSlot: event.slot,
+          signalChainTimestampMs: event.chainTimestampMs,
+          maxSignalAgeMs: strategy.maxSignalAgeMs || this.config.maxSignalAgeMs,
           allowExistingBalance,
         });
       } else {
@@ -1280,6 +1415,10 @@ class LiveTradingManager {
           signalPoolBaseReservesRaw: event.poolBaseReservesRaw,
           signalPoolQuoteReservesRaw: event.poolQuoteReservesRaw,
           signalVirtualQuoteReservesRaw: event.virtualQuoteReservesRaw,
+          signalPool: event.pool || event.poolAddress,
+          signalSlot: event.slot,
+          signalChainTimestampMs: event.chainTimestampMs,
+          maxSignalAgeMs: strategy.maxSignalAgeMs || this.config.maxSignalAgeMs,
           allowExistingBalance,
         });
       }
@@ -1292,6 +1431,14 @@ class LiveTradingManager {
       position.lastObservedPrice = null;
       position.openedAt = openedAt;
       const settlement = result.execution?.settlement || null;
+      position.entrySlot = positiveNumber(result.execution?.entrySlot ?? settlement?.transactionSlot);
+      position.entryPool = result.execution?.pool || null;
+      position.entryMarket = result.venue;
+      position.entrySignature = result.signature;
+      position.entryWalletCostSol = settlement?.walletSolDelta < 0
+        ? -settlement.walletSolDelta : strategy.positionSizeSol;
+      position.entryWalletCostVerified = settlement?.walletSolDelta < 0;
+      position.entryExecution = orderExecution(result.execution, event, submittedAt, openedAt);
       const orderId = this.store.recordLiveOrder({
         positionId: position.id,
         strategyDecisionId: decision.id,
@@ -1319,7 +1466,8 @@ class LiveTradingManager {
         highestPrice: position.highestPrice,
         openedAt,
       });
-      this.store.refreshLivePositionSettlement(position.id);
+      const entryTotals = this.store.refreshLivePositionSettlement(position.id);
+      if (entryTotals?.entrySolDelta < 0) position.entryWalletCostSol = -entryTotals.entrySolDelta;
       if (position.mode === 'LIVE' && !settlement && result.signature) {
         this._track(this._reconcileOrderSettlement({
           orderId,
@@ -1332,6 +1480,11 @@ class LiveTradingManager {
       this.metrics.lastActionAt = openedAt;
       this._noteStrategyOutcome(strategy.id, 'entries', 'OPEN', openedAt);
       this._armPositionExit(position);
+      if (position.confirmationTrade) {
+        const confirmedTrade = position.confirmationTrade;
+        position.confirmationTrade = null;
+        this._observePositionTrade(position, confirmedTrade);
+      }
       if (strategy.exitMode === 'GRADUATION_CORE_RUNNER') {
         const token = this.store.getToken(position.mint);
         if (token?.graduated_at) this.onGraduated(token);
@@ -1390,7 +1543,7 @@ class LiveTradingManager {
         0,
         Number(strategy.entryQuoteRefreshMaxSignalAgeMs) || 0,
       );
-      const signalAt = Number(event.receivedAtMs ?? event.timestampMs);
+      const signalAt = Number(event.chainTimestampMs ?? event.receivedAtMs ?? event.timestampMs);
       const retrySignalAgeMs = Number.isFinite(signalAt) ? failedAt - signalAt : Infinity;
       const canRefreshQuote = position.mode === 'LIVE'
         && (event.market || strategy.market) === 'PUMP_AMM'
@@ -1551,6 +1704,7 @@ class LiveTradingManager {
     }
 
     if (result.state === 'CONFIRMED' && result.tokenAmountRaw !== '0') {
+      position.entrySlot = positiveNumber(result.transactionSlot) || position.entrySlot;
       const openedAt = position.openedAt || position.createdAt || reconciledAt;
       if (orderId) {
         this.store.updateLiveOrder(orderId, {
@@ -2121,6 +2275,12 @@ class LiveTradingManager {
 
   _requestExit(position, reason, observedPrice) {
     if (this.stopping || !position || !['OPEN', 'EXIT_FAILED'].includes(position.status)) return;
+    if (reason === 'FAST_TAKE_PROFIT' && this.now() < (position.nextTakeProfitQuoteAt || 0)) return;
+    if (reason === 'FAST_TAKE_PROFIT' && position.mode === 'LIVE'
+      && position.strategy?.requireEntrySlot && !position.entryWalletCostVerified) {
+      position.lastTakeProfitQuote = { reason: 'ENTRY_COST_AWAITING_SETTLEMENT' };
+      return;
+    }
     if (/HARD_STOP/i.test(String(reason || '')) && !position.hardStopTriggerAt) {
       const triggerAt = Number(position.lastObservedAt) || this.now();
       const triggerReturnPct = position.entryPrice > 0 && observedPrice > 0
@@ -2145,6 +2305,13 @@ class LiveTradingManager {
       return;
     }
     position.status = 'EXITING';
+    position.exitRequestedAt = this.now();
+    position.exitEvidence = {
+      reason, trigger: tradeEvidence(position.lastAcceptedTrade),
+      entrySlot: position.entrySlot || null,
+      lastRejectedTrade: position.lastRejectedTrade || null,
+      requestedAt: position.exitRequestedAt,
+    };
     this.store.updateLivePosition(position.id, {
       status: 'EXITING',
       exitReason: reason,
@@ -2177,6 +2344,12 @@ class LiveTradingManager {
           : await this.executor.sell({
             mint: position.mint,
             tokenAmountRaw: position.tokenAmountRaw,
+            expectedMarket: position.entryMarket === 'PUMP_AMM' || position.graduatedAt
+              || this.store.getToken(position.mint)?.graduated_at ? 'PUMP_AMM' : position.entryMarket,
+            ...(reason === 'FAST_TAKE_PROFIT' ? {
+              minimumNetProceedsSol: (position.entryWalletCostSol || position.positionSol)
+                * (1 + Number(position.strategy?.fastTakeProfitPct || 0) / 100),
+            } : {}),
             ...(emergency ? { emergency: true } : {}),
           });
         if (result.alreadyEmpty
@@ -2224,6 +2397,9 @@ class LiveTradingManager {
           execution: {
             ...(result.execution || {}),
             settlement,
+            manager: { ...position.exitEvidence, executionStartedAt: submittedAt,
+              queueDelayMs: submittedAt - (position.exitRequestedAt || submittedAt),
+              finishedAt: closedAt },
           },
           error: incompleteReason,
           submittedAt,
@@ -2277,6 +2453,24 @@ class LiveTradingManager {
         );
         return;
       } catch (error) {
+        if (error.code === 'TAKE_PROFIT_NET_PROCEEDS_REJECTED' && !error.signature) {
+          position.status = 'OPEN';
+          position.nextTakeProfitQuoteAt = this.now() + 500;
+          position.lastTakeProfitQuote = error.execution;
+          this.metrics.takeProfitQuoteRejected += 1;
+          this.store.updateLivePosition(position.id, {
+            status: 'OPEN', exitReason: 'TAKE_PROFIT_NET_PROCEEDS_REJECTED',
+            exitError: errorText(error),
+          });
+          this._updatePositionDecision(position, 'OPEN', 'TAKE_PROFIT_NET_PROCEEDS_REJECTED');
+          this._armPositionExit(position);
+          if (position.confirmationTrade) {
+            const latest = position.confirmationTrade;
+            position.confirmationTrade = null;
+            this._observePositionTrade(position, latest);
+          }
+          return;
+        }
         lastError = error;
         const settlement = error.execution?.settlement || null;
         const orderId = this.store.recordLiveOrder({
@@ -2297,6 +2491,9 @@ class LiveTradingManager {
           execution: {
             ...(error.execution || {}),
             emergencyExit: emergency,
+            manager: { ...position.exitEvidence, executionStartedAt: submittedAt,
+              queueDelayMs: submittedAt - (position.exitRequestedAt || submittedAt),
+              finishedAt: this.now() },
             sellSlippagePct: emergency
               ? this.config.emergencySellSlippagePct
               : this.config.sellSlippagePct,

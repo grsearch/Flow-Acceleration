@@ -47,6 +47,10 @@ function trade(timestampMs, suffix) {
     virtualTokenReservesRaw: null,
     realSolReservesRaw: null,
     realTokenReservesRaw: null,
+    pool: null,
+    poolBaseReservesRaw: null,
+    poolQuoteReservesRaw: null,
+    virtualQuoteReservesRaw: null,
   };
 }
 

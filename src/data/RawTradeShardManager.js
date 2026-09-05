@@ -27,9 +27,40 @@ const RAW_COLUMNS = Object.freeze([
   'virtual_token_reserves_raw',
   'real_sol_reserves_raw',
   'real_token_reserves_raw',
+  'pool',
+  'pool_base_reserves_raw',
+  'pool_quote_reserves_raw',
+  'virtual_quote_reserves_raw',
 ]);
 
 const INSERT_COLUMNS = RAW_COLUMNS.filter((column) => column !== 'id');
+const EXECUTION_COLUMNS = Object.freeze([
+  'pool', 'pool_base_reserves_raw', 'pool_quote_reserves_raw', 'virtual_quote_reserves_raw',
+]);
+
+function rawColumnSet(db, schema = 'main') {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(schema)) throw new Error('Invalid raw schema');
+  return new Set(db.prepare(`PRAGMA ${schema}.table_info(raw_trades)`).all()
+    .map((row) => row.name));
+}
+
+// Only a schema change: no historical UPDATE or table scan at startup.
+function ensureRawExecutionColumns(db, schema = 'main') {
+  const available = rawColumnSet(db, schema);
+  for (const column of EXECUTION_COLUMNS) {
+    if (!available.has(column)) db.exec(`ALTER TABLE ${schema}.raw_trades ADD COLUMN ${column} TEXT`);
+  }
+}
+
+// Historical shards remain untouched on read. New execution context is NULL
+// for old rows, never reconstructed from a later pool state.
+function rawSelectProjection(db, schema = 'main', columns = RAW_COLUMNS) {
+  const available = rawColumnSet(db, schema);
+  return columns.map((column) => {
+    if (!RAW_COLUMNS.includes(column)) throw new Error('Invalid raw column');
+    return available.has(column) ? `"${column}"` : `NULL AS "${column}"`;
+  }).join(', ');
+}
 
 function shanghaiDay(timestampMs) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -83,6 +114,7 @@ function createShard(filePath, busyTimeoutMs, cacheSizeKb) {
       CREATE INDEX IF NOT EXISTS idx_raw_trades_mint_ts ON raw_trades(mint, timestamp_ms);
       CREATE INDEX IF NOT EXISTS idx_raw_trades_wallet_ts ON raw_trades(wallet, timestamp_ms);
     `);
+    ensureRawExecutionColumns(shard);
   } finally {
     shard.close();
   }
@@ -119,13 +151,12 @@ function attachRawTradeReadView(db, { dbPath, readDays = 3, now = Date.now() } =
     db.prepare(`ATTACH DATABASE ? AS ${alias}`).run(filePath);
     attachedDays.push({ day, alias });
   }
-  const columns = RAW_COLUMNS.join(', ');
   const hotFloor = now - Math.max(2, Number(readDays) || 3) * DAY_MS;
   const selects = [
-    `SELECT ${columns} FROM main.raw_trades
+    `SELECT ${rawSelectProjection(db)} FROM main.raw_trades
       WHERE timestamp_ms >= ${Math.trunc(hotFloor)}
         AND timestamp_ms < ${Math.trunc(meta.enabled_at)}`,
-    ...attachedDays.map(({ alias }) => `SELECT ${columns} FROM ${alias}.raw_trades`),
+    ...attachedDays.map(({ alias }) => `SELECT ${rawSelectProjection(db, alias)} FROM ${alias}.raw_trades`),
   ];
   db.exec(`CREATE TEMP VIEW raw_trades_all AS ${selects.join(' UNION ALL ')}`);
   return {
@@ -151,6 +182,7 @@ class RawTradeShardManager {
       : null;
     this.attached = new Map();
     this.insertStatements = new Map();
+    this.writableSchemaDays = new Set();
     this.cutoverAt = null;
     this.activeDay = null;
     this.metrics = {
@@ -226,14 +258,13 @@ class RawTradeShardManager {
 
   _rebuildView() {
     this.db.exec('DROP VIEW IF EXISTS temp.raw_trades_all');
-    const columns = RAW_COLUMNS.join(', ');
     const hotFloor = this.now() - this.readDays * DAY_MS;
     const selects = [
-      `SELECT ${columns} FROM main.raw_trades
+      `SELECT ${rawSelectProjection(this.db)} FROM main.raw_trades
         WHERE timestamp_ms >= ${Math.trunc(hotFloor)}
           AND timestamp_ms < ${Math.trunc(this.cutoverAt)}`,
       ...[...this.attached.values()].map(({ alias }) => (
-        `SELECT ${columns} FROM ${alias}.raw_trades`
+        `SELECT ${rawSelectProjection(this.db, alias)} FROM ${alias}.raw_trades`
       )),
     ];
     this.db.exec(`CREATE TEMP VIEW raw_trades_all AS ${selects.join(' UNION ALL ')}`);
@@ -262,6 +293,7 @@ class RawTradeShardManager {
     for (const day of removable) {
       const shard = this.attached.get(day);
       this.insertStatements.delete(day);
+      this.writableSchemaDays.delete(day);
       this.db.exec(`DETACH DATABASE ${shard.alias}`);
       this.attached.delete(day);
       changed = true;
@@ -269,6 +301,11 @@ class RawTradeShardManager {
     for (const day of batchDays) {
       if (!this.attached.has(day)) {
         this._attach(day, { create: true });
+        changed = true;
+      }
+      if (!this.writableSchemaDays.has(day)) {
+        ensureRawExecutionColumns(this.db, this.attached.get(day).alias);
+        this.writableSchemaDays.add(day);
         changed = true;
       }
     }
@@ -321,6 +358,9 @@ class RawTradeShardManager {
 module.exports = {
   DAY_MS,
   RAW_COLUMNS,
+  EXECUTION_COLUMNS,
+  ensureRawExecutionColumns,
+  rawSelectProjection,
   RawTradeShardManager,
   attachRawTradeReadView,
   aliasForDay,

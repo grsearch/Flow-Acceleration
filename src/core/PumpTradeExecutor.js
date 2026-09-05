@@ -31,6 +31,7 @@ const {
   PUMP_AMM_SDK,
   PUMP_AMM_PROGRAM_ID,
   buyQuoteInput: quoteAmmBuy,
+  sellBaseInput: quoteAmmSell,
   canonicalPumpPoolPda,
 } = require('@pump-fun/pump-swap-sdk');
 const BN = require('bn.js');
@@ -54,6 +55,7 @@ const EXACT_QUOTE_IN_V2_DISCRIMINATOR = Buffer.from(EXACT_QUOTE_IN_V2.discrimina
 const U64_MAX = (1n << 64n) - 1n;
 
 function normalizedSlot(value) {
+  if (value == null || value === '') return null;
   const slot = Number(value);
   return Number.isSafeInteger(slot) && slot >= 0 ? slot : null;
 }
@@ -297,6 +299,8 @@ function walletSolSettlementFromTransaction(transactionResponse, ownerValue) {
     walletSolDelta: (post - pre) / LAMPORTS_PER_SOL,
     networkFeeSol: Number.isFinite(fee) ? fee / LAMPORTS_PER_SOL : null,
     walletIndex: index,
+    ...(normalizedSlot(transactionResponse?.slot) !== null
+      ? { transactionSlot: normalizedSlot(transactionResponse.slot) } : {}),
   };
 }
 
@@ -433,6 +437,20 @@ class PumpTradeExecutor {
       response,
       this.signer.publicKey.toBase58(),
     );
+  }
+
+  async _entrySlotFromReceipt(signature, execution) {
+    const receiptSlot = normalizedSlot(execution.settlement?.transactionSlot);
+    if (receiptSlot !== null) return receiptSlot;
+    // A transaction's fee metadata may lag confirmation; status.slot is the fill slot,
+    // whereas confirmation.context.slot is merely the RPC node's current slot.
+    if (typeof this.connection.getSignatureStatuses !== 'function') return null;
+    const response = await this.connection.getSignatureStatuses([signature], {
+      searchTransactionHistory: true,
+    }).catch(() => null);
+    const status = response?.value?.[0];
+    return status && !status.err && ['confirmed', 'finalized'].includes(status.confirmationStatus)
+      ? normalizedSlot(status.slot) : null;
   }
 
   async _tokenBalanceSnapshot(mint, tokenProgram, commitment = this.readCommitment) {
@@ -637,11 +655,11 @@ class PumpTradeExecutor {
       mint.toBase58(),
       this.signer.publicKey.toBase58(),
     );
-    return classifyBuyReconciliation(status, allowExistingBalance ? 0n : tokenBalance.amount, {
+    return { ...classifyBuyReconciliation(status, allowExistingBalance ? 0n : tokenBalance.amount, {
       transactionTokenDeltaRaw: transactionDelta,
       transactionObserved: transactionResponse != null,
       balanceObserved: tokenBalance.observed,
-    });
+    }), transactionSlot: normalizedSlot(transactionResponse?.slot ?? status?.slot) };
   }
 
   async buy({
@@ -650,6 +668,8 @@ class PumpTradeExecutor {
     referencePrice,
     maxPriceJumpPct,
     signalSlot = null,
+    signalChainTimestampMs = null,
+    maxSignalAgeMs = null,
     allowExistingBalance = false,
   }) {
     const startedAt = Date.now();
@@ -661,6 +681,8 @@ class PumpTradeExecutor {
       positionSol: solAmount,
       slippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
       signalSlot: minimumContextSlot,
+      signalChainTimestampMs,
+      maxSignalAgeMs,
       readCommitment: this.readCommitment,
       preflightCommitment: this.readCommitment,
       confirmationCommitment: this.confirmationCommitment,
@@ -787,6 +809,7 @@ class PumpTradeExecutor {
         minTokensOut,
       );
       mark('instructions_ready_ms');
+      this._checkSignalFreshness(execution);
       const signature = await this._send(exactInputInstructions, {
         latestBlockhash,
         onStage: mark,
@@ -820,6 +843,7 @@ class PumpTradeExecutor {
       mark('balance_reconciled_ms');
       mark('total_ms');
       execution.settlement = await this.transactionSettlement(signature).catch(() => null);
+      execution.entrySlot = await this._entrySlotFromReceipt(signature, execution);
       return {
         signature,
         venue: 'PUMP_BONDING_CURVE',
@@ -850,12 +874,19 @@ class PumpTradeExecutor {
     signalPoolBaseReservesRaw = null,
     signalPoolQuoteReservesRaw = null,
     signalVirtualQuoteReservesRaw = null,
+    signalPool = null,
+    signalSlot = null,
+    signalChainTimestampMs = null,
+    maxSignalAgeMs = null,
     allowExistingBalance = false,
   }) {
     const startedAt = Date.now();
     const execution = {
       version: 2,
       buyMode: 'PUMP_AMM_FIXED_SOL_HARD_CAP',
+      signalSlot: normalizedSlot(signalSlot),
+      signalChainTimestampMs,
+      maxSignalAgeMs,
       hardSpendCap: true,
       positionSol: solAmount,
       slippagePct: this.config.buySlippagePct ?? this.config.slippagePct,
@@ -872,6 +903,9 @@ class PumpTradeExecutor {
 
     try {
       const mint = new PublicKey(mintValue);
+      const canonicalPool = this._assertSignalPool(mint, signalPool);
+      execution.pool = canonicalPool.toBase58();
+      execution.signalPool = signalPool ? String(signalPool) : null;
       const tokenProgram = await this._tokenProgram(mint);
       const balanceBefore = await this._tokenBalanceRaw(mint, tokenProgram);
       if (balanceBefore > 0n && !allowExistingBalance) {
@@ -888,7 +922,7 @@ class PumpTradeExecutor {
       const [walletLamports, state, latestBlockhash] = await Promise.all([
         this.connection.getBalance(this.signer.publicKey, this.readCommitment),
         this.onlineAmm.swapSolanaState(
-          canonicalPumpPoolPda(mint, NATIVE_MINT),
+          canonicalPool,
           this.signer.publicKey,
         ),
         this.connection.getLatestBlockhash(this.readCommitment),
@@ -972,10 +1006,10 @@ class PumpTradeExecutor {
         : null;
       mark('quote_ready_ms');
       if (Number.isFinite(priceDiagnostics.marketMovePct) && maxPriceJumpPct >= 0) {
-        if (priceDiagnostics.marketMovePct > maxPriceJumpPct) {
+        if (Math.abs(priceDiagnostics.marketMovePct) > maxPriceJumpPct) {
           throw errorWithCode(
             `Market price moved ${priceDiagnostics.marketMovePct.toFixed(2)}%, `
-              + `above ${maxPriceJumpPct}%`,
+              + `outside +/-${maxPriceJumpPct}%`,
             'MARKET_PRICE_MOVED',
           );
         }
@@ -1001,6 +1035,7 @@ class PumpTradeExecutor {
         minBaseOut,
       );
       mark('instructions_ready_ms');
+      this._checkSignalFreshness(execution);
       const signature = await this._send(instructions, { latestBlockhash, onStage: mark });
       const balanceAfter = await this._tokenBalanceRaw(
         mint,
@@ -1021,6 +1056,8 @@ class PumpTradeExecutor {
           mark('balance_reconciled_ms');
           mark('total_ms');
           execution.settlement = await this.transactionSettlement(signature).catch(() => null);
+          execution.entrySlot = reconciled.transactionSlot
+            ?? await this._entrySlotFromReceipt(signature, execution);
           return {
             signature,
             venue: 'PUMP_AMM',
@@ -1046,6 +1083,7 @@ class PumpTradeExecutor {
       mark('balance_reconciled_ms');
       mark('total_ms');
       execution.settlement = await this.transactionSettlement(signature).catch(() => null);
+      execution.entrySlot = await this._entrySlotFromReceipt(signature, execution);
       return {
         signature,
         venue: 'PUMP_AMM',
@@ -1110,7 +1148,52 @@ class PumpTradeExecutor {
     return snapshot.amount.toString();
   }
 
-  async sell({ mint: mintValue, tokenAmountRaw = null, emergency = false }) {
+  _assertSignalPool(mint, signalPool) {
+    const canonicalPool = canonicalPumpPoolPda(mint, NATIVE_MINT);
+    if (signalPool && String(signalPool) !== canonicalPool.toBase58()) {
+      throw errorWithCode('Signal pool differs from the canonical execution pool', 'SIGNAL_POOL_MISMATCH');
+    }
+    return canonicalPool;
+  }
+
+  _checkSignalFreshness(execution) {
+    const chainAt = Number(execution.signalChainTimestampMs);
+    const maxAge = Number(execution.maxSignalAgeMs);
+    if (!(chainAt > 0) || !(maxAge > 0)) return;
+    execution.signalChainAgeAtSubmitMs = Date.now() - chainAt;
+    if (execution.signalChainAgeAtSubmitMs > maxAge + 1000
+      || execution.signalChainAgeAtSubmitMs < -1000) {
+      throw errorWithCode('Signal chain time expired before transaction submission', 'STALE_SIGNAL_CHAIN_TIME');
+    }
+  }
+
+  _minimumTakeProfitQuote(quoteAmount, minimumNetProceedsSol, execution) {
+    if (!(minimumNetProceedsSol > 0)) return null;
+    const networkFeeLamports = 5000 + Math.ceil(
+      (Number(this.config.computeUnitLimit) || 250_000)
+      * (Number(execution.priorityFeeMicroLamports) || 0) / 1e6,
+    );
+    const minimumQuoteLamports = BigInt(Math.ceil(minimumNetProceedsSol * LAMPORTS_PER_SOL))
+      + BigInt(networkFeeLamports);
+    const quoteLamports = BigInt(quoteAmount.toString());
+    execution.minimumNetProceedsSol = minimumNetProceedsSol;
+    execution.estimatedNetworkFeeSol = networkFeeLamports / LAMPORTS_PER_SOL;
+    execution.quotedNetProceedsSol = Number(quoteLamports - BigInt(networkFeeLamports))
+      / LAMPORTS_PER_SOL;
+    execution.minimumQuoteLamports = minimumQuoteLamports.toString();
+    if (quoteLamports < minimumQuoteLamports) {
+      const error = errorWithCode(
+        `Executable net proceeds ${execution.quotedNetProceedsSol} SOL below take-profit floor `
+          + `${minimumNetProceedsSol} SOL`, 'TAKE_PROFIT_NET_PROCEEDS_REJECTED',
+      );
+      error.execution = execution;
+      throw error;
+    }
+    return new BN(minimumQuoteLamports.toString());
+  }
+
+  async sell({ mint: mintValue, tokenAmountRaw = null, emergency = false,
+    expectedMarket = null, minimumNetProceedsSol = null }) {
     const mint = new PublicKey(mintValue);
     const sellSlippagePct = emergency
       ? (this.config.emergencySellSlippagePct ?? 100)
@@ -1121,6 +1204,7 @@ class PumpTradeExecutor {
       : this.config.priorityFeeMicroLamports;
     const execution = {
       emergencyExit: Boolean(emergency),
+      expectedMarket,
       sellSlippagePct,
       priorityFeeMicroLamports,
     };
@@ -1151,6 +1235,7 @@ class PumpTradeExecutor {
     const amount = new BN(sellRaw.toString());
 
     try {
+      if (expectedMarket === 'PUMP_AMM') throw errorWithCode('Curve complete', 'CURVE_COMPLETE');
       const [{ global, feeConfig }, state] = await Promise.all([
         this._protocolState(),
         this.onlinePump.fetchSellState(mint, this.signer.publicKey, tokenProgram),
@@ -1163,6 +1248,7 @@ class PumpTradeExecutor {
         bondingCurve: state.bondingCurve,
         amount,
       });
+      const minimumQuote = this._minimumTakeProfitQuote(quoteAmount, minimumNetProceedsSol, execution);
       const instructions = await this.pump.sellV2Instructions({
         global,
         bondingCurveAccountInfo: state.bondingCurveAccountInfo,
@@ -1171,7 +1257,8 @@ class PumpTradeExecutor {
         user: this.signer.publicKey,
         amount,
         quoteAmount,
-        slippage: sellSlippagePct,
+        // A positive profit floor must survive transaction construction as a min-output.
+        slippage: minimumQuote ? 0 : sellSlippagePct,
         tokenProgram,
         quoteTokenProgram: TOKEN_PROGRAM_ID,
       });
@@ -1191,11 +1278,25 @@ class PumpTradeExecutor {
 
     const pool = canonicalPumpPoolPda(mint, NATIVE_MINT);
     const state = await this.onlineAmm.swapSolanaState(pool, this.signer.publicKey);
-    const instructions = await PUMP_AMM_SDK.sellBaseInput(
-      state,
-      amount,
-      sellSlippagePct,
-    );
+    if (!state.baseMint.equals(mint) || !state.pool.quoteMint.equals(NATIVE_MINT)) {
+      throw errorWithCode('PumpSwap pool mint direction is invalid', 'INVALID_AMM_POOL');
+    }
+    execution.pool = pool.toBase58();
+    let instructions;
+    if (minimumNetProceedsSol > 0) {
+      const quote = quoteAmmSell({ base: amount, slippage: sellSlippagePct,
+        baseReserve: state.poolBaseAmount, quoteReserve: state.poolQuoteAmount,
+        virtualQuoteReserves: state.pool.virtualQuoteReserves,
+        globalConfig: state.globalConfig, baseMintAccount: state.baseMintAccount,
+        baseMint: state.baseMint, coinCreator: state.pool.coinCreator,
+        creator: state.pool.creator, feeConfig: state.feeConfig });
+      const minimumQuote = this._minimumTakeProfitQuote(quote.uiQuote, minimumNetProceedsSol, execution);
+      instructions = await PUMP_AMM_SDK.sellInstructions(
+        state, amount, BN.max(quote.minQuote, minimumQuote),
+      );
+    } else {
+      instructions = await PUMP_AMM_SDK.sellBaseInput(state, amount, sellSlippagePct);
+    }
     const signature = await this._send(instructions, { priorityFeeMicroLamports });
     const confirmed = await this._confirmedSellResult({
       mint,

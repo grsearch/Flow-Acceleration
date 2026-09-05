@@ -6,7 +6,7 @@ const { Worker } = require('worker_threads');
 const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 const { buildShadowRugPairComparison } = require('../core/ShadowRugPairComparison');
-const { RawTradeShardManager } = require('./RawTradeShardManager');
+const { RawTradeShardManager, ensureRawExecutionColumns } = require('./RawTradeShardManager');
 
 const MIGRATION_SOURCE = Object.freeze({
   CHAIN_EVENT: 'CHAIN_EVENT',
@@ -124,6 +124,7 @@ class ResearchStore {
     console.log(`[Startup:DB] connection ready in ${Date.now() - startupStartedAt}ms; initializing schema`);
     const schemaStartedAt = Date.now();
     this._initSchema();
+    ensureRawExecutionColumns(this.db);
     this.rawTradeShards = new RawTradeShardManager({
       db: this.db,
       dbPath: storageConfig.dbPath,
@@ -3081,12 +3082,14 @@ class ResearchStore {
           timestamp_ms, chain_timestamp_ms, received_at_ms, slot, signature, event_index,
           market, mint, bonding_curve, wallet, side, sol_amount, token_amount, price,
           reserve_price, curve_pct, virtual_sol_reserves_raw, virtual_token_reserves_raw,
-          real_sol_reserves_raw, real_token_reserves_raw
+          real_sol_reserves_raw, real_token_reserves_raw,
+          pool, pool_base_reserves_raw, pool_quote_reserves_raw, virtual_quote_reserves_raw
         ) VALUES (
           @timestampMs, @chainTimestampMs, @receivedAtMs, @slot, @signature, @eventIndex,
           @market, @mint, @bondingCurve, @wallet, @side, @solAmount, @tokenAmount, @price,
           @reservePrice, @curvePct, @virtualSolReservesRaw, @virtualTokenReservesRaw,
-          @realSolReservesRaw, @realTokenReservesRaw
+          @realSolReservesRaw, @realTokenReservesRaw,
+          @pool, @poolBaseReservesRaw, @poolQuoteReservesRaw, @virtualQuoteReservesRaw
         )
       `),
       updateTokenTrade: this.db.prepare(`
@@ -3190,9 +3193,13 @@ class ResearchStore {
       `),
       recentCurveTrades: this.db.prepare(`
         SELECT timestamp_ms AS timestampMs, received_at_ms AS receivedAtMs,
+          chain_timestamp_ms AS chainTimestampMs,
+          slot, signature, event_index AS eventIndex,
           market, mint, wallet, side, sol_amount AS solAmount,
           token_amount AS tokenAmount, price, reserve_price AS reservePrice,
-          curve_pct AS curvePct, virtual_sol_reserves_raw AS virtualSolReservesRaw
+          curve_pct AS curvePct, virtual_sol_reserves_raw AS virtualSolReservesRaw,
+          virtual_token_reserves_raw AS virtualTokenReservesRaw,
+          real_sol_reserves_raw AS realSolReservesRaw, real_token_reserves_raw AS realTokenReservesRaw
         FROM raw_trades_all
         WHERE market = 'PUMP_BONDING_CURVE' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
@@ -3215,10 +3222,14 @@ class ResearchStore {
       `),
       recentAmmTrades: this.db.prepare(`
         SELECT timestamp_ms AS timestampMs, received_at_ms AS receivedAtMs,
+          chain_timestamp_ms AS chainTimestampMs,
           slot, signature, event_index AS eventIndex,
           market, mint, wallet, side, sol_amount AS solAmount,
           token_amount AS tokenAmount, price, reserve_price AS reservePrice,
-          curve_pct AS curvePct
+          curve_pct AS curvePct, pool,
+          pool_base_reserves_raw AS poolBaseReservesRaw,
+          pool_quote_reserves_raw AS poolQuoteReservesRaw,
+          virtual_quote_reserves_raw AS virtualQuoteReservesRaw
         FROM raw_trades_all
         WHERE market = 'PUMP_AMM' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
@@ -5133,6 +5144,10 @@ class ResearchStore {
       virtualTokenReservesRaw: trade.virtualTokenReservesRaw || null,
       realSolReservesRaw: trade.realSolReservesRaw || null,
       realTokenReservesRaw: trade.realTokenReservesRaw || null,
+      pool: trade.pool || null,
+      poolBaseReservesRaw: trade.poolBaseReservesRaw == null ? null : String(trade.poolBaseReservesRaw),
+      poolQuoteReservesRaw: trade.poolQuoteReservesRaw == null ? null : String(trade.poolQuoteReservesRaw),
+      virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw == null ? null : String(trade.virtualQuoteReservesRaw),
     });
     if (this.rawBuffer.length > this.maxPendingTrades) {
       const overflow = this.rawBuffer.length - this.maxPendingTrades;
