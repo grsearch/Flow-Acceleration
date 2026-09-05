@@ -36,6 +36,7 @@ const {
 } = require('@pump-fun/pump-swap-sdk');
 const BN = require('bn.js');
 const bs58Module = require('bs58');
+const { ammQuoteStateRejection } = require('./ShadowExecutionModel');
 
 const bs58 = bs58Module.default || bs58Module;
 
@@ -99,7 +100,8 @@ function ammReservePrice({
   const quoteReserve = rawNumber(quoteReserveRaw);
   const virtualQuoteReserves = rawNumber(virtualQuoteReservesRaw);
   const decimals = Number(baseDecimals);
-  if (!(baseReserve > 0) || !(quoteReserve >= 0) || !(virtualQuoteReserves >= 0)
+  if (!(baseReserve > 0) || !Number.isFinite(quoteReserve) || quoteReserve < 0
+    || !Number.isFinite(virtualQuoteReserves) || !(quoteReserve + virtualQuoteReserves > 0)
     || !Number.isInteger(decimals) || decimals < 0) return null;
   const baseTokens = baseReserve / (10 ** decimals);
   const effectiveQuoteSol = (quoteReserve + virtualQuoteReserves) / LAMPORTS_PER_SOL;
@@ -120,7 +122,11 @@ function ammQuotePriceDiagnostics({
   quotedBaseRaw,
   internalQuoteWithoutFeesRaw,
   legacyReferencePrice = null,
+  signalAmmQuoteState = null,
 }) {
+  const stateRejection = ammQuoteStateRejection({ market: 'PUMP_AMM', ammQuoteState: signalAmmQuoteState,
+    poolBaseReservesRaw: signalBaseReserveRaw, poolQuoteReservesRaw: signalQuoteReserveRaw,
+    virtualQuoteReservesRaw: signalVirtualQuoteReservesRaw ?? virtualQuoteReservesRaw });
   const signalReservePrice = ammReservePrice({
     baseReserveRaw: signalBaseReserveRaw,
     quoteReserveRaw: signalQuoteReserveRaw,
@@ -134,8 +140,8 @@ function ammQuotePriceDiagnostics({
     baseDecimals,
   });
   const fallbackReference = Number(legacyReferencePrice);
-  const marketReferencePrice = signalReservePrice
-    || (Number.isFinite(fallbackReference) && fallbackReference > 0 ? fallbackReference : null);
+  const marketReferencePrice = stateRejection ? null : (signalReservePrice
+    || (Number.isFinite(fallbackReference) && fallbackReference > 0 ? fallbackReference : null));
   const quotedBase = rawNumber(quotedBaseRaw);
   const effectiveQuoteRaw = rawNumber(internalQuoteWithoutFeesRaw);
   const decimals = Number(baseDecimals);
@@ -159,7 +165,9 @@ function ammQuotePriceDiagnostics({
     ? ((quotedPrice / marketReferencePrice) - 1) * 100
     : null;
   return {
-    referencePriceMode: signalReservePrice ? 'EFFECTIVE_POOL_RESERVES' : 'LEGACY_REFERENCE',
+    referencePriceMode: stateRejection ? 'INVALID_AMM_QUOTE_STATE'
+      : (signalReservePrice ? 'EFFECTIVE_POOL_RESERVES' : 'LEGACY_REFERENCE'),
+    ammQuoteStateRejection: stateRejection,
     marketReferencePrice,
     signalReservePrice,
     freshReservePrice,
@@ -874,6 +882,10 @@ class PumpTradeExecutor {
     signalPoolBaseReservesRaw = null,
     signalPoolQuoteReservesRaw = null,
     signalVirtualQuoteReservesRaw = null,
+    signalAmmQuoteState = null,
+    signalPrePoolBaseReservesRaw = null,
+    signalPrePoolQuoteReservesRaw = null,
+    signalAmmExecutionFees = null,
     signalPool = null,
     signalSlot = null,
     signalChainTimestampMs = null,
@@ -884,6 +896,10 @@ class PumpTradeExecutor {
     const execution = {
       version: 2,
       buyMode: 'PUMP_AMM_FIXED_SOL_HARD_CAP',
+      signalAmmQuoteState,
+      signalPrePoolBaseReservesRaw,
+      signalPrePoolQuoteReservesRaw,
+      signalAmmExecutionFees,
       signalSlot: normalizedSlot(signalSlot),
       signalChainTimestampMs,
       maxSignalAgeMs,
@@ -902,6 +918,10 @@ class PumpTradeExecutor {
     };
 
     try {
+      const quoteRejection = ammQuoteStateRejection({ market: 'PUMP_AMM', ammQuoteState: signalAmmQuoteState,
+        poolBaseReservesRaw: signalPoolBaseReservesRaw, poolQuoteReservesRaw: signalPoolQuoteReservesRaw,
+        virtualQuoteReservesRaw: signalVirtualQuoteReservesRaw });
+      if (quoteRejection) throw errorWithCode('PumpSwap signal quote state is not executable', quoteRejection);
       const mint = new PublicKey(mintValue);
       const canonicalPool = this._assertSignalPool(mint, signalPool);
       execution.pool = canonicalPool.toBase58();
@@ -930,6 +950,10 @@ class PumpTradeExecutor {
       mark('state_and_blockhash_ready_ms');
       if (!state.baseMint.equals(mint) || !state.pool.quoteMint.equals(NATIVE_MINT)) {
         throw errorWithCode('PumpSwap pool mint direction is invalid', 'INVALID_AMM_POOL');
+      }
+      if (!ammReservePrice({ baseReserveRaw: state.poolBaseAmount, quoteReserveRaw: state.poolQuoteAmount,
+        virtualQuoteReservesRaw: state.pool.virtualQuoteReserves, baseDecimals: state.baseMintAccount.decimals ?? 6 })) {
+        throw errorWithCode('PumpSwap effective reserves are invalid', 'INVALID_AMM_RESERVES');
       }
       if (walletLamports - Number(spendLamports) < reserveLamports) {
         throw errorWithCode('Wallet reserve guard rejected entry', 'WALLET_RESERVE');
@@ -970,6 +994,7 @@ class PumpTradeExecutor {
         quotedBaseRaw: quoted.base,
         internalQuoteWithoutFeesRaw: quoted.internalQuoteWithoutFees,
         legacyReferencePrice: referencePrice,
+        signalAmmQuoteState,
       });
       execution.spendableQuoteRaw = spendLamports.toString();
       execution.quotedTokenRaw = quoted.base.toString();

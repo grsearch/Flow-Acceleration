@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const { normalizeRawExecutionContext } = require('./RawExecutionContext');
 
 const DAY_MS = 24 * 60 * 60_000;
 const RAW_COLUMNS = Object.freeze([
@@ -31,28 +32,14 @@ const RAW_COLUMNS = Object.freeze([
   'pool_base_reserves_raw',
   'pool_quote_reserves_raw',
   'virtual_quote_reserves_raw',
+  'amm_execution_context_json',
 ]);
 
 const INSERT_COLUMNS = RAW_COLUMNS.filter((column) => column !== 'id');
 const EXECUTION_COLUMNS = Object.freeze([
   'pool', 'pool_base_reserves_raw', 'pool_quote_reserves_raw', 'virtual_quote_reserves_raw',
+  'amm_execution_context_json',
 ]);
-
-// Normalize at the final write boundary too: an older producer or an already
-// queued object may predate these optional columns. Never infer pool state,
-// coerce reserve integers through Number, or mutate the retry queue's objects.
-function normalizeRawExecutionContext(trade) {
-  return {
-    ...trade,
-    pool: trade.pool ?? null,
-    poolBaseReservesRaw: trade.poolBaseReservesRaw == null
-      ? null : String(trade.poolBaseReservesRaw),
-    poolQuoteReservesRaw: trade.poolQuoteReservesRaw == null
-      ? null : String(trade.poolQuoteReservesRaw),
-    virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw == null
-      ? null : String(trade.virtualQuoteReservesRaw),
-  };
-}
 
 function rawColumnSet(db, schema = 'main') {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(schema)) throw new Error('Invalid raw schema');

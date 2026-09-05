@@ -94,7 +94,7 @@ assert.strictEqual(migration.solAmount, 84.990359056);
 const ammBuyData = Buffer.concat([
   DISCRIMINATORS.ammBuy, i64(1_800_000_020), u64(50_000_000), u64(2_000_000_000),
   u64(0), u64(0), u64(500_000_000_000), u64(50_000_000_000), u64(1_000_000_000),
-  u64(0), u64(0), u64(0), u64(0), u64(0), u64(0), pk(6), pk(2),
+  u64(0), u64(0), u64(0), u64(0), u64(1_000_000_000), u64(1_000_000_000), pk(6), pk(2),
 ]);
 const ammBuy = parser.parseTransaction({
   slot: 45,
@@ -111,6 +111,8 @@ assert.strictEqual(ammBuy.mint, trade.mint);
 assert.strictEqual(ammBuy.solAmount, 1);
 assert.strictEqual(ammBuy.tokenAmount, 50);
 assert.strictEqual(ammBuy.virtualQuoteReservesRaw, '0');
+assert.strictEqual(ammBuy.ammQuoteState, 'POST_TRADE_V1');
+assert.strictEqual(ammBuy.poolQuoteReservesRaw, '51000000000');
 
 const boostedAmmBuyData = Buffer.concat([
   DISCRIMINATORS.ammBuy, i64(1_800_000_021), u64(50_000_000), u64(2_000_000_000),
@@ -137,7 +139,8 @@ assert.strictEqual(boostedAmmBuy.cashbackRaw, '0');
 assert.strictEqual(boostedAmmBuy.buybackFeeBasisPoints, 0);
 assert.strictEqual(boostedAmmBuy.buybackRaw, '0');
 assert.strictEqual(boostedAmmBuy.canBoost, true);
-assert.ok(Math.abs(boostedAmmBuy.reservePrice - 0.00014) < 1e-15);
+assert.ok(Math.abs(boostedAmmBuy.preReservePrice - 0.00014) < 1e-15);
+assert.ok(Math.abs(boostedAmmBuy.reservePrice - 70.99 / 499950) < 1e-15);
 
 const boostedAmmSellData = Buffer.concat([
   DISCRIMINATORS.ammSell, i64(1_800_000_022), u64(50_000_000), u64(500_000_000),
@@ -163,6 +166,7 @@ assert.strictEqual(boostedAmmSell.cashbackRaw, '0');
 assert.strictEqual(boostedAmmSell.buybackFeeBasisPoints, 0);
 assert.strictEqual(boostedAmmSell.buybackRaw, '0');
 assert.strictEqual(boostedAmmSell.canBoost, true);
-assert.ok(Math.abs(boostedAmmSell.reservePrice - 0.00014) < 1e-15);
+assert.ok(Math.abs(boostedAmmSell.preReservePrice - 0.00014) < 1e-15);
+assert.ok(Math.abs(boostedAmmSell.reservePrice - 69.595 / 500050) < 1e-15);
 
 console.log('test-pump-event-parser: ok');

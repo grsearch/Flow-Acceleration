@@ -13,6 +13,7 @@ const {
 } = require('../src/data/RawTradeShardManager');
 const { mergeRawShards } = require('../src/data/ResearchSnapshot');
 const { exportResearchWindow } = require('./export-research-window');
+const { restoreRawExecutionContext } = require('../src/data/RawExecutionContext');
 
 function legacySchema(db) {
   db.exec(`CREATE TABLE raw_trades (
@@ -34,6 +35,11 @@ function trade(at, signature) {
     reservePrice: 0.001, pool: 'test-amm-pool',
     poolBaseReservesRaw: '12345678901234567890', poolQuoteReservesRaw: '9876543210987654321',
     virtualQuoteReservesRaw: '0',
+    ammQuoteState: 'POST_TRADE_V1', ammQuoteStateReason: null,
+    prePoolBaseReservesRaw: '12345678901234567990',
+    prePoolQuoteReservesRaw: '9876543210987654300', preReservePrice: 0.0009,
+    ammExecutionFees: { lpFeeBasisPoints: 100, protocolFeeBasisPoints: 25,
+      coinCreatorFeeBasisPoints: 50, buybackFeeBasisPoints: 0 },
   };
 }
 
@@ -44,6 +50,13 @@ function checkContext(row) {
   assert.equal(row.virtual_quote_reserves_raw, '0');
   assert.equal(row.slot, 444311319);
   assert.equal(row.event_index, 1);
+  const context = restoreRawExecutionContext(row);
+  assert.equal(context.ammQuoteState, 'POST_TRADE_V1');
+  assert.equal(context.ammQuoteStateReason, null);
+  assert.equal(context.prePoolBaseReservesRaw, '12345678901234567990');
+  assert.equal(context.prePoolQuoteReservesRaw, '9876543210987654300');
+  assert.equal(context.preReservePrice, 0.0009);
+  assert.deepEqual(context.ammExecutionFees, trade(1, 'unused').ammExecutionFees);
 }
 
 // Exercise wire decoding as well as storage. Signed virtual reserves must never
@@ -92,8 +105,12 @@ function parsedAmmTrades(receivedAt, signatureByte) {
   assert.deepEqual(events.map((event) => event.side), ['BUY', 'SELL']);
   assert.deepEqual(events.map((event) => event.eventIndex), [0, 1]);
   for (const event of events) {
-    assert.equal(event.poolBaseReservesRaw, poolBase);
-    assert.equal(event.poolQuoteReservesRaw, poolQuote);
+    assert.equal(event.ammQuoteState, 'POST_TRADE_V1', event.ammQuoteStateReason);
+    assert.equal(event.prePoolBaseReservesRaw, poolBase);
+    assert.equal(event.prePoolQuoteReservesRaw, poolQuote);
+    assert.notEqual(event.poolBaseReservesRaw, poolBase, 'wire pre-state must not masquerade as post-state');
+    assert.notEqual(event.poolQuoteReservesRaw, poolQuote);
+    assert(event.ammExecutionFees);
     assert.equal(event.virtualQuoteReservesRaw, virtualQuote);
     assert.equal(event.chainTimestampMs, chainSeconds * 1000);
     assert.equal(event.receivedAtMs, receivedAt);
@@ -111,6 +128,10 @@ function checkParsedContext(row, event, camelCase = false) {
     event_index: 'eventIndex', side: 'side', market: 'market',
   };
   for (const [column, key] of Object.entries(fields)) assert.equal(row[camelCase ? key : column], event[key], key);
+  const context = restoreRawExecutionContext(row);
+  for (const key of ['ammQuoteState', 'ammQuoteStateReason', 'prePoolBaseReservesRaw',
+    'prePoolQuoteReservesRaw', 'preReservePrice']) assert.equal(context[key], event[key], key);
+  assert.deepEqual(context.ammExecutionFees, event.ammExecutionFees);
 }
 
 function checkUnknown(row) {
@@ -144,11 +165,13 @@ try {
     store.flushRawTrades();
     checkContext(store.db.prepare("SELECT * FROM raw_trades WHERE signature='new-main'").get());
     checkUnknown(store.db.prepare("SELECT * FROM raw_trades WHERE signature='old-main'").get());
-    const replay = store.stmts.recentAmmTrades.all(now - 2_000)[0];
+    const replay = store.recentAmmTrades(now - 2_000)[0];
     assert.equal(replay.pool, 'test-amm-pool');
     assert.equal(replay.poolBaseReservesRaw, '12345678901234567890');
     assert.equal(replay.chainTimestampMs, now - 1_700);
     assert.equal(replay.signature, 'new-main');
+    assert.equal(replay.ammQuoteState, 'POST_TRADE_V1');
+    assert.equal(replay.prePoolBaseReservesRaw, '12345678901234567990');
     for (const event of mainParsed) store.queueRawTrade(event);
     store.flushRawTrades();
     for (const event of mainParsed) {
@@ -157,6 +180,23 @@ try {
       checkParsedContext(store.stmts.recentAmmTrades.all(now - 2_000)
         .find((row) => row.signature === event.signature && row.eventIndex === event.eventIndex), event, true);
     }
+    store.primeStartupTradeReplay(now - 2_000);
+    const readsAfterPrime = store.startupTradeReplayHealth().dbReads;
+    const cachedReplay = store.recentAmmTrades(now - 2_000);
+    for (const event of mainParsed) {
+      checkParsedContext(cachedReplay.find((row) => row.signature === event.signature
+        && row.eventIndex === event.eventIndex), event, true);
+    }
+    const firstCached = cachedReplay.find((row) => row.signature === mainParsed[0].signature
+      && row.eventIndex === mainParsed[0].eventIndex);
+    firstCached.ammExecutionFees.lpFeeBasisPoints = 9999;
+    const nextCached = store.recentAmmTrades(now - 2_000).find((row) => row.signature === mainParsed[0].signature
+      && row.eventIndex === mainParsed[0].eventIndex);
+    assert.equal(nextCached.ammExecutionFees.lpFeeBasisPoints, mainParsed[0].ammExecutionFees.lpFeeBasisPoints,
+      'one replay consumer must not mutate the shared cached fee context');
+    assert.equal(store.startupTradeReplayHealth().dbReads, readsAfterPrime,
+      'context decoding must use the existing shared startup replay, not another DB scan');
+    store.releaseStartupTradeReplay();
     for (const event of mainParsed) store.queueRawTrade(event);
     store.flushRawTrades();
     assert.equal(store.db.prepare('SELECT COUNT(*) n FROM raw_trades').get().n, 4,

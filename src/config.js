@@ -462,7 +462,7 @@ const graduationRelaxedCapacitySols = positiveNumberListEnv(
   'FLOW_GRADUATION_ACCEL_RELAXED_CAPACITY_SOLS',
   [0.1, 1],
 );
-const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
+const graduationRelaxedEntryProfiles = [
   ...[0, 200, 500].flatMap((handoffDelayMs) => (
     [60_000, 120_000].flatMap((runnerMaxHoldMs) => {
       const baseline = {
@@ -576,14 +576,14 @@ const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
       runnerMaxHoldMs,
     }))
   )),
-] : [];
+].map((profile) => ({ ...profile, newEntriesEnabled: graduationRelaxedEntryShadowEnabled }));
 
 // Exit-only, forward paired controls. The Suite clones a successful 0.1 SOL
 // baseline fill; these profiles never select another entry or emit live orders.
 const graduationHo500LongExitEnabled = booleanEnv('FLOW_GRADUATION_ACCEL_HO500_LONG_EXIT_ENABLED', true);
 const graduationHo500ExitBaseline = graduationRelaxedEntryProfiles
   .find((profile) => profile.id === 'O_C80_HO500_X60');
-const graduationHo500LongExitProfiles = graduationHo500LongExitEnabled && graduationHo500ExitBaseline
+const graduationHo500LongExitProfiles = graduationHo500ExitBaseline
   ? [1_800_000, 3_600_000].flatMap((runnerMaxHoldMs) => (
     [[30, 20], [100, 30]].flatMap(([trailingActivationPct, trailingStopPct]) => (
       [20, 30, 0].map((hardStopPct) => ({
@@ -593,6 +593,7 @@ const graduationHo500LongExitProfiles = graduationHo500LongExitEnabled && gradua
         studyGroup: 'HO500_LONG_EXIT_V1',
         experimentGroup: 'HO500_LONG_EXIT_V1',
         pairedEntryProfileId: 'O_C80_HO500_X60',
+        newEntriesEnabled: graduationHo500LongExitEnabled && graduationRelaxedEntryShadowEnabled,
         handoffLiveStrategyId: null,
         liveStrategyId: null,
         liveBridgeCapacitySol: null,
@@ -1633,7 +1634,7 @@ const config = {
         fixedHoldMs: 60_000,
         hardStopPct: 30,
         maxHoldMs: 60_000,
-        sourceShadowCohortId: 'O_C80_HO500_X60:0_1SOL',
+        sourceShadowCohortId: 'O_C80_HO500_X60_POSTV1:0_1SOL',
       },
       {
         id: 'graduation_accel_o_c80_ho500_x60_recovery_live',
@@ -8092,7 +8093,7 @@ const config = {
   // It never signs or submits a transaction and does not reuse old I cohorts.
   graduationAccelerationShadow: {
     enabled: booleanEnv('FLOW_GRADUATION_ACCEL_SHADOW_ENABLED', true),
-    longExitMatrixEnabled: graduationHo500LongExitProfiles.length > 0,
+    longExitMatrixEnabled: graduationHo500LongExitProfiles.some((profile) => profile.newEntriesEnabled !== false),
     longExitObservationGraceMs: integerEnv(
       'FLOW_GRADUATION_ACCEL_LONG_EXIT_OBSERVATION_GRACE_MS', 5 * 60_000,
       { min: 60_000, max: 5 * 60_000 },
@@ -8891,6 +8892,52 @@ const config = {
     host: process.env.FLOW_BIND_HOST || '0.0.0.0',
   },
 };
+
+// Reserve semantics changed from the event's pre-trade snapshot to a reconstructed
+// post-trade snapshot. Keep every old handoff definition for open-position exits
+// and historical display, but never append a different execution model to its IDs.
+const graduationHandoffProfiles = config.graduationAccelerationShadow.entryProfiles;
+const graduationHandoffIds = new Set(graduationHandoffProfiles
+  .filter((profile) => profile.migrationHandoff).map((profile) => profile.id));
+config.graduationAccelerationShadow.entryProfiles = graduationHandoffProfiles.flatMap((profile) => {
+  if (!profile.migrationHandoff) return [profile];
+  const post = {
+    ...profile,
+    id: `${profile.id}_POSTV1`,
+    label: `${profile.label} · POST V1 即时`,
+    executionModelVersion: 'POST_TRADE_V1',
+    feeModel: 'FLAT_ESTIMATE',
+    shadowExecutionDelayMs: 0,
+    newEntriesEnabled: profile.newEntriesEnabled !== false,
+    legacyProfileId: profile.id,
+  };
+  for (const key of ['pairedEntryProfileId', 'pairedBaselineProfileId']) {
+    if (graduationHandoffIds.has(profile[key])) post[key] = `${profile[key]}_POSTV1`;
+  }
+  return [{
+    ...profile,
+    label: `${profile.label} · PRE 历史（停止新入场）`,
+    executionModelVersion: 'PRE_TRADE_LEGACY',
+    newEntriesEnabled: false,
+    handoffLiveStrategyId: null,
+    liveStrategyId: null,
+  }, post];
+});
+const graduationPostHo500Baseline = config.graduationAccelerationShadow.entryProfiles
+  .find((profile) => profile.id === 'O_C80_HO500_X60_POSTV1');
+if (graduationPostHo500Baseline) {
+  config.graduationAccelerationShadow.entryProfiles.push({
+    ...graduationPostHo500Baseline,
+    id: 'O_C80_HO500_X60_POSTV1_D1000',
+    label: 'O-C80-HO500 · POST V1 同资格延迟1秒 / 固定60秒 / 0.1 SOL',
+    pairedSignalProfileId: graduationPostHo500Baseline.id,
+    shadowExecutionDelayMs: 1_000,
+    capacitySols: [0.1],
+    handoffLiveStrategyId: null,
+    liveStrategyId: null,
+    liveBridgeCapacitySol: null,
+  });
+}
 
 // Solana requests priority price per CU, while operators reason about the total
 // fee per transaction. Derive one shared buy/sell CU price from the SOL target.

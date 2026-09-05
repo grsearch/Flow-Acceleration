@@ -9,6 +9,7 @@ const { buildShadowRugPairComparison } = require('../core/ShadowRugPairCompariso
 const {
   RawTradeShardManager, ensureRawExecutionColumns, normalizeRawExecutionContext,
 } = require('./RawTradeShardManager');
+const { serializeAmmExecutionContext, restoreRawExecutionContext } = require('./RawExecutionContext');
 
 const MIGRATION_SOURCE = Object.freeze({
   CHAIN_EVENT: 'CHAIN_EVENT',
@@ -3114,13 +3115,15 @@ class ResearchStore {
           market, mint, bonding_curve, wallet, side, sol_amount, token_amount, price,
           reserve_price, curve_pct, virtual_sol_reserves_raw, virtual_token_reserves_raw,
           real_sol_reserves_raw, real_token_reserves_raw,
-          pool, pool_base_reserves_raw, pool_quote_reserves_raw, virtual_quote_reserves_raw
+          pool, pool_base_reserves_raw, pool_quote_reserves_raw, virtual_quote_reserves_raw,
+          amm_execution_context_json
         ) VALUES (
           @timestampMs, @chainTimestampMs, @receivedAtMs, @slot, @signature, @eventIndex,
           @market, @mint, @bondingCurve, @wallet, @side, @solAmount, @tokenAmount, @price,
           @reservePrice, @curvePct, @virtualSolReservesRaw, @virtualTokenReservesRaw,
           @realSolReservesRaw, @realTokenReservesRaw,
-          @pool, @poolBaseReservesRaw, @poolQuoteReservesRaw, @virtualQuoteReservesRaw
+          @pool, @poolBaseReservesRaw, @poolQuoteReservesRaw, @virtualQuoteReservesRaw,
+          @ammExecutionContextJson
         )
       `),
       updateTokenTrade: this.db.prepare(`
@@ -3260,7 +3263,8 @@ class ResearchStore {
           curve_pct AS curvePct, pool,
           pool_base_reserves_raw AS poolBaseReservesRaw,
           pool_quote_reserves_raw AS poolQuoteReservesRaw,
-          virtual_quote_reserves_raw AS virtualQuoteReservesRaw
+          virtual_quote_reserves_raw AS virtualQuoteReservesRaw,
+          amm_execution_context_json AS ammExecutionContextJson
         FROM raw_trades_all
         WHERE market = 'PUMP_AMM' AND timestamp_ms >= ?
         ORDER BY timestamp_ms, id
@@ -5182,6 +5186,7 @@ class ResearchStore {
       poolBaseReservesRaw: trade.poolBaseReservesRaw == null ? null : String(trade.poolBaseReservesRaw),
       poolQuoteReservesRaw: trade.poolQuoteReservesRaw == null ? null : String(trade.poolQuoteReservesRaw),
       virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw == null ? null : String(trade.virtualQuoteReservesRaw),
+      ammExecutionContextJson: serializeAmmExecutionContext(trade),
     });
     if (this.rawBuffer.length > this.maxPendingTrades) {
       const overflow = this.rawBuffer.length - this.maxPendingTrades;
@@ -5411,7 +5416,7 @@ class ResearchStore {
     const normalizedSince = Math.max(0, Number(sinceMs) || 0);
     const startedAt = Date.now();
     const curve = this.stmts.recentCurveTrades.all(normalizedSince);
-    const amm = this.stmts.recentAmmTrades.all(normalizedSince);
+    const amm = this.stmts.recentAmmTrades.all(normalizedSince).map(restoreRawExecutionContext);
     this.startupTradeReplayCache = { sinceMs: normalizedSince, curve, amm };
     this.startupTradeReplayStats = {
       primed: true,
@@ -5446,7 +5451,7 @@ class ResearchStore {
     this.startupTradeReplayStats.cacheHits += 1;
     return rows
       .filter((row) => Number(row.timestampMs ?? row.timestamp_ms) >= normalizedSince)
-      .map((row) => ({ ...row }));
+      .map((row) => market === 'amm' ? restoreRawExecutionContext(row) : ({ ...row }));
   }
 
   launchMarketRegimeSnapshot({ startAt, cutoffAt, observedAt }) {
@@ -5457,7 +5462,7 @@ class ResearchStore {
     const cached = this._startupReplayRows('amm', sinceMs);
     if (cached) return cached;
     this.startupTradeReplayStats.dbReads += 1;
-    return this.stmts.recentAmmTrades.all(sinceMs);
+    return this.stmts.recentAmmTrades.all(sinceMs).map(restoreRawExecutionContext);
   }
 
   recordSmartWalletEvent(trade) {
@@ -8774,7 +8779,8 @@ class ResearchStore {
       ORDER BY f.signal_at DESC
     `);
     const rugComparisons = [
-      ['O_C80_HO500_X60', 'O_C80_HO500_X60_RUGX', '高频 O-C80 HO500 · 0.1 SOL X60'],
+      ['O_C80_HO500_X60', 'O_C80_HO500_X60_RUGX', '旧 PRE 历史 · 高频 O-C80 HO500 · 0.1 SOL X60'],
+      ['O_C80_HO500_X60_POSTV1', 'O_C80_HO500_X60_RUGX_POSTV1', 'POST V1 · 高频 O-C80 HO500 · 0.1 SOL X60'],
       ['O_C80_P500_STAIR240', 'O_C80_P500_STAIR240_RUGX', '低频 O-C80 P500 · STAIR240'],
     ].map(([baselineProfileId, filteredProfileId, label]) => (
       buildShadowRugPairComparison({

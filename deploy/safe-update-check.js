@@ -224,7 +224,7 @@ function validateSummary(summary) {
   const expectedIds = ['migrated_ge30_r23_f2_only_g2_xleg_live', 'migrated_grt_r23_f3_v2_xleg_live'];
   guard(summary.ho500?.present && summary.ho500.id === 'graduation_accel_o_c80_ho500_x60_live'
     && summary.post?.length === 2 && expectedIds.every((id) => summary.post.some((row) => row.id === id && row.present)), 'THREE_STRATEGIES_REQUIRED');
-  guard(summary.ho500.positionSizeSol === 0.1 && summary.ho500.sourceShadowCohortId === 'O_C80_HO500_X60:0_1SOL'
+  guard(summary.ho500.positionSizeSol === 0.1 && summary.ho500.sourceShadowCohortId === 'O_C80_HO500_X60_POSTV1:0_1SOL'
     && summary.bridge?.liveBridgeCapacitySol === 0.1 && summary.bridge.capacitySols.includes(0.1)
     && summary.bridge.handoffLiveStrategyId === summary.ho500.id, 'HO500_BRIDGE_MISMATCH');
 }

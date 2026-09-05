@@ -51,6 +51,7 @@ function trade(timestampMs, suffix) {
     poolBaseReservesRaw: null,
     poolQuoteReservesRaw: null,
     virtualQuoteReservesRaw: null,
+    ammExecutionContextJson: null,
   };
 }
 

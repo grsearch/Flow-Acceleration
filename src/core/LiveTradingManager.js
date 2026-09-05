@@ -1,7 +1,7 @@
 'use strict';
 
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
-const { executableSell } = require('./ShadowExecutionModel');
+const { executableSell, ammQuoteStateRejection } = require('./ShadowExecutionModel');
 
 const fs = require('fs');
 const path = require('path');
@@ -27,6 +27,16 @@ function tradeEvidence(trade) {
     chainTimestampMs: positiveNumber(trade?.chainTimestampMs),
     receivedAtMs: positiveNumber(trade?.receivedAtMs ?? trade?.timestampMs),
     timestampMs: positiveNumber(trade?.timestampMs),
+    ammQuoteState: trade?.ammQuoteState ?? null,
+    ammQuoteStateReason: trade?.ammQuoteStateReason ?? null,
+    prePoolBaseReservesRaw: trade?.prePoolBaseReservesRaw ?? null,
+    prePoolQuoteReservesRaw: trade?.prePoolQuoteReservesRaw ?? null,
+    preReservePrice: trade?.preReservePrice ?? null,
+    reservePrice: trade?.reservePrice ?? null,
+    poolBaseReservesRaw: trade?.poolBaseReservesRaw ?? null,
+    poolQuoteReservesRaw: trade?.poolQuoteReservesRaw ?? null,
+    virtualQuoteReservesRaw: trade?.virtualQuoteReservesRaw ?? null,
+    ammExecutionFees: trade?.ammExecutionFees ?? null,
   };
 }
 
@@ -287,6 +297,7 @@ class LiveTradingManager {
       candidates: 0,
       signals: 0,
       rejectedPositionTrades: 0,
+      rejectedAmmQuoteStates: 0,
       takeProfitQuoteRejected: 0,
     };
   }
@@ -671,10 +682,27 @@ class LiveTradingManager {
 
   onExternalStrategySignal(event) {
     const sourceTrade = this.signalTradeContexts.get(event?.mint);
+    // All events in a transaction share slot/receive time. A context may only
+    // repair the exact event, never a sibling event or an unidentified signal.
     if (sourceTrade && sourceTrade.timestampMs === event?.timestampMs
-      && (event.slot == null || Number(event.slot) === Number(sourceTrade.slot))) {
+      && event.slot != null && sourceTrade.slot != null
+      && Number(event.slot) === Number(sourceTrade.slot)
+      && event.signature && event.signature === sourceTrade.signature
+      && event.eventIndex != null && sourceTrade.eventIndex != null
+      && Number(event.eventIndex) === Number(sourceTrade.eventIndex)) {
       event = { ...event, chainTimestampMs: event.chainTimestampMs ?? sourceTrade.chainTimestampMs,
-        slot: event.slot ?? sourceTrade.slot, pool: event.pool ?? sourceTrade.pool };
+        slot: event.slot ?? sourceTrade.slot, pool: event.pool ?? sourceTrade.pool,
+        ammQuoteState: event.ammQuoteState ?? sourceTrade.ammQuoteState,
+        ammQuoteStateReason: event.ammQuoteState != null
+          ? event.ammQuoteStateReason ?? null : sourceTrade.ammQuoteStateReason,
+        prePoolBaseReservesRaw: event.prePoolBaseReservesRaw ?? sourceTrade.prePoolBaseReservesRaw,
+        prePoolQuoteReservesRaw: event.prePoolQuoteReservesRaw ?? sourceTrade.prePoolQuoteReservesRaw,
+        preReservePrice: event.preReservePrice ?? sourceTrade.preReservePrice,
+        reservePrice: event.reservePrice ?? sourceTrade.reservePrice,
+        poolBaseReservesRaw: event.poolBaseReservesRaw ?? sourceTrade.poolBaseReservesRaw,
+        poolQuoteReservesRaw: event.poolQuoteReservesRaw ?? sourceTrade.poolQuoteReservesRaw,
+        virtualQuoteReservesRaw: event.virtualQuoteReservesRaw ?? sourceTrade.virtualQuoteReservesRaw,
+        ammExecutionFees: event.ammExecutionFees ?? sourceTrade.ammExecutionFees };
     }
     const strategy = this.strategies.get(event?.strategyId);
     if (!strategy || !event?.mint || !event?.episodeId) return null;
@@ -760,6 +788,19 @@ class LiveTradingManager {
         this.signalTradeContexts.delete(this.signalTradeContexts.keys().next().value);
       }
     }
+    const quoteRejection = ammQuoteStateRejection(trade)
+      || (trade?.market === 'PUMP_AMM' && trade.ammQuoteState === 'POST_TRADE_V1'
+        && !(Number(trade.reservePrice) > 0) ? 'AMM_POST_TRADE_MARK_MISSING' : null);
+    if (quoteRejection) {
+      this.metrics.rejectedAmmQuoteStates += 1;
+      this.ammPriceStates.delete(trade.mint);
+      for (const position of this._positionsForMint(trade.mint)) {
+        this.metrics.rejectedPositionTrades += 1;
+        position.lastRejectedTrade = { ...tradeEvidence(trade), reason: quoteRejection };
+        position.lastAmmQuoteRejectedAt = Math.max(this.now(), Number(trade.timestampMs) || 0);
+      }
+      return;
+    }
     const ammPrice = Number(trade?.reservePrice) > 0
       ? Number(trade.reservePrice)
       : Number(trade?.price);
@@ -785,6 +826,7 @@ class LiveTradingManager {
   }
 
   _observePositionTrade(position, observedTrade) {
+    if (ammQuoteStateRejection(observedTrade)) return;
     if (position.status === 'OPENING' || position.status === 'EXITING') {
       if (!position.confirmationTrade || Number(observedTrade.slot || 0)
         >= Number(position.confirmationTrade.slot || 0)) position.confirmationTrade = observedTrade;
@@ -805,6 +847,7 @@ class LiveTradingManager {
     position.lastAcceptedChainTimestampMs = positiveNumber(observedTrade.chainTimestampMs)
       || position.lastAcceptedChainTimestampMs;
     position.lastAcceptedTrade = observedTrade;
+    position.lastAmmQuoteRejectedAt = null;
     if (position.entryPrice > 0) {
       position.lastObservedAt = observedTrade.timestampMs;
       const immediateStop = this._immediateHardStopReason(
@@ -878,6 +921,10 @@ class LiveTradingManager {
   }
 
   _positionTradeRejection(position, trade, graduatedAt) {
+    const quoteRejection = ammQuoteStateRejection(trade);
+    if (quoteRejection) return quoteRejection;
+    if (trade.market === 'PUMP_AMM' && position.lastAmmQuoteRejectedAt
+      && Number(trade.timestampMs) <= position.lastAmmQuoteRejectedAt) return 'AMM_QUOTE_CACHE_INVALIDATED';
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     const market = graduatedAt || position.entryMarket === 'PUMP_AMM'
       ? 'PUMP_AMM' : (position.entryMarket || trade.market);
@@ -1054,6 +1101,7 @@ class LiveTradingManager {
   }
 
   _acceptAmmPrice(trade) {
+    if (ammQuoteStateRejection(trade)) return false;
     const settings = this.config.ammPriceContinuity || {
       minRatio: 0.2,
       maxRatio: 5,
@@ -1149,6 +1197,7 @@ class LiveTradingManager {
       candidate.lowAt,
     ].join(':');
     const event = {
+      ...tradeEvidence(trade),
       strategyId: strategy.id,
       episodeId,
       mint: trade.mint,
@@ -1205,6 +1254,8 @@ class LiveTradingManager {
   }
 
   _riskReason(event) {
+    const quoteRejection = ammQuoteStateRejection(event);
+    if (quoteRejection) return quoteRejection;
     if (this._killSwitchActive()) return 'KILL_SWITCH';
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
@@ -1437,6 +1488,10 @@ class LiveTradingManager {
           signalPoolBaseReservesRaw: event.poolBaseReservesRaw,
           signalPoolQuoteReservesRaw: event.poolQuoteReservesRaw,
           signalVirtualQuoteReservesRaw: event.virtualQuoteReservesRaw,
+          signalAmmQuoteState: event.ammQuoteState,
+          signalPrePoolBaseReservesRaw: event.prePoolBaseReservesRaw,
+          signalPrePoolQuoteReservesRaw: event.prePoolQuoteReservesRaw,
+          signalAmmExecutionFees: event.ammExecutionFees,
           signalPool: event.pool || event.poolAddress,
           signalSlot: event.slot,
           signalChainTimestampMs: event.chainTimestampMs,
@@ -1930,6 +1985,7 @@ class LiveTradingManager {
   }
 
   _evaluatePositionExit(position, timestampMs, price, trade = null) {
+    if (ammQuoteStateRejection(trade) || (!trade && position.lastAmmQuoteRejectedAt)) return;
     const strategy = position.strategy || this.strategies.get(position.strategyId);
     if (!strategy || position.status !== 'OPEN' || !(position.entryPrice > 0) || !(price > 0)) return;
     position.lastObservedAt = timestampMs;
@@ -2098,6 +2154,7 @@ class LiveTradingManager {
   }
 
   _immediateHardStopReason(position, strategy, trade, markPrice) {
+    if (ammQuoteStateRejection(trade)) return null;
     if (!(strategy?.hardStopPct > 0) || !(position.entryPrice > 0) || !(markPrice > 0)) {
       return null;
     }

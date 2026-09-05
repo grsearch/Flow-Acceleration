@@ -22,8 +22,23 @@ function signedBigInt(value) {
   }
 }
 
+function ammQuoteStateRejection(trade = {}) {
+  if (trade?.market !== 'PUMP_AMM' || trade.ammQuoteState == null) return null;
+  if (trade.ammQuoteState !== 'POST_TRADE_V1') {
+    return trade.ammQuoteState === 'INVALID' ? 'AMM_QUOTE_STATE_INVALID' : 'AMM_QUOTE_STATE_UNSUPPORTED';
+  }
+  try {
+    const base = BigInt(trade.poolBaseReservesRaw ?? 0);
+    const realQuote = BigInt(trade.poolQuoteReservesRaw ?? -1);
+    const virtual = BigInt(trade.virtualQuoteReservesRaw ?? 0);
+    if (base > 0n && realQuote >= 0n && realQuote + virtual > 0n) return null;
+  } catch (_) { /* Explicitly versioned malformed reserves must fail closed. */ }
+  return 'AMM_POST_TRADE_RESERVES_INVALID';
+}
+
 function reservesForTrade(trade = {}) {
   if (trade.market === 'PUMP_AMM') {
+    if (ammQuoteStateRejection(trade)) return null;
     const baseRaw = positiveBigInt(trade.poolBaseReservesRaw);
     // virtualQuoteReserves is signed in PumpSwap events. Ignoring a negative
     // adjustment would overstate executable liquidity exactly during stress.
@@ -56,6 +71,9 @@ function rugClassification(trade = {}, rugMarkReturnPct = null) {
 
 function executableBuy(trade, positionSol, fallbackPrice = null) {
   const marketPrice = finite(fallbackPrice);
+  const stateRejection = ammQuoteStateRejection(trade);
+  if (stateRejection) return { available: false, price: null, marketPrice,
+    tokenUnits: null, impactPct: null, reason: stateRejection, reserveSource: null };
   const sol = finite(positionSol);
   const reserves = reservesForTrade(trade);
   if (!reserves || !(sol > 0)) {
@@ -101,6 +119,10 @@ function executableSell(trade, tokenUnits, fallbackPrice = null, {
   maxQuoteToMarketRatio = null,
 } = {}) {
   const marketPrice = finite(fallbackPrice);
+  const stateRejection = ammQuoteStateRejection(trade);
+  if (stateRejection) return { available: false, price: null, marketPrice,
+    proceedsSol: null, impactPct: null, conservative: false, rugLike: false,
+    reason: stateRejection, reserveSource: null };
   const units = finite(tokenUnits);
   const reserves = reservesForTrade(trade);
   const rugLike = finite(rugMarkReturnPct, 0) <= -35;
@@ -235,6 +257,7 @@ function executableRoundTrip({ trade, positionSol, entryPrice, marketExitPrice }
 }
 
 module.exports = {
+  ammQuoteStateRejection,
   reservesForTrade,
   executableBuy,
   executableSell,
