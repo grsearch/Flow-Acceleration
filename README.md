@@ -827,16 +827,18 @@ FLOW_GRPC_ENDPOINTS=https://laserstream-mainnet-lax.helius-rpc.com,https://laser
 
 切换后不会仅因为首选端点恢复就立即切回，避免连接抖动；当前备用端点失效时才会按列表继续轮转。Dashboard 的“重复副本已丢弃”通常应接近 0，只会在切换边界或上游重放时增加。
 
-Linux 一键安装会保留已有 `.env`、检查服务用户、Node.js 22+ 与 pnpm，生成缺失的 `.env`，校验 systemd 单元并设置开机自启：
+Linux 首次安装仅接受独立的空目录，且不能已有同名服务。安装器检查服务用户、Node.js 22+ 与 pnpm，生成 `.env` 模板，校验 systemd 单元并设置开机自启；不覆盖已有部署、数据、源码或 Git 元数据：
 
 ```bash
 sudo bash deploy/install.sh /opt/flow-acceleration
 sudo nano /opt/flow-acceleration/.env
-sudo systemctl restart flow-acceleration
+sudo systemctl start flow-acceleration
 sudo systemctl --no-pager --full status flow-acceleration
 ```
 
-也可以在已经配置好 `.env` 时使用 `START_SERVICE=1 sudo -E bash deploy/install.sh`，让安装脚本完成后立即启动并显示服务状态。
+已有生产环境不要重新运行此安装器或以 `checkout --theirs` 处理升级冲突。使用受控升级入口前先阅读 [安全升级说明](docs/safe-update.md)：先只读预检，确认服务归属、源代码一致、仓位/订单和待写数据，再决定是否执行更新。配置调优通过 `.env` 完成，不在服务器直接修改受版本管理的源码。
+
+本次新增的停止保护需要同时部署代码和 systemd 单元（`KillMode=mixed`、`SendSIGKILL=no`、停止等待180秒），仅拉取代码不会更改已安装的单元。停止失败时保留进程和待写队列，日志会记录 `STOP_FAILED` 及具体阶段；不能随后强杀或另启进程。修复锁/磁盘问题后可重新发送正常停止请求。断电、内核 OOM 或手动强杀仍可能丢失尚未落库的内存数据，此保护不等于磁盘持久队列。PM2 模板仅供研究调试，不支持这条安全升级路径。
 
 ### 每日 07:00 自动导出最近 24 小时并上传腾讯 COS
 

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { config, validateConfig, streamTokenFor } = require('./config');
 const { collectRuntimeIntegrity } = require('./runtime/RuntimeIntegrity');
+const { GracefulShutdown, createSignalShutdown } = require('./runtime/GracefulShutdown');
 const { PumpEventParser } = require('./core/PumpEventParser');
 const PumpFlowStream = require('./core/PumpFlowStream');
 const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
@@ -494,6 +495,8 @@ function createRuntime(runtimeConfig = config) {
   };
   let maintenanceTimer = null;
   let stopping = false;
+  let shutdownSequence = null;
+  let dashboardStarting = null;
 
   const refreshAmmSubscriptions = (now = Date.now()) => {
     const graduatedPending = labeler.pendingMints()
@@ -632,6 +635,7 @@ function createRuntime(runtimeConfig = config) {
   };
 
   stream.on('transaction', (transaction, context) => {
+    if (stopping) return;
     let events;
     try {
       events = parser.parseTransaction(transaction, context.receivedAt);
@@ -904,7 +908,10 @@ function createRuntime(runtimeConfig = config) {
   });
 
   async function start() {
-    await server.start();
+    if (stopping) throw new Error('Runtime cannot restart after shutdown has begun');
+    dashboardStarting = server.start();
+    try { await dashboardStarting; } finally { dashboardStarting = null; }
+    if (stopping) return;
     console.log(`Flow Acceleration dashboard: http://127.0.0.1:${runtimeConfig.server.port}`);
     console.log(`Trading mode: ${trader.mode}. Full research capture remains enabled.`);
     if (runtimeConfig.liveTrading.safetyLock) {
@@ -1127,56 +1134,47 @@ function createRuntime(runtimeConfig = config) {
 
     refreshAmmSubscriptions();
     await stream.start();
+    if (stopping) return;
     store.startHealthSampler(runtimeConfig.storage.healthRefreshMs);
   }
 
-  async function stop(reason = 'shutdown') {
-    if (stopping) return;
+  function stop(reason = 'shutdown') {
     stopping = true;
-    console.log(`[Flow] stopping: ${reason}`);
-    if (maintenanceTimer) clearInterval(maintenanceTimer);
-    maintenanceTimer = null;
-    await stream.stop();
-    await trader.stop();
-    signalShadow.stop();
-    flowFirstShadow.stop();
-    smartPullbackShadow.stop();
-    smartOpenShadow.stop();
-    flowSmartConfirmShadow.stop();
-    smartLikeEarlyShadow.stop();
-    preEntryRugRisk.stop();
-    smartWalletConsensusFlowRunnerShadow.stop();
-    smartWalletRegistry.stop();
-    smartResonanceShadow.stop();
-    smartWalletRugEscapeShadow.stop();
-    smartWalletFirstOpenRightTailShadow.stop();
-    individualSmartWalletShadows.stop();
-    publicFlowLeadShadow.stop();
-    publicFlowAbsorptionRecoveryShadow.stop();
-    creatorAffinityShadow.stop();
-    cyaSlotFlowShadow.stop();
-    cyaOrganicBurstShadow.stop();
-    earlyPureBuyBurstShadow.stop();
-    sameSlotDumpBackrunShadow.stop();
-    launchPullbackShadow.stop();
-    launchQualityObserver.stop();
-    migrationSecondLegObserver.stop();
-    migrationSecondLegShadow.stop();
-    holderGrowthShadow.stop();
-    qualityLeaderShadow.stop();
-    bigWinnerShadow.stop();
-    migratedDropReboundShadow.stop();
-    migrationContinuityShadow.stop();
-    rangeScalperShadow.stop();
-    cyaEarlyPyramidShadow.stop();
-    bondingCurveMomentumShadow.stop();
-    graduationHoldShadow.stop();
-    graduationAccelerationShadow.stop();
-    featureEdgeAudit.stop();
-    smartWalletConsensusOverlay.stop();
-    postMigrationSurvivor.stop();
-    await server.stop();
-    store.close();
+    if (!shutdownSequence) {
+      const observers = { smartWalletRegistry, signalShadow, flowFirstShadow, smartPullbackShadow,
+        smartOpenShadow, flowSmartConfirmShadow, smartLikeEarlyShadow, preEntryRugRisk,
+        smartWalletConsensusFlowRunnerShadow, smartResonanceShadow, smartWalletRugEscapeShadow,
+        smartWalletFirstOpenRightTailShadow, individualSmartWalletShadows, publicFlowLeadShadow,
+        publicFlowAbsorptionRecoveryShadow, creatorAffinityShadow, cyaSlotFlowShadow,
+        cyaOrganicBurstShadow, earlyPureBuyBurstShadow, sameSlotDumpBackrunShadow,
+        launchPullbackShadow, launchQualityObserver, migrationSecondLegObserver,
+        migrationSecondLegShadow, holderGrowthShadow, qualityLeaderShadow, bigWinnerShadow,
+        migratedDropReboundShadow, migrationContinuityShadow, rangeScalperShadow,
+        cyaEarlyPyramidShadow, bondingCurveMomentumShadow, graduationHoldShadow,
+        graduationAccelerationShadow, featureEdgeAudit, smartWalletConsensusOverlay,
+        postMigrationSurvivor };
+      shutdownSequence = new GracefulShutdown([
+        ['STOP_MAINTENANCE', () => {
+          if (maintenanceTimer) clearInterval(maintenanceTimer);
+          maintenanceTimer = null;
+        }],
+        // Dashboard startup has its own bounded handshake; do not race its
+        // resource creation against cleanup. Network stream startup is instead
+        // cancelled below, never awaited before requesting cancellation.
+        ['SETTLE_DASHBOARD_START', async () => { if (dashboardStarting) await dashboardStarting.catch(() => {}); }],
+        ['STOP_STREAM', () => stream.stop()],
+        ['SETTLE_TRADING', () => trader.stop()],
+        ...Object.entries(observers).map(([name, target]) => [`STOP_${name}`, () => target.stop()]),
+        ['DRAIN_DATABASE', (report) => store.drainPendingWrites({ timeoutMs: 60_000,
+          onProgress: (progress) => report({ database: progress }) })],
+        ['STOP_DASHBOARD', () => server.stop()],
+        ['CLOSE_DATABASE', () => store.close()],
+      ], { onProgress: (progress) => {
+        runtimeMetrics.shutdown = progress;
+        console.log(`[Shutdown] ${JSON.stringify(progress)}`);
+      } });
+    }
+    return shutdownSequence.stop(reason);
   }
 
   function health() {
@@ -1258,35 +1256,53 @@ async function main() {
   }
 
   let startupDashboard = null;
-  try {
-    startupDashboard = await launchStartupDashboard(config.server);
-    console.log(
-      `Startup Dashboard: http://127.0.0.1:${config.server.port} `
-      + `(pid ${startupDashboard.pid}; waiting for database and strategy restore).`,
-    );
-  } catch (error) {
-    console.warn(`[Startup Dashboard] unavailable; continuing startup: ${error.message}`);
-  }
   let runtime;
-  try {
-    runtime = createRuntime(config);
-  } catch (error) {
-    await startupDashboard?.stop();
-    throw error;
-  }
-  const shutdown = async (signal) => {
-    try {
-      await runtime.stop(signal);
-      process.exit(0);
-    } catch (error) {
-      console.error('[Shutdown]', error);
-      process.exit(1);
-    }
+  let stopRequested = false;
+  let finishStartup;
+  const startupFinished = new Promise((resolve) => { finishStartup = resolve; });
+  const shutdown = createSignalShutdown({
+    stop: async () => {
+      stopRequested = true;
+      // Before the runtime exists we can only wait for synchronous restore to
+      // yield. Once it exists, stop immediately to cancel async stream startup.
+      if (!runtime) await startupFinished;
+      await startupDashboard?.stop();
+      if (runtime) await runtime.stop('signal');
+    },
+    exit: (code) => process.exit(code),
+    log: (message) => console.error(message),
+  });
+  const onSignal = (signal) => {
+    stopRequested = true;
+    void shutdown(signal);
   };
-  process.once('SIGINT', () => shutdown('SIGINT'));
-  process.once('SIGTERM', () => shutdown('SIGTERM'));
-  await startupDashboard?.stop();
-  await runtime.start();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    try {
+      startupDashboard = await launchStartupDashboard(config.server);
+      console.log(
+        `Startup Dashboard: http://127.0.0.1:${config.server.port} `
+        + `(pid ${startupDashboard.pid}; waiting for database and strategy restore).`,
+      );
+    } catch (error) {
+      console.warn(`[Startup Dashboard] unavailable; continuing startup: ${error.message}`);
+    }
+    // Let a pending signal be handled before synchronous restoration.
+    await new Promise((resolve) => setImmediate(resolve));
+    if (stopRequested) return;
+    try {
+      runtime = createRuntime(config);
+    } catch (error) {
+      await startupDashboard?.stop();
+      throw error;
+    }
+    await startupDashboard?.stop();
+    await new Promise((resolve) => setImmediate(resolve));
+    if (!stopRequested) await runtime.start();
+  } finally {
+    finishStartup();
+  }
 }
 
 if (require.main === module) {

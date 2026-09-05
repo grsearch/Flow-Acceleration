@@ -129,6 +129,7 @@ class SmartWalletRegistry {
     this.actualEventBackfillPending = true;
     this.lastActualEventBackfillAt = 0;
     this.stopping = false;
+    this.stopPromise = null;
     this.metrics = {
       discovered: 0,
       seeded: 0,
@@ -1044,6 +1045,7 @@ class SmartWalletRegistry {
           }
         }
         const page = await this._historyRpc(row.wallet, row);
+        if (this.stopping) return;
         const stats = this._recordHistoryPage(row.wallet, page.data);
         const credits = Math.max(1, finite(this.config.historyCreditsPerPage, 50));
         const now = this.now();
@@ -1094,7 +1096,7 @@ class SmartWalletRegistry {
       }
       throw new Error('HISTORY_MAX_PAGES_REACHED');
     } catch (error) {
-      if (this.stopping && error?.name === 'AbortError') return;
+      if (this.stopping) return;
       const now = this.now();
       const message = String(error?.message || error).slice(0, 500);
       const timeoutLike = error?.name === 'AbortError' || /abort|timeout/i.test(message);
@@ -1707,6 +1709,8 @@ class SmartWalletRegistry {
     const finish = ({ message = null, error = null, timedOut = false } = {}) => {
       if (settled) return;
       settled = true;
+      // A late read-worker result must not mutate the Store during shutdown.
+      if (this.stopping) return;
       if (this.maintenanceWorkerTimer) clearTimeout(this.maintenanceWorkerTimer);
       this.maintenanceWorkerTimer = null;
       if (timedOut) void Promise.resolve(worker.terminate()).catch(() => null);
@@ -1802,6 +1806,7 @@ class SmartWalletRegistry {
   start() {
     if (!this.config.enabled) return;
     this.stopping = false;
+    this.stopPromise = null;
     const now = this.now();
     for (const wallet of this.config.seedWallets || []) {
       const created = this.discoverWallet({
@@ -1851,13 +1856,17 @@ class SmartWalletRegistry {
   }
 
   stop() {
+    if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
+    const pending = [...this.ageChecks.values(), ...this.historyBackfills.values()];
     if (this.maintenanceWorkerTimer) clearTimeout(this.maintenanceWorkerTimer);
     this.maintenanceWorkerTimer = null;
     if (this.maintenanceWorker) {
-      void Promise.resolve(this.maintenanceWorker.worker.terminate()).catch(() => null);
+      const active = this.maintenanceWorker;
+      pending.push(Promise.resolve().then(() => active.worker.terminate()).then(() => {
+        if (this.maintenanceWorker === active) this.maintenanceWorker = null;
+      }));
     }
-    this.maintenanceWorker = null;
     this.maintenanceQueue.length = 0;
     this.maintenancePendingTypes.clear();
     for (const controller of this.ageAbortControllers) controller.abort();
@@ -1886,8 +1895,11 @@ class SmartWalletRegistry {
     this.lastSeenWrites.clear();
     this.actualEventBackfillPending = false;
     this.lastActualEventBackfillAt = 0;
-    this.ageChecks.clear();
-    this.historyBackfills.clear();
+    this.stopPromise = Promise.all(pending).then(() => undefined, (error) => {
+      this.stopPromise = null;
+      throw error;
+    });
+    return this.stopPromise;
   }
 
   _meta() {
@@ -2103,6 +2115,7 @@ class SmartWalletRegistry {
   }
 
   _recordAgeResult(wallet, result, at = this.now()) {
+    if (this.stopping) return null;
     const current = this.store.db.prepare(
       'SELECT * FROM smart_wallet_registry WHERE wallet=?',
     ).get(wallet);

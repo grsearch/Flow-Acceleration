@@ -24,6 +24,7 @@ const CRITICAL_FILES = Object.freeze([
   'src/data/dashboard-preaggregate-worker.js',
   'src/data/dashboard-snapshot-tasks.js',
   'src/core/LiveTradingManager.js',
+  'src/core/PumpFlowStream.js',
   'src/core/SmartWalletConsensusFlowRunnerShadowSuite.js',
   'src/core/GraduationAccelerationShadowSuite.js',
   'src/core/ShadowExecutionModel.js',
@@ -32,6 +33,7 @@ const CRITICAL_FILES = Object.freeze([
   'src/core/SmartWalletRegistry.js',
   'src/core/SmartWalletConsensusOverlayObserver.js',
   'src/runtime/RuntimeIntegrity.js',
+  'src/runtime/GracefulShutdown.js',
 ]);
 const HO500_ID = 'graduation_accel_o_c80_ho500_x60_live';
 const HO500_PROFILE = 'O_C80_HO500_X60';

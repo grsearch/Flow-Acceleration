@@ -259,6 +259,7 @@ class LiveTradingManager {
     this.strategyMetrics = new Map([...this.strategies.keys()]
       .map((strategyId) => [strategyId, emptyStrategyRuntimeMetrics()]));
     this.activeMintEntryLocksSnapshot = { count: null, updatedAt: null };
+    this.unsettledOrdersSnapshot = { count: null, updatedAt: null };
     this.metrics = {
       evaluated: 0,
       matched: 0,
@@ -534,6 +535,7 @@ class LiveTradingManager {
 
   async _reconcileHistoricalSettlements() {
     const rows = this.store.unsettledLiveOrders(2_000);
+    this.unsettledOrdersSnapshot = { count: rows.length, updatedAt: this.now() };
     for (const positionId of new Set(rows.map((row) => row.position_id))) {
       this.store.refreshLivePositionSettlement(positionId);
     }
@@ -576,8 +578,11 @@ class LiveTradingManager {
     if (this.mintLockSweepPromise || (!force && now < this.nextMintLockSweepAt)) return;
     this.nextMintLockSweepAt = now + intervalMs;
     const batchSize = Math.max(1, Number(this.config.heldMintLockRecheckBatch) || 10);
-    const locks = this.store.activeLiveMintEntryLocks(batchSize)
-      .filter((lock) => now - Number(lock.last_checked_at || 0) >= intervalMs);
+    const activeLocks = this.store.activeLiveMintEntryLocks(batchSize);
+    // This bounded existing query proves empty vs nonempty without adding SQL
+    // to the IPC health path. A nonzero count may be capped at batchSize.
+    this.activeMintEntryLocksSnapshot = { count: activeLocks.length, updatedAt: now, limit: batchSize };
+    const locks = activeLocks.filter((lock) => now - Number(lock.last_checked_at || 0) >= intervalMs);
     if (!locks.length) return;
     const sweep = (async () => {
       for (const lock of locks) {
@@ -646,7 +651,11 @@ class LiveTradingManager {
       emergencyPriorityFeeMicroLamports: this.config.emergencyPriorityFeeMicroLamports,
       trackedMints: this.tracked.size,
       activePositions: this.positions.size,
+      pendingActions: this.pending.size,
+      unsettledOrders: this.unsettledOrdersSnapshot.count,
+      unsettledOrdersUpdatedAt: this.unsettledOrdersSnapshot.updatedAt,
       activeMintEntryLocks,
+      activeMintEntryLocksLimit: this.activeMintEntryLocksSnapshot.limit || 1_000,
       activeMintEntryLocksStatus,
       activeMintEntryLocksUpdatedAt: this.activeMintEntryLocksSnapshot.updatedAt,
       killSwitchActive: this._killSwitchActive(),

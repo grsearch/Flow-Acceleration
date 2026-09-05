@@ -17,8 +17,13 @@ ExecStartPre=/usr/bin/test -s /opt/flow-acceleration/.env
 ExecStart=/usr/bin/node /opt/flow-acceleration/src/index.js
 Restart=always
 RestartSec=5
-TimeoutStopSec=20
+# Signal the main process first so it can drain writes and stop its workers.
+# A failed drain must remain visible; never escalate the stop to SIGKILL.
+# With mixed + SendSIGKILL=no, surviving processes also prevent a new start.
+TimeoutStopSec=180s
 KillSignal=SIGTERM
+KillMode=mixed
+SendSIGKILL=no
 StandardOutput=append:/opt/flow-acceleration/logs/out.log
 StandardError=append:/opt/flow-acceleration/logs/err.log
 SyslogIdentifier=flow-acceleration

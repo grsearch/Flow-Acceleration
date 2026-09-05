@@ -54,6 +54,7 @@ class RegionConnection {
     this.client = null;
     this.stream = null;
     this.running = false;
+    this.generation = 0;
     this.connected = false;
     this.ammMints = new Set();
     this.unavailableNotified = false;
@@ -68,11 +69,12 @@ class RegionConnection {
   async start() {
     this.running = true;
     this.unavailableNotified = false;
-    return this._connect();
+    return this._connect(++this.generation);
   }
 
   async stop() {
     this.running = false;
+    this.generation += 1;
     await this._close();
   }
 
@@ -98,28 +100,46 @@ class RegionConnection {
     );
   }
 
-  async _connect() {
-    if (!this.running) return;
+  _createClient() {
+    const { Client } = loadYellowstone();
+    return new Client(this.endpoint, this.token, {
+      'grpc.max_receive_message_length': 64 * 1024 * 1024,
+      'grpc.keepalive_time_ms': 30_000,
+      'grpc.keepalive_timeout_ms': 5_000,
+      'grpc.keepalive_permit_without_calls': 1,
+      'grpc.http2.max_pings_without_data': 0,
+    });
+  }
+
+  async _connect(generation = this.generation) {
+    if (!this.running || generation !== this.generation) return false;
     await this._close();
+    if (!this.running || generation !== this.generation) return false;
+    let client;
+    let stream;
+    const current = () => this.running && generation === this.generation && this.client === client;
+    const discard = () => {
+      this._destroyStream(stream);
+      this._closeClient(client);
+      return false;
+    };
     try {
       this.onState(this.label, { state: 'connecting' });
-      const { Client } = loadYellowstone();
-      this.client = new Client(this.endpoint, this.token, {
-        'grpc.max_receive_message_length': 64 * 1024 * 1024,
-        'grpc.keepalive_time_ms': 30_000,
-        'grpc.keepalive_timeout_ms': 5_000,
-        'grpc.keepalive_permit_without_calls': 1,
-        'grpc.http2.max_pings_without_data': 0,
-      });
-      if (typeof this.client.connect === 'function') await this.client.connect();
-      this.stream = await this.client.subscribe();
-      this.stream.on('data', (message) => this._handleMessage(message));
-      this.stream.on('error', (error) => this._handleEnd(error));
-      this.stream.on('end', () => this._handleEnd(new Error('stream ended')));
-      this.stream.on('close', () => this._handleEnd(new Error('stream closed')));
+      client = this._createClient();
+      this.client = client;
+      if (typeof client.connect === 'function') await client.connect();
+      if (!current()) return discard();
+      stream = await client.subscribe();
+      if (!current()) return discard();
+      this.stream = stream;
+      stream.on('data', (message) => { if (current()) this._handleMessage(message); });
+      stream.on('error', (error) => { if (current()) this._handleEnd(error); });
+      stream.on('end', () => { if (current()) this._handleEnd(new Error('stream ended')); });
+      stream.on('close', () => { if (current()) this._handleEnd(new Error('stream closed')); });
       this.connected = true;
       this.subscriptionVersion += 1;
       await this._queueSubscriptionUpdate();
+      if (!current() || this.stream !== stream) return discard();
       this.connectedAt = Date.now();
       this.unavailableNotified = false;
       this.onState(this.label, {
@@ -132,6 +152,7 @@ class RegionConnection {
       });
       return true;
     } catch (error) {
+      if (!this.running || generation !== this.generation || (client && this.client !== client)) return discard();
       this._notifyUnavailable(error, 'connect');
       return false;
     }
@@ -161,16 +182,21 @@ class RegionConnection {
 
   async _queueSubscriptionUpdate() {
     if (this.subscriptionWritePromise) return this.subscriptionWritePromise;
-    this.subscriptionWritePromise = this._drainSubscriptionUpdates()
-      .finally(() => { this.subscriptionWritePromise = null; });
-    return this.subscriptionWritePromise;
+    const pending = this._drainSubscriptionUpdates().finally(() => {
+      if (this.subscriptionWritePromise === pending) this.subscriptionWritePromise = null;
+    });
+    this.subscriptionWritePromise = pending;
+    return pending;
   }
 
   async _drainSubscriptionUpdates() {
-    while (this.connected && this.stream) {
+    while (this.running && this.connected && this.stream) {
+      const client = this.client;
+      const stream = this.stream;
       const version = this.subscriptionVersion;
       const ammMints = [...this.ammMints];
-      await this._writeSubscription(this.stream, this._subscriptionTransactions(ammMints));
+      await this._writeSubscription(stream, this._subscriptionTransactions(ammMints));
+      if (!this.running || !this.connected || this.client !== client || this.stream !== stream) return;
       this.appliedSubscriptionVersion = version;
       this.lastSubscriptionWriteAt = Date.now();
       this.onState(this.label, {
@@ -203,7 +229,7 @@ class RegionConnection {
   }
 
   _handleMessage(message) {
-    if (!message?.transaction) return;
+    if (!this.running || !this.connected || !message?.transaction) return;
     this.lastMessageAt = Date.now();
     const filters = Array.isArray(message.filters) ? message.filters : [];
     const patch = { lastMessageAt: this.lastMessageAt };
@@ -231,13 +257,16 @@ class RegionConnection {
     this._destroyStream(this.stream);
     this.stream = null;
     this.subscriptionWritePromise = null;
-    if (this.client) {
-      try {
-        if (typeof this.client.close === 'function') this.client.close();
-        else if (this.client._connectedGrpcClient) this.client._connectedGrpcClient.close();
-      } catch (_) {}
-      this.client = null;
-    }
+    this._closeClient(this.client);
+    this.client = null;
+  }
+
+  _closeClient(client) {
+    if (!client) return;
+    try {
+      if (typeof client.close === 'function') client.close();
+      else if (client._connectedGrpcClient) client._connectedGrpcClient.close();
+    } catch (_) {}
   }
 
   _destroyStream(stream) {
@@ -256,6 +285,7 @@ class PumpFlowStream extends EventEmitter {
     this.connection = null;
     this.activeEndpointIndex = -1;
     this.running = false;
+    this.activationGeneration = 0;
     this.failoverAttempts = 0;
     this.failoverTimer = null;
     this.watchdogTimer = null;
@@ -297,6 +327,7 @@ class PumpFlowStream extends EventEmitter {
 
   async stop() {
     this.running = false;
+    const generation = ++this.activationGeneration;
     if (this.updateTimer) clearTimeout(this.updateTimer);
     if (this.failoverTimer) clearTimeout(this.failoverTimer);
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
@@ -307,6 +338,7 @@ class PumpFlowStream extends EventEmitter {
     const connection = this.connection;
     this.connection = null;
     if (connection) await connection.stop();
+    if (generation !== this.activationGeneration) return;
     if (this.activeEndpointIndex >= 0) {
       this._updateState(this._labelFor(this.activeEndpointIndex), { active: false, state: 'stopped' });
     }
@@ -361,13 +393,14 @@ class PumpFlowStream extends EventEmitter {
 
   async _activateEndpoint(index, reason) {
     if (!this.running || this.config.stream.endpoints.length === 0) return;
+    const generation = ++this.activationGeneration;
     const normalizedIndex = index % this.config.stream.endpoints.length;
     const previousIndex = this.activeEndpointIndex;
     const previousConnection = this.connection;
 
     this.connection = null;
     if (previousConnection) await previousConnection.stop();
-    if (!this.running) return;
+    if (!this.running || generation !== this.activationGeneration) return;
 
     if (previousIndex >= 0) {
       this._updateState(this._labelFor(previousIndex), { active: false, state: 'standby' });
@@ -404,8 +437,12 @@ class PumpFlowStream extends EventEmitter {
       activationReason: reason,
     });
     await connection.setAmmMints(this.ammMints);
+    if (!this.running || this.connection !== connection || generation !== this.activationGeneration) {
+      await connection.stop();
+      return;
+    }
     const connected = await connection.start();
-    if (connected && this.connection === connection) this.failoverAttempts = 0;
+    if (connected && this.running && this.connection === connection) this.failoverAttempts = 0;
   }
 
   _scheduleFailover(connection, _error, phase) {

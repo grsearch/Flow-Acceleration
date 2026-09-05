@@ -82,6 +82,18 @@ function classifyWriteError(error) {
   return { kind, code, missingParameter: null };
 }
 
+class DatabaseShutdownDrainError extends Error {
+  constructor(code, message, { pending, attempts = 0, elapsedMs = 0, cause } = {}) {
+    super(message, cause ? { cause } : undefined);
+    this.name = 'DatabaseShutdownDrainError';
+    this.code = code;
+    this.drained = false;
+    this.pending = pending;
+    this.attempts = attempts;
+    this.elapsedMs = elapsedMs;
+  }
+}
+
 function receivedTimestampMs(value, eventTimestampMs) {
   let timestamp = Number(value);
   if (!Number.isFinite(timestamp)) return eventTimestampMs;
@@ -5087,11 +5099,12 @@ class ResearchStore {
     this.metrics.tokenWriteDeferrals += 1;
   }
 
-  flushDeferredTokenWrites({ force = false } = {}) {
+  flushDeferredTokenWrites({ force = false, maxRows = Infinity } = {}) {
     if (this.pendingTokenWrites.size === 0) return 0;
     if (!force && Date.now() < this.nextWriteRetryAt) return 0;
     let recovered = 0;
     for (const [mint, pending] of this.pendingTokenWrites) {
+      if (recovered >= maxRows) break;
       try {
         if (pending.create) this.stmts.upsertCreate.run(pending.create);
         else this.stmts.ensureToken.run(pending.ensure || {
@@ -5184,12 +5197,13 @@ class ResearchStore {
     if (this.rawBuffer.length >= this.config.flushMax) this.flushRawTrades();
   }
 
-  flushRawTrades({ force = false } = {}) {
+  flushRawTrades({ force = false, maxRows = Infinity } = {}) {
     if (this.rawBuffer.length === 0) return 0;
     if (!force && Date.now() < this.nextWriteRetryAt) return 0;
     const batchSize = Math.min(
       this.rawBuffer.length,
       Math.max(1_000, Number(this.config.flushMax) || 1_000),
+      maxRows,
     );
     const trades = this.rawBuffer.splice(0, batchSize);
     const started = Date.now();
@@ -5346,11 +5360,12 @@ class ResearchStore {
     this.metrics.labelWriteDeferrals += 1;
   }
 
-  flushDeferredSignalReturnUpdates({ force = false } = {}) {
+  flushDeferredSignalReturnUpdates({ force = false, maxRows = Infinity } = {}) {
     if (this.pendingSignalReturnUpdates.size === 0) return 0;
     if (!force && Date.now() < this.nextWriteRetryAt) return 0;
     let recovered = 0;
     for (const [signalId, patch] of this.pendingSignalReturnUpdates) {
+      if (recovered >= maxRows) break;
       try {
         this._runSignalReturnUpdate(signalId, patch);
         this.pendingSignalReturnUpdates.delete(signalId);
@@ -10013,7 +10028,7 @@ class ResearchStore {
     return this.tokens.get(mint) || null;
   }
 
-  close() {
+  _stopBackgroundTasks() {
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = null;
     if (this.databaseHealthStartTimer) clearTimeout(this.databaseHealthStartTimer);
@@ -10028,23 +10043,135 @@ class ResearchStore {
       if (active?.worker) void active.worker.terminate().catch(() => {});
     }
     this.dashboardQueryWorkers.clear();
+  }
+
+  pendingWriteCounts() {
+    return {
+      pendingWrites: this.rawBuffer.length,
+      pendingTokenWrites: this.pendingTokenWrites.size,
+      pendingLabelWrites: this.pendingSignalReturnUpdates.size,
+    };
+  }
+
+  // Stop all upstream producers before calling this method. The deadline is
+  // checked between synchronous SQLite calls; it cannot interrupt a native
+  // busy wait or a transaction already in progress. onProgress is synchronous.
+  // No failure closes the DB.
+  async drainPendingWrites({
+    timeoutMs = 30_000,
+    retryIntervalMs = 100,
+    batchSize = 1_000,
+    onProgress,
+  } = {}) {
+    if (this.pendingWritesDrainPromise) return this.pendingWritesDrainPromise;
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0
+      || !Number.isFinite(retryIntervalMs) || retryIntervalMs < 1
+      || !Number.isInteger(batchSize) || batchSize < 1) {
+      throw new RangeError('Invalid database shutdown drain timeout, retry interval, or batch size');
+    }
+    this._stopBackgroundTasks();
+    const startedAt = performance.now();
+    let attempts = 0;
+    const snapshot = () => {
+      const pending = this.pendingWriteCounts();
+      return {
+        drained: Object.values(pending).every((count) => count === 0),
+        ...pending,
+        attempts,
+        elapsedMs: Math.ceil(performance.now() - startedAt),
+      };
+    };
+    const fail = (code, message, cause) => new DatabaseShutdownDrainError(code, message, {
+      pending: this.pendingWriteCounts(),
+      attempts,
+      elapsedMs: Math.ceil(performance.now() - startedAt),
+      cause,
+    });
+    const checkDeadline = () => {
+      if (performance.now() - startedAt >= timeoutMs) {
+        throw fail('FLOW_DB_DRAIN_TIMEOUT', 'Database shutdown drain timed out with pending writes');
+      }
+    };
+    const drain = async () => {
+      const queues = [
+        ['pendingTokenWrites', () => this.flushDeferredTokenWrites({ force: true, maxRows: batchSize })],
+        ['pendingLabelWrites', () => this.flushDeferredSignalReturnUpdates({ force: true, maxRows: batchSize })],
+        ['pendingWrites', () => this.flushRawTrades({ force: true, maxRows: batchSize })],
+      ];
+      let cursor = 0;
+      try {
+        let state = snapshot();
+        if (onProgress) onProgress({ ...state });
+        while (!state.drained) {
+          checkDeadline();
+          const [counter, flush] = queues[cursor];
+          cursor = (cursor + 1) % queues.length;
+          if (state[counter] === 0) continue;
+          attempts += 1;
+          const written = flush();
+          state = snapshot();
+          if (onProgress) onProgress({ ...state });
+          if (state.drained) return state;
+          checkDeadline();
+          // Keep the retry timer referenced: pending shutdown writes must keep
+          // the process alive even after all collection timers have stopped.
+          if (written > 0) await new Promise((resolve) => setImmediate(resolve));
+          else await new Promise((resolve) => setTimeout(resolve, Math.min(
+            retryIntervalMs, Math.max(1, timeoutMs - (performance.now() - startedAt)),
+          )));
+          state = snapshot();
+        }
+        return state;
+      } catch (error) {
+        if (error instanceof DatabaseShutdownDrainError) throw error;
+        throw fail('FLOW_DB_DRAIN_FAILED', 'Database shutdown drain failed; pending writes and connection retained', error);
+      }
+    };
+    this.pendingWritesDrainPromise = Promise.resolve().then(drain);
+    try {
+      return await this.pendingWritesDrainPromise;
+    } finally {
+      this.pendingWritesDrainPromise = null;
+    }
+  }
+
+  close() {
+    if (this.pendingWritesDrainPromise) {
+      throw new DatabaseShutdownDrainError('FLOW_DB_DRAIN_IN_PROGRESS', 'Await the active database drain before closing', {
+        pending: this.pendingWriteCounts(),
+      });
+    }
+    this._stopBackgroundTasks();
+    const ensureEmpty = () => {
+      const pending = this.pendingWriteCounts();
+      if (Object.values(pending).some((count) => count > 0)) {
+        throw new DatabaseShutdownDrainError('FLOW_DB_CLOSE_PENDING', 'Database close refused with pending writes; drain and retry', { pending });
+      }
+    };
     try {
       this.flushDeferredTokenWrites({ force: true });
+      if (this.pendingTokenWrites.size > 0) ensureEmpty();
       this.flushDeferredSignalReturnUpdates({ force: true });
+      if (this.pendingSignalReturnUpdates.size > 0) ensureEmpty();
       while (this.rawBuffer.length > 0) {
         const written = this.flushRawTrades({ force: true });
         if (written === 0) break;
       }
+      ensureEmpty();
+      if (this.db.open) this.db.close();
     } catch (error) {
-      console.error('[Database] final flush failed:', error.message);
-    } finally {
-      this.db.close();
+      if (error instanceof DatabaseShutdownDrainError) throw error;
+      throw new DatabaseShutdownDrainError('FLOW_DB_DRAIN_FAILED', 'Database close failed; pending writes and connection retained', {
+        pending: this.pendingWriteCounts(),
+        cause: error,
+      });
     }
   }
 }
 
 module.exports = {
   ResearchStore,
+  DatabaseShutdownDrainError,
   MIGRATION_SOURCE,
   curveProgress,
   isSqliteContention,

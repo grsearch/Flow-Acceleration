@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('assert');
+const EventEmitter = require('events');
 const PumpFlowStream = require('../src/core/PumpFlowStream');
 const { RegionConnection } = PumpFlowStream;
 
@@ -199,6 +200,7 @@ async function testAmmUpdatesAtomicallyPreservePumpFilter() {
     onUnavailable: () => {},
   });
   connection.client = {};
+  connection.running = true;
   connection.connected = true;
   connection.stream = { channel: 'unified' };
   connection._subscriptionTransactions = (mints) => ({
@@ -249,11 +251,154 @@ function testUnifiedFilterHealthTimestamps() {
     onError: () => {},
     onUnavailable: () => {},
   });
+  connection.running = true;
+  connection.connected = true;
   connection._handleMessage({ transaction: {}, filters: ['pumpBondingCurve'] });
   connection._handleMessage({ transaction: {}, filters: ['pumpAmmLabels'] });
   assert.strictEqual(transactions, 2);
   assert.ok(Number.isFinite(states[0].lastPumpMessageAt));
   assert.ok(Number.isFinite(states[1].lastAmmMessageAt));
+}
+
+async function testStopDuringConnectionStages() {
+  for (const phase of ['close', 'connect', 'subscribe', 'update']) {
+    let release;
+    let entered = false;
+    let transactions = 0;
+    let subscribeCalls = 0;
+    let createCalls = 0;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const pause = async () => { entered = true; await gate; };
+    const states = [];
+    const wire = new EventEmitter();
+    wire.destroy = () => { wire.destroyed = true; };
+    const client = {
+      async connect() { if (phase === 'connect') await pause(); },
+      async subscribe() { subscribeCalls += 1; if (phase === 'subscribe') await pause(); return wire; },
+      close() { this.closed = true; },
+    };
+    const connection = new RegionConnection({
+      endpoint: LAX, token: 'token', label: 'FLOW-1', programs: {},
+      onTransaction: () => { transactions += 1; },
+      onState: (_label, state) => states.push(state),
+      onError: () => {}, onUnavailable: () => {},
+    });
+    connection._createClient = () => { createCalls += 1; return client; };
+    connection._subscriptionTransactions = () => ({});
+    connection._writeSubscription = async () => { if (phase === 'update') await pause(); };
+    if (phase === 'close') {
+      const originalClose = connection._close.bind(connection);
+      let closeCalls = 0;
+      connection._close = async () => {
+        await originalClose();
+        if (++closeCalls === 1) await pause();
+      };
+    }
+    const starting = connection.start();
+    try {
+      await waitFor(() => entered, `${phase} startup boundary was not reached`);
+      await connection.stop();
+      const stateCount = states.length;
+      release();
+      assert.strictEqual(await starting, false, `${phase} late completion must stay stopped`);
+      wire.emit('data', { transaction: {} });
+      connection._handleMessage({ transaction: {} });
+      assert.strictEqual(transactions, 0, `${phase} must ignore late data`);
+      assert.strictEqual(states.length, stateCount, `${phase} must not report a late connected state`);
+      assert.strictEqual(connection.running, false);
+      assert.strictEqual(connection.connected, false);
+      assert.strictEqual(connection.client, null);
+      assert.strictEqual(connection.stream, null);
+      if (phase === 'close') assert.strictEqual(createCalls, 0);
+      if (phase === 'connect') assert.strictEqual(subscribeCalls, 0);
+      if (['subscribe', 'update'].includes(phase)) assert.ok(wire.destroyed);
+      if (phase !== 'close') assert.ok(client.closed);
+    } finally {
+      release();
+      await starting;
+      await connection.stop();
+    }
+  }
+}
+
+async function testStopDuringAmmSetup() {
+  const fakes = fakeConnections();
+  let release;
+  let entered = false;
+  let starts = 0;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const stream = new PumpFlowStream({
+    config: testConfig(), tokenForEndpoint: () => 'token',
+    connectionFactory: (options) => {
+      const connection = fakes.factory(options);
+      connection.setAmmMints = async () => { entered = true; await gate; };
+      connection.start = async () => { starts += 1; return true; };
+      return connection;
+    },
+  });
+  const starting = stream.start();
+  try {
+    await waitFor(() => entered, 'AMM setup was not reached');
+    await stream.stop();
+    release();
+    await starting;
+    assert.strictEqual(starts, 0, 'late AMM setup must not start a stopped connection');
+    assert.strictEqual(stream.connection, null);
+    assert.strictEqual(stream.running, false);
+    assert.strictEqual(stream.activeEndpointIndex, -1);
+  } finally {
+    release();
+    await starting;
+    await stream.stop();
+  }
+}
+
+async function testLateSubscriptionDoesNotReplaceRestartedConnection() {
+  let release;
+  let oldSubscribeEntered = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const clients = [];
+  const wires = [];
+  const connection = new RegionConnection({
+    endpoint: LAX, token: 'token', label: 'FLOW-1', programs: {},
+    onTransaction: () => {}, onState: () => {}, onError: () => {}, onUnavailable: () => {},
+  });
+  connection._createClient = () => {
+    const first = clients.length === 0;
+    const wire = new EventEmitter();
+    wire.destroy = () => { wire.destroyed = true; };
+    wires.push(wire);
+    const client = {
+      async connect() {},
+      async subscribe() {
+        if (first) { oldSubscribeEntered = true; await gate; }
+        return wire;
+      },
+      close() { this.closed = true; },
+    };
+    clients.push(client);
+    return client;
+  };
+  connection._subscriptionTransactions = () => ({});
+  connection._writeSubscription = async () => {};
+  const oldStart = connection.start();
+  try {
+    await waitFor(() => oldSubscribeEntered, 'old subscription was not requested');
+    await connection.stop();
+    assert.strictEqual(await connection.start(), true);
+    release();
+    assert.strictEqual(await oldStart, false);
+    assert.strictEqual(connection.client, clients[1]);
+    assert.strictEqual(connection.stream, wires[1]);
+    assert.strictEqual(connection.connected, true);
+    assert.ok(wires[0].destroyed, 'old late stream must be disposed');
+    assert.ok(!wires[1].destroyed, 'current stream must remain open');
+    assert.ok(!clients[1].closed, 'current client must remain open');
+  } finally {
+    release();
+    await oldStart;
+    await connection.stop();
+  }
 }
 
 async function main() {
@@ -262,6 +407,9 @@ async function main() {
   testEventLoopStallDefersOnlyOneStaleCheck();
   await testAmmUpdatesAtomicallyPreservePumpFilter();
   testUnifiedFilterHealthTimestamps();
+  await testStopDuringConnectionStages();
+  await testStopDuringAmmSetup();
+  await testLateSubscriptionDoesNotReplaceRestartedConnection();
   console.log('test-flow-stream-failover: ok');
 }
 
