@@ -9,7 +9,7 @@ const { spawnSync } = require('child_process');
 const { CRITICAL_FILES, collectSafeConfigSummary } = require('../src/runtime/RuntimeIntegrity');
 const { parseProperties, stopSeconds, servicePolicy, parseEnvironment, ownsCgroup,
   validateChanges, gitSnapshot, loadConfig, validateSummary, validateHealth, validateQuiescent,
-  progressed, parseArgs, versionSatisfies } = require('../deploy/safe-update-check');
+  progressed, parseArgs, versionSatisfies, strategyState, validateStrategyState } = require('../deploy/safe-update-check');
 
 const commit = 'b'.repeat(40), old = 'a'.repeat(40);
 const options = { project: '/opt/flow-acceleration', unit: 'flow-acceleration.service', target: commit };
@@ -107,11 +107,13 @@ validateSummary(summary);
 assert(!JSON.stringify(summary).includes(secret));
 assert.throws(() => loadConfig(() => "require('fs').writeFileSync('x','y')", {}), /CONFIG_IMPORT_REQUIRES_MANUAL_REVIEW/);
 
-const expected = { pid: 123, project: options.project, commit, configFingerprint: summary.fingerprint, dbPath: '/opt/flow-acceleration/data/flow-research.db' };
+const expected = { pid: 123, project: options.project, commit, configFingerprint: summary.fingerprint,
+  dbPath: '/opt/flow-acceleration/data/flow-research.db', strategies: strategyState(config.liveTrading.strategies) };
 const value = { status: 'streaming', runtime: { pid: 123, cwd: options.project,
   sourcePath: `${options.project}/src/index.js`, gitCommit: commit, dbPath: expected.dbPath }, runtimeSnapshot: { status: 'DIRECT' },
   configurationIntegrity: { status: 'MATCH', headCommit: commit, warnings: [], configSummary: summary,
     files: CRITICAL_FILES.map((file) => ({ file, status: 'MATCH' })) },
+  trading: { strategies: config.liveTrading.strategies.filter((row) => row.enabled !== false) },
   database: { writeStatus: 'HEALTHY', consecutiveWriteErrors: 0, lastPersistedTradeAt: 100, lastFlushAt: 200, dbPath: expected.dbPath } };
 assert.deepEqual(validateHealth(value, expected), { lastPersistedTradeAt: 100, lastFlushAt: 200 });
 assert.throws(() => validateHealth({ ...value, runtime: { ...value.runtime, pid: 999 } }, expected), /IDENTITY_MISMATCH/);
@@ -121,6 +123,24 @@ assert.throws(() => validateHealth({ ...value, runtimeSnapshot: { status: 'STALE
 assert.throws(() => validateHealth({ ...value, runtime: { ...value.runtime, dbPath: '/tmp/replacement.db' } }, expected), /IDENTITY_MISMATCH/);
 assert.throws(() => validateHealth({ ...value, configurationIntegrity: { ...value.configurationIntegrity,
   files: CRITICAL_FILES.map(() => ({ file: CRITICAL_FILES[0], status: 'MATCH' })) } }, expected), /SOURCE_INTEGRITY/);
+// Zero new-entry strategies is an intentional valid target. Definitions and
+// exits stay present; any unexpected re-enable or disabled exit owner is rejected.
+const stoppedDefinitions = [summary.ho500, ...summary.post].map((row) => ({ id: row.id, enabled: true, entryEnabled: false }));
+const stoppedState = strategyState(stoppedDefinitions);
+assert.equal(stoppedState.enabledIds.length, 3);
+assert.deepEqual(stoppedState.entryIds, []);
+validateStrategyState([...stoppedDefinitions].reverse(), stoppedState);
+assert.throws(() => validateStrategyState(stoppedDefinitions.slice(1), stoppedState), /DIFFERS_FROM_TARGET/);
+assert.throws(() => validateStrategyState(stoppedDefinitions.map((row, index) => index ? row : { ...row, entryEnabled: true }), stoppedState), /DIFFERS_FROM_TARGET/);
+assert.throws(() => validateStrategyState([...stoppedDefinitions, { id: 'unexpected_extra_entry' }], stoppedState), /DIFFERS_FROM_TARGET/);
+assert.throws(() => validateStrategyState(undefined, stoppedState), /STRATEGY_IDENTITY_UNAVAILABLE/);
+assert.throws(() => validateStrategyState([stoppedDefinitions[0], stoppedDefinitions[0]], stoppedState), /STRATEGY_IDENTITY_UNAVAILABLE/);
+const oneEntry = stoppedDefinitions.map((row, index) => index ? row : { ...row, entryEnabled: true });
+validateStrategyState(oneEntry, strategyState(oneEntry));
+assert.equal(strategyState([{ id: 'defaults' }, { id: 'disabled', enabled: false }]).entryIds.length, 1,
+  'omitted flags must match LiveTradingManager defaults; explicitly disabled definitions are not active');
+validateHealth({ ...value, trading: { strategies: stoppedDefinitions } }, { ...expected, strategies: stoppedState });
+assert.throws(() => validateHealth({ ...value, trading: { strategies: oneEntry } }, { ...expected, strategies: stoppedState }), /DIFFERS_FROM_TARGET/);
 const quiet = { trading: { activePositions: 0, pendingActions: 0, unsettledOrders: 0,
   unsettledOrdersUpdatedAt: Date.now(), activeMintEntryLocks: 0, activeMintEntryLocksUpdatedAt: Date.now(), killSwitchActive: true },
 database: { pendingWrites: 0, pendingLabelWrites: 0, pendingTokenWrites: 0, consecutiveWriteErrors: 0, writeStatus: 'HEALTHY' } };

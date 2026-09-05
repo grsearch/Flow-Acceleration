@@ -228,6 +228,20 @@ function validateSummary(summary) {
     && summary.bridge?.liveBridgeCapacitySol === 0.1 && summary.bridge.capacitySols.includes(0.1)
     && summary.bridge.handoffLiveStrategyId === summary.ho500.id, 'HO500_BRIDGE_MISMATCH');
 }
+function strategyState(strategies) {
+  guard(Array.isArray(strategies) && strategies.every((row) => row
+    && typeof row.id === 'string' && /^[A-Za-z0-9_:.-]{1,160}$/.test(row.id))
+    && new Set(strategies.map((row) => row.id)).size === strategies.length, 'STRATEGY_IDENTITY_UNAVAILABLE');
+  // Match LiveTradingManager's defaults exactly. Entry-disabled definitions
+  // remain enabled so existing positions retain their original exit rules.
+  const enabled = strategies.filter((row) => row.enabled !== false);
+  return { enabledIds: enabled.map((row) => row.id).sort(),
+    entryIds: enabled.filter((row) => row.entryEnabled !== false).map((row) => row.id).sort() };
+}
+function validateStrategyState(strategies, expected) {
+  guard(expected && Array.isArray(expected.enabledIds) && Array.isArray(expected.entryIds), 'EXPECTED_STRATEGY_STATE_UNAVAILABLE');
+  guard(JSON.stringify(strategyState(strategies)) === JSON.stringify(expected), 'HEALTH_STRATEGY_STATE_DIFFERS_FROM_TARGET');
+}
 function versionSatisfies(installed, requested) {
   const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(installed || '');
   const range = /^(\^?)(\d+)\.(\d+)\.(\d+)$/.exec(requested || '');
@@ -312,6 +326,7 @@ function validateHealth(value, expected) {
     && integrity.files.every((file) => file.status === 'MATCH'), 'HEALTH_SOURCE_INTEGRITY_MISMATCH');
   validateSummary(integrity.configSummary);
   guard(integrity.configSummary.fingerprint === expected.configFingerprint, 'HEALTH_CONFIG_DIFFERS_FROM_PREFLIGHT');
+  validateStrategyState(value.trading?.strategies, expected.strategies);
   guard(value.status === 'streaming' && ['HEALTHY', 'BACKLOG'].includes(value.database?.writeStatus)
     && value.database.consecutiveWriteErrors === 0 && value.runtimeSnapshot?.status !== 'STALE'
     && !value.runtimeSnapshot?.errors?.length, 'HEALTH_NOT_READY');
@@ -391,13 +406,16 @@ async function preflight(options) {
       rawShardingEnabled: configs.before.storage.rawShardingEnabled }, port: configs.before.server.port,
     beforeFingerprint: collectSafeConfigSummary(configs.before).fingerprint,
     afterFingerprint: collectSafeConfigSummary(configs.after).fingerprint, changedFiles: snapshot.changed.length,
+    beforeStrategies: strategyState(configs.before.liveTrading.strategies),
+    afterStrategies: strategyState(configs.after.liveTrading.strategies),
     acceptTimeout: options.acceptTimeout, database: databaseIdentity(options.project, configs.before.storage),
     killSwitch, allowedUntracked };
   guard(path.resolve(options.project, configs.before.liveTrading.killSwitchFile) === killSwitch
     && path.resolve(options.project, configs.after.liveTrading.killSwitchFile) === killSwitch, 'KILL_SWITCH_CONFIG_CHANGED');
   const live = await health(evidence.port);
   evidence.baseline = validateHealth(live, { pid: main.pid, project: options.project,
-    commit: snapshot.head, configFingerprint: evidence.beforeFingerprint, dbPath: evidence.database.path });
+    commit: snapshot.head, configFingerprint: evidence.beforeFingerprint, dbPath: evidence.database.path,
+    strategies: evidence.beforeStrategies });
   validateQuiescent(live);
   const again = systemd(options.unit);
   guard(again.MainPID === service.MainPID && again.InvocationID === service.InvocationID
@@ -421,6 +439,7 @@ function stopped(evidence, updated = false) {
   const snapshot = gitSnapshot(runGit, evidence.target, updated ? evidence.target : evidence.oldHead, evidence.allowedUntracked);
   const config = loadConfig((file) => runGit(['show', `${snapshot.head}:${file}`]).toString(), environment.env);
   guard(collectSafeConfigSummary(config).fingerprint === (updated ? evidence.afterFingerprint : evidence.beforeFingerprint), 'CONFIG_CHANGED_DURING_UPDATE');
+  validateStrategyState(config.liveTrading.strategies, updated ? evidence.afterStrategies : evidence.beforeStrategies);
   checkDisk(evidence.project, snapshot.head, config, runGit);
 }
 async function accept(evidence) {
@@ -444,7 +463,8 @@ async function accept(evidence) {
       guard(service.InvocationID !== evidence.oldInvocation, 'SERVICE_INVOCATION_DID_NOT_CHANGE');
       try {
         const sample = validateHealth(await health(evidence.port), { pid, project: evidence.project,
-          commit: evidence.target, configFingerprint: evidence.afterFingerprint, dbPath: evidence.database.path });
+          commit: evidence.target, configFingerprint: evidence.afterFingerprint, dbPath: evidence.database.path,
+          strategies: evidence.afterStrategies });
         processInventory(evidence.project, evidence.cgroup, evidence.storage, pid);
         if (!first) first = sample;
         else if (progressed(first, sample) && sample.lastPersistedTradeAt > evidence.baseline.lastPersistedTradeAt) return;
@@ -483,7 +503,8 @@ async function main(args = process.argv.slice(2)) {
     guard(['project', 'unit', 'user', 'target'].includes(options.field), 'INVALID_EVIDENCE_FIELD');
     process.stdout.write(`${evidence[options.field]}\n`);
   } else if (options.phase === 'describe') {
-    process.stdout.write(`Preflight passed: ${evidence.unit}, PID ${evidence.oldPid}, ${evidence.oldHead} -> ${evidence.target}; ${evidence.changedFiles} changed files. No changes made by preflight.\n`);
+    guard(Array.isArray(evidence.afterStrategies?.entryIds), 'EXPECTED_STRATEGY_STATE_UNAVAILABLE');
+    process.stdout.write(`Preflight passed: ${evidence.unit}, PID ${evidence.oldPid}, ${evidence.oldHead} -> ${evidence.target}; ${evidence.changedFiles} changed files. Target entry-enabled strategies: ${evidence.afterStrategies.entryIds.length} [${evidence.afterStrategies.entryIds.join(', ')}]. Three required definitions and HO500 bridge verified. No changes made by preflight.\n`);
   } else if (options.phase === 'stopped' || options.phase === 'updated') stopped(evidence, options.phase === 'updated');
   else if (options.phase === 'accept') await accept(evidence);
   else throw new Error('UNKNOWN_PHASE');
@@ -495,4 +516,4 @@ if (require.main === module) main().catch((error) => {
 });
 module.exports = { parseProperties, stopSeconds, servicePolicy, parseEnvironment, ownsCgroup,
   validateChanges, gitSnapshot, loadConfig, validateSummary, validateHealth, validateQuiescent,
-  progressed, parseArgs, versionSatisfies };
+  progressed, parseArgs, versionSatisfies, strategyState, validateStrategyState };

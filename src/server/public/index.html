@@ -735,6 +735,13 @@
               </div>
               <div class="strategy-expression" id="graduation-acceleration-expression">等待 Graduation Acceleration 配置…</div>
               <div class="strategy-metric-groups" id="graduation-acceleration-metrics"></div>
+              <div class="section-title"><h2>HO500 长持：同入场硬止损对照</h2><p>12 组纯 Shadow，共享 HO500 0.1 SOL 已成交入场；比较 30 / 60 分钟、两档移动止盈及 H20 / H30 / OFF，不发送交易。</p></div>
+              <p class="muted" id="graduation-acceleration-long-exit-status">等待长持实验配置与统计…</p>
+              <div class="table-wrap"><table>
+                <thead><tr><th>最长持仓 / 移动止盈</th><th>硬止损 / 容量</th><th>同源入场 / 已完成</th><th>持仓中 / 待入场</th><th>未可退出 / 异常</th><th>完成覆盖 / 终态覆盖</th><th>平均 / 中位净收益</th><th>胜率 / PF</th><th>大亏 ≤−50% / ≤−80%</th><th>大赢 ≥+50% / ≥+100%</th></tr></thead>
+                <tbody id="graduation-acceleration-long-exit-rows"></tbody>
+              </table></div>
+              <p class="table-note">入场数只含已成交并进入实验的机会，不等于原策略全部候选信号。完成覆盖＝有效已完成收益 / 已入场；终态覆盖＝有效已完成收益 /（有效已完成＋NO_EXIT＋入场后异常），两者都不是行情连续覆盖率。均值、胜率和盈亏尾部仅用有效已完成样本；各组完成样本可能不同，不能直接把均值差当作逐笔配对增益。NO_EXIT 和异常均为未知退出，不按 0% 或 −100% 混入收益。</p>
               <div class="section-title"><h2>当前 RUG 过滤严格配对</h2><p>原策略与 RUGX 使用同一信号、成交、退出和成本；跳过交易按 0% 计入配对组合，只比较这三个高置信灾难条件。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>配对组</th><th>同源信号 / 可比结果</th><th>拦截 / 已验证</th><th>避开 RUG50 / RUG80</th><th>误杀赢家 / 大赢家</th><th>原策略</th><th>RUGX</th><th>配对均值改善</th></tr></thead>
@@ -3104,6 +3111,48 @@
       }).join('') : '<tr><td colspan="10" class="empty">暂无 Shadow I 模拟仓位；高Curve信号只记录拒绝，绝不追买</td></tr>';
     }
 
+    function renderGraduationLongExitComparison(data) {
+      const configuredProfiles = (data.runtime?.entryProfiles || [])
+        .filter(profile => profile.experimentGroup === 'HO500_LONG_EXIT_V1'
+          && profile.pairedEntryProfileId === 'O_C80_HO500_X60');
+      const profileMap = new Map(configuredProfiles.map(profile => [profile.id, profile]));
+      const cohorts = new Map((data.cohorts || [])
+        .filter(row => row.position_sol === 0.1)
+        .map(row => [row.entry_profile_id, row]));
+      // Turning off the forward experiment removes its runtime profiles, but
+      // its saved V1 cohorts must remain available in this comparison.
+      for (const id of cohorts.keys()) {
+        if (profileMap.has(id)) continue;
+        const match = /^O_C80_HO500_LONG_A(30|100)_D(20|30)_H(20|30|OFF)_X(1800|3600)$/.exec(id);
+        if (!match || (match[1] === '30' ? match[2] !== '20' : match[2] !== '30')) continue;
+        profileMap.set(id, { id, runnerMaxHoldMs: Number(match[4]) * 1000,
+          trailingActivationPct: Number(match[1]), trailingStopPct: Number(match[2]),
+          hardStopPct: match[3] === 'OFF' ? 0 : Number(match[3]), historicalOnly: true });
+      }
+      const profiles = [...profileMap.values()].sort((a, b) => a.runnerMaxHoldMs - b.runnerMaxHoldMs
+          || a.trailingActivationPct - b.trailingActivationPct
+          || a.trailingStopPct - b.trailingStopPct
+          || (a.hardStopPct === 0 ? Infinity : a.hardStopPct)
+            - (b.hardStopPct === 0 ? Infinity : b.hardStopPct));
+      const empty = { signals: 0, entered: 0, resolved: 0, active_entered: 0,
+        pending_entries: 0, no_exit: 0, entered_data_error: 0, missing_return_closed: 0,
+        loss_50_count: 0, loss_80_count: 0, win_50_count: 0, win_100_count: 0 };
+      document.querySelector('#graduation-acceleration-long-exit-status').textContent = configuredProfiles.length
+        ? `已配置 ${configuredProfiles.length} / 12 组；${data.runtime?.enabled ? '前向观察中' : '当前暂停观察'}。最长持仓是上限，硬止损或移动止盈触发后会提前退出。`
+        : profiles.length ? `显示 ${profiles.length} 组历史统计；当前运行配置未启用 HO500 长持实验。`
+          : '当前运行配置未包含 HO500 长持实验；等待配置加载。';
+      document.querySelector('#graduation-acceleration-long-exit-rows').innerHTML = profiles.length
+        ? profiles.map(profile => {
+          const row = cohorts.get(profile.id) || empty;
+          const errors = Number.isFinite(row.entered_data_error) && Number.isFinite(row.missing_return_closed)
+            ? row.entered_data_error + row.missing_return_closed : null;
+          const hardStop = profile.hardStopPct === 0 ? '关闭（OFF）' : pct(-profile.hardStopPct, 0);
+          const sampleState = row.entered > 0 ? '' : '<br><span class="table-note">尚无样本</span>';
+          return `<tr data-ho500-long-profile="${escapeHtml(profile.id)}"><td><b>${number(profile.runnerMaxHoldMs / 60_000)} 分钟</b><br><span class="table-note">${pct(profile.trailingActivationPct, 0)} 启动 / 回撤 ${rate(profile.trailingStopPct, 0)}</span></td><td><b>${hardStop}</b><br><span class="table-note">0.1 SOL${profile.historicalOnly ? ' · 历史' : profile.enabled === false ? ' · 已暂停' : ''}</span></td><td>${number(row.entered)} / ${number(row.resolved)}${sampleState}</td><td>${number(row.active_entered)} / ${number(row.pending_entries)}</td><td>${number(row.no_exit)} / ${number(errors)}<br><span class="table-note">均不计已完成收益</span></td><td>${rate(row.completed_coverage_pct)} / ${rate(row.terminal_exit_coverage_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${rate(row.win_rate_pct)} / ${number(row.profit_factor, 2)}</td><td>${number(row.loss_50_count)} / ${number(row.loss_80_count)}</td><td>${number(row.win_50_count)} / ${number(row.win_100_count)}</td></tr>`;
+        }).join('')
+        : '<tr><td colspan="10" class="empty">尚未加载长持对照组</td></tr>';
+    }
+
     function renderGraduationAccelerationShadow(data) {
       const runtime = data.runtime || {};
       const strategy = runtime.strategy || {};
@@ -3123,6 +3172,7 @@
         ['RUG 诊断', `${number(runtime.rugGuardHardBlocked)} 拦截 / ${number(runtime.rugGuardRiskFlagged)} 命中`, `已评估 ${number(runtime.rugGuardEvaluated)} · 样本不足 ${number(runtime.rugGuardSampleInsufficient)}`],
         ['PumpSwap 5秒门槛', `${number(runtime.postMigrationGatePassed)} 通过 / ${number(runtime.postMigrationGateFailed)} 失败`, 'O90 系 Runner 使用；Core 毕业时仍退出50%'],
       ]);
+      renderGraduationLongExitComparison(data);
       renderRugPairComparisons(
         '#graduation-acceleration-rug-pair-rows',
         data.rugComparisons,

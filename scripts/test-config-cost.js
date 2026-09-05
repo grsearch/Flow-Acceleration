@@ -304,7 +304,7 @@ assert.strictEqual(liveQualityLeaderGuard.market, 'PUMP_BONDING_CURVE');
 assert.strictEqual(liveQualityLeaderGuard.exitMode, 'QUALITY_PROTECTED_RUNNER');
 assert.strictEqual(liveQualityLeaderGuard.qualityCriteria.requireHealthyRugRisk, true);
 assert.strictEqual(liveQualityLeaderGuard.sourceShadowCohortId, 'QL_STRICT_GUARD:QL_PROTECTED');
-assert.strictEqual(liveGe30R23F2G2.entryEnabled, true);
+assert.strictEqual(liveGe30R23F2G2.entryEnabled, false);
 assert.strictEqual(liveGe30R23F2G2.positionSizeSol, 0.1);
 assert.strictEqual(liveGe30R23F2G2.code, 'POST-GE30-R23-F2-G2-XLEG');
 assert.strictEqual(liveGe30R23F2G2.exitMode, 'LEGACY');
@@ -313,7 +313,7 @@ assert.strictEqual(liveGe30R23F2G2.entryBeijingStartHour, 4);
 assert.strictEqual(liveGe30R23F2G2.entryBeijingEndHour, 24);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshRetryCount, 1);
 assert.strictEqual(liveGe30R23F2G2.entryQuoteRefreshMaxSignalAgeMs, 2_500);
-assert.strictEqual(liveGrtF3V2.entryEnabled, true);
+assert.strictEqual(liveGrtF3V2.entryEnabled, false);
 assert.strictEqual(liveGrtF3V2.maxEntriesPerMint, 1);
 assert.strictEqual(liveGe30V2Exec01.entryEnabled, false);
 assert.strictEqual(liveGe30V2Exec01.positionSizeSol, 0.1);
@@ -414,7 +414,7 @@ assert.deepStrictEqual(cobRugFiltered.exitProfileIds, ['FIX30']);
 assert.strictEqual(cobRugFiltered.pairedBaselineProfileId, 'COB_F_LR01_FIX30');
 assert.strictEqual(cobRugFiltered.rugGuardMode, 'LIVE_CURVE_CATASTROPHE');
 assert.strictEqual(liveGraduationRecovery.entryEnabled, false);
-assert.strictEqual(liveGraduationHandoff.entryEnabled, true);
+assert.strictEqual(liveGraduationHandoff.entryEnabled, false);
 assert.strictEqual(liveGraduationHandoff.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationHandoff.market, 'PUMP_AMM');
 assert.strictEqual(liveGraduationHandoff.sourceShadowCohortId, 'O_C80_HO500_X60:0_1SOL');
@@ -485,13 +485,10 @@ assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
   [
-    'POST-GE30-R23-F2-G2-XLEG',
-    'GRT-R23-F3-V2-XLEG',
     'POST-GD25-35-X8',
     'O90-M5-STAIR120',
     'QL-STRICT-GUARD',
     'O-C80-D5-B2-S0-NC',
-    'O-C80-HO500-X60',
   ],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
@@ -1111,7 +1108,9 @@ assert.ok(config.holderGrowthShadow.exitProfiles
 assert.strictEqual(config.graduationAccelerationShadow.enabled, true);
 assert.deepStrictEqual(config.graduationAccelerationShadow.capacitySols, [1]);
 assert.deepStrictEqual(
-  config.graduationAccelerationShadow.entryProfiles.map((profile) => profile.id),
+  config.graduationAccelerationShadow.entryProfiles
+    .filter((profile) => profile.experimentGroup !== 'HO500_LONG_EXIT_V1')
+    .map((profile) => profile.id),
   [
     'O_FAST10_C80_B20_R07', 'O_C80_D5_B2_S0_NC',
     'O_C80_D5_B2_S0_NC_H15', 'O_C80_D5_B2_S0_NC_H20',

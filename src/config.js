@@ -578,6 +578,35 @@ const graduationRelaxedEntryProfiles = graduationRelaxedEntryShadowEnabled ? [
   )),
 ] : [];
 
+// Exit-only, forward paired controls. The Suite clones a successful 0.1 SOL
+// baseline fill; these profiles never select another entry or emit live orders.
+const graduationHo500LongExitEnabled = booleanEnv('FLOW_GRADUATION_ACCEL_HO500_LONG_EXIT_ENABLED', true);
+const graduationHo500ExitBaseline = graduationRelaxedEntryProfiles
+  .find((profile) => profile.id === 'O_C80_HO500_X60');
+const graduationHo500LongExitProfiles = graduationHo500LongExitEnabled && graduationHo500ExitBaseline
+  ? [1_800_000, 3_600_000].flatMap((runnerMaxHoldMs) => (
+    [[30, 20], [100, 30]].flatMap(([trailingActivationPct, trailingStopPct]) => (
+      [20, 30, 0].map((hardStopPct) => ({
+        ...graduationHo500ExitBaseline,
+        id: `O_C80_HO500_LONG_A${trailingActivationPct}_D${trailingStopPct}_H${hardStopPct || 'OFF'}_X${runnerMaxHoldMs / 1_000}`,
+        label: `HO500 长持对照 · ${runnerMaxHoldMs / 60_000}分钟 / TP${trailingActivationPct}回撤${trailingStopPct} / ${hardStopPct ? `硬止损${hardStopPct}%` : '无硬止损'}`,
+        studyGroup: 'HO500_LONG_EXIT_V1',
+        experimentGroup: 'HO500_LONG_EXIT_V1',
+        pairedEntryProfileId: 'O_C80_HO500_X60',
+        handoffLiveStrategyId: null,
+        liveStrategyId: null,
+        liveBridgeCapacitySol: null,
+        capacitySols: [0.1],
+        runnerExitMode: 'TRAILING',
+        runnerMaxHoldMs,
+        trailingActivationPct,
+        trailingStopPct,
+        hardStopPct,
+        coreExitPct: 0,
+      }))
+    ))
+  )) : [];
+
 const config = {
   pump: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
@@ -930,10 +959,8 @@ const config = {
         ruleVersion: 'migrated_ge30_r23_f2_only_g2_xleg_live_v2',
         signalSource: 'MIGRATED_GE30_R23_F2_ONLY_G2_XLEG',
         enabled: booleanEnv('FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_ENTRY_ENABLED',
-          true,
-        ),
+        // User-paused 2026-09-05. Ignore stale ENTRY_ENABLED=true; preserve exits.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_POSITION_SOL',
@@ -1005,10 +1032,8 @@ const config = {
         ruleVersion: 'migrated_grt_r23_f3_v2_xleg_live_v2',
         signalSource: 'MIGRATED_GRT_R23_F3_V2_XLEG',
         enabled: booleanEnv('FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_ENABLED', true),
-        entryEnabled: booleanEnv(
-          'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_ENTRY_ENABLED',
-          true,
-        ),
+        // User-paused 2026-09-05. Ignore stale ENTRY_ENABLED=true; preserve exits.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: livePositionEnv(
           'FLOW_LIVE_MIGRATED_GRT_R23_F3_V2_XLEG_POSITION_SOL',
@@ -1593,7 +1618,8 @@ const config = {
         ruleVersion: 'graduation_accel_o_c80_ho500_x60_live_v2',
         signalSource: 'GRADUATION_ACCEL_O_C80_HO500_X60',
         enabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_HO500_X60_ENABLED', true),
-        entryEnabled: booleanEnv('FLOW_LIVE_GRADUATION_ACCEL_HO500_X60_ENTRY_ENABLED', true),
+        // Exit research continues in Shadow. Existing live positions still exit.
+        entryEnabled: false,
         market: 'PUMP_AMM',
         positionSizeSol: 0.1,
         maxSignalAgeMs: 1_500,
@@ -8066,6 +8092,15 @@ const config = {
   // It never signs or submits a transaction and does not reuse old I cohorts.
   graduationAccelerationShadow: {
     enabled: booleanEnv('FLOW_GRADUATION_ACCEL_SHADOW_ENABLED', true),
+    longExitMatrixEnabled: graduationHo500LongExitProfiles.length > 0,
+    longExitObservationGraceMs: integerEnv(
+      'FLOW_GRADUATION_ACCEL_LONG_EXIT_OBSERVATION_GRACE_MS', 5 * 60_000,
+      { min: 60_000, max: 5 * 60_000 },
+    ),
+    longExitObservationMaxMints: integerEnv(
+      'FLOW_GRADUATION_ACCEL_LONG_EXIT_OBSERVATION_MAX_MINTS', 2_000,
+      { min: 1, max: 10_000 },
+    ),
     entryDelayMs: integerEnv('FLOW_GRADUATION_ACCEL_ENTRY_DELAY_MS', 200, { min: 0 }),
     entryTimeoutMs: integerEnv('FLOW_GRADUATION_ACCEL_ENTRY_TIMEOUT_MS', 2_000, { min: 1 }),
     exitDelayMs: integerEnv('FLOW_GRADUATION_ACCEL_EXIT_DELAY_MS', 200, { min: 0 }),
@@ -8364,6 +8399,7 @@ const config = {
         runnerMaxHoldMs: 240_000,
       })),
       ...graduationRelaxedEntryProfiles,
+      ...graduationHo500LongExitProfiles,
     ],
     trailingTiers: [
       { activationPct: 20, drawdownPct: 10 },

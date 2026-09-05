@@ -17,7 +17,8 @@ async function main() {
   // Offline integration only: every signing/transport path is explicitly disabled.
   const trader = new LiveTradingManager({ config: {
     ...config.liveTrading, enabled: true, dryRun: true, safetyLock: false,
-    killSwitchFile: null, privateKey: '', strategies: [strategy], mintCooldownMs: 0,
+    // Explicit offline override only: production config is user-paused.
+    killSwitchFile: null, privateKey: '', strategies: [{ ...strategy, entryEnabled: true }], mintCooldownMs: 0,
   }, store, now: () => now });
   const signals = [];
   const suite = new GraduationAccelerationShadowSuite({ config: {

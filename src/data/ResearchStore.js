@@ -4480,6 +4480,7 @@ class ResearchStore {
       updateGraduationAccelerationShadowPosition: this.db.prepare(`
         UPDATE graduation_acceleration_shadow_positions SET
           status = COALESCE(@status, status),
+          features_json = COALESCE(@featuresJson, features_json),
           rejection_reason = COALESCE(@rejectionReason, rejection_reason),
           rug_guard_json = COALESCE(@rugGuardJson, rug_guard_json),
           entry_target_at = COALESCE(@entryTargetAt, entry_target_at),
@@ -7309,6 +7310,7 @@ class ResearchStore {
     return this.stmts.updateGraduationAccelerationShadowPosition.run({
       id,
       status: value('status'),
+      featuresJson: patch.features ? JSON.stringify(patch.features) : null,
       rejectionReason: value('rejectionReason'),
       rugGuardJson: patch.rugGuard ? JSON.stringify(patch.rugGuard) : null,
       entryTargetAt: value('entryTargetAt'),
@@ -8674,9 +8676,16 @@ class ResearchStore {
           COALESCE(SUM(status IN (
             'PENDING_ENTRY', 'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
           )), 0) AS active,
+          COALESCE(SUM(status = 'PENDING_ENTRY'), 0) AS pending_entries,
+          COALESCE(SUM(entry_at IS NOT NULL AND status IN (
+            'OPEN', 'CORE_EXIT_PENDING', 'RUNNER', 'EXIT_PENDING'
+          )), 0) AS active_entered,
           COALESCE(SUM(entry_at IS NOT NULL), 0) AS entered,
           COALESCE(SUM(status = 'CLOSED'), 0) AS closed,
           COALESCE(SUM(status = 'NO_EXIT'), 0) AS no_exit,
+          COALESCE(SUM(status = 'DATA_ERROR'), 0) AS data_error,
+          COALESCE(SUM(status = 'DATA_ERROR' AND entry_at IS NOT NULL), 0)
+            AS entered_data_error,
           COALESCE(SUM(late_exit_status = 'OBSERVED_EXECUTABLE'), 0)
             AS late_exit_observed,
           COALESCE(SUM(late_exit_status = 'EXPIRED_NO_EXECUTABLE_TRADE'), 0)
@@ -8714,9 +8723,17 @@ class ResearchStore {
         const totalLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
         const bigWinners = rows.filter((row) => Number(row.net_return_pct) >= threshold);
         const exTop1 = wins.length ? [...wins.slice(1), ...losses] : losses;
+        const missingReturnClosed = Math.max(0, group.closed - returns.length);
+        const terminalEntries = returns.length + group.no_exit
+          + group.entered_data_error + missingReturnClosed;
         return {
           ...group,
           resolved: returns.length,
+          missing_return_closed: missingReturnClosed,
+          completed_coverage_pct: group.entered > 0
+            ? returns.length / group.entered * 100 : null,
+          terminal_exit_coverage_pct: terminalEntries > 0
+            ? returns.length / terminalEntries * 100 : null,
           exit_coverage_pct: group.closed + group.no_exit > 0
             ? group.closed / (group.closed + group.no_exit) * 100 : null,
           migration_rate_pct: group.signals > 0 ? group.graduated / group.signals * 100 : null,
@@ -8729,6 +8746,10 @@ class ResearchStore {
           average_net_return_ex_top1_pct: exTop1.length
             ? exTop1.reduce((sum, value) => sum + value, 0) / exTop1.length : null,
           big_winners: bigWinners.length,
+          loss_50_count: returns.filter((value) => value <= -50).length,
+          loss_80_count: returns.filter((value) => value <= -80).length,
+          win_50_count: returns.filter((value) => value >= 50).length,
+          win_100_count: returns.filter((value) => value >= 100).length,
           top_3_winner_contribution_pct: totalProfit > 0
             ? wins.slice(0, 3).reduce((sum, value) => sum + value, 0) / totalProfit * 100
             : null,

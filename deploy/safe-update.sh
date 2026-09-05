@@ -58,4 +58,4 @@ systemctl --no-ask-password start "$unit"
 stage='checking runtime identity and persisted trade progress'
 printf '%s' "$evidence" | check --phase=accept
 trap - ERR
-echo 'Safe update accepted: expected version, three strategies, HO500 0.1 SOL bridge, and persisted trade progress verified.'
+echo 'Safe update accepted: expected version, target entry-enabled strategy set (including zero), three required definitions, HO500 0.1 SOL bridge, and persisted trade progress verified.'

@@ -458,7 +458,7 @@ async function main() {
     assert.strictEqual(continuity.code, 'M-C5-E120');
     assert.strictEqual(ge30V2Exec01.entryEnabled, false);
     assert.strictEqual(ge30V2Exec01.code, 'G-V2-EXEC01-R2-H15');
-    assert.strictEqual(grtF3V2.entryEnabled, true);
+    assert.strictEqual(grtF3V2.entryEnabled, false);
     assert.strictEqual(grtF3V2.positionSizeSol, 0.1);
     assert.strictEqual(grtF3V2.maxEntriesPerMint, 1);
     assert.strictEqual(grtF3V2.exitMode, 'LEGACY');
