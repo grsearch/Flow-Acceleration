@@ -48,6 +48,8 @@ function emptyProfileDiagnostics() {
 }
 
 function shadowPrice(trade) {
+  if (trade?.market === 'PUMP_AMM' && trade.ammQuoteState
+    && trade.ammQuoteState !== 'POST_TRADE_V1') return null;
   const reservePrice = finite(trade?.reservePrice);
   return reservePrice > 0 ? reservePrice : finite(trade?.price);
 }
@@ -73,6 +75,9 @@ function beijingHourAllowed(timestampMs, ranges) {
 // configuredCostPct, while the size-dependent AMM curve impact is reflected in
 // the entry price itself.
 function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
+  if (trade?.ammQuoteState && trade.ammQuoteState !== 'POST_TRADE_V1') {
+    return { price: null, impactPct: null, reason: 'INVALID_AMM_QUOTE_STATE' };
+  }
   try {
     const base = BigInt(trade.poolBaseReservesRaw || 0);
     const quote = BigInt(trade.poolQuoteReservesRaw || 0)
@@ -96,6 +101,9 @@ function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
 }
 
 function ammSellAveragePrice(trade, tokenUnits, fallbackPrice) {
+  if (trade?.ammQuoteState && trade.ammQuoteState !== 'POST_TRADE_V1') {
+    return { price: null, impactPct: null, reason: 'INVALID_AMM_QUOTE_STATE' };
+  }
   try {
     const base = BigInt(trade.poolBaseReservesRaw || 0);
     const quote = BigInt(trade.poolQuoteReservesRaw || 0)
@@ -1417,6 +1425,13 @@ class MigratedDropReboundShadowSuite {
         poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
         poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
         virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+        reservePrice: trade.reservePrice ?? null,
+        ammQuoteState: trade.ammQuoteState ?? null,
+        ammQuoteStateReason: trade.ammQuoteStateReason ?? null,
+        prePoolBaseReservesRaw: trade.prePoolBaseReservesRaw ?? null,
+        prePoolQuoteReservesRaw: trade.prePoolQuoteReservesRaw ?? null,
+        preReservePrice: trade.preReservePrice ?? null,
+        ammExecutionFees: trade.ammExecutionFees ?? null,
         features: {
           entryProfileId: profile.id,
           exitProfileId: position.exitProfileId,
@@ -1468,6 +1483,13 @@ class MigratedDropReboundShadowSuite {
         poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
         poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
         virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+        reservePrice: trade.reservePrice ?? null,
+        ammQuoteState: trade.ammQuoteState ?? null,
+        ammQuoteStateReason: trade.ammQuoteStateReason ?? null,
+        prePoolBaseReservesRaw: trade.prePoolBaseReservesRaw ?? null,
+        prePoolQuoteReservesRaw: trade.prePoolQuoteReservesRaw ?? null,
+        preReservePrice: trade.preReservePrice ?? null,
+        ammExecutionFees: trade.ammExecutionFees ?? null,
         features: {
           ...(decision.features || {}),
           entryProfileId: profile.id,

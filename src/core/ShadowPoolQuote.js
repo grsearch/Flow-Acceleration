@@ -1,6 +1,8 @@
 'use strict';
 
 const { reservesForTrade } = require('./ShadowExecutionModel');
+const { AMM_POST_TRADE_STATE, restoreRawExecutionContext,
+  serializeAmmExecutionContext } = require('../data/RawExecutionContext');
 
 function finite(value, fallback = null) {
   const parsed = Number(value);
@@ -8,7 +10,13 @@ function finite(value, fallback = null) {
 }
 
 function capturePoolQuote(trade = {}, fallbackPrice = null) {
-  if (!trade?.market || !(finite(trade.timestampMs) > 0) || !reservesForTrade(trade)) return null;
+  const contextJson = serializeAmmExecutionContext(trade);
+  trade = contextJson ? { ...trade,
+    ...restoreRawExecutionContext({ ammExecutionContextJson: contextJson }) } : { ...trade };
+  if (!trade?.market || !(finite(trade.timestampMs) > 0)) return null;
+  // Persist explicit invalid states too, so an invalid new tick cannot silently
+  // leave an earlier usable cache in place. Legacy unversioned quotes stay so.
+  if (!invalidAmmState(trade) && !reservesForTrade(trade)) return null;
   return {
     timestampMs: finite(trade.timestampMs),
     market: String(trade.market),
@@ -19,7 +27,24 @@ function capturePoolQuote(trade = {}, fallbackPrice = null) {
     poolBaseReservesRaw: trade.poolBaseReservesRaw ?? null,
     poolQuoteReservesRaw: trade.poolQuoteReservesRaw ?? null,
     virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw ?? null,
+    pool: trade.pool ?? trade.poolAddress ?? null,
+    slot: trade.slot ?? null,
+    signature: trade.signature ?? null,
+    eventIndex: trade.eventIndex ?? null,
+    chainTimestampMs: trade.chainTimestampMs ?? null,
+    receivedAtMs: trade.receivedAtMs ?? null,
+    ammQuoteState: trade.ammQuoteState ?? null,
+    ammQuoteStateReason: trade.ammQuoteStateReason ?? null,
+    prePoolBaseReservesRaw: trade.prePoolBaseReservesRaw == null ? null : String(trade.prePoolBaseReservesRaw),
+    prePoolQuoteReservesRaw: trade.prePoolQuoteReservesRaw == null ? null : String(trade.prePoolQuoteReservesRaw),
+    preReservePrice: trade.preReservePrice == null ? null : finite(trade.preReservePrice),
+    ammExecutionFees: trade.ammExecutionFees ?? null,
   };
+}
+
+function invalidAmmState(quote) {
+  return quote?.market === 'PUMP_AMM' && quote.ammQuoteState != null
+    && quote.ammQuoteState !== AMM_POST_TRADE_STATE;
 }
 
 function parsePoolQuote(value) {
@@ -34,11 +59,12 @@ function parsePoolQuote(value) {
 
 function quoteTrade(quote, mint) {
   const parsed = parsePoolQuote(quote);
-  return parsed ? { ...parsed, mint } : null;
+  return parsed && !invalidAmmState(parsed) ? { ...parsed, mint } : null;
 }
 
 function quotePrice(quote) {
   const parsed = parsePoolQuote(quote);
+  if (invalidAmmState(parsed)) return null;
   return finite(parsed?.reservePrice, finite(parsed?.price));
 }
 
@@ -51,7 +77,7 @@ function cacheIsUsableForExit({
   store,
 }) {
   const parsed = parsePoolQuote(quote);
-  if (!parsed || parsed.market !== entryMarket || parsed.timestampMs > now) return false;
+  if (!parsed || invalidAmmState(parsed) || parsed.market !== entryMarket || parsed.timestampMs > now) return false;
   if (entryMarket !== 'PUMP_BONDING_CURVE') return true;
   const token = store?.getToken?.(mint);
   const graduatedAt = finite(

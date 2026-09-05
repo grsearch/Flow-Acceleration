@@ -143,6 +143,25 @@ try {
   view.render({ runtime: { entryProfiles: [] }, cohorts: [] });
   assert(view.element('#graduation-acceleration-long-exit-status').textContent.includes('未包含'));
   assert(view.element('#graduation-acceleration-long-exit-rows').innerHTML.includes('尚未加载'));
+  const postProfiles = profiles.map(profile => ({ ...profile, id: `${profile.id}_POSTV1`,
+    pairedEntryProfileId: 'O_C80_HO500_X60_POSTV1', executionModelVersion: 'POST_TRADE_V1' }));
+  const oldRow = { ...row, entry_profile_id: firstId, average_net_return_pct: 81 };
+  const postRow = { ...row, entry_profile_id: postProfiles[0].id, average_net_return_pct: -9 };
+  view.render({ runtime: { enabled: true, entryProfiles: [
+    ...profiles.map(profile => ({ ...profile, newEntriesEnabled: false })), ...postProfiles,
+  ] }, cohorts: [oldRow, postRow,
+    { ...row, entry_profile_id: 'O_C80_HO500_X60_POSTV1', average_net_return_pct: -12 },
+    { ...row, entry_profile_id: 'O_C80_HO500_X60_POSTV1_D1000', average_net_return_pct: -18 },
+  ], positions: [] });
+  const mixed = view.element('#graduation-acceleration-long-exit-rows').innerHTML;
+  assert.equal((mixed.match(/data-ho500-long-profile=/g) || []).length, 13,
+    '12 new groups plus only the old group with history, without merging versions');
+  assert(mixed.includes('POSTV1 · 交易后报价'));
+  assert(mixed.includes('旧 PRE · 历史口径'));
+  assert(mixed.includes('+81%') && mixed.includes('-9%'));
+  const execution = view.element('#graduation-acceleration-execution-model-rows').innerHTML;
+  assert(execution.includes('延迟 1 秒') && execution.includes('-12%') && execution.includes('-18%'));
+  assert.equal(view.requests(), 0, 'new execution comparison reuses the cached payload');
   console.log('test-ho500-long-exit-dashboard: ok (12 groups, 0.1 SOL isolation, unfinished states, coverage, tails, cached aggregation, no new requests)');
 } finally {
   store.close();

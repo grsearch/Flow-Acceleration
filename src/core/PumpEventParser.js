@@ -263,6 +263,31 @@ function decodePumpMigration(data) {
   };
 }
 
+// Event reserves are PRE-event. Never expose them as a current executable quote.
+function ammPostTradeState(side, base, quote, amount, poolQuoteDelta, virtualQuote) {
+  const postBase = side === 'BUY' ? base - amount : base + amount;
+  const postQuote = side === 'BUY' ? quote + poolQuoteDelta : quote - poolQuoteDelta;
+  const effectiveQuote = postQuote + virtualQuote;
+  const maxU64 = (1n << 64n) - 1n;
+  const reason = base <= 0n || quote + virtualQuote <= 0n ? 'INVALID_PRE_RESERVES'
+    : amount <= 0n || poolQuoteDelta <= 0n ? 'INVALID_POOL_DELTA'
+    : postBase <= 0n ? 'NON_POSITIVE_POST_BASE'
+      : postQuote < 0n ? 'NEGATIVE_POST_QUOTE'
+        : postBase > maxU64 || postQuote > maxU64 ? 'POST_RESERVES_OVERFLOW'
+          : effectiveQuote <= 0n ? 'NON_POSITIVE_EFFECTIVE_POST_QUOTE' : null;
+  return {
+    ammQuoteState: reason ? 'INVALID' : 'POST_TRADE_V1',
+    ammQuoteStateReason: reason,
+    prePoolBaseReservesRaw: base.toString(),
+    prePoolQuoteReservesRaw: quote.toString(),
+    preReservePrice: base > 0n && quote + virtualQuote > 0n
+      ? (Number(quote + virtualQuote) / 1e9) / (Number(base) / 1e6) : null,
+    poolBaseReservesRaw: reason ? null : postBase.toString(),
+    poolQuoteReservesRaw: reason ? null : postQuote.toString(),
+    reservePrice: reason ? null : (Number(effectiveQuote) / 1e9) / (Number(postBase) / 1e6),
+  };
+}
+
 function decodeAmmBuy(data, context) {
   const reader = new BorshReader(data, 8);
   const chainTimestampMs = timestampMs(reader.i64());
@@ -273,12 +298,12 @@ function decodeAmmBuy(data, context) {
   const poolBaseReservesRaw = reader.u64();
   const poolQuoteReservesRaw = reader.u64();
   const quoteAmountRaw = reader.u64();
-  reader.u64(); // lp_fee_basis_points
-  reader.u64(); // lp_fee
-  reader.u64(); // protocol_fee_basis_points
-  reader.u64(); // protocol_fee
-  reader.u64(); // quote_amount_in_with_lp_fee
-  reader.u64(); // user_quote_amount_in
+  const lpFeeBasisPoints = numberOf(reader.u64());
+  const lpFeeRaw = reader.u64();
+  const protocolFeeBasisPoints = numberOf(reader.u64());
+  const protocolFeeRaw = reader.u64();
+  const poolQuoteAmountRaw = reader.u64(); // quote_amount_in_with_lp_fee
+  const userQuoteAmountRaw = reader.u64();
   const pool = reader.pubkey();
   const wallet = reader.pubkey();
   let virtualQuoteReservesRaw = 0n;
@@ -287,21 +312,24 @@ function decodeAmmBuy(data, context) {
   let buybackFeeBasisPoints = null;
   let buybackRaw = null;
   let canBoost = null;
+  let coinCreatorFeeBasisPoints = null;
+  let coinCreatorFeeRaw = null;
+  let ixName = 'buy';
   if (reader.remaining() > 0) {
     reader.pubkey(); // user_base_token_account
     reader.pubkey(); // user_quote_token_account
     reader.pubkey(); // protocol_fee_recipient
     reader.pubkey(); // protocol_fee_recipient_token_account
     reader.pubkey(); // coin_creator
-    reader.u64(); // coin_creator_fee_basis_points
-    reader.u64(); // coin_creator_fee
+    coinCreatorFeeBasisPoints = numberOf(reader.u64());
+    coinCreatorFeeRaw = reader.u64();
     reader.bool(); // track_volume
     reader.u64(); // total_unclaimed_tokens
     reader.u64(); // total_claimed_tokens
     reader.u64(); // current_sol_volume
     reader.i64(); // last_update_timestamp
     reader.u64(); // min_base_amount_out
-    reader.string(); // ix_name
+    ixName = reader.string();
     cashbackFeeBasisPoints = numberOf(reader.u64());
     cashbackRaw = reader.u64();
     buybackFeeBasisPoints = numberOf(reader.u64());
@@ -311,9 +339,6 @@ function decodeAmmBuy(data, context) {
   }
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
-  const poolBaseTokens = numberOf(poolBaseReservesRaw) / 1e6;
-  const poolQuoteSol = (numberOf(poolQuoteReservesRaw) + numberOf(virtualQuoteReservesRaw)) / 1e9;
-  const reservePrice = poolBaseTokens > 0 ? poolQuoteSol / poolBaseTokens : null;
 
   return {
     type: 'ammTrade',
@@ -325,16 +350,23 @@ function decodeAmmBuy(data, context) {
     solAmount,
     tokenAmount,
     price: tokenAmount > 0 ? solAmount / tokenAmount : null,
-    reservePrice: Number.isFinite(reservePrice) && reservePrice > 0 ? reservePrice : null,
+    ...ammPostTradeState('BUY', poolBaseReservesRaw, poolQuoteReservesRaw,
+      baseAmountRaw, poolQuoteAmountRaw, virtualQuoteReservesRaw),
     chainTimestampMs,
-    poolBaseReservesRaw: poolBaseReservesRaw.toString(),
-    poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
     virtualQuoteReservesRaw: virtualQuoteReservesRaw.toString(),
     cashbackFeeBasisPoints,
     cashbackRaw: cashbackRaw == null ? null : cashbackRaw.toString(),
     buybackFeeBasisPoints,
     buybackRaw: buybackRaw == null ? null : buybackRaw.toString(),
     canBoost,
+    ammExecutionFees: {
+      quoteAmountRaw: quoteAmountRaw.toString(), poolQuoteAmountRaw: poolQuoteAmountRaw.toString(),
+      userQuoteAmountRaw: userQuoteAmountRaw.toString(), lpFeeBasisPoints, lpFeeRaw: lpFeeRaw.toString(),
+      protocolFeeBasisPoints, protocolFeeRaw: protocolFeeRaw.toString(), coinCreatorFeeBasisPoints,
+      coinCreatorFeeRaw: coinCreatorFeeRaw?.toString() ?? null, cashbackFeeBasisPoints,
+      cashbackRaw: cashbackRaw?.toString() ?? null, buybackFeeBasisPoints,
+      buybackRaw: buybackRaw?.toString() ?? null, ixName,
+    },
   };
 }
 
@@ -348,12 +380,12 @@ function decodeAmmSell(data, context) {
   const poolBaseReservesRaw = reader.u64();
   const poolQuoteReservesRaw = reader.u64();
   const quoteAmountRaw = reader.u64();
-  reader.u64(); // lp_fee_basis_points
-  reader.u64(); // lp_fee
-  reader.u64(); // protocol_fee_basis_points
-  reader.u64(); // protocol_fee
-  reader.u64(); // quote_amount_out_without_lp_fee
-  reader.u64(); // user_quote_amount_out
+  const lpFeeBasisPoints = numberOf(reader.u64());
+  const lpFeeRaw = reader.u64();
+  const protocolFeeBasisPoints = numberOf(reader.u64());
+  const protocolFeeRaw = reader.u64();
+  const poolQuoteAmountRaw = reader.u64(); // quote_amount_out_without_lp_fee
+  const userQuoteAmountRaw = reader.u64();
   const pool = reader.pubkey();
   const wallet = reader.pubkey();
   let virtualQuoteReservesRaw = 0n;
@@ -362,14 +394,16 @@ function decodeAmmSell(data, context) {
   let buybackFeeBasisPoints = null;
   let buybackRaw = null;
   let canBoost = null;
+  let coinCreatorFeeBasisPoints = null;
+  let coinCreatorFeeRaw = null;
   if (reader.remaining() > 0) {
     reader.pubkey(); // user_base_token_account
     reader.pubkey(); // user_quote_token_account
     reader.pubkey(); // protocol_fee_recipient
     reader.pubkey(); // protocol_fee_recipient_token_account
     reader.pubkey(); // coin_creator
-    reader.u64(); // coin_creator_fee_basis_points
-    reader.u64(); // coin_creator_fee
+    coinCreatorFeeBasisPoints = numberOf(reader.u64());
+    coinCreatorFeeRaw = reader.u64();
     cashbackFeeBasisPoints = numberOf(reader.u64());
     cashbackRaw = reader.u64();
     buybackFeeBasisPoints = numberOf(reader.u64());
@@ -379,9 +413,6 @@ function decodeAmmSell(data, context) {
   }
   const tokenAmount = numberOf(baseAmountRaw) / 1e6;
   const solAmount = numberOf(quoteAmountRaw) / 1e9;
-  const poolBaseTokens = numberOf(poolBaseReservesRaw) / 1e6;
-  const poolQuoteSol = (numberOf(poolQuoteReservesRaw) + numberOf(virtualQuoteReservesRaw)) / 1e9;
-  const reservePrice = poolBaseTokens > 0 ? poolQuoteSol / poolBaseTokens : null;
 
   return {
     type: 'ammTrade',
@@ -393,16 +424,23 @@ function decodeAmmSell(data, context) {
     solAmount,
     tokenAmount,
     price: tokenAmount > 0 ? solAmount / tokenAmount : null,
-    reservePrice: Number.isFinite(reservePrice) && reservePrice > 0 ? reservePrice : null,
+    ...ammPostTradeState('SELL', poolBaseReservesRaw, poolQuoteReservesRaw,
+      baseAmountRaw, poolQuoteAmountRaw, virtualQuoteReservesRaw),
     chainTimestampMs,
-    poolBaseReservesRaw: poolBaseReservesRaw.toString(),
-    poolQuoteReservesRaw: poolQuoteReservesRaw.toString(),
     virtualQuoteReservesRaw: virtualQuoteReservesRaw.toString(),
     cashbackFeeBasisPoints,
     cashbackRaw: cashbackRaw == null ? null : cashbackRaw.toString(),
     buybackFeeBasisPoints,
     buybackRaw: buybackRaw == null ? null : buybackRaw.toString(),
     canBoost,
+    ammExecutionFees: {
+      quoteAmountRaw: quoteAmountRaw.toString(), poolQuoteAmountRaw: poolQuoteAmountRaw.toString(),
+      userQuoteAmountRaw: userQuoteAmountRaw.toString(), lpFeeBasisPoints, lpFeeRaw: lpFeeRaw.toString(),
+      protocolFeeBasisPoints, protocolFeeRaw: protocolFeeRaw.toString(), coinCreatorFeeBasisPoints,
+      coinCreatorFeeRaw: coinCreatorFeeRaw?.toString() ?? null, cashbackFeeBasisPoints,
+      cashbackRaw: cashbackRaw?.toString() ?? null, buybackFeeBasisPoints,
+      buybackRaw: buybackRaw?.toString() ?? null, ixName: 'sell',
+    },
   };
 }
 

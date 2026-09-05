@@ -735,7 +735,12 @@
               </div>
               <div class="strategy-expression" id="graduation-acceleration-expression">等待 Graduation Acceleration 配置…</div>
               <div class="strategy-metric-groups" id="graduation-acceleration-metrics"></div>
-              <div class="section-title"><h2>HO500 长持：同入场硬止损对照</h2><p>12 组纯 Shadow，共享 HO500 0.1 SOL 已成交入场；比较 30 / 60 分钟、两档移动止盈及 H20 / H30 / OFF，不发送交易。</p></div>
+              <div class="section-title"><h2>HO500 执行口径对照</h2><p>新 POSTV1 使用触发交易完成后的池状态。D1000 从同源即时成交时点再等 1 秒，取后续合格行情；无行情或跳价也计入失败样本。成本仍为原配置估算，不等同链上实际收益；旧 PRE 历史不可直接作同步对照。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>模型 / 容量</th><th>信号 / 已入场</th><th>已完成 / 待入场</th><th>无入场 / 跳价 / 无退出</th><th>平均 / 中位净收益</th><th>胜率 / PF</th></tr></thead>
+                <tbody id="graduation-acceleration-execution-model-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h2>HO500 长持：同入场硬止损对照</h2><p>每代 12 组纯 Shadow，共享对应 HO500 0.1 SOL 即时成交入场；比较 30 / 60 分钟、两档移动止盈及 H20 / H30 / OFF，不发送交易。新 POSTV1 与旧 PRE 历史分开显示，D1000 不复制长持组。</p></div>
               <p class="muted" id="graduation-acceleration-long-exit-status">等待长持实验配置与统计…</p>
               <div class="table-wrap"><table>
                 <thead><tr><th>最长持仓 / 移动止盈</th><th>硬止损 / 容量</th><th>同源入场 / 已完成</th><th>持仓中 / 待入场</th><th>未可退出 / 异常</th><th>完成覆盖 / 终态覆盖</th><th>平均 / 中位净收益</th><th>胜率 / PF</th><th>大亏 ≤−50% / ≤−80%</th><th>大赢 ≥+50% / ≥+100%</th></tr></thead>
@@ -3111,10 +3116,26 @@
       }).join('') : '<tr><td colspan="10" class="empty">暂无 Shadow I 模拟仓位；高Curve信号只记录拒绝，绝不追买</td></tr>';
     }
 
+    function renderGraduationExecutionModels(data) {
+      const rows = new Map((data.cohorts || []).filter(row => row.position_sol === 0.1)
+        .map(row => [row.entry_profile_id, row]));
+      const models = [
+        ['O_C80_HO500_X60_POSTV1', 'POSTV1 · 即时交易后报价'],
+        ['O_C80_HO500_X60_POSTV1_D1000', 'POSTV1 · 延迟 1 秒'],
+        ['O_C80_HO500_X60', '旧 PRE · 仅历史参考'],
+      ];
+      document.querySelector('#graduation-acceleration-execution-model-rows').innerHTML = models.map(([id, label]) => {
+        const row = rows.get(id);
+        if (!row) return `<tr data-ho500-execution-model="${id}"><td>${label}<br><span class="table-note">0.1 SOL</span></td><td colspan="5">尚无样本</td></tr>`;
+        return `<tr data-ho500-execution-model="${id}"><td>${label}<br><span class="table-note">0.1 SOL</span></td><td>${number(row.signals)} / ${number(row.entered)}</td><td>${number(row.resolved)} / ${number(row.pending_entries)}</td><td>${number(row.no_entry)} / ${number(row.price_jump)} / ${number(row.no_exit)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${rate(row.win_rate_pct)} / ${number(row.profit_factor, 2)}</td></tr>`;
+      }).join('');
+    }
+
     function renderGraduationLongExitComparison(data) {
       const configuredProfiles = (data.runtime?.entryProfiles || [])
         .filter(profile => profile.experimentGroup === 'HO500_LONG_EXIT_V1'
-          && profile.pairedEntryProfileId === 'O_C80_HO500_X60');
+          && ['O_C80_HO500_X60', 'O_C80_HO500_X60_POSTV1'].includes(profile.pairedEntryProfileId)
+          && profile.newEntriesEnabled !== false);
       const profileMap = new Map(configuredProfiles.map(profile => [profile.id, profile]));
       const cohorts = new Map((data.cohorts || [])
         .filter(row => row.position_sol === 0.1)
@@ -3123,13 +3144,15 @@
       // its saved V1 cohorts must remain available in this comparison.
       for (const id of cohorts.keys()) {
         if (profileMap.has(id)) continue;
-        const match = /^O_C80_HO500_LONG_A(30|100)_D(20|30)_H(20|30|OFF)_X(1800|3600)$/.exec(id);
+        const match = /^O_C80_HO500_LONG_A(30|100)_D(20|30)_H(20|30|OFF)_X(1800|3600)(_POSTV1)?$/.exec(id);
         if (!match || (match[1] === '30' ? match[2] !== '20' : match[2] !== '30')) continue;
         profileMap.set(id, { id, runnerMaxHoldMs: Number(match[4]) * 1000,
           trailingActivationPct: Number(match[1]), trailingStopPct: Number(match[2]),
-          hardStopPct: match[3] === 'OFF' ? 0 : Number(match[3]), historicalOnly: true });
+          hardStopPct: match[3] === 'OFF' ? 0 : Number(match[3]), historicalOnly: true,
+          executionModelVersion: match[5] ? 'POST_TRADE_V1' : 'LEGACY_PRE' });
       }
-      const profiles = [...profileMap.values()].sort((a, b) => a.runnerMaxHoldMs - b.runnerMaxHoldMs
+      const profiles = [...profileMap.values()].sort((a, b) => Number(b.id.endsWith('_POSTV1')) - Number(a.id.endsWith('_POSTV1'))
+          || a.runnerMaxHoldMs - b.runnerMaxHoldMs
           || a.trailingActivationPct - b.trailingActivationPct
           || a.trailingStopPct - b.trailingStopPct
           || (a.hardStopPct === 0 ? Infinity : a.hardStopPct)
@@ -3138,7 +3161,7 @@
         pending_entries: 0, no_exit: 0, entered_data_error: 0, missing_return_closed: 0,
         loss_50_count: 0, loss_80_count: 0, win_50_count: 0, win_100_count: 0 };
       document.querySelector('#graduation-acceleration-long-exit-status').textContent = configuredProfiles.length
-        ? `已配置 ${configuredProfiles.length} / 12 组；${data.runtime?.enabled ? '前向观察中' : '当前暂停观察'}。最长持仓是上限，硬止损或移动止盈触发后会提前退出。`
+        ? `已配置 ${configuredProfiles.length} / ${Math.max(12, configuredProfiles.length)} 组；${data.runtime?.enabled ? '前向观察中' : '当前暂停观察'}。新旧报价口径不合并；最长持仓是上限，硬止损或移动止盈触发后会提前退出。`
         : profiles.length ? `显示 ${profiles.length} 组历史统计；当前运行配置未启用 HO500 长持实验。`
           : '当前运行配置未包含 HO500 长持实验；等待配置加载。';
       document.querySelector('#graduation-acceleration-long-exit-rows').innerHTML = profiles.length
@@ -3148,7 +3171,8 @@
             ? row.entered_data_error + row.missing_return_closed : null;
           const hardStop = profile.hardStopPct === 0 ? '关闭（OFF）' : pct(-profile.hardStopPct, 0);
           const sampleState = row.entered > 0 ? '' : '<br><span class="table-note">尚无样本</span>';
-          return `<tr data-ho500-long-profile="${escapeHtml(profile.id)}"><td><b>${number(profile.runnerMaxHoldMs / 60_000)} 分钟</b><br><span class="table-note">${pct(profile.trailingActivationPct, 0)} 启动 / 回撤 ${rate(profile.trailingStopPct, 0)}</span></td><td><b>${hardStop}</b><br><span class="table-note">0.1 SOL${profile.historicalOnly ? ' · 历史' : profile.enabled === false ? ' · 已暂停' : ''}</span></td><td>${number(row.entered)} / ${number(row.resolved)}${sampleState}</td><td>${number(row.active_entered)} / ${number(row.pending_entries)}</td><td>${number(row.no_exit)} / ${number(errors)}<br><span class="table-note">均不计已完成收益</span></td><td>${rate(row.completed_coverage_pct)} / ${rate(row.terminal_exit_coverage_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${rate(row.win_rate_pct)} / ${number(row.profit_factor, 2)}</td><td>${number(row.loss_50_count)} / ${number(row.loss_80_count)}</td><td>${number(row.win_50_count)} / ${number(row.win_100_count)}</td></tr>`;
+          const model = profile.id.endsWith('_POSTV1') ? 'POSTV1 · 交易后报价' : '旧 PRE · 历史口径';
+          return `<tr data-ho500-long-profile="${escapeHtml(profile.id)}"><td><b>${number(profile.runnerMaxHoldMs / 60_000)} 分钟</b><br><span class="table-note">${model}</span><br><span class="table-note">${pct(profile.trailingActivationPct, 0)} 启动 / 回撤 ${rate(profile.trailingStopPct, 0)}</span></td><td><b>${hardStop}</b><br><span class="table-note">0.1 SOL${profile.historicalOnly ? ' · 历史' : profile.enabled === false ? ' · 已暂停' : ''}</span></td><td>${number(row.entered)} / ${number(row.resolved)}${sampleState}</td><td>${number(row.active_entered)} / ${number(row.pending_entries)}</td><td>${number(row.no_exit)} / ${number(errors)}<br><span class="table-note">均不计已完成收益</span></td><td>${rate(row.completed_coverage_pct)} / ${rate(row.terminal_exit_coverage_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${rate(row.win_rate_pct)} / ${number(row.profit_factor, 2)}</td><td>${number(row.loss_50_count)} / ${number(row.loss_80_count)}</td><td>${number(row.win_50_count)} / ${number(row.win_100_count)}</td></tr>`;
         }).join('')
         : '<tr><td colspan="10" class="empty">尚未加载长持对照组</td></tr>';
     }
@@ -3172,6 +3196,7 @@
         ['RUG 诊断', `${number(runtime.rugGuardHardBlocked)} 拦截 / ${number(runtime.rugGuardRiskFlagged)} 命中`, `已评估 ${number(runtime.rugGuardEvaluated)} · 样本不足 ${number(runtime.rugGuardSampleInsufficient)}`],
         ['PumpSwap 5秒门槛', `${number(runtime.postMigrationGatePassed)} 通过 / ${number(runtime.postMigrationGateFailed)} 失败`, 'O90 系 Runner 使用；Core 毕业时仍退出50%'],
       ]);
+      renderGraduationExecutionModels(data);
       renderGraduationLongExitComparison(data);
       renderRugPairComparisons(
         '#graduation-acceleration-rug-pair-rows',

@@ -20,6 +20,7 @@ const CRITICAL_FILES = Object.freeze([
   'src/server/public/dashboard-runtime.js',
   'src/data/ResearchStore.js',
   'src/data/RawTradeShardManager.js',
+  'src/data/RawExecutionContext.js',
   'src/data/DashboardReadModel.js',
   'src/data/dashboard-preaggregate-worker.js',
   'src/data/dashboard-snapshot-tasks.js',
@@ -28,6 +29,8 @@ const CRITICAL_FILES = Object.freeze([
   'src/core/SmartWalletConsensusFlowRunnerShadowSuite.js',
   'src/core/GraduationAccelerationShadowSuite.js',
   'src/core/ShadowExecutionModel.js',
+  'src/core/ShadowPoolQuote.js',
+  'src/core/PumpEventParser.js',
   'src/core/PumpTradeExecutor.js',
   'src/core/PreEntryRugRiskTracker.js',
   'src/core/SmartWalletRegistry.js',
@@ -36,8 +39,8 @@ const CRITICAL_FILES = Object.freeze([
   'src/runtime/GracefulShutdown.js',
 ]);
 const HO500_ID = 'graduation_accel_o_c80_ho500_x60_live';
-const HO500_PROFILE = 'O_C80_HO500_X60';
-const HO500_SOURCE = 'O_C80_HO500_X60:0_1SOL';
+const HO500_PROFILE = 'O_C80_HO500_X60_POSTV1';
+const HO500_SOURCE = 'O_C80_HO500_X60_POSTV1:0_1SOL';
 const POST_IDS = Object.freeze([
   'migrated_ge30_r23_f2_only_g2_xleg_live',
   'migrated_grt_r23_f3_v2_xleg_live',

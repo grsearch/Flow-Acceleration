@@ -417,7 +417,7 @@ assert.strictEqual(liveGraduationRecovery.entryEnabled, false);
 assert.strictEqual(liveGraduationHandoff.entryEnabled, false);
 assert.strictEqual(liveGraduationHandoff.positionSizeSol, 0.1);
 assert.strictEqual(liveGraduationHandoff.market, 'PUMP_AMM');
-assert.strictEqual(liveGraduationHandoff.sourceShadowCohortId, 'O_C80_HO500_X60:0_1SOL');
+assert.strictEqual(liveGraduationHandoff.sourceShadowCohortId, 'O_C80_HO500_X60_POSTV1:0_1SOL');
 assert.strictEqual(liveGraduationHandoff.fixedHoldMs, 60_000);
 assert.strictEqual(liveGraduationHandoff.maxHoldMs, 60_000);
 assert.strictEqual(liveGraduationHandoff.hardStopPct, 30);
@@ -1109,7 +1109,8 @@ assert.strictEqual(config.graduationAccelerationShadow.enabled, true);
 assert.deepStrictEqual(config.graduationAccelerationShadow.capacitySols, [1]);
 assert.deepStrictEqual(
   config.graduationAccelerationShadow.entryProfiles
-    .filter((profile) => profile.experimentGroup !== 'HO500_LONG_EXIT_V1')
+    .filter((profile) => profile.experimentGroup !== 'HO500_LONG_EXIT_V1'
+      && profile.executionModelVersion !== 'POST_TRADE_V1')
     .map((profile) => profile.id),
   [
     'O_FAST10_C80_B20_R07', 'O_C80_D5_B2_S0_NC',
@@ -1146,7 +1147,8 @@ const d5StopProfiles = config.graduationAccelerationShadow.entryProfiles
 assert.deepStrictEqual(d5StopProfiles.map((profile) => profile.hardStopPct), [15, 20]);
 assert.ok(d5StopProfiles.every((profile) => !profile.liveStrategyId));
 const relaxedGraduationProfiles = config.graduationAccelerationShadow.entryProfiles
-  .filter((profile) => profile.studyGroup?.startsWith('O_C80_'));
+  .filter((profile) => profile.studyGroup?.startsWith('O_C80_')
+    && profile.executionModelVersion !== 'POST_TRADE_V1');
 assert.strictEqual(relaxedGraduationProfiles.length, 15);
 assert.ok(relaxedGraduationProfiles.every((profile) => (
   !profile.liveStrategyId
@@ -1159,9 +1161,9 @@ assert.strictEqual(relaxedGraduationProfiles
   .filter((profile) => profile.migrationHandoff).length, 9);
 assert.strictEqual(relaxedGraduationProfiles
   .filter((profile) => profile.entryPriceJumpBand).length, 6);
-const recoveryBridgeProfiles = relaxedGraduationProfiles
+const recoveryBridgeProfiles = config.graduationAccelerationShadow.entryProfiles
   .filter((profile) => profile.handoffLiveStrategyId);
-assert.deepStrictEqual(recoveryBridgeProfiles.map((profile) => profile.id), ['O_C80_HO500_X60']);
+assert.deepStrictEqual(recoveryBridgeProfiles.map((profile) => profile.id), ['O_C80_HO500_X60_POSTV1']);
 assert.strictEqual(recoveryBridgeProfiles[0].liveBridgeCapacitySol, 0.1);
 assert.strictEqual(recoveryBridgeProfiles[0].handoffLiveStrategyId, liveGraduationHandoff.id);
 assert.deepStrictEqual(
@@ -1197,9 +1199,10 @@ const migrationHandoffProfile = config.graduationAccelerationShadow.entryProfile
   .find((profile) => profile.id === 'O_C80_M5_HANDOFF_X60');
 assert.strictEqual(migrationHandoffProfile.migrationHandoff, true);
 assert.strictEqual(migrationHandoffProfile.postMigrationEntryGate.minBuyers, 5);
-assert.strictEqual(migrationHandoffProfile.liveStrategyId, undefined);
+assert.strictEqual(migrationHandoffProfile.liveStrategyId, null);
 const liveMigrationHandoffProfiles = config.graduationAccelerationShadow.entryProfiles
-  .filter((profile) => profile.mode === 'LIVE_MIGRATION_FAILURE');
+  .filter((profile) => profile.mode === 'LIVE_MIGRATION_FAILURE'
+    && profile.executionModelVersion !== 'POST_TRADE_V1');
 assert.deepStrictEqual(
   liveMigrationHandoffProfiles.map((profile) => profile.id),
   ['O_C80_LIVE_MIG_X20', 'O_C80_LIVE_MIG_X30'],

@@ -9,6 +9,51 @@ const MAX_LONG_EXIT_HOLD_MS = 60 * 60_000;
 const LONG_EXIT_TRADE_MAX_AGE_MS = 3_000;
 const LONG_EXIT_HEARTBEAT_MS = 1_000;
 const LONG_EXIT_RESTORE_ROWS_PER_STATUS = 12_000;
+const POST_EXECUTION_MODEL = 'POST_TRADE_V1';
+const LEGACY_EXECUTION_MODEL = 'PRE_TRADE_LEGACY';
+const POST_PENDING_SLOT_EVENT_LIMIT = 256;
+
+function postTradePoint(trade, now) {
+  const slot = finite(trade.slot);
+  const chainTimestampMs = finite(trade.chainTimestampMs);
+  const timestampMs = finite(trade.timestampMs);
+  const receivedAtMs = finite(trade.receivedAtMs ?? trade.timestampMs);
+  const pool = trade.pool || trade.poolAddress;
+  const signature = typeof trade.signature === 'string' && trade.signature ? trade.signature : null;
+  const eventIndex = trade.eventIndex == null ? null : finite(trade.eventIndex);
+  if (trade.ammQuoteState !== POST_EXECUTION_MODEL || !pool || !(slot > 0)
+    || !(chainTimestampMs > 0) || !(timestampMs > 0) || !(receivedAtMs > 0)
+    || !signature || eventIndex == null || !Number.isInteger(eventIndex) || eventIndex < 0) return null;
+  if (now - chainTimestampMs > LONG_EXIT_TRADE_MAX_AGE_MS || chainTimestampMs > now + 1_000
+    || now - receivedAtMs > LONG_EXIT_TRADE_MAX_AGE_MS || receivedAtMs > now + 1_000
+    || receivedAtMs - chainTimestampMs > LONG_EXIT_TRADE_MAX_AGE_MS) return null;
+  return { pool, slot, chainTimestampMs, timestampMs, receivedAtMs, signature, eventIndex };
+}
+
+function postCursorEventKeys(cursor) {
+  return cursor?.seenEventKeys || (cursor?.signature ? [`${cursor.signature}:${cursor.eventIndex}`] : []);
+}
+
+function canAdvancePostCursor(cursor, point) {
+  if (!cursor) return true;
+  if (point.slot < cursor.slot || point.chainTimestampMs < cursor.chainTimestampMs
+    || point.timestampMs < cursor.timestampMs
+    || point.receivedAtMs < (cursor.receivedAtMs || cursor.timestampMs)) return false;
+  if (point.slot !== cursor.slot) return true;
+  const keys = postCursorEventKeys(cursor);
+  const prefix = `${point.signature}:`;
+  // Event indices order events within one transaction. Across transactions in
+  // the same slot only deduplication is provable from this stream's metadata.
+  if (keys.some((key) => key.startsWith(prefix) && Number(key.slice(prefix.length)) >= point.eventIndex)) return false;
+  return keys.length < POST_PENDING_SLOT_EVENT_LIMIT;
+}
+
+function advancePostCursor(cursor, point) {
+  return { ...point, seenEventKeys: [
+    ...(cursor?.slot === point.slot ? postCursorEventKeys(cursor) : []),
+    `${point.signature}:${point.eventIndex}`,
+  ] };
+}
 
 function decodedFeatures(row) {
   if (row?.features && typeof row.features === 'object') return row.features;
@@ -139,6 +184,9 @@ function hasCurveReserves(trade) {
 
 function ammBuyAveragePrice(trade, positionSol, fallbackPrice) {
   try {
+    if (trade.ammQuoteState != null && trade.ammQuoteState !== POST_EXECUTION_MODEL) {
+      return { price: null, impactPct: null, available: false };
+    }
     const base = BigInt(trade.poolBaseReservesRaw || 0);
     const quote = BigInt(trade.poolQuoteReservesRaw || 0)
       + BigInt(trade.virtualQuoteReservesRaw || 0);
@@ -190,6 +238,8 @@ class GraduationAccelerationShadowSuite {
     this.rowsByMint = new Map();
     this.graduatedMints = new Set();
     this.postMigrationTrades = new Map();
+    this.postMigrationTradeCursors = new Map();
+    this.postEvidenceStartedAt = null;
     this.profileDiagnostics = new Map([...this.entryProfiles.keys()]
       .map((profileId) => [profileId, emptyProfileDiagnostics()]));
     this.metrics = {
@@ -236,19 +286,32 @@ class GraduationAccelerationShadowSuite {
   start() {
     if (!this.config.enabled) return;
     const startupAt = this.now();
+    this.postEvidenceStartedAt = startupAt;
     for (const row of this.store.activeGraduationAccelerationShadowPositions()) {
       const position = rowPosition(row);
-      if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT) position.notBeforeChainTimestampMs = startupAt;
+      if (position.status === STATUS.PENDING_ENTRY && this._retiredEntryProfile(position)) {
+        this.store.updateGraduationAccelerationShadowPosition(position.id, {
+          status: STATUS.NO_ENTRY, rejectionReason: 'LEGACY_QUOTE_MODEL_RETIRED',
+          features: { ...position.features, executionModelVersion: LEGACY_EXECUTION_MODEL },
+        });
+        continue;
+      }
+      if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT || this._isPostPosition(position)) {
+        position.notBeforeChainTimestampMs = startupAt;
+      }
       if (position.status === STATUS.PENDING_ENTRY) this.pendingEntries.set(position.id, position);
       else this.positions.set(position.id, position);
       if (position.graduatedAt) this.graduatedMints.add(position.mint);
       this._index(position);
+      this._restorePostEntryCursor(position.mint, position.features?.postEntryTradeCursor);
     }
     this._restoreLongExitObservations(startupAt);
     const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
     for (const row of this.store.recoverableGraduationAccelerationNoExitPositions()) {
       const position = rowPosition(row);
-      if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT) position.notBeforeChainTimestampMs = startupAt;
+      if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT || this._isPostPosition(position)) {
+        position.notBeforeChainTimestampMs = startupAt;
+      }
       if (!(position.exitDeadlineAt > 0)
         || startupAt > position.exitDeadlineAt + noExitObservationMs) {
         this.store.updateGraduationAccelerationShadowPosition(position.id, {
@@ -263,7 +326,7 @@ class GraduationAccelerationShadowSuite {
     }
     const postMigrationSince = startupAt - Math.max(this.config.maxPostGraduationHoldMs, 30_000);
     for (const trade of this.store.recentAmmTrades(postMigrationSince)) {
-      this._recordPostMigrationTrade(trade);
+      this._recordPostMigrationTrade(trade, { replay: true });
     }
     const since = startupAt - Math.max(this.config.maxPreGraduationHoldMs, 30_000);
     for (const trade of this.store.recentCurveTrades(since)) this._recordState(trade);
@@ -285,7 +348,7 @@ class GraduationAccelerationShadowSuite {
 
   stop() {
     for (const position of [...this.positions.values(), ...this.noExitWatches.values()]) {
-      if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT) {
+      if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT || this._isPostPosition(position)) {
         this.store.updateGraduationAccelerationShadowPosition(position.id, this._longExitSnapshot(position));
       }
     }
@@ -352,7 +415,89 @@ class GraduationAccelerationShadowSuite {
     // changing future defaults cannot change an already-open experiment.
     if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT
       && position.features.exitPolicy) return position.features.exitPolicy;
+    if (position.features?.delayedEntryPolicy) return position.features.delayedEntryPolicy;
     return this.entryProfiles.get(position.entryProfileId);
+  }
+
+  _isPostPosition(position) {
+    return position?.features?.executionModelVersion === POST_EXECUTION_MODEL
+      || this.entryProfiles.get(position?.entryProfileId)?.executionModelVersion === POST_EXECUTION_MODEL;
+  }
+
+  _retiredEntryProfile(position) {
+    const profile = this.entryProfiles.get(position.entryProfileId);
+    return profile?.migrationHandoff && profile.newEntriesEnabled === false
+      && profile.executionModelVersion === LEGACY_EXECUTION_MODEL;
+  }
+
+  _tradeForPosition(position, trade) {
+    if (trade.market !== 'PUMP_AMM') return trade;
+    if (trade.ammQuoteState != null && trade.ammQuoteState !== POST_EXECUTION_MODEL) return null;
+    if (this._isPostPosition(position)) {
+      return trade.ammQuoteState === POST_EXECUTION_MODEL ? trade : null;
+    }
+    const profile = this._positionProfile(position);
+    if (!profile?.migrationHandoff || trade.ammQuoteState !== POST_EXECUTION_MODEL) return trade;
+    // Existing handoff positions retain the historical pre-trade mark/exit
+    // convention. This local view never escapes into the live signal bridge.
+    if (trade.prePoolBaseReservesRaw == null || trade.prePoolQuoteReservesRaw == null) return null;
+    const legacy = { ...trade,
+      poolBaseReservesRaw: trade.prePoolBaseReservesRaw,
+      poolQuoteReservesRaw: trade.prePoolQuoteReservesRaw,
+      reservePrice: trade.preReservePrice,
+      ammQuoteState: null,
+      legacyQuoteView: true,
+    };
+    if (!(legacy.reservePrice > 0)) {
+      try {
+        legacy.reservePrice = (Number(BigInt(legacy.poolQuoteReservesRaw)
+          + BigInt(legacy.virtualQuoteReservesRaw || 0)) / 1e9)
+          / (Number(BigInt(legacy.poolBaseReservesRaw)) / 1e6);
+      } catch (_) { return null; }
+    }
+    return legacy.reservePrice > 0 ? legacy : null;
+  }
+
+  _freshPostEntryTrade(position, trade, qualification = null) {
+    const point = postTradePoint(trade, this.now());
+    if (!point || point.chainTimestampMs < (position.notBeforeChainTimestampMs || 0)) return false;
+    const cursor = position.features?.postEntryTradeCursor;
+    const fixedPool = qualification?.pool || position.features?.pendingEntryPool || cursor?.pool;
+    if (fixedPool && point.pool !== fixedPool) return false;
+    if (qualification && (point.slot <= qualification.slot
+      || point.chainTimestampMs < qualification.chainTimestampMs)) return false;
+    return canAdvancePostCursor(cursor, point);
+  }
+
+  _acceptPostPendingTrade(position, trade) {
+    if (!this._freshPostEntryTrade(position, trade, position.features?.qualification)) return false;
+    const point = postTradePoint(trade, this.now());
+    const features = { ...position.features,
+      pendingEntryPool: position.features?.qualification?.pool || position.features?.pendingEntryPool || point.pool,
+      postEntryTradeCursor: advancePostCursor(position.features?.postEntryTradeCursor, point),
+    };
+    // Pending windows are short. Persist every accepted cursor before applying
+    // the time gate so a crash cannot resurrect a lower slot or duplicate event.
+    this.store.updateGraduationAccelerationShadowPosition(position.id, { features });
+    position.features = features;
+    return true;
+  }
+
+  _restorePostEntryCursor(mint, cursor) {
+    if (!cursor || !(cursor.slot > 0)) return;
+    const current = this.postMigrationTradeCursors.get(mint);
+    if (!current || cursor.slot > current.slot) {
+      this.postMigrationTradeCursors.set(mint, cursor);
+      return;
+    }
+    if (cursor.slot !== current.slot) return;
+    const latest = cursor.timestampMs > current.timestampMs ? cursor : current;
+    this.postMigrationTradeCursors.set(mint, { ...latest,
+      chainTimestampMs: Math.max(cursor.chainTimestampMs, current.chainTimestampMs),
+      receivedAtMs: Math.max(cursor.receivedAtMs || cursor.timestampMs, current.receivedAtMs || current.timestampMs),
+      seenEventKeys: [...new Set([...postCursorEventKeys(current), ...postCursorEventKeys(cursor)])]
+        .slice(0, POST_PENDING_SLOT_EVENT_LIMIT),
+    });
   }
 
   _longExitObservationGraceMs() {
@@ -400,7 +545,7 @@ class GraduationAccelerationShadowSuite {
   }
 
   _acceptLongExitTrade(position, trade) {
-    if (position.features?.experimentGroup !== LONG_EXIT_EXPERIMENT) return true;
+    if (position.features?.experimentGroup !== LONG_EXIT_EXPERIMENT && !this._isPostPosition(position)) return true;
     const features = position.features;
     const pool = trade.pool || trade.poolAddress;
     const slot = finite(trade.slot);
@@ -465,6 +610,7 @@ class GraduationAccelerationShadowSuite {
       const pending = this.pendingEntries.get(id);
       if (pending) {
         const profile = this.entryProfiles.get(pending.entryProfileId);
+        if (profile?.pairedSignalProfileId || pending.features?.pairedSignalProfileId) continue;
         if (profile?.migrationHandoff) {
           const windowMs = finite(profile.postMigrationEntryGate?.windowMs, 5_000);
           const handoffDelayMs = finite(profile.postMigrationEntryGate?.entryDelayMs, windowMs);
@@ -546,9 +692,9 @@ class GraduationAccelerationShadowSuite {
     const timestampMs = finite(trade?.timestampMs);
     const price = shadowPrice(trade);
     if (!this.config.enabled || !trade?.mint || !(timestampMs > 0) || !(price > 0)) return;
-    if (trade.market === 'PUMP_AMM') this._recordPostMigrationTrade(trade);
+    const postEvidence = trade.market === 'PUMP_AMM' ? this._recordPostMigrationTrade(trade) : null;
     this.advanceTime(timestampMs);
-    this._observePositions(trade, price);
+    this._observePositions(trade, price, postEvidence);
     if (trade.market !== 'PUMP_BONDING_CURVE') return;
     const state = this._recordState(trade);
     if (!state) return;
@@ -562,7 +708,8 @@ class GraduationAccelerationShadowSuite {
       const profile = this.entryProfiles.get(pending.entryProfileId);
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
         status: STATUS.NO_ENTRY,
-        rejectionReason: profile?.migrationHandoff
+        rejectionReason: pending.features?.pairedSignalProfileId
+          ? 'NO_POST_TRADE_IN_DELAYED_ENTRY_WINDOW' : profile?.migrationHandoff
           ? 'NO_PUMPSWAP_TRADE_IN_HANDOFF_WINDOW'
           : profile?.entryPriceJumpBand
             ? 'NO_CURVE_TRADE_FOR_JUMP_BAND'
@@ -672,7 +819,7 @@ class GraduationAccelerationShadowSuite {
     const ageMs = trade.timestampMs - state.createdAt;
     if (ageMs < 0) return;
     for (const profile of this.entryProfiles.values()) {
-      if (profile.pairedEntryProfileId) continue;
+      if (profile.newEntriesEnabled === false || profile.pairedEntryProfileId || profile.pairedSignalProfileId) continue;
       if (state.triggered.has(profile.id)) continue;
       // These cohorts are seeded only by a real live pre-submit migration
       // rejection. They must not create ordinary Curve-triggered entries.
@@ -810,7 +957,11 @@ class GraduationAccelerationShadowSuite {
   }
 
   _createPendingRows(state, profile, trade, price, features) {
-    if (profile.pairedEntryProfileId) return;
+    if (profile.newEntriesEnabled === false || profile.pairedEntryProfileId || profile.pairedSignalProfileId) return;
+    features = { ...features, executionModelVersion: profile.executionModelVersion || null,
+      shadowExecutionDelayMs: finite(profile.shadowExecutionDelayMs, 0),
+      feeModel: 'FLAT_ESTIMATE', feeModelIncludes: 'EXISTING_CONFIGURED_COSTS',
+    };
     const episodeId = `${state.mint}:${profile.id}:${trade.timestampMs}`;
     if (this.onLiveSignal && profile.liveStrategyId) {
       try {
@@ -882,8 +1033,13 @@ class GraduationAccelerationShadowSuite {
     this.metrics.lastActionAt = this.now();
   }
 
-  _observePositions(trade, price) {
-    for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
+  _observePositions(incomingTrade, incomingPrice, postEvidence = null) {
+    for (const id of [...(this.rowsByMint.get(incomingTrade.mint) || [])]) {
+      const row = this.noExitWatches.get(id) || this.pendingEntries.get(id) || this.positions.get(id);
+      if (!row) continue;
+      const trade = this._tradeForPosition(row, incomingTrade);
+      if (!trade) continue;
+      const price = trade === incomingTrade ? incomingPrice : shadowPrice(trade);
       const noExitWatch = this.noExitWatches.get(id);
       if (noExitWatch) {
         if (this._acceptLongExitTrade(noExitWatch, trade)) this._observeLateExit(noExitWatch, trade, price);
@@ -891,7 +1047,17 @@ class GraduationAccelerationShadowSuite {
       }
       const pending = this.pendingEntries.get(id);
       if (pending) {
-        const profile = this.entryProfiles.get(pending.entryProfileId);
+        const profile = this._positionProfile(pending);
+        if (this._isPostPosition(pending)) {
+          if (!postEvidence?.validPostEvidence || trade.market !== 'PUMP_AMM'
+            || !(pending.graduatedAt > 0) || trade.timestampMs < pending.graduatedAt
+            || trade.timestampMs > pending.entryDeadlineAt
+            || !this._acceptPostPendingTrade(pending, trade)) continue;
+        }
+        if (profile?.pairedSignalProfileId || pending.features?.pairedSignalProfileId) {
+          this._observeDelayedHandoffEntry(pending, profile, trade, price);
+          continue;
+        }
         if (profile?.migrationHandoff) {
           this._observeMigrationHandoffEntry(pending, profile, trade, price);
           continue;
@@ -1154,7 +1320,7 @@ class GraduationAccelerationShadowSuite {
     }
   }
 
-  _recordPostMigrationTrade(trade) {
+  _recordPostMigrationTrade(trade, { replay = false } = {}) {
     if (trade?.market !== 'PUMP_AMM' || !trade.mint) return;
     const timestampMs = finite(trade.timestampMs);
     if (!(timestampMs > 0)) return;
@@ -1162,23 +1328,44 @@ class GraduationAccelerationShadowSuite {
       .map((id) => this.positions.get(id) || this.pendingEntries.get(id))
       .filter(Boolean);
     const gated = positions.filter((position) => (
-      (this.entryProfiles.get(position.entryProfileId)?.postMigrationGate
-        || this.entryProfiles.get(position.entryProfileId)?.postMigrationEntryGate)
+      (this._positionProfile(position)?.postMigrationGate
+        || this._positionProfile(position)?.postMigrationEntryGate)
       && position.graduatedAt > 0
     ));
     if (!gated.length) return;
+    const point = replay ? null : postTradePoint(trade, this.now());
+    const latest = this.postMigrationTradeCursors.get(trade.mint);
+    const poolAllowed = point && gated.some((position) => {
+      if (!this._isPostPosition(position)) return false;
+      const features = position.features || {};
+      const fixedPool = features.qualification?.pool || features.pendingEntryPool || features.entryPool;
+      return !fixedPool || fixedPool === point.pool;
+    });
+    const validPostEvidence = Boolean(point
+      && poolAllowed
+      && point.chainTimestampMs >= (this.postEvidenceStartedAt || 0)
+      && canAdvancePostCursor(latest, point));
+    if (validPostEvidence) this.postMigrationTradeCursors.set(trade.mint, advancePostCursor(latest, point));
+    const evidence = { validPostEvidence };
     const graduatedAt = Math.min(...gated.map((position) => position.graduatedAt));
     const maxWindowMs = Math.max(...gated.map((position) => (
       (() => {
-        const gate = this.entryProfiles.get(position.entryProfileId).postMigrationGate
-          || this.entryProfiles.get(position.entryProfileId).postMigrationEntryGate;
+        const gate = this._positionProfile(position).postMigrationGate
+          || this._positionProfile(position).postMigrationEntryGate;
         return finite(gate.captureWindowMs, gate.windowMs);
       })()
     )));
-    if (timestampMs < graduatedAt || timestampMs > graduatedAt + maxWindowMs) return;
+    if (timestampMs < graduatedAt || timestampMs > graduatedAt + maxWindowMs) return evidence;
     const rows = this.postMigrationTrades.get(trade.mint) || [];
     rows.push({
       timestampMs,
+      receivedAtMs: finite(trade.receivedAtMs ?? trade.timestampMs),
+      chainTimestampMs: finite(trade.chainTimestampMs),
+      slot: finite(trade.slot),
+      signature: trade.signature || null,
+      eventIndex: trade.eventIndex ?? null,
+      validPostEvidence,
+      replay,
       pool: trade.pool || null,
       side: trade.side,
       wallet: trade.wallet || null,
@@ -1187,9 +1374,11 @@ class GraduationAccelerationShadowSuite {
       poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
       poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
       virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+      ammQuoteState: trade.ammQuoteState || null,
     });
     rows.sort((left, right) => left.timestampMs - right.timestampMs);
     this.postMigrationTrades.set(trade.mint, rows);
+    return evidence;
   }
 
   _observeMigrationHandoffEntry(pending, profile, trade, price) {
@@ -1245,6 +1434,20 @@ class GraduationAccelerationShadowSuite {
       return;
     }
     this.store.updateGraduationAccelerationShadowPosition(pending.id, { rugGuard });
+    this._fillMigrationHandoffEntry(pending, profile, trade, price, gate, rugGuard);
+  }
+
+  _observeDelayedHandoffEntry(pending, profile, trade, price) {
+    const qualification = pending.features?.qualification;
+    if (!qualification || trade.market !== 'PUMP_AMM'
+      || trade.timestampMs < pending.entryTargetAt || trade.timestampMs > pending.entryDeadlineAt) return;
+    // Eligibility belongs to the source signal. Only execution price/impact is
+    // evaluated after the delay; a later sell must not rewrite that eligibility.
+    this._fillMigrationHandoffEntry(pending, profile, trade, price, qualification.gate,
+      pending.features.qualificationRugGuard || null);
+  }
+
+  _fillMigrationHandoffEntry(pending, profile, trade, price, gate, rugGuard) {
     const execution = ammBuyAveragePrice(trade, pending.positionSol, price);
     if (!execution.available) {
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
@@ -1294,16 +1497,47 @@ class GraduationAccelerationShadowSuite {
       maxFavorableReturnPct: 0,
       maxAdverseReturnPct: 0,
     };
+    if (this._isPostPosition(pending)) {
+      const qualification = pending.features?.qualification || {
+        at: trade.timestampMs,
+        pool: trade.pool || trade.poolAddress || null,
+        slot: finite(trade.slot),
+        signature: trade.signature || null,
+        eventIndex: trade.eventIndex ?? null,
+        chainTimestampMs: finite(trade.chainTimestampMs),
+        gate: { ...gate },
+      };
+      fill.features = {
+        ...pending.features,
+        executionModelVersion: POST_EXECUTION_MODEL,
+        reserveState: trade.ammQuoteState,
+        feeModel: 'FLAT_ESTIMATE', feeModelIncludes: 'EXISTING_CONFIGURED_COSTS',
+        executionFeesAppliedSeparately: false,
+        qualification,
+        qualifiedAt: qualification.at,
+        entryPool: trade.pool || trade.poolAddress || null,
+        entrySlot: finite(trade.slot),
+        entrySignature: trade.signature || null,
+        entryEventIndex: trade.eventIndex ?? null,
+        entryChainTimestampMs: finite(trade.chainTimestampMs),
+        entryGate: { ...gate },
+        actualExecutionDelayMs: trade.timestampMs - qualification.at,
+      };
+    }
     const pairedProfiles = [...this.entryProfiles.values()].filter((candidate) => (
       candidate.experimentGroup === LONG_EXIT_EXPERIMENT
+      && candidate.newEntriesEnabled !== false
       && candidate.pairedEntryProfileId === profile.id
       && (candidate.capacitySols || []).includes(pending.positionSol)
     ));
     let paired = [];
-    if (pairedProfiles.length) {
+    let delayed = [];
+    if (pairedProfiles.length || this._isPostPosition(pending)) {
       this.store.db.transaction(() => {
         this.store.updateGraduationAccelerationShadowPosition(pending.id, fill);
-        paired = this._clonePairedEntries({ ...pending, ...fill }, pairedProfiles, trade, gate, rugGuard);
+        const source = { ...pending, ...fill };
+        paired = this._clonePairedEntries(source, pairedProfiles, trade, gate, rugGuard);
+        delayed = this._createDelayedHandoffEntries(source, profile, rugGuard);
       })();
     } else this.store.updateGraduationAccelerationShadowPosition(pending.id, fill);
     Object.assign(pending, fill);
@@ -1319,6 +1553,59 @@ class GraduationAccelerationShadowSuite {
     this.positions.set(pending.id, pending);
     this.metrics.opened += 1;
     this.metrics.migrationHandoffPassed += 1;
+    // The pending comparison was committed atomically with the source. Its
+    // execution remains event-driven; the live callback never waits one second.
+    for (const position of delayed) {
+      this.pendingEntries.set(position.id, position);
+      this._index(position);
+      this.metrics.signals += 1;
+    }
+  }
+
+  _createDelayedHandoffEntries(source, sourceProfile, rugGuard) {
+    if (sourceProfile.pairedSignalProfileId || !this._isPostPosition(source)
+      || Math.abs(source.positionSol - 0.1) > 1e-9) return [];
+    const delayed = [];
+    const profiles = [...this.entryProfiles.values()].filter((profile) => (
+      profile.newEntriesEnabled !== false && profile.pairedSignalProfileId === source.entryProfileId
+      && (profile.capacitySols || []).includes(source.positionSol)
+    ));
+    for (const profile of profiles) {
+      const delayMs = Math.max(0, finite(profile.shadowExecutionDelayMs, 1_000));
+      const entryTargetAt = source.entryAt + delayMs;
+      const entryDeadlineAt = entryTargetAt + finite(profile.entryTimeoutMs, this.config.entryTimeoutMs);
+      const features = {
+        ...source.features,
+        pairedSignalProfileId: source.entryProfileId,
+        pairedSourcePositionId: source.id,
+        pairedSourceCohortId: source.cohortId,
+        pairedSourceEpisodeId: source.episodeId,
+        shadowExecutionDelayMs: delayMs,
+        actualExecutionDelayMs: null,
+        qualificationRugGuard: rugGuard,
+        delayedEntryPolicy: { ...profile, handoffLiveStrategyId: null, liveStrategyId: null },
+      };
+      // Pending rows carry qualification evidence, never the source's fill.
+      for (const key of ['entryPool', 'entrySlot', 'entrySignature', 'entryEventIndex', 'entryChainTimestampMs']) {
+        delete features[key];
+      }
+      const saved = this.store.createGraduationAccelerationShadowPosition({
+          cohortId: `${profile.id}:${capacityId(source.positionSol)}`,
+          episodeId: source.episodeId,
+          entryProfileId: profile.id,
+          mint: source.mint, symbol: source.symbol, creator: source.creator,
+          status: STATUS.PENDING_ENTRY, positionSol: source.positionSol,
+          configuredCostPct: source.configuredCostPct,
+          signalAt: source.signalAt, signalPrice: source.signalPrice,
+          signalCurvePct: source.signalCurvePct, entryTargetAt, entryDeadlineAt,
+          coreWeightPct: 0, features,
+      });
+      if (!saved) throw new Error(`Delayed entry could not be persisted: ${profile.id}`);
+      if (!saved?.inserted) continue;
+      this.store.updateGraduationAccelerationShadowPosition(saved.id, { graduatedAt: source.graduatedAt });
+      delayed.push({ ...rowPosition(saved), graduatedAt: source.graduatedAt });
+    }
+    return delayed;
   }
 
   _clonePairedEntries(source, profiles, trade, gate, rugGuard) {
@@ -1326,6 +1613,7 @@ class GraduationAccelerationShadowSuite {
     for (const profile of profiles) {
       const exitPolicy = {
         experimentGroup: LONG_EXIT_EXPERIMENT,
+        executionModelVersion: profile.executionModelVersion || null,
         migrationHandoff: true,
         capacityAwareExit: true,
         coreExitPct: 0,
@@ -1341,6 +1629,7 @@ class GraduationAccelerationShadowSuite {
       const features = {
         ...source.features,
         experimentGroup: LONG_EXIT_EXPERIMENT,
+        executionModelVersion: profile.executionModelVersion || source.features?.executionModelVersion || null,
         pairedEntryProfileId: source.entryProfileId,
         pairedSourcePositionId: source.id,
         pairedSourceCohortId: source.cohortId,
@@ -1382,7 +1671,8 @@ class GraduationAccelerationShadowSuite {
   }
 
   _emitMigrationHandoffLiveSignal(position, profile, trade, price, gate, execution) {
-    if (!this.onLiveSignal || !profile?.handoffLiveStrategyId || profile.pairedEntryProfileId) return;
+    if (!this.onLiveSignal || !profile?.handoffLiveStrategyId || profile.pairedEntryProfileId
+      || profile.pairedSignalProfileId || profile.newEntriesEnabled === false || trade.legacyQuoteView) return;
     const bridgeCapacity = finite(profile.liveBridgeCapacitySol, 1);
     if (Math.abs(position.positionSol - bridgeCapacity) > 1e-9) return;
     try {
@@ -1403,8 +1693,16 @@ class GraduationAccelerationShadowSuite {
         poolBaseReservesRaw: trade.poolBaseReservesRaw || null,
         poolQuoteReservesRaw: trade.poolQuoteReservesRaw || null,
         virtualQuoteReservesRaw: trade.virtualQuoteReservesRaw || null,
+        ammQuoteState: trade.ammQuoteState || null,
+        ammQuoteStateReason: trade.ammQuoteStateReason ?? null,
+        prePoolBaseReservesRaw: trade.prePoolBaseReservesRaw ?? null,
+        prePoolQuoteReservesRaw: trade.prePoolQuoteReservesRaw ?? null,
+        preReservePrice: trade.preReservePrice ?? null,
+        ammExecutionFees: trade.ammExecutionFees ?? null,
         features: {
           sourceShadowCohortId: position.cohortId,
+          executionModelVersion: position.features?.executionModelVersion || null,
+          feeModel: 'FLAT_ESTIMATE',
           signalCurvePct: position.signalCurvePct,
           graduatedAt: position.graduatedAt,
           migrationHandoff: true,
@@ -1426,6 +1724,7 @@ class GraduationAccelerationShadowSuite {
       || event.rejectionReason !== 'ENTRY_MIGRATED_BEFORE_SUBMIT') return;
     const profiles = [...this.entryProfiles.values()].filter((profile) => (
       profile.mode === 'LIVE_MIGRATION_FAILURE'
+      && profile.newEntriesEnabled !== false
       && (!profile.sourceLiveStrategyId || profile.sourceLiveStrategyId === event.strategyId)
     ));
     if (!profiles.length) return;
@@ -1463,6 +1762,9 @@ class GraduationAccelerationShadowSuite {
           signalCurvePct: finite(event.signalCurvePct),
           features: {
             ...(event.features || {}),
+            executionModelVersion: profile.executionModelVersion || null,
+            shadowExecutionDelayMs: 0,
+            feeModel: 'FLAT_ESTIMATE', feeModelIncludes: 'EXISTING_CONFIGURED_COSTS',
             sourceLiveStrategyId: event.strategyId || null,
             sourceLiveRejectionReason: event.rejectionReason,
             sourceLiveErrorCode: event.errorCode || null,
@@ -1500,6 +1802,8 @@ class GraduationAccelerationShadowSuite {
     const rows = (this.postMigrationTrades.get(position.mint) || []).filter((row) => (
       row.timestampMs >= position.graduatedAt && row.timestampMs <= evaluatedAt
       && (!entryPool || row.pool === entryPool)
+      && (!this._isPostPosition(position)
+        || (row.ammQuoteState === POST_EXECUTION_MODEL && row.validPostEvidence === true))
     ));
     const buys = rows.filter((row) => row.side === 'BUY');
     const sells = rows.filter((row) => row.side === 'SELL');
@@ -1626,7 +1930,7 @@ class GraduationAccelerationShadowSuite {
   }
 
   _longExitSnapshot(position) {
-    if (position.features?.experimentGroup !== LONG_EXIT_EXPERIMENT) return {};
+    if (position.features?.experimentGroup !== LONG_EXIT_EXPERIMENT && !this._isPostPosition(position)) return {};
     return {
       features: {
         ...position.features,
@@ -1689,6 +1993,7 @@ class GraduationAccelerationShadowSuite {
         { rugMarkReturnPct: markReturnPct },
       );
       if (!execution.available && (profile?.experimentGroup === LONG_EXIT_EXPERIMENT
+        || this._isPostPosition(position)
         || !execution.conservative)) return;
       runnerPrice = execution.price ?? price;
       exitImpactPct = execution.impactPct;
@@ -1801,6 +2106,7 @@ class GraduationAccelerationShadowSuite {
     if (!ids.size) {
       this.rowsByMint.delete(position.mint);
       this.postMigrationTrades.delete(position.mint);
+      this.postMigrationTradeCursors.delete(position.mint);
     }
     const gate = this.entryProfiles.get(position.entryProfileId)?.postMigrationGate;
     if (gate && position.graduatedAt > 0 && this._gateDecisions) {
@@ -1819,4 +2125,5 @@ module.exports = {
   GraduationAccelerationShadowSuite,
   STATUS,
   curveBuyAveragePrice,
+  ammBuyAveragePrice,
 };

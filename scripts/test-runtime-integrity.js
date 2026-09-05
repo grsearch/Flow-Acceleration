@@ -15,7 +15,7 @@ const config = {
     maxSignalAgeMs: 1500, maxPositionTradeAgeMs: 3000,
     strategies: [
       { id: 'graduation_accel_o_c80_ho500_x60_live', enabled: true, entryEnabled: true,
-        sourceShadowCohortId: 'O_C80_HO500_X60:0_1SOL', positionSizeSol: 0.1,
+        sourceShadowCohortId: 'O_C80_HO500_X60_POSTV1:0_1SOL', positionSizeSol: 0.1,
         requireChainTimestamp: true, requireEntrySlot: true, requireSignalPool: true,
         exitMode: 'FIXED_HOLD', fixedHoldMs: 60000, credentials: secret },
       ...['migrated_ge30_r23_f2_only_g2_xleg_live', 'migrated_grt_r23_f3_v2_xleg_live'].map((id) => ({
@@ -23,7 +23,7 @@ const config = {
       })),
     ],
   },
-  graduationAccelerationShadow: { enabled: true, entryProfiles: [{ id: 'O_C80_HO500_X60',
+  graduationAccelerationShadow: { enabled: true, entryProfiles: [{ id: 'O_C80_HO500_X60_POSTV1',
     handoffLiveStrategyId: 'graduation_accel_o_c80_ho500_x60_live', liveBridgeCapacitySol: 0.1,
     capacitySols: [0.1, 1], postMigrationEntryGate: { windowMs: 500, evaluateAtFill: true },
   }] },

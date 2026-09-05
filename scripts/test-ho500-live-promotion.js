@@ -9,7 +9,7 @@ const { GraduationAccelerationShadowSuite } = require('../src/core/GraduationAcc
 async function main() {
   let now = Date.now();
   const strategy = config.liveTrading.strategies.find((row) => row.id === 'graduation_accel_o_c80_ho500_x60_live');
-  const profile = config.graduationAccelerationShadow.entryProfiles.find((row) => row.id === 'O_C80_HO500_X60');
+  const profile = config.graduationAccelerationShadow.entryProfiles.find((row) => row.id === 'O_C80_HO500_X60_POSTV1');
   assert.equal(strategy.positionSizeSol, 0.1);
   assert.equal(profile.liveBridgeCapacitySol, 0.1);
   const store = new ResearchStore({ dbPath: ':memory:', archiveDir: '.',
@@ -35,7 +35,7 @@ async function main() {
       wallet: `buyer-${at}`, virtualSolReservesRaw: '100000000000',
       virtualTokenReservesRaw: '1000000000000000', pool: market === 'PUMP_AMM' ? 'test-pool' : null,
       poolBaseReservesRaw: '1000000000000000', poolQuoteReservesRaw: '100000000000',
-      virtualQuoteReservesRaw: '0', ...extra };
+      virtualQuoteReservesRaw: '0', ammQuoteState: market === 'PUMP_AMM' ? 'POST_TRADE_V1' : null, ...extra };
   }
   async function enter(mint) {
     const createdAt = now;
@@ -61,7 +61,7 @@ async function main() {
     assert.equal(position.entrySlot, 100);
     assert(trader.timers.has(position.id), 'fixed 60s exit must be armed even if no later trades');
     const signal = signals.find((row) => row.mint === mint);
-    assert.equal(signal.features.sourceShadowCohortId, 'O_C80_HO500_X60:0_1SOL');
+    assert.equal(signal.features.sourceShadowCohortId, 'O_C80_HO500_X60_POSTV1:0_1SOL');
     trader.onExternalStrategySignal(signal);
     await trader.entryQueue;
     assert.equal([...trader.positions.values()].filter((row) => row.mint === mint).length, 1);
