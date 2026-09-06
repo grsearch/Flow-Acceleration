@@ -2112,6 +2112,7 @@
         ['持续确认失败', number(source.persistenceConfirmationRejected), '回撤 / 卖单 / Curve保持条件'],
       ] : source.kind === 'LEGACY_EARLY_FLOW' ? [
         ['EARLY_FLOW源头评估', number(source.evaluated), `同源机会 ${number(source.sourceSignals ?? source.matched ?? source.signals)} · 两臂记录 ${number(source.cohortSignals)}`],
+        ...legacyFdvReferenceMetrics(source.solUsdReference, source.tracker || source, data),
         ['RUG过滤拒绝', number(source.rugRejected), '当前生命周期阶段重复作恶钱包/模板过滤'],
         ['实盘桥接信号', number(source.liveBridgeEmitted ?? source.liveSignals), `桥接错误 ${number(source.liveBridgeErrors)}`],
         ['源头桥接开关', source.liveBridgeEnabled === true ? '允许发送信号' : source.liveBridgeEnabled === false ? '关闭' : '待确认', '实际开仓仍受实盘开关、异常闸与执行保护约束'],
@@ -3434,6 +3435,43 @@
     }
 
     const legacyEarlyFlowCohortIds = ['LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX'];
+    function legacyFdvReferenceMetrics(feed, tracker = {}, data = {}) {
+      const reference = feed?.reference;
+      const known = feed && (typeof feed.ready === 'boolean' || typeof feed.status === 'string');
+      const snapshotStale = runtimeSnapshotStale(data);
+      const expired = Number.isFinite(reference?.expiresAt) && reference.expiresAt <= Date.now();
+      const valid = feed?.ready === true && Number.isFinite(reference?.priceUsd) && reference.priceUsd > 0
+        && Number.isFinite(reference?.observedAt) && reference.observedAt <= Date.now()
+        && Number.isFinite(reference?.expiresAt) && !expired;
+      const status = !known ? 'UNKNOWN'
+        : ['DISABLED', 'STOPPED'].includes(feed.status) ? feed.status
+          : expired || feed.status === 'STALE' ? 'STALE'
+            : valid ? 'READY' : feed.ready === false ? 'UNAVAILABLE' : 'UNKNOWN';
+      const labels = { READY: 'READY · 可计算FDV', STALE: '过期 · 无法判断机会',
+        UNAVAILABLE: '缺失 · 无法判断机会', DISABLED: '参考价已禁用', STOPPED: '参考价已停止',
+        UNKNOWN: '待确认 · 非正常结论' };
+      const blocked = tracker.rejectedByReason && typeof tracker.rejectedByReason === 'object'
+        ? tracker.rejectedByReason.FDV_REFERENCE_UNAVAILABLE ?? 0 : null;
+      const reasons = tracker.fdvRejectedByReason;
+      const reasonLabels = { TOKEN_SUPPLY_UNAVAILABLE: '代币供应量缺失',
+        SOL_USD_REFERENCE_UNAVAILABLE: 'SOL/USD缺失', SOL_USD_REFERENCE_EXPIRED: 'SOL/USD过期',
+        SOL_USD_REFERENCE_NOT_YET_KNOWN: '参考价晚于事件' };
+      const detail = reasons && typeof reasons === 'object'
+        ? Object.entries(reasonLabels).map(([key, label]) => `${label} ${number(reasons[key] ?? 0)}`).join(' · ')
+        : '缺数据分项待确认';
+      const freshness = valid ? `缓存 $${number(reference.priceUsd,4)} / SOL · 有效至 ${dateTime(reference.expiresAt)}`
+        : '缺少有效参考价时在信号前阻断；不代表市场没有机会，也不是RUG拒绝';
+      const refreshState = snapshotStale ? '运行快照已过期' : feed?.refreshing === true
+        ? `刷新中 ${age(feed.pendingAgeMs)}` : feed?.refreshing === false ? '当前无刷新请求' : '刷新状态待确认';
+      const error = feed?.lastErrorCode || feed?.lastError;
+      return [
+        ['FDV参考价', snapshotStale ? '运行快照过期 · 待确认' : labels[status], snapshotStale
+          ? '不能根据旧快照确认参考价可用；等待运行状态更新' : freshness],
+        ['FDV缺数据阻断', number(blocked), `${detail}；累计评估次数，非币数或已命中信号，不计RUG拦截`],
+        ['参考价刷新', refreshState, `最近尝试 ${dateTime(feed?.lastAttemptAt)} · 最近成功 ${dateTime(feed?.lastSuccessAt)}<br>最近完成 ${dateTime(feed?.lastCompletedAt)} · 下次刷新 ${dateTime(feed?.nextRefreshAt)}`],
+        ['参考价失败 / 超时', `${number(feed?.failures)} / ${number(feed?.timeouts)}`, `${error ? escapeHtml(error) : known && feed?.lastError === null ? '无已记录错误' : '错误状态待确认'} · 连续失败 ${number(feed?.consecutiveFailures)} · HTTP ${number(feed?.lastHttpStatus)}<br>硬超时 ${age(feed?.requestTimeoutMs)} · 刷新间隔 ${age(feed?.refreshIntervalMs)}；仅展示缓存，不增加查询`],
+      ];
+    }
     function renderLegacyEarlyFlowShadow(data = {}) {
       const runtime = data.runtimeShadow || {};
       const shadow = data.shadow || {};
@@ -3450,6 +3488,7 @@
       renderMetricGroups('#legacy-early-flow-metrics', [
         ['当前查看', escapeHtml(selected), '两组配对结果始终同时展示，不合并收益'],
         ['源头评估 / 命中', `${number(tracker.evaluated)} / ${number(tracker.sourceSignals ?? tracker.matched ?? tracker.signals)}`, `两臂记录 ${number(tracker.cohortSignals)}；同一源不算两次命中`],
+        ...legacyFdvReferenceMetrics(data.solUsdReference ?? metrics.solUsdReference, tracker, data),
         ['实盘桥接', bridgeEnabled === true ? '允许发送信号' : bridgeEnabled === false ? '关闭' : '待确认', escapeHtml(rugx.liveStrategyId || '实盘目标待确认')],
         ['桥接信号 / 错误', `${number(metrics.liveSignals ?? metrics.liveBridgeEmitted)} / ${number(metrics.liveBridgeErrors)}`, '收到信号不等于成交；查看对应实盘策略'],
         ['持久化异常 / 待处理', `${number(metrics.persistenceErrors)} / ${number(metrics.pendingErrors)}`, '写入失败隔离为DATA_ERROR；不计过滤收益'],
