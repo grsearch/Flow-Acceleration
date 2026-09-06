@@ -14,6 +14,7 @@ const {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
+  createCloseAccountInstruction,
   getAssociatedTokenAddressSync,
 } = require('@solana/spl-token');
 const {
@@ -37,6 +38,8 @@ const {
 const BN = require('bn.js');
 const bs58Module = require('bs58');
 const { ammQuoteStateRejection } = require('./ShadowExecutionModel');
+const { canonicalCandidate, fullAccountKeys, integer: fundingInteger,
+  tokenAccountFundingFromTransaction, transactionClosesTokenAccount, validateEmptyTokenAccount } = require('./TokenAccountFunding');
 
 const bs58 = bs58Module.default || bs58Module;
 
@@ -249,6 +252,18 @@ function confirmedTransactionFailure(signature, transactionError) {
   return error;
 }
 
+async function accountRecoveryRead(signal, task) {
+  const check = () => {
+    if (signal?.aborted) throw errorWithCode('Account recovery read was cancelled', 'ACCOUNT_RECOVERY_ABORTED');
+  };
+  check();
+  const result = await task();
+  // web3 RPC cannot cancel its in-flight HTTP request, but a timed-out job must
+  // not continue its next history request or sign after that request returns.
+  check();
+  return result;
+}
+
 function tokenDeltaFromTransaction(transactionResponse, mintValue, ownerValue) {
   const meta = transactionResponse?.meta;
   if (!meta || meta.err) return null;
@@ -304,9 +319,11 @@ function walletSolSettlementFromTransaction(transactionResponse, ownerValue) {
   if (!Number.isSafeInteger(pre) || !Number.isSafeInteger(post)) return null;
   const fee = Number(meta.fee || 0);
   return {
+    wallet: owner,
     walletSolDelta: (post - pre) / LAMPORTS_PER_SOL,
     networkFeeSol: Number.isFinite(fee) ? fee / LAMPORTS_PER_SOL : null,
     walletIndex: index,
+    accountFunding: tokenAccountFundingFromTransaction(transactionResponse, owner),
     ...(normalizedSlot(transactionResponse?.slot) !== null
       ? { transactionSlot: normalizedSlot(transactionResponse.slot) } : {}),
   };
@@ -445,6 +462,191 @@ class PumpTradeExecutor {
       response,
       this.signer.publicKey.toBase58(),
     );
+  }
+
+  // Cleanup is a separate durable workflow: never add CloseAccount to an urgent
+  // SELL, where a nonempty/extended account could cause the entire sell to fail.
+  async prepareEmptyTokenAccountClose(candidate, { signal } = {}) {
+    const read = task => accountRecoveryRead(signal, task);
+    const owner = this.signer.publicKey.toBase58();
+    const identity = canonicalCandidate(candidate, owner);
+    if (candidate?.creationVerified !== true || typeof candidate.sourceSignature !== 'string'
+      || bs58.decode(candidate.sourceSignature).length !== 64) {
+      throw errorWithCode('Cleanup requires a verified creation receipt', 'ACCOUNT_CREATION_UNVERIFIED');
+    }
+    const originalFunding = fundingInteger(candidate.fundedLamports);
+    const source = await read(() => this.connection.getTransaction(candidate.sourceSignature, {
+      commitment: 'finalized', maxSupportedTransactionVersion: 0,
+    }));
+    const sourceFunding = tokenAccountFundingFromTransaction(source, owner);
+    const creation = sourceFunding.accounts.find((row) => row.address === identity.address);
+    const creationSlot = normalizedSlot(source?.slot);
+    if (!sourceFunding.verified || !creation?.created || creation.owner !== identity.owner
+      || creation.mint !== identity.mint || creation.programId !== identity.programId
+      || creation.postLamports !== originalFunding.toString() || creationSlot === null
+      || source?.transaction?.signatures?.[0] !== candidate.sourceSignature) {
+      throw errorWithCode('Finalized creation receipt did not prove this account', 'ACCOUNT_CREATION_UNVERIFIED');
+    }
+    const snapshot = await read(() => this.connection.getAccountInfoAndContext(new PublicKey(identity.address), {
+      commitment: 'finalized', minContextSlot: creationSlot,
+    }));
+    const contextSlot = normalizedSlot(snapshot?.context?.slot);
+    if (contextSlot === null || contextSlot < creationSlot) throw errorWithCode('Account snapshot is stale', 'ACCOUNT_CONTEXT_STALE');
+    if (!snapshot.value) return { status: 'ABSENT', account: identity.address, owner, contextSlot };
+    const empty = validateEmptyTokenAccount(identity, snapshot.value, owner);
+    if (empty.refundLamports !== originalFunding.toString()) {
+      throw errorWithCode('Account funding changed since the verified creation', 'ACCOUNT_FUNDING_CHANGED');
+    }
+    // A deterministic ATA can have been closed/recreated since our original
+    // funding. Bound the proof to 32 address-local transactions and fail closed
+    // rather than scanning the wallet or assuming equal rent means same account.
+    const history = await read(() => this.connection.getSignaturesForAddress(new PublicKey(identity.address), {
+      limit: 32, minContextSlot: contextSlot,
+    }, 'finalized'));
+    if (!Array.isArray(history) || new Set(history.map((item) => item?.signature)).size !== history.length) {
+      throw errorWithCode('Incomplete account history', 'ACCOUNT_LIFECYCLE_UNVERIFIED');
+    }
+    const sourceIndex = history.findIndex((item) => item.signature === candidate.sourceSignature);
+    if (sourceIndex < 0) throw errorWithCode('Creation is outside bounded account history', 'ACCOUNT_HISTORY_TRUNCATED');
+    for (const item of history.slice(0, sourceIndex)) {
+      const later = await read(() => this.connection.getTransaction(item.signature, {
+        commitment: 'finalized', maxSupportedTransactionVersion: 0,
+      }));
+      if (!later || later.transaction?.signatures?.[0] !== item.signature) throw errorWithCode('Later account receipt unavailable', 'ACCOUNT_LIFECYCLE_UNVERIFIED');
+      let changed;
+      try {
+        const index = fullAccountKeys(later).indexOf(identity.address);
+        if (index < 0) throw errorWithCode('Account missing from its history', 'ACCOUNT_LIFECYCLE_UNVERIFIED');
+        const pre = fundingInteger(later.meta.preBalances[index]);
+        const post = fundingInteger(later.meta.postBalances[index]);
+        changed = pre !== originalFunding || post !== originalFunding
+          || (!later.meta.err && transactionClosesTokenAccount(later, identity.address));
+      } catch (error) {
+        throw errorWithCode(`Cannot prove account lifecycle: ${error.message}`, 'ACCOUNT_LIFECYCLE_UNVERIFIED');
+      }
+      if (changed) throw errorWithCode('Account was closed, recreated or refunded after creation', 'ACCOUNT_LIFECYCLE_CHANGED');
+    }
+    const latest = await read(() => this.connection.getLatestBlockhash({ commitment: 'finalized', minContextSlot: contextSlot }));
+    if (!Number.isSafeInteger(latest?.lastValidBlockHeight) || latest.lastValidBlockHeight < 0) throw errorWithCode('Missing blockhash validity', 'CLEANUP_BLOCKHASH_INVALID');
+    const transaction = new Transaction({ feePayer: this.signer.publicKey,
+      blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight });
+    // Exactly 0.0001 SOL priority budget, independent of the trading CU limit.
+    transaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 20_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5_000_000 }),
+      createCloseAccountInstruction(new PublicKey(identity.address), this.signer.publicKey,
+        this.signer.publicKey, [], new PublicKey(identity.programId)));
+    const feeResponse = await read(() => this.connection.getFeeForMessage(transaction.compileMessage(), 'finalized'));
+    const fee = fundingInteger(feeResponse?.value, 'cleanup fee');
+    if (fee <= 0n || fee > 105_000n || fee >= originalFunding) throw errorWithCode('Cleanup fee is not economical', 'CLEANUP_FEE_TOO_HIGH');
+    transaction.sign(this.signer);
+    return { status: 'READY', ...identity, account: identity.address,
+      signature: bs58.encode(transaction.signature), rawTransactionBase64: transaction.serialize().toString('base64'),
+      blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight,
+      contextSlot, sourceSignature: candidate.sourceSignature,
+      expectedRefundLamports: originalFunding.toString(), estimatedFeeLamports: fee.toString() };
+  }
+
+  _validatePreparedTokenAccountClose(prepared) {
+    const identity = canonicalCandidate({ ...prepared, address: prepared?.account }, this.signer.publicKey.toBase58());
+    if (prepared?.status !== 'READY' || typeof prepared.rawTransactionBase64 !== 'string'
+      || !Number.isSafeInteger(prepared.lastValidBlockHeight) || prepared.lastValidBlockHeight < 0) {
+      throw errorWithCode('Malformed prepared cleanup', 'INVALID_PREPARED_CLEANUP');
+    }
+    const raw = Buffer.from(prepared.rawTransactionBase64, 'base64');
+    if (raw.toString('base64') !== prepared.rawTransactionBase64) throw errorWithCode('Invalid cleanup encoding', 'INVALID_PREPARED_CLEANUP');
+    const transaction = Transaction.from(raw);
+    const expectedInstructions = [ComputeBudgetProgram.setComputeUnitLimit({ units: 20_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5_000_000 }),
+      createCloseAccountInstruction(new PublicKey(identity.address), this.signer.publicKey,
+        this.signer.publicKey, [], new PublicKey(identity.programId))];
+    if (!transaction.feePayer?.equals(this.signer.publicKey) || transaction.recentBlockhash !== prepared.blockhash
+      || transaction.signatures.length !== 1 || !transaction.signatures[0].publicKey.equals(this.signer.publicKey)
+      || !transaction.verifySignatures() || bs58.encode(transaction.signature) !== prepared.signature
+      || transaction.instructions.length !== expectedInstructions.length) {
+      throw errorWithCode('Prepared transaction identity mismatch', 'INVALID_PREPARED_CLEANUP');
+    }
+    for (let index = 0; index < expectedInstructions.length; index += 1) {
+      const actual = transaction.instructions[index];
+      const expected = expectedInstructions[index];
+      // Compiling merges repeated owner metas; pubkey order and permissions are
+      // checked against a recompiled expected transaction below, not raw metas.
+      if (!actual.programId.equals(expected.programId) || !actual.data.equals(expected.data)
+        || actual.keys.length !== expected.keys.length
+        || actual.keys.some((entry, i) => !entry.pubkey.equals(expected.keys[i].pubkey))) {
+        throw errorWithCode('Prepared cleanup contains unexpected instructions', 'INVALID_PREPARED_CLEANUP');
+      }
+    }
+    const expected = new Transaction({ feePayer: this.signer.publicKey, recentBlockhash: prepared.blockhash });
+    expected.add(...expectedInstructions);
+    if (!expected.compileMessage().serialize().equals(transaction.compileMessage().serialize())) throw errorWithCode('Prepared cleanup account permissions mismatch', 'INVALID_PREPARED_CLEANUP');
+    const refund = fundingInteger(prepared.expectedRefundLamports);
+    const fee = fundingInteger(prepared.estimatedFeeLamports);
+    if (fee <= 0n || fee > 105_000n || fee >= refund) throw errorWithCode('Unsafe prepared fee', 'INVALID_PREPARED_CLEANUP');
+    return { identity, raw, transaction, refund, fee };
+  }
+
+  async sendPreparedTokenAccountClose(prepared) {
+    const { raw } = this._validatePreparedTokenAccountClose(prepared);
+    // The coordinator persists the signature/bytes before this call. Even if the
+    // HTTP request fails, reconciliation must use these bytes, never a new tx.
+    const signature = await this.connection.sendRawTransaction(raw, {
+      skipPreflight: false, maxRetries: 0, preflightCommitment: 'finalized',
+      ...(normalizedSlot(prepared.contextSlot) !== null ? { minContextSlot: prepared.contextSlot } : {}),
+    });
+    if (signature !== prepared.signature) throw errorWithCode('RPC returned another cleanup signature', 'CLEANUP_SIGNATURE_MISMATCH');
+    return { status: 'SUBMITTED', signature };
+  }
+
+  async reconcileTokenAccountClose(prepared, { signal } = {}) {
+    const read = task => accountRecoveryRead(signal, task);
+    const { identity, transaction, refund } = this._validatePreparedTokenAccountClose(prepared);
+    const fetchReceipt = () => read(() => this.connection.getTransaction(prepared.signature, {
+      commitment: 'finalized', maxSupportedTransactionVersion: 0,
+    }));
+    const receipt = await fetchReceipt();
+    if (receipt) {
+      try {
+        const keys = fullAccountKeys(receipt);
+        const message = receipt.transaction.message;
+        if (receipt.transaction.signatures?.length !== 1 || receipt.transaction.signatures[0] !== prepared.signature
+          || typeof message.serialize !== 'function' || !Buffer.from(message.serialize()).equals(transaction.compileMessage().serialize())) {
+          return { status: 'UNVERIFIED', reason: 'CLEANUP_RECEIPT_IDENTITY_MISMATCH' };
+        }
+        const meta = receipt.meta;
+        const ownerIndex = keys.indexOf(identity.owner);
+        const accountIndex = keys.indexOf(identity.address);
+        if (ownerIndex !== 0 || accountIndex < 0) return { status: 'UNVERIFIED', reason: 'CLEANUP_RECEIPT_ACCOUNT_MISSING' };
+        const fee = fundingInteger(meta.fee);
+        const walletDelta = fundingInteger(meta.postBalances[ownerIndex]) - fundingInteger(meta.preBalances[ownerIndex]);
+        const accountPre = fundingInteger(meta.preBalances[accountIndex]);
+        const accountPost = fundingInteger(meta.postBalances[accountIndex]);
+        if (fee > 105_000n || meta.preBalances.some((amount, index) => index !== ownerIndex
+          && index !== accountIndex && fundingInteger(amount) !== fundingInteger(meta.postBalances[index]))) {
+          return { status: 'UNVERIFIED', reason: 'CLEANUP_UNEXPECTED_BALANCE_CHANGES' };
+        }
+        const settlement = { walletSolDelta: Number(walletDelta) / LAMPORTS_PER_SOL,
+          networkFeeSol: Number(fee) / LAMPORTS_PER_SOL, wallet: identity.owner,
+          transactionSlot: normalizedSlot(receipt.slot), refundLamports: '0' };
+        if (meta.err) {
+          if (accountPre !== accountPost || walletDelta !== -fee) return { status: 'UNVERIFIED', reason: 'CLEANUP_FAILED_BALANCE_MISMATCH' };
+          return { status: 'FAILED', ...settlement, error: JSON.stringify(meta.err) };
+        }
+        if (accountPre !== refund || accountPost !== 0n || walletDelta !== refund - fee) {
+          return { status: 'UNVERIFIED', reason: 'CLEANUP_REFUND_MISMATCH' };
+        }
+        return { status: 'CONFIRMED', ...settlement, refundLamports: refund.toString(), account: identity.address, signature: prepared.signature };
+      } catch (error) { return { status: 'UNVERIFIED', reason: error.code || 'MALFORMED_CLEANUP_RECEIPT' }; }
+    }
+    const height = await read(() => this.connection.getBlockHeight('finalized'));
+    if (!Number.isSafeInteger(height) || height <= prepared.lastValidBlockHeight) return { status: 'PENDING' };
+    const finalizedSlot = await read(() => this.connection.getSlot('finalized'));
+    const statuses = await read(() => this.connection.getSignatureStatuses([prepared.signature], { searchTransactionHistory: true }));
+    if (normalizedSlot(finalizedSlot) === null || normalizedSlot(statuses?.context?.slot) === null
+      || statuses.context.slot < finalizedSlot || !Array.isArray(statuses.value)
+      || statuses.value.length !== 1 || statuses.value[0] !== null) return { status: 'PENDING' };
+    // Recheck after the fresh status read. A failed/null RPC is never expiry.
+    if (await fetchReceipt()) return { status: 'PENDING' };
+    return { status: 'EXPIRED', finalizedBlockHeight: height, finalizedSlot };
   }
 
   async _entrySlotFromReceipt(signature, execution) {

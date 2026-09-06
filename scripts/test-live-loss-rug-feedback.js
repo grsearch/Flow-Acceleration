@@ -232,8 +232,72 @@ async function boundedRecoveryCursor() {
   await f.feedback.stop();
 }
 
+async function lateBindingAndEvidenceHealth() {
+  const f = fixture();
+  // Match the original production order: feedback exists before the tracker.
+  f.feedback.tracker = undefined;
+  assert.equal(f.feedback.health().trackerBound, false);
+  assert.equal(f.feedback.health().status, 'DEGRADED');
+  const missing = f.position(1); f.entry(missing);
+  const unavailable = clone(f.feedback.tracked.get(1).entryEvidence);
+  assert.equal(unavailable.tracker.reason, 'CAPTURE_UNAVAILABLE');
+  assert.equal(f.feedback.health().entryEvidenceUnavailable, 1);
+  assert.equal(f.feedback.health().lastEvidenceError, 'CAPTURE_UNAVAILABLE');
+  assert.equal(f.feedback.health().consecutiveEvidenceErrors, 1);
+
+  f.store.preEntryRugRisk = f.tracker;
+  const valid = f.position(2); f.entry(valid);
+  assert.equal(f.feedback.health().ready, true);
+  assert.equal(f.feedback.health().captureReady, true);
+  assert.equal(f.feedback.health().lastSuccessfulCaptureAt, T);
+  assert.equal(f.feedback.health().entryEvidenceUnavailable, 1, 'past missing entries remain visible');
+  f.setNow(10_000);
+  f.feedback.onSettlement(1, totals()); f.feedback.onSettlement(2, totals());
+  await f.feedback.flush();
+  assert.equal(f.cases.get(1).classification, 'INSUFFICIENT');
+  assert.equal(f.cases.get(1).attribution.analysis.reason, 'ENTRY_EVIDENCE_UNAVAILABLE');
+  assert.deepEqual(f.cases.get(1).entryEvidence, unavailable, 'later binding cannot backfill entry evidence');
+  assert.equal(f.cases.get(2).learning.status, 'LEARNED');
+  assert.deepEqual(f.learns.map(row => row.caseId), ['LIVE_LOSS:2']);
+
+  let replacements = 0;
+  f.store.preEntryRugRisk = { ...f.tracker, captureLossEvidence(...args) {
+    replacements += 1; return f.tracker.captureLossEvidence(...args);
+  } };
+  // An explicitly passed old tracker must not hide the runtime replacement.
+  f.feedback.tracker = { captureLossEvidence() { throw new Error('stale tracker used'); } };
+  f.entry(f.position(3));
+  assert.equal(replacements, 1);
+  f.store.preEntryRugRisk = { ...f.tracker, config: { enabled: false } };
+  assert.equal(f.feedback.health().trackerEnabled, false);
+  assert.equal(f.feedback.health().status, 'DEGRADED');
+  f.entry(f.position(4));
+  assert.equal(f.feedback.health().lastEvidenceError, 'CAPTURE_DISABLED');
+  f.store.preEntryRugRisk = { ...f.tracker, captureLossEvidence() { throw new Error('secret-provider-url'); } };
+  f.entry(f.position(5));
+  assert.equal(f.feedback.health().lastEvidenceError, 'CAPTURE_FAILED');
+  assert.equal(JSON.stringify(f.feedback.health()).includes('secret-provider-url'), false);
+  f.store.preEntryRugRisk = { ...f.tracker, captureLossEvidence() { return undefined; } };
+  f.entry(f.position(6));
+  assert.equal(f.feedback.health().lastEvidenceError, 'INVALID_CAPTURE_RESULT');
+  f.store.preEntryRugRisk = { ...f.tracker, analyzeLossEvidence: undefined };
+  assert.equal(f.feedback.health().analyzerReady, false);
+  assert.equal(f.feedback.health().ready, false);
+  await f.feedback.stop();
+
+  const settlement = fixture();
+  const p = settlement.position(); settlement.entry(p); settlement.setNow(10_000);
+  settlement.store.preEntryRugRisk = { ...settlement.tracker,
+    captureLossEvidence() { throw new Error('capture failed at settlement'); } };
+  settlement.feedback.onSettlement(1, totals()); await settlement.feedback.flush();
+  assert.equal(settlement.cases.get(1).attribution.analysis.reason, 'SETTLEMENT_EVIDENCE_UNAVAILABLE');
+  assert.equal(settlement.learns.length, 0, 'missing settlement capture cannot be learned');
+  await settlement.feedback.stop();
+}
+
 (async () => {
   await baseline(); await accountingAndIsolation(); await durabilityAndRecovery(); await boundedAndConfirmation();
   await boundedRecoveryCursor();
+  await lateBindingAndEvidenceHealth();
   console.log('test-live-loss-rug-feedback: ok');
 })().catch(error => { console.error(error); process.exitCode = 1; });

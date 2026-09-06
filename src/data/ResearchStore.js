@@ -10,6 +10,7 @@ const {
   RawTradeShardManager, ensureRawExecutionColumns, normalizeRawExecutionContext,
 } = require('./RawTradeShardManager');
 const { serializeAmmExecutionContext, restoreRawExecutionContext } = require('./RawExecutionContext');
+const { liveAccountRecoveryMethods } = require('./LiveAccountRecoveryStore');
 
 const MIGRATION_SOURCE = Object.freeze({
   CHAIN_EVENT: 'CHAIN_EVENT',
@@ -3110,6 +3111,7 @@ class ResearchStore {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_live_positions_loss_rug_pending
       ON live_positions(id) WHERE mode = 'LIVE' AND status = 'CLOSED'
         AND realized_return_pct <= -50`);
+    this._ensureLiveAccountRecoverySchema();
   }
 
   _prepare() {
@@ -5993,11 +5995,25 @@ class ResearchStore {
       createdAt: now,
       updatedAt: now,
     });
-    return Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertRowid);
+    if (order.execution?.settlement) this._safeLiveAccountFunding(() => this.recordLiveAccountFunding(id, order.execution.settlement));
+    return id;
   }
 
   updateLiveOrder(id, patch = {}) {
     const value = (key) => (Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] : null);
+    let execution = value('execution');
+    if (execution) {
+      let previous = null;
+      try { previous = JSON.parse(this.db.prepare('SELECT execution_json FROM live_orders WHERE id=?').get(id)?.execution_json || 'null'); } catch (_) {}
+      const settlement = previous?.settlement || execution.settlement
+        ? { ...previous?.settlement, ...execution.settlement } : null;
+      execution = { ...previous, ...execution };
+      if (settlement) execution.settlement = settlement;
+      if (previous?.settlement?.accountFunding?.verified === true && execution.settlement.accountFunding?.verified !== true) {
+        execution.settlement.accountFunding = previous.settlement.accountFunding;
+      }
+    }
     this.stmts.updateLiveOrder.run({
       id,
       status: value('status'),
@@ -6005,10 +6021,11 @@ class ResearchStore {
       error: value('error'),
       walletSolDelta: finiteOrNull(value('walletSolDelta')),
       networkFeeSol: finiteOrNull(value('networkFeeSol')),
-      executionJson: value('execution') ? JSON.stringify(value('execution')) : null,
+      executionJson: execution ? JSON.stringify(execution) : null,
       confirmedAt: value('confirmedAt'),
       updatedAt: Date.now(),
     });
+    if (patch.execution?.settlement) this._safeLiveAccountFunding(() => this.recordLiveAccountFunding(id, patch.execution.settlement));
   }
 
   latestLiveOrderForPositionSide(positionId, side) {
@@ -6032,7 +6049,7 @@ class ResearchStore {
     `).all(Math.min(2_000, Math.max(1, Math.trunc(Number(limit) || 500))));
   }
 
-  refreshLivePositionSettlement(positionId) {
+  refreshLivePositionSettlement(positionId, { refreshAccountFunding = true } = {}) {
     const totals = this.db.prepare(`
       SELECT
         SUM(CASE WHEN side = 'BUY' THEN wallet_sol_delta ELSE 0 END) AS entry_delta,
@@ -6082,6 +6099,7 @@ class ResearchStore {
       hardStopSlippagePct,
       positionId,
     );
+    if (refreshAccountFunding) this._safeLiveAccountFunding(() => this.refreshLivePositionAccountFunding(positionId));
     return {
       entrySolDelta: entryDelta,
       exitSolDelta: exitDelta,
@@ -6932,6 +6950,7 @@ class ResearchStore {
       Date.now(),
       id,
     );
+    this._safeLiveAccountFunding(() => this.recordLiveAccountFunding(id, settlement));
   }
 
   activeCyaEarlyPyramidShadowPositions() {
@@ -9990,6 +10009,12 @@ class ResearchStore {
       LIMIT ?
     `).all(...(strategy ? [strategy, safeLimit(positionLimit)] : [safeLimit(positionLimit)]))
       .map((row) => {
+        if (row.account_funding_cash_pnl_sol !== row.realized_pnl_sol) {
+          row.economic_pnl_sol = null;
+          row.economic_return_pct = null;
+          row.cash_after_recovery_pnl_sol = null;
+          row.account_funding_complete = 0;
+        }
         const legacyCurveComplete = row.status === 'ENTRY_FAILED'
           && row.entry_signature == null
           && /(?:bonding curve already complete|curve complete)/i.test(row.entry_error || '');
@@ -10138,6 +10163,7 @@ class ResearchStore {
       entryLocks: this.activeLiveMintEntryLocks(100),
       strategyId: strategy,
       lossRugFeedback: this.liveLossRugFeedbackDashboard(strategy),
+      accountRecovery: this.liveAccountRecoveryDashboard(strategy),
     };
   }
 
@@ -10667,6 +10693,8 @@ class ResearchStore {
     }
   }
 }
+
+Object.assign(ResearchStore.prototype, liveAccountRecoveryMethods);
 
 module.exports = {
   ResearchStore,

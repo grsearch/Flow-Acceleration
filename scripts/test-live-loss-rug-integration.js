@@ -15,7 +15,6 @@ async function main() {
     flushMax: 100 }, { configuredTradingCostPct: 0 });
   const tracker = new PreEntryRugRiskTracker({ config: { ...config.preEntryRugRisk,
     enabled: true, toxicCollapsePct: 60, toxicMemoryPath: null }, store, now: () => now });
-  store.preEntryRugRisk = tracker;
   store.recordCreate({ mint, symbol: mint, name: null, uri: null, bondingCurve: null,
     creator: null, createdAt: T - 1000, initialRealTokenReservesRaw: '1000000000000000',
     tokenTotalSupplyRaw: '1000000000000000' });
@@ -44,6 +43,12 @@ async function main() {
     strategies: config.liveTrading.strategies.filter(row => row.id === LEGACY_LIVE_ID),
     lossRugFeedback: { ...config.liveTrading.lossRugFeedback, enabled: true } },
     store, executor, now: () => now });
+  assert.equal(manager.lossRugFeedback.health().status, 'DEGRADED');
+  assert.equal(manager.lossRugFeedback.health().trackerBound, false);
+  // Regression: the manager already exists, exactly like the broken runtime.
+  // Late binding must work for capture, analysis, learning and evidence release.
+  store.preEntryRugRisk = tracker;
+  assert.equal(manager.lossRugFeedback.health().ready, true);
   let b = 1_000_000_000_000_000n, q = 400_000_000_000n, seq = 0;
   const emit = (offset, side, amount, { target = mint, slot = ++seq + 100, reset = false } = {}) => {
     if (reset) { b = 1_000_000_000_000_000n; q = 400_000_000_000n; }
@@ -114,4 +119,52 @@ async function main() {
   } finally { await manager.stop(); store.close(); }
   console.log('test-live-loss-rug-integration: real tracker + store + manager feedback + future filter passed');
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+
+async function runtimeStartupBinding() {
+  const { createRuntime } = require('../src/index');
+  const runtimeConfig = { ...config,
+    storage: { ...config.storage, dbPath: ':memory:', startupReplayCacheMs: 0 },
+    liveTrading: { ...config.liveTrading, enabled: false, dryRun: true },
+    server: { ...config.server, host: '127.0.0.1', port: 0 },
+    migrationSecondLegShadow: { ...config.migrationSecondLegShadow, solUsdReference: { enabled: false } },
+  };
+  for (const [key, value] of Object.entries(runtimeConfig)) {
+    if (/Shadow|Registry|Observer|Audit|Overlay/.test(key) && value && typeof value === 'object') {
+      runtimeConfig[key] = { ...value, enabled: false };
+    }
+  }
+  runtimeConfig.preEntryRugRisk = { ...config.preEntryRugRisk, enabled: true,
+    toxicMemoryPath: null, crossMintEnabled: false, firstCliffCounterfactualEnabled: false };
+  const startedTrackers = new WeakSet();
+  const trackerStart = PreEntryRugRiskTracker.prototype.start;
+  const managerStart = LiveTradingManager.prototype.start;
+  const log = console.log;
+  let assertions = 0, app;
+  PreEntryRugRiskTracker.prototype.start = function (...args) {
+    const result = trackerStart.apply(this, args);
+    startedTrackers.add(this); return result;
+  };
+  LiveTradingManager.prototype.start = function (...args) {
+    assert(this.store.preEntryRugRisk instanceof PreEntryRugRiskTracker,
+      'real createRuntime must bind the collector before live state restoration');
+    assert(startedTrackers.has(this.store.preEntryRugRisk), 'collector must be started first');
+    assert.equal(this.lossRugFeedback.tracker, this.store.preEntryRugRisk,
+      'constructor injection itself must already be valid, not only the late-binding fallback');
+    assertions += 1; return managerStart.apply(this, args);
+  };
+  console.log = () => {};
+  try {
+    // Constructor/restoration only: no start(), sockets, wallet, signing or RPC.
+    app = createRuntime(runtimeConfig);
+    assert.equal(assertions, 1);
+    assert.equal(app.trader.lossRugFeedback.health().status, 'DISABLED', 'dry run remains disabled');
+  } finally {
+    PreEntryRugRiskTracker.prototype.start = trackerStart;
+    LiveTradingManager.prototype.start = managerStart;
+    if (app) await app.stop('offline-loss-feedback-startup-test');
+    console.log = log;
+  }
+  console.log('test-live-loss-rug-integration: actual createRuntime binds and starts tracker before manager');
+}
+(async () => { await runtimeStartupBinding(); await main(); })()
+  .catch(error => { console.error(error); process.exitCode = 1; });

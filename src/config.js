@@ -677,6 +677,13 @@ const config = {
 
   liveTrading: {
     ...guardedLiveTrading,
+    accountRecovery: {
+      enabled: booleanEnv('FLOW_LIVE_ACCOUNT_RECOVERY_ENABLED', true),
+      intervalMs: integerEnv('FLOW_LIVE_ACCOUNT_RECOVERY_INTERVAL_MS', 60_000, { min: 30_000 }),
+      batchSize: integerEnv('FLOW_LIVE_ACCOUNT_RECOVERY_BATCH_SIZE', 3, { min: 1, max: 5 }),
+      backfillBatchSize: integerEnv('FLOW_LIVE_ACCOUNT_FUNDING_BACKFILL_BATCH_SIZE', 3, { min: 1, max: 10 }),
+      minAgeMs: 60_000,
+    },
     lossRugFeedback: {
       enabled: booleanEnv('FLOW_LIVE_LOSS_RUG_FEEDBACK_ENABLED', true),
       lossThresholdPct: 50,

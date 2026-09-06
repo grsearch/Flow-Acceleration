@@ -4,6 +4,7 @@ const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 const { executableSell, ammQuoteStateRejection } = require('./ShadowExecutionModel');
 const { hardBlockSignaturesForLifecycle } = require('./RugGuardPolicy');
 const { LiveLossRugFeedback } = require('./LiveLossRugFeedback');
+const LiveAccountRecovery = require('./LiveAccountRecovery');
 
 const fs = require('fs');
 const path = require('path');
@@ -314,6 +315,12 @@ class LiveTradingManager {
       lossRugFeedbackErrors: 0,
       lossRugFeedbackLastError: null,
     };
+    this.accountRecovery = new LiveAccountRecovery({
+      config: config.accountRecovery, store, executor, mode: this.mode, now,
+      isMintBusy: mint => this._hasActiveMint(mint) || this.mintExitQueues.has(mint),
+      canRun: () => !this.stopping && !this.config.safetyLock && !this._killSwitchActive()
+        && ![...this.positions.values()].some(p => ['OPENING', 'EXITING'].includes(p.status)),
+    });
   }
 
   _strategyMetrics(strategyId) {
@@ -421,6 +428,7 @@ class LiveTradingManager {
   }
 
   start() {
+    this.accountRecovery.start();
     for (const row of this.store.activeLivePositions()) {
       const position = restoredPosition(row);
       position.strategy = this.strategies.get(position.strategyId) || null;
@@ -699,6 +707,8 @@ class LiveTradingManager {
       unsettledOrders: this.unsettledOrdersSnapshot.count,
       unsettledOrdersUpdatedAt: this.unsettledOrdersSnapshot.updatedAt,
       lossRugFeedback: this._lossFeedback('health'),
+      accountRecovery: this.accountRecovery.health(),
+      accountFunding: this.store.liveAccountFundingWriteHealth?.() || null,
       activeMintEntryLocks,
       activeMintEntryLocksLimit: this.activeMintEntryLocksSnapshot.limit || 1_000,
       activeMintEntryLocksStatus,
@@ -1078,6 +1088,7 @@ class LiveTradingManager {
 
   async stop() {
     this.stopping = true;
+    await this.accountRecovery.stop();
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     await Promise.allSettled([...this.pending]);
@@ -1312,6 +1323,7 @@ class LiveTradingManager {
     const quoteRejection = ammQuoteStateRejection(event);
     if (quoteRejection) return quoteRejection;
     if (this._killSwitchActive()) return 'KILL_SWITCH';
+    if (this.accountRecovery.blocksMint(event.mint)) return 'TOKEN_ACCOUNT_RECOVERY_PENDING';
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
