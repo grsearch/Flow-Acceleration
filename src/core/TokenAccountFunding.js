@@ -139,7 +139,7 @@ function tokenAccountFundingFromTransaction(receipt, ownerValue) {
   } catch (error) { return failure(error.code || 'MALFORMED_ACCOUNT_FUNDING_META'); }
 }
 
-function validateEmptyTokenAccount(candidate, info, expectedOwner) {
+function validateEmptyTokenAccount(candidate, info, expectedOwner, diagnostics = null) {
   const identity = canonicalCandidate(candidate, expectedOwner);
   if (!info || info.executable || key(info.owner) !== identity.programId || !Buffer.isBuffer(info.data)) reject('UNSAFE_TOKEN_ACCOUNT');
   // Fail closed on all Token-2022 extensions except the immutable-owner marker.
@@ -152,9 +152,12 @@ function validateEmptyTokenAccount(candidate, info, expectedOwner) {
   if (![0, 1].includes(raw.delegateOption) || ![0, 1].includes(raw.closeAuthorityOption)
     || raw.isNativeOption !== 0 || raw.state !== 1) reject('UNSAFE_TOKEN_ACCOUNT_STATE');
   const account = unpackAccount(new PublicKey(identity.address), info, new PublicKey(identity.programId));
+  if (diagnostics) diagnostics.tokenAmountRaw = account.amount.toString();
   if (!account.owner.equals(new PublicKey(identity.owner)) || !account.mint.equals(new PublicKey(identity.mint))
-    || account.amount !== 0n || account.delegate || account.delegatedAmount !== 0n || account.isNative
-    || account.closeAuthority && !account.closeAuthority.equals(new PublicKey(identity.owner))) reject('TOKEN_ACCOUNT_NOT_SAFELY_EMPTY');
+    || account.closeAuthority && !account.closeAuthority.equals(new PublicKey(identity.owner))) reject('TOKEN_ACCOUNT_AUTHORITY_MISMATCH');
+  if (account.amount !== 0n) reject('TOKEN_ACCOUNT_BALANCE_NONZERO');
+  if (account.delegate || account.delegatedAmount !== 0n) reject('TOKEN_ACCOUNT_DELEGATED');
+  if (account.isNative) reject('UNSAFE_TOKEN_ACCOUNT_STATE');
   const refund = integer(info.lamports);
   if (refund <= 0n) reject('TOKEN_ACCOUNT_HAS_NO_REFUND');
   return { ...identity, refundLamports: refund.toString() };

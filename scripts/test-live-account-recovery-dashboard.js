@@ -25,7 +25,9 @@ const run = code => vm.runInContext(code, sandbox);
 sandbox.fixture = { available: true,
   summary: { cash_pnl_sol: -0.003, economic_pnl_sol: null, verified_economic_pnl_sol: 0.001,
     funding_complete_positions: 2, closed_positions: 3, retained_funding_sol: 0.00203928,
-    refund_sol: 0.00203928, recovery_fee_sol: 0.000105, cash_after_recovery_pnl_sol: -0.00106572 },
+    refund_sol: 0.00203928, recovery_fee_sol: 0.000105, cash_after_recovery_pnl_sol: -0.00106572,
+    queueCounts: { WAITING_FEE_QUOTE: 12, WAITING_ACCOUNT_EMPTY: 3, WAITING_TRADING: 2,
+      WAITING_SAFETY: 1, QUEUED: 4, SIGNED_UNCONFIRMED: 5, CONFIRMED: 18, BLOCKED: 2, ABSENT: 1 } },
   cases: [{ position_id: 1, account_address: 'test-account', status: 'CONFIRMED', funded_lamports: '2039280',
     refund_lamports: '2039280', network_fee_sol: 0.000105, wallet_sol_delta: 0.00193428, signature: 'test-close' },
   { position_id: 2, account_address: '<unsafe>', status: 'UNKNOWN', error: '<script>bad</script>', error_stage: '<unsafe-stage>' }] };
@@ -40,16 +42,94 @@ assert(!metrics.includes('回收后现金'));
 assert(element('#live-account-recovery-note').textContent.includes('不再给经济盈亏加一次'));
 let rows = element('#live-account-recovery-rows').innerHTML;
 assert(rows.includes('0.00203928 SOL')); assert(rows.includes('0.000105 SOL'));
-assert(rows.includes('确认未知，保留锁')); assert(rows.includes('退款已确认'));
+assert(rows.includes('链上结果未知（保留锁，不保证广播成功）')); assert(rows.includes('已退款（链上已确认）'));
 assert(rows.includes('&lt;script&gt;')); assert(!rows.includes('<script>'));
 assert(rows.includes('阶段 &lt;unsafe-stage&gt;')); assert(!rows.includes('<unsafe-stage>'));
 assert(!/undefined|NaN/.test(rows + metrics));
+assert(rows.includes('已签 未知') && rows.includes('未签检查 未知'));
+assert(rows.includes('连续失败 未知') && rows.includes('最近检查 未知') && rows.includes('下次检查 未知'));
+assert(rows.includes('报价诊断未知（旧快照不推算）'));
+let queue = element('#live-account-recovery-queue').innerHTML;
+assert(queue.includes('当前策略全体回收任务'));
+assert(queue.includes('等待费用报价 <b>12</b>') && queue.includes('已退款 <b>18</b>'), 'summary includes all tasks, not the two visible cases');
+assert(element('#live-account-recovery-note').textContent.includes('已签次数也不等于已广播或已扣费次数'));
+
+const inspectionTime = 1_788_691_221_000;
+sandbox.fixture.cases = [
+  { position_id: 1, status: 'PENDING', error: 'CLEANUP_FEE_UNAVAILABLE', error_stage: 'FEE_QUOTE',
+    attempts: 0, checks: 7, consecutive_failures: 4, last_checked_at: inspectionTime,
+    next_attempt_at: inspectionTime + 60_000,
+    diagnostics: { version: 'ACCOUNT_RECOVERY_DIAGNOSTICS_V1',
+      account: { status: 'EMPTY', tokenAmountRaw: '0', contextSlot: 123, reason: 'SAFE_EMPTY' },
+      quoteAttempts: [
+        { rpc: 'PRIMARY', blockhashSlot: 124, feeSlot: 124, feeLamports: null, result: 'CLEANUP_FEE_UNAVAILABLE' },
+        { rpc: 'PRIMARY', blockhashSlot: 125, feeSlot: 125, feeLamports: null, result: 'CLEANUP_FEE_UNAVAILABLE' },
+        { rpc: 'FALLBACK', blockhashSlot: 126, feeSlot: 126, feeLamports: '105000', result: 'OK' },
+        { rpc: 'FALLBACK', result: 'MUST_NOT_DISPLAY' } ], rawTransactionBase64: 'NEVER_RENDER_RAW_PAYLOAD' } },
+  { position_id: 2, status: 'PENDING', error: 'TOKEN_ACCOUNT_BALANCE_NONZERO',
+    diagnostics: { version: 'ACCOUNT_RECOVERY_DIAGNOSTICS_V1', account: { status: 'NONZERO', tokenAmountRaw: '9' } } },
+  { position_id: 3, status: 'PENDING', error: 'TOKEN_ACCOUNT_NOT_SAFELY_EMPTY' },
+  { position_id: 4, status: 'PENDING', error: 'TOKEN_ACCOUNT_DELEGATED' },
+  { position_id: 5, status: 'PENDING', error: 'TOKEN_ACCOUNT_AUTHORITY_MISMATCH' },
+  { position_id: 6, status: 'PENDING', error: 'ACTIVE_POSITION_OR_UNRESOLVED_ORDER' },
+  { position_id: 7, status: 'PENDING', error: null },
+  { position_id: 8, status: 'PREPARED', signature: 'fixture-signature', attempts: 1, checks: 2 },
+  { position_id: 9, status: 'UNKNOWN', signature: 'fixture-signature', attempts: 1, checks: 2 },
+  { position_id: 10, status: 'BLOCKED', error: 'CLEANUP_FEE_TOO_HIGH', error_stage: 'FEE_QUOTE' },
+  { position_id: 11, status: 'CONFIRMED', error: null },
+  { position_id: 12, status: 'PENDING', error: '<script>error</script>', error_stage: '<stage>',
+    diagnostics: { version: 'ACCOUNT_RECOVERY_DIAGNOSTICS_V1',
+      account: { status: '<status>', tokenAmountRaw: '<img>', reason: '<reason>' },
+      quoteAttempts: [{ rpc: 'https://private.invalid/?key=secret', blockhashSlot: '<slot>',
+        feeSlot: null, feeLamports: '<fee>', result: '<script>quote</script>' }] } },
+];
+run('renderLiveAccountRecovery(fixture)');
+rows = element('#live-account-recovery-rows').innerHTML;
+assert(rows.includes('等待费用报价 / 报价重试（未发送）'));
+assert(rows.includes('账户仍有代币，等待清空（未发送）'));
+assert(rows.includes('空账户安全校验未通过（未发送）'));
+assert.equal((rows.match(/权限安全检查阻止回收（未发送）/g) || []).length, 2);
+assert(rows.includes('等待交易结束（未发送）') && rows.includes('排队未发送'));
+assert(rows.includes('已签名待确认（不保证广播成功）'));
+assert(rows.includes('链上结果未知（保留锁，不保证广播成功）'));
+assert(rows.includes('已停止回收，等待检查') && rows.includes('已退款（链上已确认）'));
+assert(rows.includes('已签 0<br>未签检查 7<br>连续失败 4'));
+assert(rows.includes(`最近检查 ${run(`dateTime(${inspectionTime})`)}`));
+assert(rows.includes(`下次检查 ${run(`dateTime(${inspectionTime + 60_000})`)}`));
+assert(rows.includes('代币余额 0 raw') && rows.includes('代币余额 9 raw'));
+assert(rows.includes('主 RPC · blockhash slot 124 · fee slot 124 · 费用 未知 lamports'));
+assert(rows.includes('备用 RPC · blockhash slot 126 · fee slot 126 · 费用 105000 lamports · OK'));
+assert(!rows.includes('MUST_NOT_DISPLAY') && !rows.includes('NEVER_RENDER_RAW_PAYLOAD'));
+assert(rows.includes('&lt;status&gt;') && rows.includes('&lt;reason&gt;') && rows.includes('&lt;script&gt;quote&lt;/script&gt;'));
+assert(!rows.includes('<script>') && !rows.includes('<img>') && !rows.includes('key=secret'));
+assert(!/undefined|NaN/.test(rows));
+assert.equal(run("recoveryStateLabel('PENDING', 'AUTHORITY_MISMATCH')"), '权限安全检查阻止回收（未发送）');
+assert.equal(run("recoveryStateLabel('PENDING', 'ACCOUNT_RECOVERY_MIN_AGE')"), '等待最短观察期（未发送）');
+assert.equal(run("recoveryStateLabel('PENDING', 'CLEANUP_BLOCKHASH_CONTEXT_STALE', 'BLOCKHASH')"), '等待费用上下文 / 区块哈希重试（未发送）');
+for (const status of ['CONFIRMED', 'BLOCKED', 'ABSENT']) {
+  sandbox.terminalStatus = status;
+  sandbox.fixture.cases = [{ status, next_attempt_at: null }];
+  run('renderLiveAccountRecovery(fixture)');
+  assert(element('#live-account-recovery-rows').innerHTML.includes('下次检查 已结束，不自动重试'));
+  assert.equal(run('recoveryNextCheckTime(terminalStatus, undefined)'), '未知', 'omitted old field is still unknown');
+}
+const queueCounts = sandbox.fixture.summary.queueCounts;
+delete sandbox.fixture.summary.queueCounts;
+run('renderLiveAccountRecovery(fixture)');
+assert(element('#live-account-recovery-queue').innerHTML.includes('分类未知；不以最近 20 条案例推算'));
+sandbox.fixture.summary.queueCounts = { WAITING_FEE_QUOTE: 12 };
+run('renderLiveAccountRecovery(fixture)');
+queue = element('#live-account-recovery-queue').innerHTML;
+assert(queue.includes('等待账户清空 <b>未知</b>'), 'missing categories must not become zero');
+sandbox.fixture.summary.queueCounts = queueCounts;
 sandbox.fixture.cases = Array.from({ length: 30 }, (_, i) => ({ position_id: i }));
 run('renderLiveAccountRecovery(fixture)');
 assert.equal((element('#live-account-recovery-rows').innerHTML.match(/<tr>/g) || []).length, 20);
 run('renderLiveAccountRecovery({available:false,summary:null,cases:[]})');
 assert(element('#live-account-recovery-metrics').innerHTML.includes('旧收据未知，不是零占款'));
 assert(!element('#live-account-recovery-rows').innerHTML.includes('test-account'));
+assert(element('#live-account-recovery-queue').innerHTML.includes('分类未知'));
+assert(!element('#live-account-recovery-queue').innerHTML.includes('<b>12</b>'));
 run('renderLiveAccountRecovery(fixture); renderLivePending()');
 assert(element('#live-account-recovery-rows').innerHTML.includes('所选策略账户证据待加载'));
 assert(source.includes('renderLiveAccountRecovery(data.accountRecovery)'));
@@ -89,11 +169,28 @@ assert(positionRows.includes('现金收益基数 0.02199223 SOL（含账户占�
 assert(positionRows.includes('收益基数 0.020105 SOL（剔除账户占款）'));
 assert(positionRows.includes('触发参考价涨跌 +0.73%（非成交收益）'));
 assert(positionRows.includes('账户留存 0.00188723 SOL · 已确认退款 0 SOL · 回收费 0 SOL'));
-assert(positionRows.includes('待回收（未退款） 1 项 · INVALID_ACCOUNT_FUNDING'));
+assert(positionRows.includes('排队未发送 1 项 · 最近原因：检查未通过，等待重查（未发送） · INVALID_ACCOUNT_FUNDING'));
 assert(!positionRows.includes(' · 阶段 '));
 assert(positionRows.includes('截至目前现金 -0.00273689 SOL（仅计已确认回收，不含待回收资金）'));
 assert(!positionRows.includes('回收后现金'));
 assert(!/undefined|NaN/.test(positionRows));
+assert(positionRows.includes('最近检查 未知 · 下次检查 未知 · 未签检查 未知'));
+// Position-level fields are supplied independently of the truncated case panel.
+sandbox.liveFixture.positions = [{ ...position134, account_recovery_error: 'CLEANUP_FEE_UNAVAILABLE',
+  account_recovery_error_stage: 'FEE_QUOTE', account_recovery_checks: 7,
+  account_recovery_last_checked_at: inspectionTime, account_recovery_next_attempt_at: inspectionTime + 60_000,
+}];
+run('renderLiveTrading(liveFixture)');
+positionRows = element('#live-position-rows').innerHTML;
+assert(positionRows.includes('最近原因：等待费用报价 / 报价重试（未发送） · CLEANUP_FEE_UNAVAILABLE · 阶段 FEE_QUOTE'));
+assert(positionRows.includes(`最近检查 ${run(`dateTime(${inspectionTime})`)} · 下次检查 ${run(`dateTime(${inspectionTime + 60_000})`)} · 未签检查 7`));
+sandbox.liveFixture.positions = [{ ...position134, account_recovery_states: { PENDING: 1, BLOCKED: 1 },
+  account_recovery_error: 'CLEANUP_FEE_TOO_HIGH', account_recovery_error_stage: 'FEE_QUOTE',
+}];
+run('renderLiveTrading(liveFixture)');
+assert(!element('#live-position-rows').innerHTML.includes('最近原因：等待费用报价'), 'do not attribute one blocked task error to every queued account');
+sandbox.liveFixture.positions = [position134];
+run('renderLiveTrading(liveFixture)');
 let mainMetrics = element('#live-metrics').innerHTML;
 assert(mainMetrics.includes('经济胜率（已核实）'));
 assert(mainMetrics.includes('平均经济收益（已核实）'));
@@ -108,13 +205,15 @@ sandbox.liveFixture.positions = [{ ...position134,
   recovery_network_fee_sol: 0.000105, cash_after_recovery_pnl_sol: -0.000954657,
   economic_pnl_sol: -0.000954657, economic_return_pct: -4.74835613,
   account_recovery_states: { CONFIRMED: 1 }, account_recovery_error: null,
+  account_recovery_next_attempt_at: null,
 }];
 run('renderLiveTrading(liveFixture)');
 positionRows = element('#live-position-rows').innerHTML;
 assert(positionRows.includes('账户留存 0 SOL · 已确认退款 0.00188723 SOL · 回收费 0.000105 SOL'));
-assert(positionRows.includes('退款已确认 1 项'));
+assert(positionRows.includes('已退款（链上已确认） 1 项'));
+assert(positionRows.includes('下次检查 已结束，不自动重试'));
 assert(positionRows.includes('截至目前现金 -0.00095466 SOL'));
-assert(!positionRows.includes('待回收（未退款）'));
+assert(!positionRows.includes('排队未发送'));
 assert(!positionRows.includes(' · 阶段 '));
 
 // Unknown confirmation is not a projected refund or zero funding; errors escape.
@@ -129,7 +228,7 @@ positionRows = element('#live-position-rows').innerHTML;
 assert(positionRows.includes('<td class="muted">经济待核实（不计输赢）'));
 assert(positionRows.includes('账户留存 待验证'));
 assert(positionRows.includes('截至目前现金 待验证'));
-assert(positionRows.includes('确认未知（不预计退款） 1 项'));
+assert(positionRows.includes('链上结果未知（保留锁，不保证广播成功） 1 项'));
 assert(positionRows.includes('&lt;script&gt;unsafe&lt;/script&gt;'));
 assert(positionRows.includes('阶段 &lt;unsafe-stage&gt;'));
 assert(!positionRows.includes('<unsafe-stage>'));

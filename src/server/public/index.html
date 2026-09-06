@@ -526,8 +526,9 @@
             <article class="card record-section">
               <div class="section-title"><h2>现金盈亏 · 账户资金 · 回收对账</h2><p>原现金盈亏及 RUG 大亏门槛保持不变。只剔除收据已验证的代币账户净占款；旧凭证缺失时不推算固定租金。</p></div>
               <div class="grid live-metric-grid" id="live-account-recovery-metrics"></div>
+              <div class="runtime-strip" id="live-account-recovery-queue">全体回收任务分类待加载。</div>
               <p class="table-note" id="live-account-recovery-note">账户证据待加载。</p>
-              <div class="table-wrap"><table><thead><tr><th>仓位 / 账户</th><th>状态</th><th>创建占款</th><th>已归因退款 / 回收费用</th><th>回收现金变化</th><th>签名 / 异常</th></tr></thead><tbody id="live-account-recovery-rows"></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>仓位 / 账户</th><th>状态 / 最近检查 / 下次检查</th><th>创建占款</th><th>已归因退款 / 回收费用</th><th>回收现金变化</th><th>已签次数 / 未签检查 / 连续失败</th><th>签名 / 异常 / 报价诊断</th></tr></thead><tbody id="live-account-recovery-rows"></tbody></table></div>
             </article>
             <article class="card record-section">
               <div class="section-title"><h2>实盘 ≥50% 大亏复盘与 RUG 学习</h2><p>按当前策略统计；首次入场/触发证据冻结，归因与学习为最新状态，不是历史时点回放。</p></div>
@@ -1909,13 +1910,63 @@
       target.innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">配置种子钱包</p><div class="wallet-address">${walletLink(row.wallet, true)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
+    function recoveryStateLabel(status, error, stage) {
+      if (status === 'CONFIRMED') return '已退款（链上已确认）';
+      if (status === 'PREPARED') return '已签名待确认（不保证广播成功）';
+      if (status === 'UNKNOWN') return '链上结果未知（保留锁，不保证广播成功）';
+      if (status === 'BLOCKED') return '已停止回收，等待检查';
+      if (status === 'ABSENT') return '账户已不存在，退款归因看证据';
+      if (status !== 'PENDING') return status || '状态未知';
+      if (!error) return '排队未发送';
+      if (stage === 'FEE_QUOTE' && String(error).startsWith('CLEANUP_FEE_')) return '等待费用报价 / 报价重试（未发送）';
+      if (stage === 'BLOCKHASH' && String(error).startsWith('CLEANUP_BLOCKHASH_')) return '等待费用上下文 / 区块哈希重试（未发送）';
+      if (error === 'ACCOUNT_RECOVERY_MIN_AGE') return '等待最短观察期（未发送）';
+      if (error === 'TOKEN_ACCOUNT_BALANCE_NONZERO') return '账户仍有代币，等待清空（未发送）';
+      if (error === 'TOKEN_ACCOUNT_NOT_SAFELY_EMPTY') return '空账户安全校验未通过（未发送）';
+      if (['TOKEN_ACCOUNT_DELEGATED', 'TOKEN_ACCOUNT_AUTHORITY_MISMATCH', 'AUTHORITY_MISMATCH'].includes(error)) return '权限安全检查阻止回收（未发送）';
+      if (String(error).startsWith('ACTIVE_POSITION') || error === 'STATE_CHANGED_BEFORE_CLOSE') return '等待交易结束（未发送）';
+      return '检查未通过，等待重查（未发送）';
+    }
+
+    function recoveryCheckCount(value) {
+      return Number.isSafeInteger(value) && value >= 0 ? number(value) : '未知';
+    }
+
+    function recoveryCheckTime(value) {
+      return Number.isFinite(value) && value > 0 ? dateTime(value) : '未知';
+    }
+
+    function recoveryNextCheckTime(status, value) {
+      return value === null && ['CONFIRMED', 'BLOCKED', 'ABSENT'].includes(status)
+        ? '已结束，不自动重试' : recoveryCheckTime(value);
+    }
+
+    function recoveryQuoteDiagnostics(diagnostics) {
+      if (diagnostics?.version !== 'ACCOUNT_RECOVERY_DIAGNOSTICS_V1') return '报价诊断未知（旧快照不推算）';
+      const attempts = Array.isArray(diagnostics.quoteAttempts) ? diagnostics.quoteAttempts.slice(0, 3) : [];
+      const quotes = attempts.map(attempt => {
+        const rpc = attempt?.rpc === 'PRIMARY' ? '主 RPC' : attempt?.rpc === 'FALLBACK' ? '备用 RPC' : '未知 RPC';
+        const fee = typeof attempt?.feeLamports === 'string' && /^\d+$/.test(attempt.feeLamports)
+          ? escapeHtml(attempt.feeLamports) : Number.isSafeInteger(attempt?.feeLamports) && attempt.feeLamports >= 0 ? number(attempt.feeLamports) : '未知';
+        return `${rpc} · blockhash slot ${recoveryCheckCount(attempt?.blockhashSlot)} · fee slot ${recoveryCheckCount(attempt?.feeSlot)} · 费用 ${fee} lamports · ${escapeHtml(String(attempt?.result || '结果未知').slice(0, 100))}`;
+      });
+      const account = diagnostics.account;
+      const token = typeof account?.tokenAmountRaw === 'string' && /^\d+$/.test(account.tokenAmountRaw)
+        ? `代币余额 ${escapeHtml(account.tokenAmountRaw)} raw` : '';
+      const accountNote = account && typeof account === 'object'
+        ? `账户检查 ${escapeHtml(String(account.status || '未知').slice(0, 100))} · slot ${recoveryCheckCount(account.contextSlot)}${account.reason ? ` · ${escapeHtml(String(account.reason).slice(0, 100))}` : ''}` : '';
+      return [accountNote, token, ...quotes].filter(Boolean).join('<br>') || '本次无报价诊断记录';
+    }
+
     function renderLiveAccountRecovery(data) {
       const metrics = document.querySelector('#live-account-recovery-metrics');
+      const queue = document.querySelector('#live-account-recovery-queue');
       const rows = document.querySelector('#live-account-recovery-rows');
       const note = document.querySelector('#live-account-recovery-note');
       if (data?.available !== true || !data.summary) {
         metrics.innerHTML = '<div class="empty">账户资金口径不可用；旧收据未知，不是零占款。</div>';
-        rows.innerHTML = '<tr><td colspan="6" class="empty">所选策略账户证据待加载</td></tr>';
+        rows.innerHTML = '<tr><td colspan="7" class="empty">所选策略账户证据待加载</td></tr>';
+        queue.innerHTML = '全体回收任务分类未知；不以最近案例推算。';
         note.textContent = '现金口径保持原值；不能把未知账户资金当成零。';
         return;
       }
@@ -1930,11 +1981,16 @@
         ['单独回收退款', amount(s.refund_sol), `回收费用 ${amount(s.recovery_fee_sol)}`],
         ['截至目前现金盈亏（已知部分）', amount(s.cash_after_recovery_pnl_sol), '原现金 + 已确认回收现金变化；不含待回收资金'],
       ]);
-      note.textContent = '经济盈亏 = 原现金 + 已验证账户净占款 − 回收费用；退款只减少留存资金并进入截至目前现金，不再给经济盈亏加一次。待回收不等于已退款；PREPARED/UNKNOWN 或账户消失但退款无法归因时，相关经济盈亏待验证。现金收益率以买入实际现金支出为基数，经济收益率以剔除账户占款后的买入支出为基数。共享账户仅归属首次创建仓位，正常卖出中的退款已包含在原现金。最新最多 20 条，不展示待发送交易内容。';
-      const labels = { PENDING: '待检查', PREPARED: '已持久签名，待核对', UNKNOWN: '确认未知，保留锁', CONFIRMED: '退款已确认', ABSENT: '账户已不存在', BLOCKED: '已停止此回收' };
+      const queueLabels = { WAITING_FEE_QUOTE: '等待费用报价', WAITING_ACCOUNT_EMPTY: '等待账户清空',
+        WAITING_TRADING: '等待交易结束', WAITING_SAFETY: '等待安全检查', QUEUED: '排队未发送',
+        SIGNED_UNCONFIRMED: '已签名未确认', CONFIRMED: '已退款', BLOCKED: '已停止待检查', ABSENT: '账户已不存在' };
+      queue.innerHTML = s.queueCounts && typeof s.queueCounts === 'object'
+        ? `<span>当前策略全体回收任务：</span>${Object.entries(queueLabels).map(([key, label]) => `<span>${label} <b>${recoveryCheckCount(s.queueCounts[key])}</b></span>`).join('')}`
+        : '全体回收任务分类未知；不以最近 20 条案例推算。';
+      note.textContent = '经济盈亏 = 原现金 + 已验证账户净占款 − 回收费用；退款只减少留存资金并进入截至目前现金，不再给经济盈亏加一次。排队/检查未发送不等于已退款；PREPARED/UNKNOWN 仅说明已签名，不能保证广播成功，相关经济盈亏待验证。未签检查次数不是链上交易次数，不产生网络费；已签次数也不等于已广播或已扣费次数。现金收益率以买入实际现金支出为基数，经济收益率以剔除账户占款后的买入支出为基数。共享账户仅归属首次创建仓位，正常卖出中的退款已包含在原现金。分类概览来自全体任务；下表最新最多 20 条，不展示待发送交易内容。';
       const cases = Array.isArray(data.cases) ? data.cases.slice(0, 20) : [];
-      rows.innerHTML = cases.length ? cases.map(row => `<tr><td>#${number(row.position_id)}<br>${walletLink(row.account_address, true)}</td><td>${escapeHtml(labels[row.status] || row.status || '待确认')}</td><td>${lamports(row.funded_lamports)}</td><td>${lamports(row.refund_lamports)}<br>费用 ${amount(row.network_fee_sol)}</td><td>${amount(row.wallet_sol_delta)}</td><td>${transactionLink(row.signature) || '—'}<br>${escapeHtml(row.error || '')}${row.error_stage ? ` · 阶段 ${escapeHtml(row.error_stage)}` : ''}</td></tr>`).join('')
-        : '<tr><td colspan="6" class="empty">暂无经过创建收据验证的回收候选</td></tr>';
+      rows.innerHTML = cases.length ? cases.map(row => `<tr><td>#${number(row.position_id)}<br>${walletLink(row.account_address, true)}</td><td>${escapeHtml(recoveryStateLabel(row.status, row.error, row.error_stage))}<br><span class="table-note">最近检查 ${recoveryCheckTime(row.last_checked_at)}<br>下次检查 ${recoveryNextCheckTime(row.status, row.next_attempt_at)}</span></td><td>${lamports(row.funded_lamports)}</td><td>${lamports(row.refund_lamports)}<br>费用 ${amount(row.network_fee_sol)}</td><td>${amount(row.wallet_sol_delta)}</td><td>已签 ${recoveryCheckCount(row.attempts)}<br>未签检查 ${recoveryCheckCount(row.checks)}<br>连续失败 ${recoveryCheckCount(row.consecutive_failures)}</td><td>${transactionLink(row.signature) || '—'}<br>${escapeHtml(row.error || '')}${row.error_stage ? ` · 阶段 ${escapeHtml(row.error_stage)}` : ''}<br><span class="table-note">${recoveryQuoteDiagnostics(row.diagnostics)}</span></td></tr>`).join('')
+        : '<tr><td colspan="7" class="empty">暂无经过创建收据验证的回收候选</td></tr>';
     }
 
     function renderLivePositions(positions) {
@@ -1942,12 +1998,13 @@
       const recoveryStatus = row => {
         const states = row.account_recovery_states;
         if (!states || typeof states !== 'object') return '回收状态待验证';
-        const labels = { PENDING: '待回收（未退款）', PREPARED: '已签名待确认（不预计退款）',
-          UNKNOWN: '确认未知（不预计退款）', CONFIRMED: '退款已确认', ABSENT: '账户已不存在，退款归因看证据',
-          BLOCKED: '回收已停止，需检查' };
         const status = Object.entries(states).filter(([, count]) => Number(count) > 0)
-          .map(([key, count]) => `${labels[key] || key} ${number(count)} 项`).join('；');
-        return `${status || '无单独回收任务'}${row.account_recovery_error ? ` · ${row.account_recovery_error}` : ''}${row.account_recovery_error_stage ? ` · 阶段 ${row.account_recovery_error_stage}` : ''}`;
+          .map(([key, count]) => `${recoveryStateLabel(key)} ${number(count)} 项`).join('；');
+        const onlyPending = Number(states.PENDING) > 0
+          && Object.entries(states).every(([key, count]) => key === 'PENDING' || !(Number(count) > 0));
+        const reason = row.account_recovery_error
+          ? ` · 最近原因：${onlyPending ? recoveryStateLabel('PENDING', row.account_recovery_error, row.account_recovery_error_stage) + ' · ' : ''}${row.account_recovery_error}` : '';
+        return `${status || '无单独回收任务'}${reason}${row.account_recovery_error_stage ? ` · 阶段 ${row.account_recovery_error_stage}` : ''}`;
       };
       document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
         const signatures = [transactionLink(row.entry_signature, '买'), transactionLink(row.exit_signature, '卖')].filter(Boolean).join('<br>') || '—';
@@ -1962,8 +2019,12 @@
         const primaryTone = row.mode === 'DRY_RUN' ? tone(row.gross_return_pct)
           : tone(economicVerified ? row.economic_pnl_sol : null);
         const cashBasis = row.entry_sol_delta < 0 ? -row.entry_sol_delta : null;
+        const recoveryStates = Object.entries(row.account_recovery_states || {}).filter(([, count]) => Number(count) > 0);
+        const recoveryTerminal = recoveryStates.length > 0
+          && recoveryStates.every(([state]) => ['CONFIRMED', 'BLOCKED', 'ABSENT'].includes(state));
+        const nextCheck = recoveryNextCheckTime(recoveryTerminal ? recoveryStates[0][0] : null, row.account_recovery_next_attempt_at);
         const priceNote = row.price_return_pct == null ? '' : `<br><span class="table-note">触发参考价涨跌 ${pct(row.price_return_pct)}（非成交收益）</span>`;
-        const fundingNote = row.mode !== 'LIVE' ? '' : `<br><span class="table-note">经济收益基数 ${amount(economicVerified ? row.economic_cost_basis_sol : null)}（剔除账户占款）<br>原交易现金 ${cash}<br>现金收益基数 ${amount(cashBasis)}（含账户占款）<br>账户留存 ${amount(row.account_retained_funding_sol)} · 已确认退款 ${amount(row.recovery_refund_sol)} · 回收费 ${amount(row.recovery_network_fee_sol)}<br>${escapeHtml(recoveryStatus(row))}<br>截至目前现金 ${amount(row.cash_after_recovery_pnl_sol)}（仅计已确认回收，不含待回收资金）</span>`;
+        const fundingNote = row.mode !== 'LIVE' ? '' : `<br><span class="table-note">经济收益基数 ${amount(economicVerified ? row.economic_cost_basis_sol : null)}（剔除账户占款）<br>原交易现金 ${cash}<br>现金收益基数 ${amount(cashBasis)}（含账户占款）<br>账户留存 ${amount(row.account_retained_funding_sol)} · 已确认退款 ${amount(row.recovery_refund_sol)} · 回收费 ${amount(row.recovery_network_fee_sol)}<br>${escapeHtml(recoveryStatus(row))}<br>最近检查 ${recoveryCheckTime(row.account_recovery_last_checked_at)} · 下次检查 ${nextCheck} · 未签检查 ${recoveryCheckCount(row.account_recovery_checks)}<br>截至目前现金 ${amount(row.cash_after_recovery_pnl_sol)}（仅计已确认回收，不含待回收资金）</span>`;
         const positionReason = row.entry_failure_category || row.exit_reason
           || row.entry_error || row.exit_error || '—';
         return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${primaryTone}">${settled}${priceNote}${fundingNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;

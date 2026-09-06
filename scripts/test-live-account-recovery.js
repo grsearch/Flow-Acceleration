@@ -21,6 +21,7 @@ function fixture({ enabled = true, initial = [], mode = 'LIVE' } = {}) {
     updateLiveAccountRecovery(id, patch) {
       events.push(`save:${patch.status}`);
       const map = { preparedJson: 'prepared_json', nextAttemptAt: 'next_attempt_at', errorStage: 'error_stage',
+        consecutiveFailures: 'consecutive_failures', lastCheckedAt: 'last_checked_at',
         refundLamports: 'refund_lamports', networkFeeSol: 'network_fee_sol', walletSolDelta: 'wallet_sol_delta' };
       const row = rows.get(id);
       for (const [key, value] of Object.entries(patch)) row[map[key] || key] = value;
@@ -51,7 +52,7 @@ function fixture({ enabled = true, initial = [], mode = 'LIVE' } = {}) {
     mode, now: () => now, isMintBusy: () => state.busy, canRun: () => state.allowed });
   const worker = make();
   return { rows, events, state, store, executor, worker, make,
-    advance() { now += 60_001; } };
+    advance(ms = 60_001) { now += ms; } };
 }
 
 function candidate(id = 1, mint = 'mint-1') {
@@ -61,6 +62,64 @@ function candidate(id = 1, mint = 'mint-1') {
 }
 
 async function main() {
+  {
+    const f = fixture({ initial: [candidate()] });
+    let reason = 'CLEANUP_FEE_UNAVAILABLE';
+    f.executor.prepareEmptyTokenAccountClose = async () => {
+      throw Object.assign(new Error('offline RPC unavailable'), { code: reason, recoveryStage: 'FEE_QUOTE',
+        recoveryDiagnostics: { version: 'ACCOUNT_RECOVERY_DIAGNOSTICS_V1',
+          quoteAttempts: [{ rpc: 'PRIMARY', blockhashSlot: 100, feeSlot: 100, result: 'FEE_UNAVAILABLE' }] } });
+    };
+    f.worker.start(); await f.worker.tick();
+    assert.equal(f.rows.get(1).checks, 1);
+    assert.equal(f.rows.get(1).consecutive_failures, 1);
+    assert.equal(f.rows.get(1).next_attempt_at - f.rows.get(1).updatedAt, 60_000);
+    f.advance(); await f.worker.tick();
+    assert.equal(f.rows.get(1).checks, 2);
+    assert.equal(f.rows.get(1).consecutive_failures, 2);
+    assert.equal(f.rows.get(1).next_attempt_at - f.rows.get(1).updatedAt, 120_000);
+    await f.worker.stop();
+    const restarted = f.make(); restarted.start();
+    f.advance(); await restarted.tick(); assert.equal(f.rows.get(1).checks, 2, 'persisted due time survives restart');
+    f.advance(); await restarted.tick(); assert.equal(f.rows.get(1).consecutive_failures, 3);
+    assert.equal(f.rows.get(1).next_attempt_at - f.rows.get(1).updatedAt, 240_000);
+    for (let i = 0; i < 4; i++) { f.advance(600_001); await restarted.tick(); }
+    assert.equal(f.rows.get(1).next_attempt_at - f.rows.get(1).updatedAt, 600_000, 'retry cap is ten minutes');
+    reason = 'TOKEN_ACCOUNT_BALANCE_NONZERO'; f.advance(600_001); await restarted.tick();
+    assert.equal(f.rows.get(1).consecutive_failures, 1, 'new cause gets a fresh short retry');
+    assert.equal(f.rows.get(1).attempts, 0); assert.equal(f.state.sends, 0);
+    assert(!restarted.blocksMint('mint-1')); await restarted.stop();
+  }
+  {
+    const f = fixture({ initial: [candidate()] });
+    f.state.result = { status: 'PENDING' };
+    f.worker.start(); await f.worker.tick(); assert.equal(f.rows.get(1).status, 'UNKNOWN');
+    const signature = f.rows.get(1).signature;
+    f.executor.reconcileTokenAccountClose = async () => { throw new Error('offline confirmation read failed'); };
+    f.advance(); await f.worker.tick();
+    const row = f.rows.get(1);
+    assert.equal(row.status, 'UNKNOWN'); assert.equal(row.signature, signature);
+    assert.equal(row.error, 'ACCOUNT_CLOSE_RECONCILE_RETRY');
+    assert.equal(row.next_attempt_at - row.updatedAt, 60_000, 'failed confirmation read must not stay overdue');
+    assert.equal(row.checks, 1, 'signed receipt polling is not an unsigned preparation');
+    assert.equal(f.state.sends, 1); assert(f.worker.blocksMint(row.mint));
+    await f.worker.tick(); assert.equal(f.state.sends, 1); await f.worker.stop();
+  }
+  {
+    const f = fixture({ initial: [{ ...candidate(), created_at: 1_980_000 }] });
+    f.worker.start(); await f.worker.tick();
+    assert.equal(f.rows.get(1).next_attempt_at, 2_040_000);
+    assert.equal(f.rows.get(1).error, 'ACCOUNT_RECOVERY_MIN_AGE');
+    assert.equal(f.state.sends, 0); assert(!f.events.includes('prepare'));
+    await f.worker.stop();
+  }
+  for (const code of ['TOKEN_ACCOUNT_AUTHORITY_MISMATCH', 'TOKEN_ACCOUNT_DELEGATED']) {
+    const f = fixture({ initial: [candidate()] });
+    f.executor.prepareEmptyTokenAccountClose = async () => { throw Object.assign(new Error('unsafe'), { code, recoveryStage: 'ACCOUNT_SNAPSHOT' }); };
+    f.worker.start(); await f.worker.tick();
+    assert.equal(f.rows.get(1).status, 'BLOCKED'); assert.equal(f.state.sends, 0);
+    f.advance(); await f.worker.tick(); assert.equal(f.rows.get(1).checks, 1); await f.worker.stop();
+  }
   {
     const f = fixture({ initial: [candidate()] });
     const prepare = f.executor.prepareEmptyTokenAccountClose;
