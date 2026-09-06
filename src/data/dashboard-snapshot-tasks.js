@@ -37,6 +37,11 @@ function observerAdapter(name, config, store) {
   const module = require(`../core/${name}`);
   const instance = Object.create(module[name].prototype);
   Object.assign(instance, { store, db: store.db, config, now: () => Date.now(),
+    // Dashboard methods may resolve a persisted cohort against its configured
+    // execution profile. Copy only the bounded config maps: never construct a
+    // live observer or initialize its position/market state in the reader.
+    entryProfiles: new Map((config.entryProfiles || []).map((row) => [row.id, row])),
+    exitProfiles: new Map((config.exitProfiles || []).map((row) => [row.id, row])),
     health: () => ({ enabled: config.enabled, sendsTransactions: false,
       runtimeSource: 'SNAPSHOT_CONFIG_ONLY', entryProfiles: config.entryProfiles || [],
       exitProfiles: config.exitProfiles || [] }),
@@ -54,8 +59,6 @@ function observerAdapter(name, config, store) {
     instance.modeCode = config.modeCode || 'SHADOW_SMART_FIRST_OPEN_RIGHT_TAIL';
     instance.targetWallet = config.targetWallet || null;
     instance.targetMarket = config.targetMarket || null;
-    instance.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
-    instance.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
   }
   if (name === 'IndividualSmartWalletShadowPortfolio') {
     instance.suites = (config.profiles || []).filter((row) => row && row.enabled !== false)

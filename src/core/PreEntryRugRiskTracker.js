@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const strictAmm = require('./StrictAmmShadowExecution');
 const {
   executableBuy,
   reservesForTrade,
@@ -14,6 +15,19 @@ function finite(value, fallback = null) {
   if (value == null || value === '') return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function toxicRecordActiveAt(record, timestampMs) {
+  const labeledAt = finite(record?.labeledAt);
+  // Current DB exports carry the persistence time as a second knowledge fence.
+  // Older JSON snapshots have no createdAt; retain their known label time, but
+  // never discard a provided later creation time during restore or matching.
+  const createdAt = record?.createdAt == null ? labeledAt : finite(record.createdAt);
+  const expiresAt = finite(record?.expiresAt);
+  // A legacy record without a known label time is not evidence available in
+  // the past. Do not substitute load time or export time for that missing fact.
+  return labeledAt > 0 && labeledAt <= timestampMs
+    && createdAt > 0 && createdAt <= timestampMs && expiresAt > timestampMs;
 }
 
 function tradePrice(trade) {
@@ -52,6 +66,57 @@ const TOXIC_WALLET_ROLES = Object.freeze({
 
 const LEGACY_GLOBAL_STAGE = 'LEGACY_GLOBAL';
 const UNKNOWN_MARKET = 'UNKNOWN';
+const LOSS_EVIDENCE_VERSION = 'LIVE_LOSS_EVIDENCE_V1';
+const LOSS_MAX_EVENTS = 256;
+const LOSS_WINDOW_MS = 60_000;
+const LOSS_STREAM_TTL_MS = 35 * 60_000;
+
+function lossEvent(trade) {
+  const out = {};
+  for (const key of ['mint', 'market', 'pool', 'signature', 'wallet', 'side', 'ammQuoteState',
+    'lifecycleStage', 'poolBaseReservesRaw', 'poolQuoteReservesRaw', 'virtualQuoteReservesRaw',
+    'prePoolBaseReservesRaw', 'prePoolQuoteReservesRaw']) {
+    out[key] = typeof trade?.[key] === 'string' ? trade[key].slice(0, 160) : null;
+  }
+  for (const key of ['timestampMs', 'receivedAtMs', 'chainTimestampMs', 'slot', 'eventIndex',
+    'price', 'reservePrice', 'solAmount', 'tokenAmount', 'lifecycleAgeMs']) out[key] = finite(trade?.[key]);
+  return out;
+}
+
+function lossTemplate(template) {
+  if (!template) return null;
+  return {
+    fingerprint: String(template.fingerprint || '').slice(0, 300),
+    firstAt: finite(template.firstAt), observedAt: finite(template.observedAt),
+    burstSpanMs: finite(template.burstSpanMs), totalBuySol: finite(template.totalBuySol),
+    largeBuyCount: finite(template.largeBuyCount),
+    amounts: (template.amounts || []).slice(0, 6).map(value => finite(value)),
+    wallets: (template.wallets || []).slice(0, 6).map(value => String(value).slice(0, 100)),
+    lifecycleStage: String(template.lifecycleStage || '').slice(0, 30),
+    market: String(template.market || '').slice(0, 30),
+  };
+}
+
+function lossRaw(value) {
+  if (typeof value !== 'string' || !/^-?\d{1,40}$/.test(value)) return null;
+  try { return BigInt(value); } catch (_) { return null; }
+}
+
+function lossPostPrice(event) {
+  const b = lossRaw(event?.poolBaseReservesRaw);
+  const q = lossRaw(event?.poolQuoteReservesRaw);
+  const v = event?.virtualQuoteReservesRaw == null ? 0n : lossRaw(event.virtualQuoteReservesRaw);
+  if (b == null || q == null || v == null || b <= 0n || q <= 0n || q + v <= 0n) return null;
+  const price = Number(q + v) / Number(b) / 1_000;
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function lossReservesContinue(previous, next) {
+  return lossRaw(previous?.poolBaseReservesRaw) != null
+    && lossRaw(previous.poolBaseReservesRaw) === lossRaw(next?.prePoolBaseReservesRaw)
+    && lossRaw(previous.poolQuoteReservesRaw) === lossRaw(next?.prePoolQuoteReservesRaw)
+    && lossRaw(previous.virtualQuoteReservesRaw ?? '0') === lossRaw(next?.virtualQuoteReservesRaw ?? '0');
+}
 
 function firstCliffCounterRow() {
   return {
@@ -92,7 +157,14 @@ class PreEntryRugRiskTracker {
     this.toxicTemplates = new Map();
     this.toxicTemplateIndex = new Map();
     this.toxicVersion = 0;
+    this.toxicNextBoundaryAt = Infinity;
     this.toxicMemoryDirty = false;
+    // Only explicitly captured live cases get a longer evidence ring. Never
+    // expand every market's ordinary risk ring or run I/O from capture.
+    this.lossEvidenceStreams = new Map();
+    this.lossLearnedCases = new Map();
+    this.lossMetrics = { captures: 0, streamEvictions: 0, eventTruncations: 0,
+      missingCaptures: 0, analyses: 0, templatesLearned: 0, persistenceErrors: 0 };
     this.toxicPersistTimer = null;
     this.toxicPersistPromise = null;
     this.guardStrategies = new Map();
@@ -219,13 +291,18 @@ class PreEntryRugRiskTracker {
     this.firstCliffPendingCount = 0;
     this.recentFirstCliffCounterfactuals = [];
     this.firstCliffAuditQueue = [];
+    this.lossEvidenceStreams.clear();
+    this.lossLearnedCases.clear();
   }
 
   observeTrade(trade) {
     if (!this.config.enabled || !trade?.mint || !['BUY', 'SELL'].includes(trade.side)) return;
     const timestampMs = finite(trade.timestampMs);
     const price = tradePrice(trade);
-    if (!(timestampMs > 0) || !(price > 0)) return;
+    if (!(timestampMs > 0) || !(price > 0)) {
+      this._appendLossEvidence(trade);
+      return;
+    }
     let state = this.states.get(trade.mint);
     if (!state) {
       state = {
@@ -249,6 +326,8 @@ class PreEntryRugRiskTracker {
     const curvePct = finite(trade.curvePct);
     if (curvePct != null) state.lastCurvePct = curvePct;
     const observedEvent = {
+      ...lossEvent(trade),
+      mint: trade.mint,
       timestampMs,
       side: trade.side,
       price,
@@ -268,6 +347,7 @@ class PreEntryRugRiskTracker {
     const lifecycle = this._firstCliffLifecycle(state, [observedEvent], timestampMs);
     observedEvent.lifecycleStage = lifecycle.stage;
     observedEvent.lifecycleAgeMs = lifecycle.ageMs;
+    this._appendLossEvidence(observedEvent);
     state.version += 1;
     state.lastAt = Math.max(state.lastAt, timestampMs);
     if (!(state.peakPrice > 0) || price > state.peakPrice) {
@@ -298,7 +378,9 @@ class PreEntryRugRiskTracker {
     if (!state) return this._empty(timestampMs);
     if (state.cachedRisk && state.cachedVersion === state.version
       && state.cachedToxicVersion === this.toxicVersion
-      && Math.abs(timestampMs - state.cachedRisk.observedAt) <= this.config.cacheMaxAgeMs) {
+      && timestampMs >= state.cachedRisk.observedAt
+      && timestampMs - state.cachedRisk.observedAt <= this.config.cacheMaxAgeMs
+      && timestampMs < (state.cachedToxicValidUntil ?? Infinity)) {
       this.metrics.evaluations += 1;
       if (state.cachedRisk.sampleReady) this.metrics.sampleReady += 1;
       if (state.cachedRisk.flagged) {
@@ -313,6 +395,7 @@ class PreEntryRugRiskTracker {
       row.timestampMs >= cutoff && row.timestampMs <= timestampMs
     ));
     if (!rows.length) return this._empty(timestampMs);
+    this.toxicNextBoundaryAt = Infinity;
     let buys = 0;
     let alternations = 0;
     let upticks = 0;
@@ -484,6 +567,7 @@ class PreEntryRugRiskTracker {
     state.cachedRisk = risk;
     state.cachedVersion = state.version;
     state.cachedToxicVersion = this.toxicVersion;
+    state.cachedToxicValidUntil = this.toxicNextBoundaryAt;
     return risk;
   }
 
@@ -508,7 +592,9 @@ class PreEntryRugRiskTracker {
       const cached = state?.cachedRisk;
       if (cached && state.cachedVersion === state.version
         && state.cachedToxicVersion === this.toxicVersion
-        && Math.abs(timestampMs - cached.observedAt) <= this.config.cacheMaxAgeMs) {
+        && timestampMs >= cached.observedAt
+        && timestampMs - cached.observedAt <= this.config.cacheMaxAgeMs
+        && timestampMs < (state.cachedToxicValidUntil ?? Infinity)) {
         risk = cached;
         this.metrics.liveCacheHits += 1;
       } else {
@@ -630,6 +716,274 @@ class PreEntryRugRiskTracker {
     return decision;
   }
 
+  _appendLossEvidence(trade) {
+    const stream = this.lossEvidenceStreams.get(trade?.mint);
+    if (!stream) return;
+    const at = finite(trade.receivedAtMs, finite(trade.timestampMs, this.now()));
+    if (at > stream.expiresAt) { this.lossEvidenceStreams.delete(trade.mint); return; }
+    stream.events.push(lossEvent(trade));
+    stream.lastAt = Math.max(stream.lastAt, at);
+    stream.events = stream.events.filter(row => finite(row.receivedAtMs, row.timestampMs) >= stream.lastAt - LOSS_WINDOW_MS);
+    if (stream.events.length > LOSS_MAX_EVENTS) {
+      stream.truncated += stream.events.length - LOSS_MAX_EVENTS;
+      this.lossMetrics.eventTruncations += stream.events.length - LOSS_MAX_EVENTS;
+      stream.events = stream.events.slice(-LOSS_MAX_EVENTS);
+    }
+  }
+
+  releaseLossEvidence(mint) { return this.lossEvidenceStreams.delete(mint); }
+
+  captureLossEvidence(mint, now = this.now(), { phase = 'OBSERVATION' } = {}) {
+    const at = finite(now);
+    const state = this.states.get(mint);
+    let stream = this.lossEvidenceStreams.get(mint);
+    if (stream && stream.expiresAt < at) { this.lossEvidenceStreams.delete(mint); stream = null; }
+    if (!stream && phase === 'ENTRY' && at > 0) {
+      if (this.lossEvidenceStreams.size >= 64) {
+        this.lossEvidenceStreams.delete(this.lossEvidenceStreams.keys().next().value);
+        this.lossMetrics.streamEvictions += 1;
+      }
+      stream = { events: (state?.events || []).slice(state?.offset || 0).slice(-LOSS_MAX_EVENTS).map(lossEvent),
+        startedAt: at, lastAt: at, expiresAt: at + LOSS_STREAM_TTL_MS, truncated: 0 };
+      this.lossEvidenceStreams.set(mint, stream);
+    }
+    const available = stream?.events || (state?.events || []).slice(state?.offset || 0);
+    const events = available.filter(row => {
+      const received = finite(row.receivedAtMs, row.timestampMs);
+      return received >= at - LOSS_WINDOW_MS && received <= at;
+    }).slice(-LOSS_MAX_EVENTS).map(lossEvent);
+    const omittedFutureEvents = available.filter(row => finite(row.receivedAtMs, row.timestampMs) > at).length;
+    this.lossMetrics.captures += 1;
+    if (!events.length) this.lossMetrics.missingCaptures += 1;
+    const template = state?.template?.observedAt <= at ? lossTemplate(state.template) : null;
+    return { version: LOSS_EVIDENCE_VERSION, mint, phase: String(phase).slice(0, 30),
+      capturedAt: at, windowStartAt: at - LOSS_WINDOW_MS, events, template,
+      lifecycleStage: events.at(-1)?.lifecycleStage || null, market: events.at(-1)?.market || null,
+      completeness: { streamRegistered: Boolean(stream), eventCount: events.length,
+        truncatedEvents: stream?.truncated || 0, omittedFutureEvents,
+        firstObservedAt: finite(events[0]?.receivedAtMs), lastObservedAt: finite(events.at(-1)?.receivedAtMs),
+        coversRequestedWindow: events.length > 0 && events[0].receivedAtMs <= at - LOSS_WINDOW_MS,
+        // Public event continuity must be proven locally from raw reserve links;
+        // an unbroken socket is not proof that all pool trades were observed.
+        fullMarketCoverageProven: false } };
+  }
+
+  analyzeLossEvidence({ entryEvidence, triggerEvidence, position, orders = [], settlement, knownAt } = {}) {
+    this.lossMetrics.analyses += 1;
+    const at = finite(knownAt);
+    const entry = entryEvidence?.tracker || entryEvidence;
+    const trigger = triggerEvidence?.tracker || triggerEvidence;
+    const resolution = triggerEvidence?.resolutionTracker;
+    const captures = [entry, trigger, resolution].filter(Boolean);
+    const evidence = { version: LOSS_EVIDENCE_VERSION, knownAt: at, mint: position?.mint || entry?.mint || null,
+      autoLearningPolicy: 'AUTO_TEMPLATE_ONLY', walletsAdded: 0,
+      entryTemplate: lossTemplate(entry?.template), templateExistedAtEntry: false,
+      canExplainOriginalEntry: false, issues: [] };
+    const result = (classification, reason, learningCandidate = null) => ({
+      version: LOSS_EVIDENCE_VERSION, classification, reason, evidence, learningCandidate });
+    const netReturn = finite(settlement?.realizedReturnPct ?? settlement?.realized_return_pct);
+    evidence.realizedReturnPct = netReturn;
+    const orderRows = Array.isArray(orders) ? orders : [];
+    const signedOrders = orderRows.filter(row => row.signature);
+    const delta = row => finite(row.walletSolDelta ?? row.wallet_sol_delta);
+    const confirmedSide = side => signedOrders.some(row => row.side === side
+      && /^CONFIRMED(?:_PARTIAL)?$/.test(row.status) && delta(row) != null);
+    if (!(at > 0) || position?.mode !== 'LIVE' || position?.status !== 'CLOSED'
+      || settlement?.complete !== true || !(netReturn <= -50)
+      || !confirmedSide('BUY') || !confirmedSide('SELL')
+      || signedOrders.some(row => delta(row) == null)) {
+      return result('INSUFFICIENT', 'VERIFIED_LIVE_LOSS_SETTLEMENT_REQUIRED');
+    }
+    if (!entry || captures.some(capture => capture.version !== LOSS_EVIDENCE_VERSION
+      || capture.mint !== evidence.mint || !(capture.capturedAt > 0) || capture.capturedAt > at)) {
+      return result('INSUFFICIENT', 'FROZEN_ASOF_EVIDENCE_REQUIRED');
+    }
+    evidence.captureQuality = captures.map(capture => ({ phase: capture.phase,
+      capturedAt: capture.capturedAt, ...capture.completeness }));
+    if (captures.some(capture => capture.completeness?.omittedFutureEvents > 0)) {
+      return result('INSUFFICIENT', 'FUTURE_EVENTS_PRESENT_IN_CAPTURE');
+    }
+    // De-duplicate overlap between immutable captures, never sort away arrival
+    // disorder or remove repeated/conflicting events within a capture.
+    const rows = []; const across = new Map();
+    for (const capture of captures) {
+      const local = new Set();
+      for (const source of (capture.events || []).slice(-LOSS_MAX_EVENTS)) {
+        const row = lossEvent(source);
+        const key = `${row.signature}:${row.eventIndex}`;
+        const encoded = JSON.stringify(row);
+        if (local.has(key)) { evidence.issues.push('DUPLICATE_EVENT_IN_CAPTURE'); continue; }
+        local.add(key);
+        if (across.has(key)) {
+          if (across.get(key) !== encoded) evidence.issues.push('CONFLICTING_EVENT_IDENTITY');
+          continue;
+        }
+        across.set(key, encoded); rows.push(row);
+      }
+    }
+    const policy = { version: strictAmm.VERSION, maxTradeAgeMs: 3_000 };
+    const cursor = { policy };
+    const valid = rows.map(row => {
+      const price = lossPostPrice(row);
+      const reason = strictAmm.rejection(row, cursor, row.receivedAtMs);
+      if (reason || !price || row.receivedAtMs > at || row.timestampMs > at
+        || (row.reservePrice != null && Math.abs(row.reservePrice / price - 1) > 0.000001)) {
+        evidence.issues.push(reason || 'INVALID_POST_RESERVE_PRICE'); return false;
+      }
+      strictAmm.accept(row, cursor, row.receivedAtMs);
+      return true;
+    });
+    evidence.issues = [...new Set(evidence.issues)].slice(0, 16);
+    evidence.observedEvents = rows.length;
+    const entryRow = (entry.events || []).filter(row => row.receivedAtMs <= entry.capturedAt).at(-1);
+    const entryMark = lossPostPrice(entryRow);
+    const entryPrice = finite(position.entryPrice ?? position.entry_price);
+    // A receipt can arrive well after the sell. A later rebound must never be
+    // used to claim that an earlier realized loss was execution slippage.
+    const exitAt = finite(position.closedAt ?? position.closed_at);
+    const exitRow = exitAt > 0 ? rows.filter((row, index) => valid[index]
+      && row.receivedAtMs <= exitAt && row.chainTimestampMs <= exitAt
+      && exitAt - row.chainTimestampMs <= 3_000).at(-1) : null;
+    const finalPrice = lossPostPrice(exitRow);
+    evidence.exitMarkAt = exitRow?.receivedAtMs || null;
+    evidence.exitMarkBasis = exitRow ? 'PRE_CLOSE_VALID_POST_QUOTE_WITHIN_3S' : 'UNKNOWN';
+    evidence.entryExecutionPremiumPct = entryPrice > 0 && entryMark > 0 ? (entryPrice / entryMark - 1) * 100 : null;
+    evidence.markReturnPct = finalPrice > 0 && entryPrice > 0 ? (finalPrice / entryPrice - 1) * 100 : null;
+    const entryCost = Math.abs(finite(settlement.entrySolDelta ?? settlement.entry_sol_delta, 0));
+    const fees = signedOrders.reduce((sum, row) => sum + Math.max(0, finite(row.networkFeeSol ?? row.network_fee_sol, 0)), 0);
+    evidence.networkFeesPct = entryCost > 0 ? fees / entryCost * 100 : null;
+    const executionCause = evidence.entryExecutionPremiumPct >= 20
+      || evidence.networkFeesPct >= Math.max(20, Math.abs(netReturn) / 2)
+      || (evidence.markReturnPct != null && evidence.markReturnPct - netReturn >= 20);
+    const continuous = (first, last) => {
+      for (let i = first; i <= last; i += 1) {
+        if (!valid[i]) return false;
+        if (i > first && (rows[i].receivedAtMs - rows[i - 1].receivedAtMs > 2_000
+          || !lossReservesContinue(rows[i - 1], rows[i]))) return false;
+      }
+      return true;
+    };
+    let collapse = null; let unprovenCliff = false;
+    for (let i = 1; i < rows.length; i += 1) {
+      const before = rows[i - 1]; const sell = rows[i];
+      if (!valid[i - 1] || !valid[i] || sell.side !== 'SELL'
+        || !(lossPostPrice(sell) <= lossPostPrice(before) * 0.5)) continue;
+      if (!continuous(i - 1, i)
+        || !(lossRaw(sell.poolBaseReservesRaw) > lossRaw(sell.prePoolBaseReservesRaw))
+        || !(lossRaw(sell.poolQuoteReservesRaw) < lossRaw(sell.prePoolQuoteReservesRaw))) {
+        unprovenCliff = true; continue;
+      }
+      const confirm = rows[i + 1];
+      const persisted = Boolean(confirm && continuous(i, i + 1)
+        && confirm.signature !== sell.signature && confirm.wallet && confirm.wallet !== sell.wallet
+        && confirm.receivedAtMs > sell.receivedAtMs
+        && lossPostPrice(confirm) <= lossPostPrice(before) * 0.5);
+      collapse = { before, sell, confirm: persisted ? confirm : null, index: i,
+        dropPct: (1 - lossPostPrice(sell) / lossPostPrice(before)) * 100 };
+      if (persisted) break;
+    }
+    evidence.collapse = collapse ? { dropPct: collapse.dropPct, before: collapse.before,
+      sell: collapse.sell, confirmation: collapse.confirm } : null;
+    if (evidence.issues.length || !entryMark || !rows.length || !valid.some(Boolean)) {
+      return result('INSUFFICIENT', 'QUOTE_IDENTITY_FRESHNESS_OR_CONTINUITY_UNPROVEN');
+    }
+    if (!collapse && unprovenCliff) return result('INSUFFICIENT', 'COLLAPSE_POOL_CONTINUITY_UNPROVEN');
+    if (!collapse) return result(executionCause ? 'EXECUTION_LOSS' : finalPrice ? 'MARKET_LOSS' : 'INSUFFICIENT',
+      executionCause ? 'EXECUTION_OR_COST_EXPLAINS_LOSS_NO_CONFIRMED_CLIFF'
+        : finalPrice ? 'NO_CONFIRMED_DISCRETE_RUG_CLIFF' : 'EXIT_TIME_MARK_UNAVAILABLE');
+    if (!collapse.confirm) return result('CANDIDATE', 'INDEPENDENT_POST_COLLAPSE_CONFIRMATION_MISSING');
+    const templates = captures.map(capture => lossTemplate(capture.template)).filter(Boolean);
+    let candidateTemplate = null;
+    for (const template of templates) {
+      if (!['AMM_EARLY', 'AMM_MATURE'].includes(template.lifecycleStage) || template.market !== 'PUMP_AMM'
+        || !(template.observedAt <= collapse.before.timestampMs)
+        || collapse.sell.timestampMs - template.observedAt > this._cfg('toxicCollapseWindowMs', 30_000)) continue;
+      const buys = rows.filter(row => row.side === 'BUY' && row.timestampMs >= template.firstAt
+        && row.timestampMs <= template.observedAt && row.market === template.market
+        && row.lifecycleStage === template.lifecycleStage && row.solAmount >= 1);
+      const amounts = buys.map(row => row.solAmount).sort((a, b) => b - a);
+      const total = amounts.reduce((sum, amount) => sum + amount, 0);
+      const span = buys.length ? buys.at(-1).timestampMs - buys[0].timestampMs : Infinity;
+      const firstIndex = rows.indexOf(buys[0]);
+      if (buys.length < Math.max(4, this._cfg('templateMinLargeBuys', 4))
+        || buys.length > Math.min(6, this._cfg('templateMaxLargeBuys', 6))
+        || total < Math.max(40, this._cfg('templateMinTotalBuySol', 40))
+        || span < 0 || span > Math.min(500, this._cfg('templateMaxBurstSpanMs', 500))
+        || template.largeBuyCount !== buys.length || template.totalBuySol !== total
+        || template.fingerprint !== this._templateFingerprint(amounts, span, template.lifecycleStage, template.market)
+        || !continuous(firstIndex, collapse.index + 1)) continue;
+      candidateTemplate = template; break;
+    }
+    if (!candidateTemplate) return result('CANDIDATE', 'PRE_COLLAPSE_HIGH_CONFIDENCE_TEMPLATE_UNPROVEN');
+    evidence.templateBeforeCollapse = candidateTemplate;
+    evidence.templateExistedAtEntry = Boolean(entry.template
+      && entry.template.fingerprint === candidateTemplate.fingerprint
+      && entry.template.observedAt === candidateTemplate.observedAt
+      && candidateTemplate.observedAt <= entry.capturedAt);
+    evidence.canExplainOriginalEntry = evidence.templateExistedAtEntry;
+    evidence.actorEvidence = { directCollapseSeller: collapse.sell.wallet,
+      automaticallyBlacklisted: false, reason: 'AUTO_TEMPLATE_ONLY' };
+    if (executionCause) return result('MIXED', 'CONFIRMED_CLIFF_WITH_MATERIAL_EXECUTION_OR_COST_COMPONENT');
+    return result('CONFIRMED_RUG', 'CONTINUOUS_POST_CLIFF_WITH_PREEXISTING_HIGH_CONFIDENCE_TEMPLATE', {
+      version: LOSS_EVIDENCE_VERSION, policy: 'AUTO_TEMPLATE_ONLY', mint: evidence.mint,
+      knownAt: at, template: candidateTemplate, collapsePct: collapse.dropPct,
+      confirmedAt: collapse.confirm.receivedAtMs,
+      templateExistedAtEntry: evidence.templateExistedAtEntry,
+    });
+  }
+
+  learnFromLossCase({ caseId, analysis, knownAt } = {}) {
+    const candidate = analysis?.learningCandidate;
+    const at = finite(knownAt);
+    const unchanged = { templatesAdded: 0, walletsAdded: 0, reason: 'AUTO_TEMPLATE_ONLY' };
+    if (!caseId || analysis?.version !== LOSS_EVIDENCE_VERSION || analysis.classification !== 'CONFIRMED_RUG'
+      || candidate?.version !== LOSS_EVIDENCE_VERSION || candidate.policy !== 'AUTO_TEMPLATE_ONLY'
+      || !(at > 0) || candidate.knownAt !== at || !(candidate.confirmedAt > 0) || candidate.confirmedAt > at
+      || candidate.collapsePct < 50 || !candidate.template?.fingerprint
+      || !['AMM_EARLY', 'AMM_MATURE'].includes(candidate.template.lifecycleStage)
+      || candidate.template.market !== 'PUMP_AMM') return { status: 'NOT_ELIGIBLE', ...unchanged };
+    const key = `${String(caseId).slice(0, 160)}:${at}`;
+    if (this.lossLearnedCases.has(key)) return { status: 'ALREADY_LEARNED', ...unchanged };
+    if (typeof this.store?.recordPreEntryRugToxicHistory !== 'function') {
+      throw Object.assign(new Error('Loss learning requires durable toxic history'), { code: 'LOSS_LEARNING_STORE_UNAVAILABLE' });
+    }
+    const template = candidate.template;
+    const record = { ...lossTemplate(template), mint: candidate.mint, labeledAt: at,
+      expiresAt: at + this._cfg('toxicTemplateRetentionMs', 30 * 86_400_000),
+      collapsePct: candidate.collapsePct, lossCaseId: String(caseId).slice(0, 160),
+      learningSource: 'VERIFIED_LIVE_LOSS_AUTO_TEMPLATE_ONLY' };
+    let written;
+    try {
+      // DB first; lock/failure leaves memory, cache version and retry key intact.
+      const persist = () => this.store.recordPreEntryRugToxicHistory([{
+        kind: 'TEMPLATE', subject: record.fingerprint, walletRole: null, ...record,
+      }]);
+      written = typeof this.store.withLiveLossRugWrite === 'function'
+        ? this.store.withLiveLossRugWrite(persist) : persist();
+      if (!Number.isSafeInteger(written) || written < 0) {
+        throw Object.assign(new Error('Invalid durable loss history result'), { code: 'LOSS_LEARNING_HISTORY_RESULT_INVALID' });
+      }
+    } catch (error) { this.lossMetrics.persistenceErrors += 1; throw error; }
+    // Label knowledge is frozen with the analysis; durable availability is a
+    // separate fence and may be hours later after a failed-write retry.
+    record.createdAt = Math.max(at, finite(this.now(), at));
+    const existing = this.toxicTemplates.get(record.fingerprint);
+    const added = !existing || existing.expiresAt <= at;
+    if (!existing || existing.labeledAt === at || existing.expiresAt <= at) {
+      this.toxicTemplates.set(record.fingerprint, record);
+      this._indexToxicTemplate(record);
+      this._boundToxicTemplates(this._cfg('maxToxicTemplates', 1_024));
+      this.toxicVersion += 1;
+      this.toxicMemoryDirty = true;
+    }
+    this.lossLearnedCases.set(key, true);
+    this._boundMap(this.lossLearnedCases, 2_000);
+    this.lossMetrics.templatesLearned += added ? 1 : 0;
+    return { status: Number(written) > 0 ? 'LEARNED' : 'ALREADY_LEARNED',
+      ...unchanged, templatesAdded: added ? 1 : 0, historyRowsWritten: Number(written) || 0,
+      labeledAt: at, fingerprint: record.fingerprint };
+  }
+
   classifyOutcome(mint, entryPrice, entryAt, observedAt = this.now()) {
     const state = this.states.get(mint);
     const entry = finite(entryPrice);
@@ -655,6 +1009,9 @@ class PreEntryRugRiskTracker {
   advanceTime(now = this.now()) {
     if (!this.config.enabled || now - this.lastSweepAt < this.config.sweepIntervalMs) return;
     this.lastSweepAt = now;
+    for (const [mint, stream] of this.lossEvidenceStreams) {
+      if (stream.expiresAt < now) this.lossEvidenceStreams.delete(mint);
+    }
     const cutoff = now - this.config.stateRetentionMs;
     for (const [mint, state] of this.states) {
       this._resolveFirstCliffCounterfactuals(mint, state, null, now);
@@ -703,6 +1060,9 @@ class PreEntryRugRiskTracker {
       livePath: 'MEMORY_ONLY_BOUNDED_CACHE_REFRESH',
       sendsTransactions: false,
       trackedMints: this.states.size,
+      lossFeedbackEvidence: { ...this.lossMetrics, activeStreams: this.lossEvidenceStreams.size,
+        maxStreams: 64, maxEventsPerStream: LOSS_MAX_EVENTS, windowMs: LOSS_WINDOW_MS,
+        streamTtlMs: LOSS_STREAM_TTL_MS, learningPolicy: 'AUTO_TEMPLATE_ONLY' },
       toxicWallets: this.toxicWallets.size,
       toxicTemplates: this.toxicTemplates.size,
       toxicMemoryByStage,
@@ -1759,6 +2119,19 @@ class PreEntryRugRiskTracker {
       + `|${walletRole || TOXIC_WALLET_ROLES.COORDINATED_BUYER}|${wallet}`;
   }
 
+  _toxicRecordActiveAt(record, timestampMs) {
+    // Cache only through the next time at which examined evidence can change.
+    // This preserves the bounded hot-path cache without carrying a future label
+    // backwards, or a previously valid label across its expiry.
+    for (const boundary of [finite(record?.labeledAt), finite(record?.createdAt),
+      finite(record?.expiresAt)]) {
+      if (boundary > timestampMs) {
+        this.toxicNextBoundaryAt = Math.min(this.toxicNextBoundaryAt, boundary);
+      }
+    }
+    return toxicRecordActiveAt(record, timestampMs);
+  }
+
   _toxicWalletMatch(wallets, timestampMs, lifecycleStage, market) {
     let overlap = 0;
     let changed = false;
@@ -1774,6 +2147,7 @@ class PreEntryRugRiskTracker {
           changed = true;
           continue;
         }
+        if (!this._toxicRecordActiveAt(record, timestampMs)) continue;
         walletMatched = true;
         roles[walletRole] = (roles[walletRole] || 0) + 1;
       }
@@ -1788,8 +2162,9 @@ class PreEntryRugRiskTracker {
 
   _activeToxicTemplate(template, timestampMs) {
     const exact = this.toxicTemplates.get(template.fingerprint);
-    if (exact?.expiresAt > timestampMs) return exact;
-    if (exact) this._deleteToxicTemplate(exact.fingerprint);
+    if (exact && this._toxicRecordActiveAt(exact, timestampMs)) return exact;
+    // A future label must remain available to a later chronological evaluation.
+    if (exact?.expiresAt <= timestampMs) this._deleteToxicTemplate(exact.fingerprint);
 
     // Conservative fuzzy matching is bounded by large-buy count. It tolerates
     // tiny amount/timing jitter, but never treats a scaled or structurally
@@ -1803,6 +2178,7 @@ class PreEntryRugRiskTracker {
         this._deleteToxicTemplate(fingerprint);
         continue;
       }
+      if (!this._toxicRecordActiveAt(record, timestampMs)) continue;
       if (this._templatesApproximatelyEqual(template, record)) {
         this.metrics.toxicFuzzyMatches += 1;
         return record;
@@ -1908,7 +2284,7 @@ class PreEntryRugRiskTracker {
   _ingestToxicMemory(payload, now) {
     let added = 0;
     for (const source of payload?.templates || []) {
-      if (!source?.fingerprint || !(source.expiresAt > now)) continue;
+      if (!source?.fingerprint || !toxicRecordActiveAt(source, now)) continue;
       const record = {
         ...source,
         lifecycleStage: source.lifecycleStage || LEGACY_GLOBAL_STAGE,
@@ -1919,7 +2295,7 @@ class PreEntryRugRiskTracker {
       this._indexToxicTemplate(record);
     }
     for (const source of payload?.wallets || []) {
-      if (!source?.wallet || !(source.expiresAt > now)) continue;
+      if (!source?.wallet || !toxicRecordActiveAt(source, now)) continue;
       const record = {
         ...source,
         lifecycleStage: source.lifecycleStage || LEGACY_GLOBAL_STAGE,

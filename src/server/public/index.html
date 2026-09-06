@@ -472,6 +472,12 @@
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="launch-quality" data-strategy-code="E">
               <b><span class="strategy-code">E</span>Launch Quality</b><small>只观察选币、存活与首次回踩</small>
             </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="legacy-early-flow-base" data-strategy-code="LEGACY-EARLY-FLOW-BASE">
+              <b><span class="strategy-code">LEGACY-EARLY-FLOW-BASE</span>旧版毕业资金流 · 原版无过滤</b><small>与 RUGX 同信号、同金额、同退出严格配对；新前向样本</small>
+            </button>
+            <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="stopped" data-live-strategy="legacy-early-flow-rugx" data-strategy-code="LEGACY-EARLY-FLOW-RUGX">
+              <b><span class="strategy-code">LEGACY-EARLY-FLOW-RUGX</span>旧版毕业资金流 · 当前阶段 RUG 过滤</b><small>重复作恶钱包/模板过滤；实盘桥接状态单独展示，不要求 Smart Wallet 共识</small>
+            </button>
             <button class="strategy-nav-item" type="button" aria-current="false" data-strategy-state="active" data-live-strategy="migration-second-leg" data-strategy-code="PMO / PMO-RUGX">
               <b><span class="strategy-code">PMO / PMO-RUGX</span>毕业后公开资金流</b><small>同信号严格配对 RUG 过滤；止损 + 高阈值移动止盈 + 最长持仓</small>
             </button>
@@ -517,6 +523,15 @@
             </div>
             <div class="grid live-metric-grid" id="live-metrics"></div>
             <div class="grid strategy-grid" id="live-strategy-cards"></div>
+            <article class="card record-section">
+              <div class="section-title"><h2>实盘 ≥50% 大亏复盘与 RUG 学习</h2><p>按当前策略统计；首次入场/触发证据冻结，归因与学习为最新状态，不是历史时点回放。</p></div>
+              <div class="grid live-metric-grid" id="live-loss-rug-metrics"></div>
+              <p class="table-note" id="live-loss-rug-note">案例数据待加载；仅捕获入场证据不算大亏。</p>
+              <div class="table-wrap"><table>
+                <thead><tr><th>更新时间 / 仓位</th><th>Mint</th><th>处理状态 / 归因</th><th>已结算收益 / 首次触发</th><th>冻结证据</th><th>学习状态 / 新增记录</th></tr></thead>
+                <tbody id="live-loss-rug-rows"></tbody>
+              </table></div>
+            </article>
             <article class="card record-section">
               <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；已关闭实盘按链上钱包 SOL 实际收支结算，包含链上费用</p></div>
               <div class="table-wrap"><table>
@@ -783,6 +798,29 @@
               <div class="table-wrap"><table>
                 <thead><tr><th>时间</th><th>Mint</th><th>窗口</th><th>Buyers / 新增</th><th>Top1 / Top3</th><th>Retention / Creator</th><th>Buy / Sell / Net</th><th>回撤 / Sell Impact / 深度标准化</th></tr></thead>
                 <tbody id="launch-quality-snapshot-rows"></tbody>
+              </table></div>
+            </article>
+          </div>
+
+          <div class="strategy-pane" data-live-strategy-pane="legacy-early-flow" hidden>
+            <article class="card record-section">
+              <div class="section-title"><h2>Legacy Early Flow · 原版 / RUGX 严格配对</h2><p>复原旧版毕业后资金流入场；仅比较本次部署后的新口径，不混入 PMO 或旧历史收益。Shadow 本身不签名；RUGX 可提供独立实盘信号，是否执行以实盘页为准。</p></div>
+              <div class="strategy-expression" id="legacy-early-flow-expression">等待旧版资金流配置…</div>
+              <div class="strategy-metric-groups" id="legacy-early-flow-metrics"></div>
+              <div class="section-title"><h3>两组独立结果</h3><p>BASE 原版无 RUG 过滤；RUGX 仅增加当前生命周期阶段的重复作恶钱包/模板过滤。没有 Smart Wallet 买入或共识前提；未知退出不当作 0 收益。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>组别 / 金额 / 模型</th><th>退出配置</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / PF</th><th>待入场 / 活动</th><th>拒绝 / 未知退出</th></tr></thead>
+                <tbody id="legacy-early-flow-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h3>同源 RUG 过滤效果</h3><p>仅同一 Mint、迁移、信号及执行/退出口径的严格配对；被拦截组可按空仓 0% 比较，但未决或无可执行退出不能按 0%。未拦截不等于已证明过滤有效。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>配对组</th><th>配对 / 可比</th><th>拦截 / 已验证</th><th>避开 RUG50 / RUG80</th><th>误杀赢家 / 大赢家</th><th>BASE</th><th>RUGX</th><th>均值提升</th></tr></thead>
+                <tbody id="legacy-early-flow-pair-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h3>最近模拟仓位</h3><p>只显示这两个精确 cohort。信号后严格 POST 行情，收益含配置估算费用但不是链上实际成交；硬止损阈值不保证成交亏损上限。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>时间 / 组别</th><th>状态 / Mint</th><th>金额 / AGE</th><th>1秒净流 / 5秒买家</th><th>价格 / 入场 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
+                <tbody id="legacy-early-flow-position-rows"></tbody>
               </table></div>
             </article>
           </div>
@@ -1455,9 +1493,11 @@
           : number(row.pairedSignals) > 0
             ? `仍需积累，已验证拦截 ${number(row.resolvedBlocked)}/30`
             : '部署后开始前向采集';
-        const readiness = guardAudit
+        const strictPairAudit = row.pairAudit
+          ? `<br><span class="table-note">候选配对 ${number(row.pairAudit.candidatePairs)} · 源不一致 ${number(row.pairAudit.sourceMismatch)} · 执行规则不一致 ${number(row.pairAudit.protocolMismatch)} · 入场不一致 ${number(row.pairAudit.entryMismatch)}<br>风控不可用 ${number(row.pairAudit.guardUnavailable)} · 结果未决/不可比 ${number(row.pairAudit.incompleteOutcomes)}（不计过滤收益）</span>` : '';
+        const readiness = (guardAudit
           ? `<br><span class="table-note">RUG样本就绪 ${number(guardAudit.sampleReady)}/${number(guardAudit.evaluated)} · 不足 ${number(guardAudit.sampleInsufficient)} · 风险命中 ${number(guardAudit.riskFlagged)} · 硬拦截 ${number(guardAudit.hardBlocked)}</span><br><span class="table-note">特征 ${escapeHtml(Object.entries(guardAudit.signatureHits || {}).filter(([, count]) => Number(count) > 0).map(([name, count]) => `${name}:${count}`).join(' · ') || '尚无命中')}</span>`
-          : '';
+          : '') + strictPairAudit;
         return `<tr><td><b>${escapeHtml(row.label || row.id)}</b><br><span class="table-note">${escapeHtml(row.baselineProfileId)} → ${escapeHtml(row.filteredProfileId)}${row.exitProfileId ? ` · ${escapeHtml(row.exitProfileId)}` : ''}</span></td><td>${number(row.pairedSignals)} / ${number(row.comparableResolved)}<br><span class="table-note">${escapeHtml(evidence)}</span>${readiness}</td><td>${number(row.blocked)} / ${number(row.resolvedBlocked)}<br><span class="table-note">拦截精度 ${rate(row.blockPrecisionPct)}</span></td><td>${number(row.avoidedRug50)} / ${number(row.avoidedRug80)}</td><td>${number(row.blockedWinners)} / ${number(row.blockedBig50)}<br><span class="table-note">误杀率 ${rate(row.falsePositiveRatePct)}</span></td><td class="${tone(baseline.averageNetReturnPct)}">均值 ${pct(baseline.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(baseline.winRatePct)} · PF ${number(baseline.profitFactor,2)} · RUG50 ${rate(baseline.rug50RatePct)}</span></td><td class="${tone(filtered.averageNetReturnPct)}">均值 ${pct(filtered.averageNetReturnPct)}<br><span class="table-note">胜率 ${rate(filtered.winRatePct)} · PF ${number(filtered.profitFactor,2)} · RUG50 ${rate(filtered.rug50RatePct)}</span></td><td class="${tone(row.averageNetReturnLiftPct)}">${pct(row.averageNetReturnLiftPct)}<br><span class="table-note">被拦截按空仓 0% 计</span></td></tr>`;
       }).join('') : '<tr><td colspan="8" class="empty">等待严格配对前向样本。</td></tr>';
     }
@@ -1612,8 +1652,10 @@
           && (id !== 'execution' || selectedExecution || !activeExecutionStrategyId),
         ));
       });
+      const paneId = ['legacy-early-flow-base', 'legacy-early-flow-rugx'].includes(id)
+        ? 'legacy-early-flow' : id;
       document.querySelectorAll('[data-live-strategy-pane]').forEach(pane => {
-        pane.hidden = pane.dataset.liveStrategyPane !== id;
+        pane.hidden = pane.dataset.liveStrategyPane !== paneId;
       });
       syncActiveStrategyCode();
       if (activeTabId === 'live-trading') {
@@ -1861,6 +1903,38 @@
       target.innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">配置种子钱包</p><div class="wallet-address">${walletLink(row.wallet, true)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
+    function renderLiveLossRugFeedback(data) {
+      const metrics = document.querySelector('#live-loss-rug-metrics');
+      const rows = document.querySelector('#live-loss-rug-rows');
+      const note = document.querySelector('#live-loss-rug-note');
+      if (data?.available !== true || !data.summary) {
+        metrics.innerHTML = '<div class="empty">案例统计尚不可用；旧数据库/未加载不等于零大亏。</div>';
+        rows.innerHTML = '<tr><td colspan="6" class="empty">此策略案例待加载</td></tr>';
+        note.textContent = '仅捕获入场证据不算大亏；待取得此策略的后台快照。';
+        return;
+      }
+      const s = data.summary;
+      metrics.innerHTML = metricCards([
+        ['已结算 ≥50% 大亏', number(s.largeLossCases), '已核对真实结算'],
+        ['暂定触发', number(s.provisional), '尚未结算，不当作 RUG'],
+        ['确认 RUG / 混合原因', `${number(s.confirmedRug)} / ${number(s.mixedLoss)}`, '混合原因不等于纯 RUG'],
+        ['执行问题 / 市场亏损', `${number(s.executionLoss)} / ${number(s.marketLoss)}`, '不能直接毒化钱包'],
+        ['候选 / 证据不足', `${number(s.candidates)} / ${number(s.unknown)}`, '不足不强行确认为 RUG'],
+        ['待处理 / 结算异常', `${number(s.pending)} / ${number(s.invalidSettlement)}`, '结算异常未计有效大亏'],
+        ['已学习案例', number(s.learnedCases), `新增模板 ${number(s.templatesAdded)} · 钱包记录 ${number(s.walletsAdded)}`],
+        ['撤销大亏候选', number(s.withdrawn), '最终亏损未达 50%'],
+      ]);
+      note.textContent = `入场证据 ${number(s.captured)} 条不计入大亏；下表最多 20 例。新增学习记录不是独立作恶样本数。误拦与收益改善请看 BASE/RUGX 严格同源对照，不能用这里的案例计数代替。完整证据保留在导出数据库。`;
+      const labels = { CAPTURED: '入场证据', TRIGGERED: '暂定触发', AWAITING_CONFIRMATION: '已结算，等待归因确认', ANALYZED: '待完成学习', FINAL: '已完成', INVALID_SETTLEMENT: '结算待修复',
+        CONFIRMED_RUG: '确认 RUG', MIXED: '混合原因', EXECUTION_LOSS: '执行亏损', MARKET_LOSS: '市场亏损', CANDIDATE: 'RUG 候选', INSUFFICIENT: '证据不足', NOT_APPLICABLE: '不适用', RECOVERED: '已恢复，撤销候选', NOT_LOSS: '未达大亏门槛',
+        LEARNED: '已学习', ALREADY_LEARNED: '已存在（幂等）', NOT_ELIGIBLE: '不满足学习条件', PENDING: '待学习' };
+      const label = value => escapeHtml(labels[value] || value || '待确认');
+      const evidence = value => value == null ? '未保存' : value.evidenceUnavailable ? '证据不完整' : '已冻结';
+      const cases = Array.isArray(data.cases) ? data.cases.slice(0, 20) : [];
+      rows.innerHTML = cases.length ? cases.map(row => `<tr><td>${dateTime(row.updatedAt)}<br>#${number(row.positionId)}</td><td>${mintLink(row.mint)}</td><td>${label(row.status)}<br>${label(row.classification)}</td><td>${row.settledAt != null ? pct(row.realizedReturnPct) : '尚未结算'}<br><span class="table-note">首次触发 ${pct(row.triggerEvidence?.markReturnPct)}</span></td><td>入场 ${evidence(row.entryEvidence)}<br>触发 ${evidence(row.triggerEvidence)}</td><td>${label(row.learning?.status)}<br><span class="table-note">模板 ${number(row.learning?.templatesAdded)} / 钱包 ${number(row.learning?.walletsAdded)}</span></td></tr>`).join('')
+        : '<tr><td colspan="6" class="empty">此策略暂无触发或结算案例；不据此认定过滤有效。</td></tr>';
+    }
+
     function renderLivePending(message = '正在读取此策略的运行状态与历史统计。', runtime = null) {
       const strategy = liveStrategyCatalog.find(item => item.id === activeExecutionStrategyId);
       document.querySelector('#live-mode-card').className = 'card mode-card disabled';
@@ -1877,6 +1951,7 @@
         : '等待策略配置…';
       document.querySelector('#live-metrics').innerHTML = '<article class="card empty">统计尚未加载，暂无可展示的数值。</article>';
       document.querySelector('#live-strategy-cards').innerHTML = '<article class="card empty">完整规则参数待加载；不使用其他策略的参数。</article>';
+      renderLiveLossRugFeedback(null);
       document.querySelector('#live-order-summary').textContent = '订单统计待加载';
       for (const [selector, columns] of [['#live-position-rows',10], ['#live-order-rows',9], ['#live-decision-rows',9]]) {
         document.querySelector(selector).innerHTML = `<tr><td colspan="${columns}" class="empty">此策略数据待加载</td></tr>`;
@@ -1898,6 +1973,20 @@
         buySlippagePct: runtime.buySlippagePct,
         sellSlippagePct: runtime.sellSlippagePct,
       };
+      const isEbaCalibrationLive = strategy.id === 'early_pure_buy_burst_eba_fix20_calibration_live'
+        || strategy.signalSource === 'EARLY_PURE_BUY_EBA_EXEC_V1';
+      const isLegacyEarlyFlowLive = strategy.id === 'legacy_early_flow_rugx_live'
+        || strategy.signalSource === 'LEGACY_EARLY_FLOW_EXEC_V1';
+      const isExecutionCalibrationLive = isEbaCalibrationLive || isLegacyEarlyFlowLive
+        || strategy.calibrationOnly === true;
+      const calibrationSafety = strategy.calibrationSafety;
+      const calibrationSafetyCopy = calibrationSafety?.blocked === true
+        ? `已阻止新仓：${calibrationSafety.reason || '执行异常待核对'}`
+        : calibrationSafety?.blocked === false ? '未触发（仍受其他执行保护约束）' : '待确认，不能认定可开仓';
+      const cumulativeLimitCopy = (value, unit) => value === null
+        ? '不设累计上限' : Number.isFinite(value) ? `${number(value, 4)} ${unit}` : '待确认';
+      const priorityFeeCopy = value => Number.isFinite(value) && value >= 0
+        ? `${number(value,6)} SOL / 笔` : '待确认';
       const stats = data.stats || {};
       const mode = ['LIVE','DRY_RUN'].includes(runtime.mode) ? runtime.mode : 'DISABLED';
       const modeClass = mode === 'LIVE' ? 'live' : mode === 'DRY_RUN' ? 'dry' : 'disabled';
@@ -1913,6 +2002,12 @@
       badge.textContent = mode;
       document.querySelector('#live-mode-title').textContent = modeCopy[0];
       document.querySelector('#live-mode-description').textContent = modeCopy[1];
+      if (isExecutionCalibrationLive) {
+        document.querySelector('#live-mode-title').textContent = mode === 'LIVE'
+          ? (strategy.entryEnabled === false ? '真实执行校准：已停止新开仓' : '小额真实执行校准')
+          : mode === 'DRY_RUN' ? '执行校准模拟中（不发真实交易）' : '执行校准已关闭';
+        document.querySelector('#live-mode-description').textContent = `${modeCopy[1]} 本策略用于测量信号、报价、成交、费用和退出差距，不代表已验证盈利；未设置累计封顶时，反复交易仍可持续消耗资金。`;
+      }
       if (runtime.safetyLock) {
         document.querySelector('#live-mode-description').textContent = '实盘安全锁已开启：即使旧 .env 仍配置 ENABLED=true，也不会签名或发送链上交易。';
       }
@@ -1932,7 +2027,8 @@
         ['风控拒绝', number(strategyRuntime.riskRejected)],
         ['入场失败', number(strategyRuntime.entryFailures)],
         ['重复信号', number(strategyRuntime.duplicateSignals)],
-        ['紧急开关', runtime.killSwitchActive ? '<span class="negative">已触发</span>' : '<span class="positive">正常</span>'],
+        ['紧急开关', runtime.killSwitchActive === true ? '<span class="negative">已触发</span>' : runtime.killSwitchActive === false ? '<span class="positive">正常</span>' : '待确认'],
+        ...(isExecutionCalibrationLive ? [['校准异常闸', escapeHtml(calibrationSafetyCopy)]] : []),
       ].map(([label,value]) => `<span>${label} <b>${value}</b></span>`).join('');
 
       const isContinuityLive = String(strategy.signalSource || '').startsWith('MIGRATION_CONTINUITY_MC_C5');
@@ -1948,7 +2044,7 @@
       const isCyaOrganicBurstLive = String(strategy.signalSource || '')
         .startsWith('CYA_ORGANIC_BURST_COB_');
       const isCobFLive = strategy.signalSource === 'CYA_ORGANIC_BURST_COB_F';
-      const isBondingCurveLive = isGraduationAccelLive || isQualityLeaderLive
+      const isBondingCurveLive = isEbaCalibrationLive || isGraduationAccelLive || isQualityLeaderLive
         || isLaunchPullbackLive || isCyaOrganicBurstLive;
       const mintOpportunityCopy = strategy.maxSignalsPerMint
         ? `每Mint只取首次机会（最多${number(strategy.maxSignalsPerMint)}个匹配信号）`
@@ -1982,6 +2078,12 @@
           ? 'COB-F：发射后2–10秒，Buyers5≥10、NetFlow5≥7 SOL、买入占比70%–95%、健康回撤≥2% → +20%卖25%，75%阶梯Runner'
           : 'COB-D：发射后2–10秒，Buyers5≥10、NetFlow5≥5 SOL、买入占比70%–95%、健康回撤≥2% → 快速止盈或移动止盈';
       }
+      if (isEbaCalibrationLive) {
+        strategyExpression = `EB-A 公共纯买流 → EXEC_V1 合格可执行行情 → ${number(strategy.positionSizeSol,4)} SOL 校准入场 / ${rate(strategy.hardStopPct)}硬止损触发 / 固定${age(strategy.fixedHoldMs)}、最长${age(strategy.maxHoldMs)}整仓退出；这是执行校准，不是盈利验证。`;
+      }
+      if (isLegacyEarlyFlowLive) {
+        strategyExpression = `EARLY_FLOW：毕业后15–25秒，FDV 1.5万–10万 USD，最长10秒可用历史涨跌−10%～+8%，1秒净流>0，5秒≥3买家/≥4笔、最大单笔买入占比≤70% → 当前阶段重复作恶钱包/模板RUG过滤 → ${number(strategy.positionSizeSol,4)} SOL / ${rate(strategy.hardStopPct)}硬止损 / +${rate(strategy.trailingActivationPct)}激活、峰值回撤${rate(strategy.trailingStopPct)}退出 / 最长${age(strategy.maxHoldMs)}；不要求Smart Wallet共识，非盈利验证。`;
+      }
       document.querySelector('#live-strategy-expression').textContent = strategyExpression;
       const wallets = data.monitoredWallets || [];
       let venueCopy = isGraduationAccelLive
@@ -1990,6 +2092,8 @@
       if (isQualityLeaderLive) venueCopy = '毕业前使用 Bonding Curve 买入；毕业前后均卖出全部链上余额';
       if (isLaunchPullbackLive) venueCopy = '毕业前使用 Bonding Curve 买入；到期按所在市场卖出全部链上余额';
       if (isCyaOrganicBurstLive) venueCopy = '毕业前使用 Bonding Curve 买入；按当前所在市场执行分批或整仓退出';
+      if (isEbaCalibrationLive) venueCopy = 'Bonding Curve 固定SOL买入；按本策略可执行退出路径整仓卖出；不以Smart Wallet买入或共识为先决条件';
+      if (isLegacyEarlyFlowLive) venueCopy = '迁移后 PumpSwap 固定SOL买入与整仓退出；源于 LEGACY-EARLY-FLOW-RUGX，不跟单、不要求Smart Wallet共识';
       document.querySelector('#live-monitored-wallets').innerHTML = `<b>${venueCopy}</b><br>单笔 ${number(strategy.positionSizeSol,4)} SOL；Smart Wallet ${number(wallets.length)} 个继续监控，仅用于研究。`;
 
       const decisionCount = Number(stats.decisions) || 0;
@@ -2006,6 +2110,12 @@
         ['持续确认已启动', number(source.persistenceArmed), `要求 ${age(source.persistenceMs)}`],
         ['初筛未通过', number(source.persistenceBaseRejected), 'Curve增量 / 买家 / 卖单条件'],
         ['持续确认失败', number(source.persistenceConfirmationRejected), '回撤 / 卖单 / Curve保持条件'],
+      ] : source.kind === 'LEGACY_EARLY_FLOW' ? [
+        ['EARLY_FLOW源头评估', number(source.evaluated), `同源机会 ${number(source.sourceSignals ?? source.matched ?? source.signals)} · 两臂记录 ${number(source.cohortSignals)}`],
+        ['RUG过滤拒绝', number(source.rugRejected), '当前生命周期阶段重复作恶钱包/模板过滤'],
+        ['实盘桥接信号', number(source.liveBridgeEmitted ?? source.liveSignals), `桥接错误 ${number(source.liveBridgeErrors)}`],
+        ['源头桥接开关', source.liveBridgeEnabled === true ? '允许发送信号' : source.liveBridgeEnabled === false ? '关闭' : '待确认', '实际开仓仍受实盘开关、异常闸与执行保护约束'],
+        ['持久化异常 / 待处理', `${number(source.persistenceErrors)} / ${number(source.pendingErrors)}`, '数据异常不是RUG拦截或可比收益'],
       ] : [];
       const metrics = [
         ...sourceMetrics,
@@ -2026,7 +2136,21 @@
       const commitmentPath = execution.readCommitment && execution.confirmationCommitment
         ? `${execution.readCommitment} → ${execution.confirmationCommitment}`
         : execution.commitment || '—';
-      const liveEntryRows = isCyaOrganicBurstLive ? [
+      const liveEntryRows = isLegacyEarlyFlowLive ? [
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'],
+        ['用途', '小额真实执行校准，非盈利验证'], ['新开仓', strategy.entryEnabled === false ? '已停止' : strategy.entryEnabled === true ? '启用（仍须通过异常闸）' : '待确认'],
+        ['信号来源', strategy.signalSource || '—'], ['源Shadow', strategy.sourceShadowCohortId || '—'],
+        ['市场', strategy.market || '—'], ['毕业后窗口', '15–25秒'], ['FDV', '15,000–100,000 USD'],
+        ['最长10秒可用历史涨跌', '−10%～+8%；覆盖长度随信号保存'], ['1秒净流', '>0 SOL'], ['5秒买家 / 交易', '≥3 / ≥4'],
+        ['最大单笔买入占比', '≤70%'], ['RUG过滤', '当前生命周期阶段的重复作恶钱包/模板过滤'],
+        ['Smart Wallet共识', '不要求'], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isEbaCalibrationLive ? [
+        ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'],
+        ['用途', '小额真实执行校准，非盈利验证'], ['新开仓', strategy.entryEnabled === false ? '已停止' : strategy.entryEnabled === true ? '启用（仍须通过异常闸）' : '待确认'],
+        ['信号来源', strategy.signalSource || '—'], ['源Shadow', strategy.sourceShadowCohortId || '—'],
+        ['市场', strategy.market || '—'], ['入场逻辑', 'EB-A公共纯买流；不跟单，不要求钱包共识'],
+        ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
+      ] : isCyaOrganicBurstLive ? [
         ['策略编号', strategy.code || strategy.id || '—'], ['规则版本', strategy.ruleVersion || '—'], ['新开仓', strategy.entryEnabled === false ? '已停止' : '启用'], ['信号类型', isCobFLive ? 'COB-F Strict 7 SOL Organic Pullback' : 'COB-D Strict 5 SOL Organic Pullback'], ['市场', 'PUMP_BONDING_CURVE'],
         ['发射后窗口', '2–10秒'], ['独立买家', '5秒≥10'], ['5秒净流入', isCobFLive ? '≥7 SOL' : '≥5 SOL'], ['买入占比', '70%–95%'],
         ['2秒涨幅 / 15秒回撤', '0%–40% / ≥2%'], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)], ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)],
@@ -2067,7 +2191,17 @@
         ['毕业后窗口', age(strategy.trackingAgeMs)], ['市场涨价上限', rate(strategy.maxEntryPriceJumpPct)],
         ['自身冲击上限', rate(strategy.maxEntrySelfImpactPct)], ['机会限制', mintOpportunityCopy],
       ];
-      const liveExitRows = isCobFLive ? [
+      const liveExitRows = isLegacyEarlyFlowLive ? [
+        ['策略模式', '移动止盈 + 硬止损（整仓）'], ['硬止损触发', rate(strategy.hardStopPct)],
+        ['移动止盈激活', rate(strategy.trailingActivationPct)], ['峰值回撤退出', rate(strategy.trailingStopPct)],
+        ['最长持仓', age(strategy.maxHoldMs)], ['卖出比例', '本策略当前仓位100%'],
+        ['止损说明', '触发阈值不是最大成交亏损保证'],
+      ] : isEbaCalibrationLive ? [
+        ['策略模式', '固定持有 + 硬止损（整仓）'], ['固定持仓', age(strategy.fixedHoldMs)],
+        ['硬止损触发', rate(strategy.hardStopPct)], ['最长持仓', age(strategy.maxHoldMs)],
+        ['移动止盈', '无'], ['卖出比例', '本策略当前仓位100%'],
+        ['止损说明', '触发阈值不是最大成交亏损保证'],
+      ] : isCobFLive ? [
         ['策略模式', '25% Core + 75% Stair Runner'], ['Core触发 / 卖出', `${rate(strategy.coreActivationPct)} / ${rate(strategy.coreExitPct)}`],
         ['峰值≥20% / ≥50% / ≥100%', '回撤15% / 20% / 25%'], ['固定止盈', '仅Core分批'],
         ['硬止损', '无'], ['最大持仓兜底', age(strategy.maxHoldMs)],
@@ -2116,8 +2250,19 @@
       const cards = [
         ['买入条件', liveEntryRows],
         ['卖出策略', liveExitRows],
-        ['仓位与风控', [
-          ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`], ['最大并发', `${number(runtime.maxConcurrentPositions || 10)} 仓`],
+        ['仓位与风控', isExecutionCalibrationLive ? [
+          ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`],
+          ['本策略最大并发', `${number(strategy.maxConcurrentPositions)} 仓`],
+          ['账户总并发约束', `${number(strategy.maxTotalConcurrentPositions)} 仓`],
+          ['累计买入金额', cumulativeLimitCopy(strategy.cumulativeAmountLimitSol, 'SOL')],
+          ['累计损失', cumulativeLimitCopy(strategy.cumulativeLossLimitSol, 'SOL')],
+          ['累计笔数', cumulativeLimitCopy(strategy.cumulativeTradeLimit, '笔')],
+          ['异常停新仓', strategy.stopOnExecutionAnomaly === true ? '开启；存量仓位继续处理' : strategy.stopOnExecutionAnomaly === false ? '关闭' : '待确认'],
+          ['校准异常闸', calibrationSafetyCopy],
+          ['钱包最低保留', `${number(runtime.minWalletReserveSol,4)} SOL`],
+          ['本策略活动仓位', number(strategy.activePositions)], ['当前模式', mode],
+        ] : [
+          ['单笔仓位', `${number(strategy.positionSizeSol,4)} SOL`], ['最大并发', `${number(strategy.maxConcurrentPositions ?? runtime.maxConcurrentPositions)} 仓`],
           ['每日开仓额度', '不设上限'], ['钱包最低保留', `${number(runtime.minWalletReserveSol,4)} SOL`],
           ['同 Mint 上限', `${number(runtime.maxConcurrentPositionsPerMint || 3)} 仓 / ${mintOpportunityCopy}`], ['重入冷却', age(strategy.reentryCooldownMs || 0)],
           ['当前活动仓位', number(runtime.activePositions)],
@@ -2128,10 +2273,12 @@
           ['卖出数量', isCobFLive
             ? '盈利20%卖25%，余75% Runner'
             : ((isGraduationAccelLive || isPbrLive) ? `当前批次 Core ${number(strategy.coreExitPct || 50)}% + Runner` : '当前仓位批次 100%')], ['卖后余额核对', '当前批次残余自动重试'],
-          ['买/卖优先费', `${number(runtime.priorityFeeSol,6)} SOL / 笔`],
+          ['普通买/卖优先费', priorityFeeCopy(runtime.priorityFeeSol)],
+          ['紧急卖出优先费', priorityFeeCopy(runtime.emergencyPriorityFeeSol)],
         ]],
       ];
       document.querySelector('#live-strategy-cards').innerHTML = cards.map(([title,rows]) => `<article class="card strategy-card"><h3>${title}</h3><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${escapeHtml(value)}</b></div>`).join('')}</div></article>`).join('');
+      renderLiveLossRugFeedback(data.lossRugFeedback);
 
       const positions = data.positions || [];
       document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
@@ -2679,34 +2826,48 @@
     function renderEarlyPureBuyBurstShadow(data) {
       const runtime = data.runtime || data.health || {};
       const strategy = data.strategy || {};
+      const entryProfiles = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row]));
+      const exitProfiles = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row]));
       const entryLabels = Object.fromEntries((runtime.entryProfiles || []).map(row => [row.id, row.label]));
       const exitLabels = Object.fromEntries((runtime.exitProfiles || []).map(row => [row.id, row.label]));
-      document.querySelector('#early-pure-buy-burst-expression').textContent = `${(runtime.entryProfiles || []).map(row => row.id).join(' / ')}：AGE<10s、Curve<50%、W3净流3–5 SOL、Buyers 2–4、0卖单；${number(strategy.positionSizeSol || runtime.positionSizeSol,2)} SOL储备成交 × FIX5/20/30。`;
+      const activeProfiles = (runtime.entryProfiles || []).filter(row => row.newEntriesEnabled !== false && row.enabled !== false);
+      const hasCalibrationProfile = activeProfiles.some(row => String(row.id || '').startsWith('EB_A_EXEC_V1'));
+      document.querySelector('#early-pure-buy-burst-expression').textContent = `新增组：${activeProfiles.map(row => row.id).join(' / ') || '无 / 等待配置'}。EB-A公共纯买流；各组金额、持仓和执行版本分别展示，旧缓存报价口径不与EXEC_V1严格链时间执行混算。${hasCalibrationProfile ? ' EXEC_V1为隔离的小额执行校准影子；是否真实开仓以Live Trading页独立开关及异常闸为准。' : ''}`;
       renderMetricGroups('#early-pure-buy-burst-metrics', [
-        ['运行模式', runtime.enabled ? 'SHADOW EB' : '关闭', '独立表；永不签名或发送实盘信号'],
+        ['运行模式', runtime.enabled ? 'SHADOW EB' : '关闭', '模拟仓位不签名；仅指定EXEC_V1桥接可向独立校准实盘发信号'],
         ['观察成交 / 候选', `${number(runtime.trades)} / ${number(runtime.candidates)}`, `排除监控钱包成交 ${number(runtime.excludedSmartTrades)}`],
         ['信号 / 已开 / 已关', `${number(runtime.signals)} / ${number(runtime.opened)} / ${number(runtime.closed)}`, `活动 ${number(runtime.activePositions)}`],
-        ['无入场 / 无退出', `${number(runtime.noEntry)} / ${number(runtime.noExit)}`, 'NO_EXIT 不进入胜率与收益均值'],
+        ['无入场 / 无退出', `${number(runtime.noEntry)} / ${number(runtime.noExit)}`, 'NO_EXIT是未知退出，非0亏损；不进入已完成收益'],
         ['RUGX 配对拦截', number(runtime.blockedByRugGuard), '仅RUGX硬过滤；原EB-A保持不变，不增加RPC'],
-        ['队列 / 仓位', `${number(runtime.boundedPerMintTradeQueue)} / ${number(runtime.positionSizeSol,2)} SOL`, '每Mint成交状态严格限长'],
+        ['队列 / 默认仓位', `${number(runtime.boundedPerMintTradeQueue)} / ${number(runtime.positionSizeSol,4)} SOL`, '新执行组按各自金额；不能用旧1 SOL结果代替小额校准'],
       ], []);
       renderRugPairComparisons(
         '#early-pure-buy-burst-rug-pair-rows',
         data.rugComparisons,
       );
       const cohorts = data.cohorts || [];
-      document.querySelector('#early-pure-buy-burst-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => (
-        `<tr><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id)}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id)}</span></td><td>${number(row.signals)}</td><td>${number(row.completed)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averageNetReturnPct)}">${pct(row.averageNetReturnPct)} / ${pct(row.medianNetReturnPct)}</td><td>${number(row.profitFactor,2)} / —</td><td>${rate(row.big50RatePct)} / ${rate(row.big100RatePct)}</td><td>${rate(row.rug50RatePct)}</td><td>${number(row.active)} / ${number(row.no_entry)} / ${number(row.no_exit)}</td></tr>`
-      )).join('') : '<tr><td colspan="8" class="empty">等待 Early Pure-Buy Burst 前向样本。</td></tr>';
+      document.querySelector('#early-pure-buy-burst-cohort-rows').innerHTML = cohorts.length ? cohorts.map(row => {
+        const profile = entryProfiles[row.entry_profile_id] || {};
+        const exit = exitProfiles[row.exit_profile_id] || {};
+        const isExecution = String(row.entry_profile_id || '').startsWith('EB_A_EXEC_V1');
+        const positionSol = row.position_sol ?? profile.positionSizeSol ?? profile.positionSol;
+        const entryState = profile.newEntriesEnabled === false || profile.enabled === false ? ' · 停止新增' : '';
+        const model = row.execution_model_version || profile.executionModelVersion || profile.executionVersion
+          || (isExecution ? 'EXEC_V1 · 隔离执行校准' : '原研究口径');
+        const exitCopy = isExecution
+          ? ` · 固定${age(profile.fixedHoldMs ?? exit.maxHoldMs)} · 硬止损${rate(profile.hardStopPct ?? exit.hardStopPct)}` : '';
+        return `<tr data-eb-cohort="${escapeHtml(row.cohort_id || `${row.entry_profile_id || '—'}:${row.exit_profile_id || '—'}`)}"><td><b>${escapeHtml(entryLabels[row.entry_profile_id] || row.entry_profile_id || '—')}</b><br><span class="table-note">${escapeHtml(exitLabels[row.exit_profile_id] || row.exit_profile_id || '—')}${escapeHtml(exitCopy)}</span><br><span class="table-note">${number(positionSol,4)} SOL · ${escapeHtml(model)}${escapeHtml(entryState)}</span><br><span class="table-note">估算成本 ${rate(row.configured_cost_pct,3)}，非链上实际费用</span></td><td>${number(row.signals)}</td><td>${number(row.completed)} / ${rate(row.winRatePct)}</td><td class="${tone(row.averageNetReturnPct)}">${pct(row.averageNetReturnPct)} / ${pct(row.medianNetReturnPct)}</td><td>${number(row.profitFactor,2)} / —</td><td>${rate(row.big50RatePct)} / ${rate(row.big100RatePct)}</td><td>${rate(row.rug50RatePct)}</td><td>${number(row.active)} / ${number(row.no_entry)} / ${number(row.no_exit)}<br><span class="table-note">右端截断 ${number(row.right_censored)} · 未知不记0</span></td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">等待 Early Pure-Buy Burst 前向样本。</td></tr>';
       const rows = data.positions || [];
       document.querySelector('#early-pure-buy-burst-position-rows').innerHTML = rows.length ? rows.map(row => {
         const reason = row.exit_reason || row.rejection_reason || '—';
+        const completedNetReturn = row.status === 'CLOSED' ? row.net_return_pct : null;
         const confirmation = row.entry_profile_id === 'EB_B'
           ? `${age(row.confirmation_delay_ms)} / Buyers +${number(row.delta_buyers)} / Flow +${number(row.delta_net_flow,2)}`
           : row.entry_profile_id === 'EB_C'
             ? `回撤 ${pct(row.drawdown_pct)} / 收复 ${pct(row.reclaim_pct)}`
-            : '立即确认';
-        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id)} / ${escapeHtml(row.exit_profile_id)}</b><br>${statusChip(row.status)}</td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.buyers_3s)} / ${number(row.net_flow_3s,2)} SOL<br><span class="table-note">Buy ${rate(row.buy_tx_share_pct)}</span></td><td>${confirmation}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(row.net_return_pct)}">${pct(row.net_return_pct)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
+            : String(row.entry_profile_id || '').startsWith('EB_A_EXEC_V1') ? 'EXEC_V1 · 严格链时间报价' : '立即确认';
+        return `<tr><td>${dateTime(row.signal_at)}</td><td><b>${escapeHtml(row.entry_profile_id || '—')} / ${escapeHtml(row.exit_profile_id || '—')}</b><br>${statusChip(row.status)}<br><span class="table-note">${number(row.position_sol,4)} SOL</span></td><td>${mintLink(row.mint)}</td><td>${age(row.age_ms)} / ${pct(row.curve_pct)}</td><td>${number(row.buyers_3s)} / ${number(row.net_flow_3s,2)} SOL<br><span class="table-note">Buy ${rate(row.buy_tx_share_pct)}</span></td><td>${confirmation}</td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}<br><span class="table-note">入/出冲击 ${pct(row.entry_impact_pct)} / ${pct(row.exit_impact_pct)}</span></td><td class="${tone(completedNetReturn)}">${pct(completedNetReturn)} / ${pct(row.max_favorable_return_pct)} / ${pct(row.max_adverse_return_pct)}</td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(reason)}</span></td></tr>`;
       }).join('') : '<tr><td colspan="9" class="empty">暂无 Early Pure-Buy Burst 模拟仓位。</td></tr>';
     }
 
@@ -3272,6 +3433,63 @@
       )).join('') : '<tr><td colspan="8" class="empty">等待5/10/20/30/60秒 Launch快照</td></tr>';
     }
 
+    const legacyEarlyFlowCohortIds = ['LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX'];
+    function renderLegacyEarlyFlowShadow(data = {}) {
+      const runtime = data.runtimeShadow || {};
+      const shadow = data.shadow || {};
+      const configurations = (runtime.strategy?.cohorts || []).filter(row => legacyEarlyFlowCohortIds.includes(row.id));
+      const metrics = runtime.legacyEarlyFlow || runtime.sourceDiagnostics || {};
+      const tracker = metrics.tracker || metrics;
+      const rugx = configurations.find(row => row.id === legacyEarlyFlowCohortIds[1]) || {};
+      const bridgeEnabled = runtimeSnapshotStale(data) ? undefined
+        : runtime.enabled === false || runtime.newEntriesEnabled === false || rugx.newEntriesEnabled === false
+          ? false : (rugx.liveBridgeEnabled ?? metrics.liveBridgeEnabled);
+      const queryStatus = data.dashboardQuery?.status || data.dashboardSnapshot?.status;
+      const selected = activeLiveStrategyId === 'legacy-early-flow-base' ? legacyEarlyFlowCohortIds[0] : legacyEarlyFlowCohortIds[1];
+      document.querySelector('#legacy-early-flow-expression').textContent = `${selected}：毕业后15–25秒，FDV 15,000–100,000 USD，最长10秒可用历史涨跌−10%～+8%（逐信号保存覆盖长度），1秒净流>0，5秒≥3买家/≥4笔，最大单笔买入占比≤70%。BASE 无RUG过滤；RUGX 当前阶段重复作恶钱包/模板过滤；不要求Smart Wallet共识。${['PREPARING', 'REFRESHING'].includes(queryStatus) ? ' 历史统计后台准备/刷新中，未知数值保持待确认。' : ''}`;
+      renderMetricGroups('#legacy-early-flow-metrics', [
+        ['当前查看', escapeHtml(selected), '两组配对结果始终同时展示，不合并收益'],
+        ['源头评估 / 命中', `${number(tracker.evaluated)} / ${number(tracker.sourceSignals ?? tracker.matched ?? tracker.signals)}`, `两臂记录 ${number(tracker.cohortSignals)}；同一源不算两次命中`],
+        ['实盘桥接', bridgeEnabled === true ? '允许发送信号' : bridgeEnabled === false ? '关闭' : '待确认', escapeHtml(rugx.liveStrategyId || '实盘目标待确认')],
+        ['桥接信号 / 错误', `${number(metrics.liveSignals ?? metrics.liveBridgeEmitted)} / ${number(metrics.liveBridgeErrors)}`, '收到信号不等于成交；查看对应实盘策略'],
+        ['持久化异常 / 待处理', `${number(metrics.persistenceErrors)} / ${number(metrics.pendingErrors)}`, '写入失败隔离为DATA_ERROR；不计过滤收益'],
+        ['严格行情拒绝', Object.keys(metrics.strictRejectedByReason || {}).length ? escapeHtml(Object.entries(metrics.strictRejectedByReason).map(([reason, count]) => `${reason}: ${number(count)}`).join(' · ')) : '暂无明细', '不回退到旧报价或将未知退出当成功'],
+      ]);
+      const cohorts = (shadow.legacyCohorts || shadow.cohorts || []).filter(row => legacyEarlyFlowCohortIds.includes(row.cohort_id));
+      const rows = legacyEarlyFlowCohortIds.flatMap(id => {
+        const matches = cohorts.filter(row => row.cohort_id === id);
+        return matches.length ? matches : [{ cohort_id: id, pendingData: true }];
+      });
+      document.querySelector('#legacy-early-flow-cohort-rows').innerHTML = rows.map(row => {
+        const config = configurations.find(item => item.id === row.cohort_id) || {};
+        const isBaseline = row.cohort_id === legacyEarlyFlowCohortIds[0];
+        const running = runtime.enabled === false || runtime.newEntriesEnabled === false || config.newEntriesEnabled === false
+          ? '停止新增；存量继续退出' : runtime.enabled === true && config.id ? '前向采集中' : '配置待确认';
+        const amount = row.position_sol ?? config.positionSizeSol;
+        const cost = row.configured_cost_pct ?? config.configuredCostPct;
+        const model = row.execution_version || config.executionVersion || '模型待确认';
+        const exits = `H${number(config.hardStopPct)} / A${number(config.trailingActivationPct)} / D${number(config.trailingStopPct)} / ${age(config.maxHoldMs)}`;
+        return `<tr data-legacy-cohort="${escapeHtml(row.cohort_id)}"><td><b>${escapeHtml(row.cohort_id)}</b><br><span class="table-note">${isBaseline ? '原版无RUG过滤' : '当前阶段重复作恶钱包/模板RUG过滤'} · ${escapeHtml(running)}<br>${number(amount,4)} SOL · ${escapeHtml(model)}<br>估算费用 ${rate(cost,2)}，非链上实际费用</span></td><td>${escapeHtml(exits)}<br><span class="table-note">H硬止损 / A激活 / D峰值回撤；${row.pendingData ? '等待前向样本' : '未知退出不记0'}</span></td><td>${number(row.signals)} / ${number(row.mints)}<br><span class="table-note">入场 ${number(row.entered)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${number(row.profit_factor,2)}</td><td>${number(row.pending_entries)} / ${number(row.active_positions)}</td><td>RUG ${number(row.rug_rejected)} · 无入场 ${number(row.no_entry)} · 跳价 ${number(row.price_jump)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 截尾 ${number(row.right_censored)} · 数据异常 ${number(row.data_error)}</span></td></tr>`;
+      }).join('');
+      const pairs = (shadow.rugComparisons || []).filter(row => (
+        row.baselineProfileId === legacyEarlyFlowCohortIds[0]
+        && row.filteredProfileId === legacyEarlyFlowCohortIds[1]
+      ));
+      renderRugPairComparisons('#legacy-early-flow-pair-rows', pairs);
+      const positions = (shadow.legacyPositions || shadow.positions || []).filter(row => legacyEarlyFlowCohortIds.includes(row.cohort_id));
+      document.querySelector('#legacy-early-flow-position-rows').innerHTML = positions.length ? positions.map(row => {
+        let features = row.features || {};
+        if (!row.features && row.features_json) {
+          try { features = JSON.parse(row.features_json); } catch (_) { features = {}; }
+        }
+        const source = features?.sourceFeatures || features || {};
+        const singleBuySharePct = Number.isFinite(source.maxSingleBuyShare5s)
+          ? source.maxSingleBuyShare5s * 100 : source.largestSingleBuyShare5sPct;
+        const settledReturn = row.status === 'CLOSED' ? row.net_return_pct : null;
+        return `<tr><td>${dateTime(row.signal_at)}<br><span class="table-note">${escapeHtml(row.cohort_id)}</span></td><td>${statusChip(row.status)}<br>${mintLink(row.mint)}</td><td>${number(row.position_sol,4)} SOL / ${age(row.signal_age_ms ?? source.ageMs)}</td><td>${number(source.netFlow1sSol ?? source.netFlow1s,4)} SOL / ${number(source.buyers5s)}<br><span class="table-note">5秒交易 ${number(source.trades5s)} · 最大单笔 ${rate(singleBuySharePct)}</span></td><td>${number(row.signal_price,10)} / ${number(row.entry_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(settledReturn)}">${row.status === 'CLOSED' ? pct(settledReturn) : '未结算 / 未知'}<br><span class="table-note">MFE ${pct(row.max_favorable_return_pct)} · MAE ${pct(row.max_adverse_return_pct)}</span></td><td>${age(row.hold_ms)}<br><span class="table-note">${escapeHtml(row.exit_reason || row.rejection_reason || '—')}</span></td></tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">等待 Legacy Early Flow 新前向样本；不使用 PMO 或旧模型历史填充。</td></tr>';
+    }
+
     function renderMigrationSecondLegObserver(data) {
       const runtime = data.runtime || {};
       const queryStatus = data.dashboardQuery?.status;
@@ -3304,19 +3522,19 @@
       ]);
 
       const shadow = data.shadow || {};
-      const shadowStats = shadow.pmoStats || shadow.stats || {};
+      const shadowStats = shadow.pmoStats || {};
       const shadowStrategy = shadowRuntime.strategy || {};
       const marketRegime = shadowStrategy.marketRegime || {};
-      const activeCohorts = shadowStrategy.cohorts || [];
+      const activeCohorts = (shadowStrategy.cohorts || []).filter(row => String(row.id || '').startsWith('PMO-FLOW-'));
       const primaryCohort = activeCohorts.find(row => String(row.id || '').includes('A75-D25'))
         || activeCohorts[0] || {};
       renderMetricGroups('#m2f-shadow-metrics', [
-        ['运行模式', shadowRuntime.enabled ? 'PMO STRICT PAIRS' : '关闭', `${number(activeCohorts.length)} 个前向 cohort · 永不签名或发送交易`],
+        ['运行模式', shadowRuntime.enabled && shadowRuntime.newEntriesEnabled !== false && activeCohorts.some(row => row.newEntriesEnabled !== false) ? 'PMO STRICT PAIRS' : '停止新增；保留历史/退出', `${number(activeCohorts.length)} 个PMO配置 cohort · 永不签名或发送交易`],
         ['信号 / Mint', `${number(shadowStats.signals)} / ${number(shadowStats.mints)}`, `已入场 ${number(shadowStats.entered)} · 待入场 ${number(shadowStats.pending_entries)} · 活动 ${number(shadowStats.active_positions)}`],
         ['完成 / 胜率', `${number(shadowStats.resolved)} / ${pct(shadowStats.win_rate_pct)}`, `已关 ${number(shadowStats.closed_positions)} · NO_EXIT ${number(shadowStats.no_exit)}`],
         ['平均净收益', pct(shadowStats.average_net_return_pct), `PF ${number(shadowStats.profit_factor,2)} · 最大赢家 ${pct(shadowStats.maximum_winner_pct)}`],
         ['RUGX 拦截', number(shadowStats.rug_rejected), '仅三个高置信灾难特征硬拦截；BASE 只打标签'],
-        ['NO_EXIT 延迟观察', `${number(shadowStats.late_exit_observed)} 可执行 / ${number(shadowRuntime.lateExitPending)} 等待`, `平均超期 ${age(shadowStats.average_late_exit_after_deadline_ms)} · 模拟净收益 ${pct(shadowStats.average_late_exit_net_return_pct)}`],
+        ['NO_EXIT 延迟观察', `${number(shadowStats.late_exit_observed)} 可执行 / ${number(shadowStats.late_exit_pending)} 等待`, `平均超期 ${age(shadowStats.average_late_exit_after_deadline_ms)} · 模拟净收益 ${pct(shadowStats.average_late_exit_net_return_pct)}`],
         ['价格跳变', number(shadowStats.price_jump), `200ms延迟 · 上冲≤${pct(shadowStrategy.maxEntryPriceJumpPct)}`],
         ['模拟仓位', `${number(shadowStrategy.positionSizeSol,2)} SOL`, `成本 ${pct(shadowStrategy.configuredCostPct)} · 容量冲击计入`],
         ['市场状态（仅Shadow）', escapeHtml(marketRegime.state || 'INSUFFICIENT'), `${number(marketRegime.sampleMints)} Mint · 正收益 ${pct(marketRegime.positiveReturnRatePct)} · RUG ${pct(marketRegime.rugCollapseRatePct)}`],
@@ -3334,7 +3552,10 @@
         }).join('')
         : '<tr><td colspan="7" class="empty">等待新的 PMO 前向样本；原 M2F/LPS 历史分组继续保留</td></tr>';
 
-      renderRugPairComparisons('#m2f-rug-pair-rows', shadow.rugComparisons || []);
+      renderRugPairComparisons('#m2f-rug-pair-rows', (shadow.rugComparisons || []).filter(row => (
+        String(row.baselineProfileId || '').startsWith('PMO-FLOW-')
+        && String(row.filteredProfileId || '').startsWith('PMO-FLOW-')
+      )));
 
       const shadowPositions = (shadow.positions || []).filter(row => (
         String(row.cohort_id || '').startsWith('PMO-FLOW-')
@@ -3701,8 +3922,13 @@
       const bondingMomentum = data.bondingCurveMomentumShadow || { mode: 'SHADOW_H', enabled: false, activePositions: 0, pendingEntries: 0, signals: 0, snapshotsWritten: 0 };
       const graduationHold = data.graduationHoldShadow || { mode: 'SHADOW_I', enabled: false, activePositions: 0, pendingEntries: 0, signalsSeen: 0, gatesPassed: 0 };
       const liveStrategies = trading.strategies || [];
-      const activeLiveStrategy = liveStrategies.find(strategy => strategy.enabled) || liveStrategies[0] || {};
+      const activeLiveStrategy = liveStrategies.find(strategy => strategy.enabled !== false && strategy.entryEnabled === true) || {};
       const liveEntry = activeLiveStrategy;
+      const liveRuleCopy = liveEntry.signalSource === 'LEGACY_EARLY_FLOW_EXEC_V1'
+        ? `EARLY_FLOW 毕业后15–25秒 · 当前阶段RUG过滤 · H${number(liveEntry.hardStopPct)} / A${number(liveEntry.trailingActivationPct)} / D${number(liveEntry.trailingStopPct)} / ${age(liveEntry.maxHoldMs)}`
+        : liveEntry.signalSource === 'EARLY_PURE_BUY_EBA_EXEC_V1'
+          ? `EB-A EXEC_V1 · ${age(liveEntry.fixedHoldMs)} / H${number(liveEntry.hardStopPct)}`
+          : liveEntry.id ? `毕业后≤${age(liveEntry.trackingAgeMs)} · 1秒跌${number(liveEntry.dropMinPct)}–${number(liveEntry.dropMaxPct)}% · 反弹${number(liveEntry.reboundMinPct)}–${number(liveEntry.reboundMaxPct)}%` : '无明确允许新开仓的策略';
       const shadowRules = (signalShadow.profiles || []).map(profile => (
         `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)}/${number(profile.strategy?.entry?.minUniqueBuyersW3)}`
       )).join(' · ') || '3/3 · 5/4 · 7/5';
@@ -3712,7 +3938,7 @@
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
         ['Pre-entry RUG Guard', [['模式', rugRisk.enabled ? '按生命周期与策略分层' : '关闭'], ['硬拦截隔离', '仅同市场、同年龄段毒钱包/模板；Curve迁移另有专属条件'], ['前向候选（仅标签）', 'CL-R2 / CM-W70 / AE-R20-OR-W25'], ['AMM集中度', '仅标签；不继承Curve阈值，避免误杀右尾赢家'], ['候选命中', number(rugRisk.firstCliffStageCandidateMatched)], ['跟踪 Mint', number(rugRisk.trackedMints)], ['风险快照评估', number(rugRisk.evaluations)], ['实际入场评估', number(rugRisk.guardEvaluations)], ['风险命中', number(rugRisk.guardRiskFlagged)], ['硬拦截 / 仅标签', `${number(rugRisk.guardHardBlocked)} / ${number(rugRisk.guardLabelOnly)}`], ['放行（含仅标签）', number(rugRisk.guardPassed)], ['原生样本不足', `${number(rugRisk.guardSampleInsufficient)}（同阶段毒模板仍可判定）`], ['跨 Mint 毒模板硬拦截', number(rugRisk.guardCrossMintRejected)], ['已学习 毒模板 / 钱包角色', `${number(rugRisk.toxicTemplates)} / ${number(rugRisk.toxicWallets)}`], ['分层记忆 钱包/模板', rugStageMemory], ['旧全局记忆已隔离', number(rugRisk.toxicLegacyQuarantined)], ['重启恢复 JSON / DB', `${number(rugRisk.toxicMemoryJsonLoaded)} / ${number(rugRisk.toxicMemoryDbLoaded)}`], ['保存', number(rugRisk.toxicMemorySaved)], ['近似模板命中', number(rugRisk.toxicFuzzyMatches)], ['持久化错误', `${number(rugRisk.toxicMemoryLoadErrors)} / ${number(rugRisk.toxicMemorySaveErrors)}`], ['已标毒快速崩盘', number(rugRisk.toxicCollapsesLabeled)], ['实盘缓存命中 / 刷新', `${number(rugRisk.liveCacheHits)} / ${number(rugRisk.liveCacheMisses)}`], ['旧阶梯 / 垂直脆弱', `${number(rugRisk.flaggedLegacy)} / ${number(rugRisk.flaggedVerticalFragile)}`], ['买家稀疏 / 同额追涨', `${number(rugRisk.flaggedSparseBreadth)} / ${number(rugRisk.flaggedChaseRepeatedSize)}`], ['毒钱包 / 金额模板命中', `${number(rugRisk.flaggedCrossMintWallets)} / ${number(rugRisk.flaggedCrossMintTemplates)}`], ['北京时间风险窗', `16:00–20:00 · 阶梯 ${number(rugRisk.thresholds?.beijingRiskMinFlags || 4)}/5 记风险 · 命中 ${number(rugRisk.flaggedBeijingRiskWindow)}`], ['跨 Mint 判定', `同阶段≥${number(rugRisk.thresholds?.toxicWalletOverlapMin || 2)}毒钱包，或同阶段保守近似金额/时序模板`], ['买入热路径', '仅内存；最多扫描 256 笔；无等待'], ['持久化', '后台JSON + SQLite恢复；入场路径不读盘'], ['额外 RPC', '无']]],
         ['Database', [['运行 Commit', escapeHtml(data.runtime?.gitCommit ? data.runtime.gitCommit.slice(0, 12) : 'unknown')], ['运行 DB', escapeHtml(data.database.dbPath || '—')], ['写入状态', escapeHtml(data.database.writeStatus || 'UNKNOWN')], ['最近落库成交', Number.isFinite(data.database.lastPersistedTradeAt) ? age(Math.max(0, Date.now() - data.database.lastPersistedTradeAt)) : '—'], ['待落库延迟', Number.isFinite(data.database.queuedTradeLagMs) ? age(data.database.queuedTradeLagMs) : '—'], ['SQLite锁错误', number(data.database.sqliteBusyErrors)], ['连续写入失败', number(data.database.consecutiveWriteErrors)], ['Token / 标签待补写', `${number(data.database.pendingTokenWrites)} / ${number(data.database.pendingLabelWrites)}`], ['背压丢弃', number(data.database.tradesDroppedBackpressure)], ['重试等待', Number.isFinite(data.database.writeBackoffMs) ? age(data.database.writeBackoffMs) : '—'], ['统计快照', escapeHtml(databaseStats.status || 'PENDING')], ['快照年龄', Number.isFinite(databaseStats.staleMs) ? age(databaseStats.staleMs) : '等待后台统计'], ['后台统计耗时', Number.isFinite(databaseStats.durationMs) ? `${number(databaseStats.durationMs)} ms` : '—'], ['历史清理', retentionStatus], ['最近维护', retentionCompletedAt], ['本轮删除', `${number(retention?.deletedRows)} 行`], ['可复用空间', retentionReusable], ['维护保护', `同归档 ${age(retention?.repeatGuardMs || 86400000)} 仅1轮 · 上限 ${number(retention?.hardMaxRowsPerRun || 5000000)} 行`], ['Raw Rows', number(data.database.rawRows)], ['Research Primary', number(data.database.primarySignalRows)], ['Early Threshold', number(data.database.earlyThresholdSignalRows)], ['Shadow Signals', number(data.database.shadowSignalRows)], ['Flow-First C仓位', number(data.database.flowFirstShadowPositions?.total)], ['Smart OPEN 标签', number(data.database.smartSignalConfirmations)], ['Smart OPEN D仓位', number(data.database.smartOpenShadowPositions?.total)], ['Flow→Smart L仓位', number(data.database.flowSmartConfirmShadowPositions?.total)], ['Launch回踩 F仓位', number(data.database.launchPullbackShadowPositions?.total)], ['生命周期反弹 G仓位', number(data.database.migratedDropReboundShadowPositions?.total)], ['Bonding动量 H仓位', number(data.database.bondingCurveMomentumShadowPositions?.total)], ['Bonding动量 H快照', number(data.database.bondingCurveMomentumShadowSnapshots?.total)], ['毕业持仓 I仓位', number(data.database.graduationHoldShadowPositions?.total)], ['Holder Growth N仓位', number(data.database.holderGrowthShadowPositions?.total)], ['Quality Leader QL仓位', number(data.database.qualityLeaderShadowPositions?.total)], ['Launch Quality观察', number(data.database.launchQualityObservations?.total)], ['M2F观察 / 快照', `${number(data.database.migrationSecondLegObservations?.total)} / ${number(data.database.migrationSecondLegObservations?.snapshots)}`], ['Complete Labels', number(data.database.labels?.complete)], ['Censored Labels', number(data.database.labels?.right_censored)], ['Pending Writes', number(data.database.pendingWrites)], ['写入错误', number(data.database.writeErrors)]]],
-        ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['策略', escapeHtml(activeLiveStrategy.label || '未启用')], ['规则', `毕业后≤${age(liveEntry.trackingAgeMs)} · 1秒跌${number(liveEntry.dropMinPct)}–${number(liveEntry.dropMaxPct)}% · 反弹${number(liveEntry.reboundMinPct)}–${number(liveEntry.reboundMaxPct)}%`], ['单笔', `${number(activeLiveStrategy.positionSizeSol,4)} SOL`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
+        ['Trading', [['模式', escapeHtml(trading.mode || 'DISABLED')], ['策略', escapeHtml(activeLiveStrategy.label || '未启用')], ['规则', liveRuleCopy], ['单笔', `${number(activeLiveStrategy.positionSizeSol,4)} SOL`], ['活动仓位', number(trading.activePositions)], ['规则评估', number(trading.evaluated)], ['规则命中', number(trading.matched)], ['开仓成功', number(trading.entries)], ['平仓成功', number(trading.exits)], ['紧急开关', trading.killSwitchActive ? '已禁止新开仓' : '正常']]],
         ['Primary Shadow', [['模式', signalShadow.enabled ? 'SHADOW' : '关闭'], ['规则组', shadowRules], ['移动止盈', '立即激活 / 回撤7.5%'], ['活动仓位', number(signalShadow.activePositions)], ['待入场', number(signalShadow.pendingEntries)], ['本次评估', number(signalShadow.evaluated)], ['本次命中', number(signalShadow.matched)], ['链上交易', '永不发送']]],
         ['Flow-First C', [['模式', flowFirst.enabled ? 'SHADOW C' : '关闭'], ['Primary信号', number(flowFirst.signalsSeen)], ['独立Episode', number(flowFirst.episodes)], ['重复行去重', number(flowFirst.deduplicated)], ['待入场', number(flowFirst.pendingEntries)], ['活动模拟仓位', number(flowFirst.activePositions)], ['C组退出', '5秒 / 7.5% / 12.5%'], ['链上交易', '永不发送']]],
         ['Smart Pullback A/B', [['模式', smartPullback.enabled ? 'SHADOW A/B' : '关闭'], ['候选', number(smartPullback.candidates)], ['待入场', number(smartPullback.pendingEntries)], ['活动仓位', number(smartPullback.activePositions)], ['本次Episode', number(smartPullback.episodes)], ['确认', number(smartPullback.confirmed)], ['A / B', '7.5% / 12.5%'], ['链上交易', '永不发送']]],
@@ -4026,6 +4252,12 @@
         ],
         'migration-second-leg': requestContext => [
           loadDashboard('/api/migration-second-leg-observer?observationLimit=40&snapshotLimit=100', renderMigrationSecondLegObserver, requestContext),
+        ],
+        'legacy-early-flow-base': requestContext => [
+          loadDashboard('/api/migration-second-leg-observer?observationLimit=40&snapshotLimit=100', renderLegacyEarlyFlowShadow, requestContext),
+        ],
+        'legacy-early-flow-rugx': requestContext => [
+          loadDashboard('/api/migration-second-leg-observer?observationLimit=40&snapshotLimit=100', renderLegacyEarlyFlowShadow, requestContext),
         ],
         'holder-growth': requestContext => [
           loadDashboard('/api/holder-growth-shadow?positionLimit=30', renderHolderGrowthShadow, requestContext),

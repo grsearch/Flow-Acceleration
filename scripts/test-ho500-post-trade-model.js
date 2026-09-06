@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 // operator trading switches. No signer or transport is constructed by this test.
 require('dotenv').config = () => ({ parsed: {} });
 for (const key of Object.keys(process.env)) if (key.startsWith('FLOW_')) delete process.env[key];
+// Exercise the retained legacy long-exit engine, not the new rollout's pause policy.
+process.env.FLOW_RESEARCH_FOCUS_ENABLED = 'false';
 const { config } = require('../src/config');
 const { ResearchStore } = require('../src/data/ResearchStore');
 const { GraduationAccelerationShadowSuite, STATUS, ammBuyAveragePrice } = require('../src/core/GraduationAccelerationShadowSuite');

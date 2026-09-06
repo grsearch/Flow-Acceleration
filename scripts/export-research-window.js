@@ -52,18 +52,36 @@ const EXPLICIT_FILTERS = Object.freeze({
     bind: (startMs, endMs) => [startMs, endMs, startMs, endMs],
   },
   smart_wallet_pnl_processed_events: {
-    where: `position_id IN (
-      SELECT id FROM source.smart_wallet_actual_positions
-      WHERE (opened_at >= ? AND opened_at < ?)
-        OR (closed_at >= ? AND closed_at < ?)
-        OR status IN ('OPEN', 'PARTIAL')
+    // Both parent tables precede this table in the deterministic copy order.
+    // Reuse their pinned-window exports instead of scanning source event history twice.
+    where: `smart_event_id IN (
+      SELECT id FROM main.smart_wallet_events
+    ) OR position_id IN (
+      SELECT id FROM main.smart_wallet_actual_positions
     )`,
     anchor: 'created_at',
+    bind: () => [],
+  },
+  parser_event_quarantine: {
+    where: `(received_at_ms >= ? AND received_at_ms < ?)
+      OR (created_at >= ? AND created_at < ?)`,
+    anchor: 'received_at_ms',
     bind: (startMs, endMs) => [startMs, endMs, startMs, endMs],
+  },
+  pre_entry_rug_toxic_history: {
+    // Carry the pre-window seed (30/60-day memory), not only labels created
+    // inside the window. The pinned source snapshot can be newer than endMs:
+    // neither a future label nor a later persisted backfill is then as-of data.
+    // The existing (expires_at, labeled_at) index excludes expired history.
+    where: 'expires_at > ? AND labeled_at > 0 AND labeled_at < ? AND created_at > 0 AND created_at < ?',
+    anchor: 'labeled_at',
+    sourceIndex: 'idx_pre_entry_rug_toxic_history_expires',
+    bind: (startMs, endMs) => [startMs, endMs, endMs],
   },
   smart_open_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
   primary_live_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
   live_strategy_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
+  live_loss_rug_cases: { where: 'updated_at >= ? AND updated_at < ?', anchor: 'updated_at' },
   live_positions: {
     where: `(
       (created_at >= ? AND created_at < ?)
@@ -153,6 +171,10 @@ const FULL_STATE_TABLES = new Set([
   'smart_wallet_history_backfill_meta',
   'smart_wallet_history_backfills',
   'smart_wallet_history_backfill_daily',
+  'smart_wallet_pnl_pending_events',
+  'smart_wallet_pnl_repair_state',
+  'smart_wallet_pnl_order_checks',
+  'smart_wallet_pnl_replay_required',
   'smart_wallet_consensus_overlay_meta',
 ]);
 
@@ -193,9 +215,20 @@ function indexCreateSql(name, sourceSql) {
   return `CREATE ${unique}INDEX main.${quoteIdentifier(name)} ${sourceSql.slice(match[0].length)}`;
 }
 
-function chooseFilter(table, columns) {
+function chooseFilter(table, columns, sourceTables = null) {
   if (FULL_STATE_TABLES.has(table)) return { where: '1 = 1', anchor: null, fullTable: true };
   const explicit = EXPLICIT_FILTERS[table];
+  // A case can be resolved/learned well after its position was closed. Carry its
+  // whole accounting evidence, not just orders that happen to fall in the window.
+  // Old archives lack this table and must remain exportable without migration.
+  if (sourceTables?.has('live_loss_rug_cases') && ['live_positions', 'live_orders'].includes(table)) {
+    const key = table === 'live_positions' ? 'id' : 'position_id';
+    return { ...explicit,
+      where: `(${explicit.where}) OR ${key} IN (SELECT position_id FROM source.live_loss_rug_cases
+        WHERE updated_at >= ? AND updated_at < ?)`,
+      bind: (startMs, endMs) => [...(explicit.bind ? explicit.bind(startMs, endMs) : [startMs, endMs]), startMs, endMs],
+    };
+  }
   if (explicit) return explicit;
   const anchor = GENERIC_TIME_COLUMNS.find((candidate) => columns.includes(candidate));
   if (!anchor) return { where: '1 = 1', anchor: null, fullTable: true };
@@ -395,11 +428,12 @@ function exportResearchWindow({
       ORDER BY name
     `).all();
 
+    const sourceTables = new Set(tables.map(table => table.name));
     for (const table of tables) {
       if (SKIP_TABLES.has(table.name)) continue;
       const columns = db.prepare(`PRAGMA source.table_info(${quoteIdentifier(table.name)})`)
         .all().map((column) => column.name);
-      const filter = chooseFilter(table.name, columns);
+      const filter = chooseFilter(table.name, columns, sourceTables);
       db.exec(tableCreateSql(table.name, table.sql));
       const bind = filter.bind ? filter.bind(startMs, endMs) : (
         filter.fullTable ? [] : [startMs, endMs]
@@ -413,9 +447,17 @@ function exportResearchWindow({
           SELECT ${quotedColumns} FROM source_raw_trades WHERE ${filter.where}
         `).run(...bind);
       } else {
-        const sourceTable = table.name === 'raw_trades'
+        let sourceTable = table.name === 'raw_trades'
           ? 'source_raw_trades'
           : `source.${quoteIdentifier(table.name)}`;
+        // Prefer the live-memory expiry range over scanning every old label.
+        // Historical archives can predate the index; never require a migration
+        // or source write merely to export such an archive.
+        if (filter.sourceIndex && db.prepare(`
+          SELECT 1 FROM source.sqlite_master WHERE type='index' AND name=?
+        `).get(filter.sourceIndex)) {
+          sourceTable += ` INDEXED BY ${quoteIdentifier(filter.sourceIndex)}`;
+        }
         insert = db.prepare(`
           INSERT INTO main.${quoteIdentifier(table.name)}
           SELECT * FROM ${sourceTable} WHERE ${filter.where}
@@ -503,6 +545,11 @@ function exportResearchWindow({
     exportBytes: fs.statSync(destination).size,
     integrity,
     dataQuality,
+    liveLossRugFeedback: {
+      included: tableStats.some(row => row.table === 'live_loss_rug_cases'),
+      selection: 'CASE_UPDATED_IN_WINDOW_WITH_ASSOCIATED_POSITION_AND_ALL_ORDERS',
+      temporalScope: 'Entry and first-trigger evidence are frozen when captured. Classification and learning are the pinned export snapshot, not a historical as-of result; linked position/order evidence may lie outside the requested window.',
+    },
     safety: {
       sourceWritesExecuted: false,
       walCheckpointExecuted: false,

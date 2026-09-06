@@ -29,8 +29,9 @@ for (const strategy of strategies) {
 }
 const source = config.graduationAccelerationShadow.entryProfiles.find((p) => p.id === 'O_C80_HO500_X60_POSTV1');
 const matrix = config.graduationAccelerationShadow.entryProfiles.filter((p) => p.experimentGroup === 'HO500_LONG_EXIT_V1'
-  && p.executionModelVersion === 'POST_TRADE_V1' && p.newEntriesEnabled !== false);
+  && p.executionModelVersion === 'POST_TRADE_V1');
 assert.equal(matrix.length, 12);
+assert(matrix.every((p) => p.newEntriesEnabled === false), 'retained long-exit definitions no longer open new trials');
 assert.equal(new Set(matrix.map((p) => p.id)).size, 12);
 assert.equal(source.runnerExitMode, 'FIXED_HOLD');
 assert.equal(source.runnerMaxHoldMs, 60_000);

@@ -25,6 +25,16 @@ const CRITICAL_FILES = Object.freeze([
   'src/data/dashboard-preaggregate-worker.js',
   'src/data/dashboard-snapshot-tasks.js',
   'src/core/LiveTradingManager.js',
+  'src/core/LiveLossRugFeedback.js',
+  'src/core/ResearchCalibrationPolicy.js',
+  'src/core/LegacyEarlyFlowEntryTracker.js',
+  'src/core/MigrationSecondLegShadowSuite.js',
+  'src/core/SolUsdReference.js',
+  'src/core/RugGuardPolicy.js',
+  'src/core/UniversalRugGuard.js',
+  'src/core/EarlyPureBuyBurstShadowSuite.js',
+  'src/core/StrictAmmShadowExecution.js',
+  'src/core/MigratedDropReboundShadowSuite.js',
   'src/core/PumpFlowStream.js',
   'src/core/SmartWalletConsensusFlowRunnerShadowSuite.js',
   'src/core/GraduationAccelerationShadowSuite.js',
@@ -74,6 +84,15 @@ function strategySummary(strategy, id) {
     requireEntrySlot: bool(strategy?.requireEntrySlot),
     requireSignalPool: bool(strategy?.requireSignalPool),
     exitMode: safeId(strategy?.exitMode), fixedHoldMs: finite(strategy?.fixedHoldMs),
+    hardStopPct: finite(strategy?.hardStopPct), maxHoldMs: finite(strategy?.maxHoldMs),
+    trailingActivationPct: finite(strategy?.trailingActivationPct),
+    trailingStopPct: finite(strategy?.trailingStopPct),
+    requireRugGuard: bool(strategy?.requireRugGuard),
+    requirePostTradeQuote: bool(strategy?.requirePostTradeQuote),
+    maxConcurrentPositions: finite(strategy?.maxConcurrentPositions),
+    maxTotalConcurrentPositions: finite(strategy?.maxTotalConcurrentPositions),
+    calibrationOnly: bool(strategy?.calibrationOnly),
+    stopOnExecutionAnomaly: bool(strategy?.stopOnExecutionAnomaly),
   };
 }
 
@@ -113,9 +132,63 @@ function collectSafeConfigSummary(runtimeConfig) {
     if (strategy.requireEntrySlot !== true) warnings.push(`ENTRY_SLOT_GATE_MISSING:${strategy.id}`);
   }
   if (ho500.present && ho500.requireSignalPool !== true) warnings.push('HO500_SIGNAL_POOL_GATE_MISSING');
+  if (runtimeConfig.researchCalibration) {
+    const calibrationId = 'legacy_early_flow_rugx_live';
+    const cal = strategies.find((row) => row.id === calibrationId);
+    const calSource = runtimeConfig.migrationSecondLegShadow?.cohorts
+      ?.find((row) => row.id === 'LEGACY-EARLY-FLOW-RUGX');
+    const calBase = runtimeConfig.migrationSecondLegShadow?.cohorts
+      ?.find((row) => row.id === 'LEGACY-EARLY-FLOW-BASE');
+    if (!cal || cal.positionSizeSol !== 0.02 || cal.maxConcurrentPositions !== 3
+      || cal.maxTotalConcurrentPositions !== 3 || live.maxConcurrentPositions !== 3 || cal.hardStopPct !== 30
+      || cal.maxHoldMs !== 1_800_000 || cal.stopOnExecutionAnomaly !== true
+      || cal.exitMode !== 'TRAILING' || cal.trailingActivationPct !== 10 || cal.trailingStopPct !== 5
+      || cal.requirePostTradeQuote !== true || cal.requireRugGuard !== true
+      || cal.rugGuardMode !== 'HARD_BLOCK' || cal.market !== 'PUMP_AMM'
+      || JSON.stringify(cal.hardBlockSignatures) !== JSON.stringify(['crossMintToxicWallets', 'crossMintToxicTemplate'])
+      || cal.sourceShadowCohortId !== 'LEGACY-EARLY-FLOW-RUGX'
+      || cal.requireChainTimestamp !== true || cal.requireEntrySlot !== true
+      || !['cumulativeAmountLimitSol', 'cumulativeLossLimitSol', 'cumulativeTradeLimit']
+        .every((key) => cal[key] === null)) warnings.push('CALIBRATION_SAFETY_CONFIG_MISMATCH');
+    if (!calSource || !calBase || calBase.positionSizeSol !== 0.02
+      || calSource.positionSizeSol !== 0.02 || calSource.rugGuardMode !== 'HARD_BLOCK'
+      || JSON.stringify(calSource.hardBlockSignatures) !== JSON.stringify(cal?.hardBlockSignatures)
+      || calSource.strictExecution?.version !== 'POST_POOL_EXEC1_V1'
+      || calBase.strictExecution?.version !== 'POST_POOL_EXEC1_V1'
+      || calBase.rugGuardMode !== 'LABEL_ONLY' || calBase.liveBridgeEnabled !== false
+      || runtimeConfig.migrationSecondLegShadow?.enabled !== true
+      || calSource.liveStrategyId !== calibrationId
+      || calSource.liveBridgeEnabled !== cal?.entryEnabled) warnings.push('CALIBRATION_BRIDGE_MISMATCH');
+    if (runtimeConfig.earlyPureBuyBurstShadow?.entryProfiles
+      ?.some((row) => row.liveBridgeEnabled)) warnings.push('RETIRED_CAL02_BRIDGE_ENABLED');
+    if (strategies.some((row) => row.id !== calibrationId && row.enabled !== false
+      && row.entryEnabled !== false)) warnings.push('CALIBRATION_OTHER_LIVE_ENTRY_ENABLED');
+    if (live.priorityFeeSol !== 0.0001 || live.emergencyPriorityFeeSol !== 0.0001) {
+      warnings.push('LIVE_PRIORITY_FEE_POLICY_MISMATCH');
+    }
+    const expectedMicroLamports = live.computeUnitLimit > 0
+      ? Math.ceil(0.0001 * 1e15 / live.computeUnitLimit) : null;
+    if (expectedMicroLamports == null || live.priorityFeeMicroLamports !== expectedMicroLamports
+      || live.emergencyPriorityFeeMicroLamports !== expectedMicroLamports) {
+      warnings.push('LIVE_PRIORITY_FEE_DERIVATION_MISMATCH');
+    }
+  }
   const summary = {
     available: true, liveEnabled: bool(live.enabled), maxSignalAgeMs: finite(live.maxSignalAgeMs),
     maxPositionTradeAgeMs: finite(live.maxPositionTradeAgeMs), ho500, bridge, post,
+    maxConcurrentPositions: finite(live.maxConcurrentPositions),
+    priorityFeeSol: finite(live.priorityFeeSol),
+    emergencyPriorityFeeSol: finite(live.emergencyPriorityFeeSol),
+    priorityFeeMicroLamports: finite(live.priorityFeeMicroLamports),
+    emergencyPriorityFeeMicroLamports: finite(live.emergencyPriorityFeeMicroLamports),
+    calibration: runtimeConfig.researchCalibration ? {
+      version: safeId(runtimeConfig.researchCalibration.version),
+      focusEnabled: bool(runtimeConfig.researchCalibration.focusEnabled),
+      liveEntryEnabled: bool(runtimeConfig.researchCalibration.liveEntryEnabled),
+      strategy: strategySummary(strategies.find((row) => row.id
+        === runtimeConfig.researchCalibration.liveStrategyId), runtimeConfig.researchCalibration.liveStrategyId),
+      costModel: runtimeConfig.researchCalibration.costModel,
+    } : null,
     legacyRecovery: strategySummary(strategies.find((candidate) => candidate.id
       === 'graduation_accel_o_c80_ho500_x60_recovery_live'), 'graduation_accel_o_c80_ho500_x60_recovery_live'),
   };

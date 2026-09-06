@@ -135,6 +135,8 @@ async function verifyFullRuntime() {
   const { config } = require('../src/config');
   const { createRuntime } = require('../src/index');
   const app = createRuntime({ ...config,
+    migrationSecondLegShadow: { ...config.migrationSecondLegShadow,
+      solUsdReference: { enabled: false } },
     storage: { ...config.storage, dbPath: ':memory:' },
     liveTrading: { ...config.liveTrading, enabled: false, dryRun: true },
     server: { ...config.server, port: 0, host: '127.0.0.1' },

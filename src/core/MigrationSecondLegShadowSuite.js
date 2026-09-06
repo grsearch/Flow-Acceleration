@@ -3,6 +3,11 @@
 const { costBreakdown } = require('./CostModel');
 const { executableBuy, executableSell } = require('./ShadowExecutionModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
+const strictAmm = require('./StrictAmmShadowExecution');
+const {
+  LegacyEarlyFlowEntryTracker, ENTRY_MODE: LEGACY_ENTRY_MODE,
+  EXECUTION_VERSION: LEGACY_EXECUTION_VERSION, matchesLegacyEntry, postPoolPrice,
+} = require('./LegacyEarlyFlowEntryTracker');
 const {
   hardBlockSignaturesForLifecycle,
   RUG_GUARD_ENFORCEMENT,
@@ -34,7 +39,11 @@ function valueOf(row, snake, camel) {
 }
 
 function restore(row) {
+  let features;
+  try { features = typeof row.features === 'object' ? row.features
+    : JSON.parse(row.features_json ?? row.featuresJson ?? '{}'); } catch (_) { features = {}; }
   return {
+    features,
     id: row.id,
     cohortId: valueOf(row, 'cohort_id', 'cohortId'),
     episodeId: valueOf(row, 'episode_id', 'episodeId'),
@@ -167,10 +176,12 @@ class MarketRegimeTracker {
 }
 
 class MigrationSecondLegShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null,
+    getSolUsdReference = () => null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onLiveSignal = onLiveSignal;
     const legacy = {
       id: config.cohortId,
       label: 'M2F Near-High Flow + Universal RUG Guard B',
@@ -204,8 +215,17 @@ class MigrationSecondLegShadowSuite {
     this.cohortById = new Map(this.cohorts.map((cohort) => [cohort.id, cohort]));
     this.costsByCohort = new Map(this.cohorts.map((cohort) => [cohort.id, costBreakdown({
       ...(config.costModel || {}),
+      ...(cohort.costModel || {}),
+      ...(cohort.entryMode === LEGACY_ENTRY_MODE ? { priceImpactPct: 0 } : {}),
       positionSizeSol: cohort.positionSizeSol,
     })]));
+    this.legacyCohorts = this.cohorts.filter(cohort => cohort.entryMode === LEGACY_ENTRY_MODE);
+    this.legacyTracker = new LegacyEarlyFlowEntryTracker({ store, now, getSolUsdReference,
+      config: { ...(config.legacyEarlyFlow || {}), thresholds: this.legacyCohorts[0]?.thresholds } });
+    this.legacyMetrics = { signals: 0, rugRejected: 0, liveBridgeEmitted: 0,
+      liveBridgeErrors: 0, persistenceErrors: 0, persistenceRetryErrors: 0,
+      persistenceFailedRows: 0, strictRejectedByReason: {} };
+    this.legacyPersistenceFailures = new Map();
     this.pendingEntries = new Map();
     this.positions = new Map();
     this.noExitWatches = new Map();
@@ -237,6 +257,7 @@ class MigrationSecondLegShadowSuite {
     if (!this.config.enabled) return;
     for (const row of this.store.activeMigrationSecondLegShadowPositions()) {
       const position = restore(row);
+      if (!this._restoreLegacy(position)) continue;
       if (position.status === STATUS.PENDING_ENTRY) this.pendingEntries.set(position.id, position);
       else this.positions.set(position.id, position);
       this._index(position);
@@ -245,6 +266,7 @@ class MigrationSecondLegShadowSuite {
     const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
     for (const row of this.store.recoverableMigrationSecondLegNoExitPositions()) {
       const position = restore(row);
+      if (!this._restoreLegacy(position)) continue;
       if (!(position.exitDeadlineAt > 0)
         || startupAt > position.exitDeadlineAt + noExitObservationMs) {
         this.store.updateMigrationSecondLegShadowPosition(position.id, {
@@ -260,7 +282,21 @@ class MigrationSecondLegShadowSuite {
     this.advanceTime(this.now());
   }
 
-  stop() {}
+  stop() {
+    for (const position of [...this.pendingEntries.values(), ...this.positions.values(),
+      ...this.noExitWatches.values()]) {
+      if (!this._isLegacy(position)) continue;
+      try { this._saveLegacy(position, {}, true); }
+      catch (error) { this._queueLegacyPersistenceFailure(position, error, 'STOP_FLUSH'); }
+    }
+    this._retryLegacyPersistenceFailures(this.now(), true);
+    if (this.legacyPersistenceFailures.size > 0) {
+      const error = new Error('Legacy Shadow persistence outcomes remain unsaved');
+      error.code = 'LEGACY_SHADOW_PERSISTENCE_PENDING';
+      error.pendingErrors = this.legacyPersistenceFailures.size;
+      throw error;
+    }
+  }
 
   health() {
     const cohortHealth = this.cohorts.map((cohort) => ({
@@ -276,6 +312,13 @@ class MigrationSecondLegShadowSuite {
       hardBlockSignatures: cohort.hardBlockSignatures,
       requireCapacityMetrics: cohort.requireCapacityMetrics,
       configuredCostPct: this.costsByCohort.get(cohort.id)?.deterministicCostPct ?? null,
+      entryMode: cohort.entryMode,
+      executionVersion: cohort.executionVersion,
+      positionSizeSol: cohort.positionSizeSol,
+      strictExecution: cohort.strictExecution,
+      liveBridgeEnabled: cohort.liveBridgeEnabled === true,
+      liveStrategyId: cohort.liveStrategyId || null,
+      newEntriesEnabled: this.config.newEntriesEnabled !== false && cohort.newEntriesEnabled !== false,
     }));
     return {
       enabled: this.config.enabled,
@@ -283,7 +326,19 @@ class MigrationSecondLegShadowSuite {
       mode: 'SHADOW_PMO_STRICT_PAIR_MATRIX',
       code: this.cohorts.map((cohort) => cohort.id).join(' / '),
       sendsTransactions: false,
-      liveDecisionIntegration: 'DISABLED',
+      liveDecisionIntegration: this.legacyCohorts.some(cohort => cohort.liveBridgeEnabled)
+        ? 'LEGACY_EARLY_FLOW_RUGX_SOURCE_ONLY' : 'DISABLED',
+      sourceDiagnostics: { kind: 'LEGACY_EARLY_FLOW', ...this.legacyTracker.health(),
+        ...this.legacyMetrics, sourceSignals: this.legacyTracker.metrics.signals,
+        cohortSignals: this.legacyMetrics.signals,
+        matched: this.legacyTracker.metrics.signals,
+        pendingErrors: this.legacyPersistenceFailures.size },
+      legacyEarlyFlow: { kind: 'LEGACY_EARLY_FLOW', ...this.legacyTracker.health(),
+        ...this.legacyMetrics, sourceSignals: this.legacyTracker.metrics.signals,
+        cohortSignals: this.legacyMetrics.signals,
+        matched: this.legacyTracker.metrics.signals,
+        liveSignals: this.legacyMetrics.liveBridgeEmitted,
+        pendingErrors: this.legacyPersistenceFailures.size },
       marketRegimeUsage: 'SHADOW_ONLY_NEVER_LIVE',
       guardRequired: true,
       strictRugPairs: true,
@@ -310,7 +365,13 @@ class MigrationSecondLegShadowSuite {
   }
 
   trackedMints() {
-    return [...this.rowsByMint.keys()];
+    return [...new Set([...this.rowsByMint.keys(),
+      ...(this.config.enabled && this.legacyCohorts.length ? this.legacyTracker.trackedMints() : [])])];
+  }
+
+  observeGraduation(token) {
+    if (!this.config.enabled || !this.legacyCohorts.length) return;
+    this.legacyTracker.observeGraduation(token);
   }
 
   onSnapshot(snapshot, trade) {
@@ -321,6 +382,8 @@ class MigrationSecondLegShadowSuite {
     const regime = this.marketRegime.snapshot(snapshot.observedAt);
     this.metrics.evaluated += 1;
     for (const cohort of this.cohorts) {
+      if (cohort.entryMode === LEGACY_ENTRY_MODE) continue;
+      if (cohort.newEntriesEnabled === false) continue;
       const matched = this._matches(snapshot, cohort, regime);
       if (!matched) {
         // CF2 means two consecutive qualifying observer snapshots. A failed
@@ -336,7 +399,7 @@ class MigrationSecondLegShadowSuite {
   }
 
   _createSignal(snapshot, trade, cohort, regime) {
-    if (this.config.newEntriesEnabled === false) return;
+    if (this.config.newEntriesEnabled === false || cohort.newEntriesEnabled === false) return;
     const migrationAt = finite(snapshot.migrationAt, snapshot.observedAt - snapshot.ageMs);
     const episodeId = `${snapshot.mint}:${migrationAt}:${cohort.id}`;
     const features = {
@@ -419,11 +482,22 @@ class MigrationSecondLegShadowSuite {
   }
 
   observeTrade(trade) {
+    if (this.config.enabled && this.config.newEntriesEnabled !== false
+      && this.legacyCohorts.some(cohort => cohort.newEntriesEnabled !== false)) {
+      const candidate = this.legacyTracker.observeTrade(trade);
+      if (candidate) this._createLegacySignals(candidate);
+    }
     const price = priceOf(trade);
     const timestampMs = finite(trade?.timestampMs);
-    if (!this.config.enabled || trade?.market !== 'PUMP_AMM' || !trade?.mint
-      || !(price > 0) || !(timestampMs > 0)) return;
+    if (!this.config.enabled || trade?.market !== 'PUMP_AMM' || !trade?.mint) return;
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
+      const legacyPosition = this.pendingEntries.get(id) || this.positions.get(id) || this.noExitWatches.get(id);
+      if (this._isLegacy(legacyPosition)) {
+        this._withLegacyPersistence(legacyPosition, 'TRADE_STATE',
+          () => this._observeLegacyPosition(legacyPosition, trade));
+        continue;
+      }
+      if (!(price > 0) || !(timestampMs > 0)) continue;
       const noExitWatch = this.noExitWatches.get(id);
       if (noExitWatch) {
         this._observeLateExit(noExitWatch, trade, price);
@@ -479,33 +553,41 @@ class MigrationSecondLegShadowSuite {
 
   advanceTime(now = this.now()) {
     if (!this.config.enabled) return;
+    this._retryLegacyPersistenceFailures(now);
+    this.legacyTracker.advanceTime(now);
     for (const position of [...this.pendingEntries.values()]) {
       if (now <= position.entryDeadlineAt) continue;
-      this.store.updateMigrationSecondLegShadowPosition(position.id, {
-        status: STATUS.NO_ENTRY,
-        rejectionReason: 'ENTRY_TIMEOUT',
+      this._withLegacyPersistence(position, 'ENTRY_TIMEOUT', () => {
+        this.store.updateMigrationSecondLegShadowPosition(position.id, {
+          status: STATUS.NO_ENTRY,
+          rejectionReason: 'ENTRY_TIMEOUT',
+        });
+        this.pendingEntries.delete(position.id);
+        this._unindex(position);
+        this.metrics.noEntry += 1;
       });
-      this.pendingEntries.delete(position.id);
-      this._unindex(position);
-      this.metrics.noEntry += 1;
     }
     for (const position of [...this.positions.values()]) {
-      if (position.status === STATUS.OPEN && now >= position.entryAt + position.maxHoldMs) {
-        this._requestExit(position, position.entryAt + position.maxHoldMs, 'FIXED_HOLD');
-      }
-      if (position.status === STATUS.EXIT_PENDING && now > position.exitDeadlineAt) {
-        this._markNoExit(position);
-      }
+      this._withLegacyPersistence(position, 'EXIT_TIMEOUT', () => {
+        if (position.status === STATUS.OPEN && now >= position.entryAt + position.maxHoldMs) {
+          this._requestExit(position, position.entryAt + position.maxHoldMs, 'FIXED_HOLD');
+        }
+        if (position.status === STATUS.EXIT_PENDING && now > position.exitDeadlineAt) {
+          this._markNoExit(position);
+        }
+      });
     }
     const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
     for (const position of [...this.noExitWatches.values()]) {
       if (now <= position.exitDeadlineAt + noExitObservationMs) continue;
-      this.store.updateMigrationSecondLegShadowPosition(position.id, {
-        lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
+      this._withLegacyPersistence(position, 'LATE_EXIT_TIMEOUT', () => {
+        this.store.updateMigrationSecondLegShadowPosition(position.id, {
+          lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
+        });
+        this.noExitWatches.delete(position.id);
+        this._unindex(position);
+        this.metrics.lateExitObservationExpired += 1;
       });
-      this.noExitWatches.delete(position.id);
-      this._unindex(position);
-      this.metrics.lateExitObservationExpired += 1;
     }
   }
 
@@ -684,12 +766,26 @@ class MigrationSecondLegShadowSuite {
   _requestExit(position, triggerAt, reason) {
     if (position.status !== STATUS.OPEN) return;
     const cohort = this._cohort(position);
+    const legacy = this._isLegacy(position) ? position.features.strictExecution : null;
+    const exitDelayMs = legacy?.policy.exitDelayMs ?? cohort.exitDelayMs;
+    const exitTimeoutMs = legacy?.policy.exitTimeoutMs ?? cohort.exitTimeoutMs;
+    if (legacy) {
+      const next = { ...position, status: STATUS.EXIT_PENDING, exitReason: reason,
+        exitTriggerAt: triggerAt, exitTargetAt: triggerAt + exitDelayMs,
+        exitDeadlineAt: triggerAt + exitDelayMs + exitTimeoutMs };
+      this._saveLegacy(next, { status: next.status, exitReason: next.exitReason,
+        exitTriggerAt: next.exitTriggerAt, exitTargetAt: next.exitTargetAt,
+        exitDeadlineAt: next.exitDeadlineAt }, true);
+      // Publish the transition only after the exact trigger is durable.
+      Object.assign(position, next);
+      return;
+    }
     Object.assign(position, {
       status: STATUS.EXIT_PENDING,
       exitReason: reason,
       exitTriggerAt: triggerAt,
-      exitTargetAt: triggerAt + cohort.exitDelayMs,
-      exitDeadlineAt: triggerAt + cohort.exitDelayMs + cohort.exitTimeoutMs,
+      exitTargetAt: triggerAt + exitDelayMs,
+      exitDeadlineAt: triggerAt + exitDelayMs + exitTimeoutMs,
     });
     this.store.updateMigrationSecondLegShadowPosition(position.id, {
       status: STATUS.EXIT_PENDING,
@@ -697,6 +793,7 @@ class MigrationSecondLegShadowSuite {
       exitTriggerAt: position.exitTriggerAt,
       exitTargetAt: position.exitTargetAt,
       exitDeadlineAt: position.exitDeadlineAt,
+      ...(legacy ? { features: position.features } : {}),
     });
   }
 
@@ -729,6 +826,387 @@ class MigrationSecondLegShadowSuite {
     this._unindex(position);
     this.metrics.closed += 1;
     this.metrics.lastActionAt = this.now();
+  }
+
+  _isLegacy(position) {
+    return Boolean(position && (position.features?.executionVersion === LEGACY_EXECUTION_VERSION
+      || String(position.cohortId || '').startsWith('LEGACY-EARLY-FLOW-')));
+  }
+
+  _restoreLegacy(position) {
+    if (!this._isLegacy(position)) return true;
+    const strict = position.features?.strictExecution;
+    const cohort = strict?.cohort;
+    if (position.features?.executionVersion !== LEGACY_EXECUTION_VERSION
+      || strict?.policy?.version !== strictAmm.VERSION || !strict.pool || !strict.source
+      || strict.policy.maxTradeAgeMs !== 3_000 || strict.policy.entryDelayMs !== 1_000
+      || strict.policy.exitDelayMs !== 1_000
+      || !Number.isFinite(strict.policy.entryTimeoutMs) || strict.policy.entryTimeoutMs < 0
+      || !Number.isFinite(strict.policy.exitTimeoutMs) || strict.policy.exitTimeoutMs < 0
+      || cohort?.executionVersion !== LEGACY_EXECUTION_VERSION || cohort.id !== position.cohortId
+      || !(cohort.maxHoldMs > 0) || !(cohort.hardStopPct > 0)
+      || !Number.isFinite(cohort.maxEntryImpactPct) || cohort.maxEntryImpactPct < 0
+      || position.maxHoldMs !== cohort.maxHoldMs || position.hardStopPct !== cohort.hardStopPct
+      || position.positionSol !== 0.02
+      || (position.entryAt && (!Number.isFinite(strict.tokenUnits) || !(strict.tokenUnits > 0)))) {
+      this._withLegacyPersistence(position, 'RESTORE_INVALID', () => {
+        this.store.updateMigrationSecondLegShadowPosition(position.id, {
+          status: STATUS.DATA_ERROR, rejectionReason: 'LEGACY_FROZEN_EXECUTION_INVALID',
+        });
+        this.metrics.dataError += 1;
+      });
+      return false;
+    }
+    if (position.status === STATUS.PENDING_ENTRY && this.now() >= position.entryTargetAt) {
+      // The process was absent for part of the fill window. Neither a fill nor
+      // an ordinary no-market timeout can be reconstructed from cached quotes.
+      this._withLegacyPersistence(position, 'RESTORE_PENDING_UNKNOWN', () => {
+        this.store.updateMigrationSecondLegShadowPosition(position.id, {
+          status: STATUS.DATA_ERROR, rejectionReason: 'LEGACY_RESTART_PENDING_OUTCOME_UNKNOWN',
+        });
+        this.metrics.dataError += 1;
+      });
+      return false;
+    }
+    position.strictRestoredAt = this.now();
+    return true;
+  }
+
+  _legacyTradeEvidence(trade) {
+    const evidence = Object.fromEntries(['market', 'pool', 'signature', 'slot', 'eventIndex',
+      'timestampMs', 'receivedAtMs', 'chainTimestampMs', 'ammQuoteState',
+      'poolBaseReservesRaw', 'poolQuoteReservesRaw', 'virtualQuoteReservesRaw',
+      'prePoolBaseReservesRaw', 'prePoolQuoteReservesRaw', 'preReservePrice', 'ammQuoteStateReason',
+      'price', 'reservePrice', 'side', 'wallet', 'solAmount', 'tokenAmount']
+      .map(key => [key, trade[key] ?? null]));
+    if (trade.ammExecutionFees && typeof trade.ammExecutionFees === 'object') {
+      evidence.ammExecutionFees = Object.fromEntries(['quoteAmountRaw', 'poolQuoteAmountRaw',
+        'userQuoteAmountRaw', 'lpFeeBasisPoints', 'lpFeeRaw', 'protocolFeeBasisPoints',
+        'protocolFeeRaw', 'coinCreatorFeeBasisPoints', 'coinCreatorFeeRaw', 'cashbackFeeBasisPoints',
+        'cashbackRaw', 'buybackFeeBasisPoints', 'buybackRaw', 'ixName'].flatMap(key => {
+        const value = trade.ammExecutionFees[key];
+        return value === null || (typeof value === 'number' && Number.isFinite(value))
+          ? [[key, value]] : typeof value === 'string' ? [[key, value.slice(0, 160)]] : [];
+      }));
+    }
+    return evidence;
+  }
+
+  _legacyGuard(cohort, trade, migrationAt, sourceAt = trade.receivedAtMs) {
+    const requestedLifecycleAgeMs = trade.chainTimestampMs - migrationAt;
+    const requestedLifecycleStage = requestedLifecycleAgeMs <= 10_000 ? 'AMM_EARLY' : 'AMM_MATURE';
+    const enforcementMode = cohort.rugGuardMode === RUG_GUARD_ENFORCEMENT.HARD_BLOCK
+      ? RUG_GUARD_ENFORCEMENT.HARD_BLOCK : RUG_GUARD_ENFORCEMENT.LABEL_ONLY;
+    const hardBlockSignatures = hardBlockSignaturesForLifecycle({ market: 'PUMP_AMM',
+      lifecycleStage: requestedLifecycleStage });
+    let guard;
+    try {
+      guard = evaluateUniversalRugGuard(this.store, { strategyId: cohort.id,
+        mint: trade.mint, timestampMs: sourceAt, source: 'SHADOW', market: 'PUMP_AMM',
+        lifecycleStage: requestedLifecycleStage, lifecycleAgeMs: null, enforcementMode, hardBlockSignatures,
+        policyReason: 'LEGACY_EARLY_FLOW_STAGE_SCOPED_REPEAT_ACTOR_ONLY' });
+    } catch (_) { guard = { enabled: false, blocked: false, reason: 'RUG_GUARD_ERROR' }; }
+    // The real tracker returns a decision without an `enabled` property;
+    // explicit disabled/error replies do include false. Do not mistake every
+    // ordinary real decision for an unavailable guard (the stub has enabled).
+    const trackerAvailable = this.store?.preEntryRugRisk?.config?.enabled === true
+      && typeof this.store.preEntryRugRisk.evaluateGuard === 'function';
+    const unknown = !trackerAvailable || guard?.enabled === false || typeof guard?.blocked !== 'boolean';
+    // Entry age uses confirmed migration; the existing RUG memory uses its
+    // first observed AMM clock. Keep its actual stage/template association.
+    // In particular evaluateGuard's top-level age may be caller metadata,
+    // whereas firstCliffCounterfactual contains the observed lifecycle age.
+    const evaluatedLifecycleStage = typeof guard?.lifecycleStage === 'string'
+      && guard.lifecycleStage ? guard.lifecycleStage : null;
+    const rawAge = guard?.firstCliffCounterfactual?.lifecycleAgeMs ?? guard?.lifecycleAgeMs;
+    const evaluatedLifecycleAgeMs = rawAge == null || rawAge === '' ? null : finite(rawAge);
+    const lifecycleStageMismatch = evaluatedLifecycleStage == null ? null
+      : evaluatedLifecycleStage !== requestedLifecycleStage;
+    const lifecycleClockMismatch = evaluatedLifecycleStage == null && evaluatedLifecycleAgeMs == null
+      ? null : lifecycleStageMismatch === true
+        || (evaluatedLifecycleAgeMs != null && evaluatedLifecycleAgeMs !== requestedLifecycleAgeMs);
+    return { ...guard, enabled: !unknown, lifecycleStage: evaluatedLifecycleStage,
+      lifecycleAgeMs: evaluatedLifecycleAgeMs,
+      requestedLifecycleStage, requestedLifecycleAgeMs,
+      evaluatedLifecycleStage, evaluatedLifecycleAgeMs, lifecycleStageMismatch, lifecycleClockMismatch,
+      enforcementMode, hardBlockSignatures,
+      blocked: enforcementMode === RUG_GUARD_ENFORCEMENT.HARD_BLOCK
+        && (unknown || guard.blocked),
+      ...(unknown ? { reason: 'PRE_ENTRY_RUG_GUARD_UNAVAILABLE', evidenceUnknown: true } : {}) };
+  }
+
+  _createLegacySignals(candidate) {
+    const { trade, features, price } = candidate;
+    const sourceAt = trade.receivedAtMs;
+    const eligible = this.legacyCohorts.filter(cohort => cohort.newEntriesEnabled !== false
+      && matchesLegacyEntry(features, cohort.thresholds));
+    if (!eligible.length) return;
+    // One mint per immutable execution version, even if a later confirmed
+    // migration timestamp replaces the explicit completion fallback.
+    const episodeId = `${trade.mint}:${LEGACY_EXECUTION_VERSION}`;
+    const rows = [];
+    for (const cohort of eligible) {
+      if (cohort.executionVersion !== LEGACY_EXECUTION_VERSION
+        || cohort.strictExecution?.version !== strictAmm.VERSION
+        || cohort.positionSizeSol !== 0.02 || !(cohort.hardStopPct > 0)
+        || !(cohort.maxHoldMs > 0)) {
+        this._legacyReject('LEGACY_PROFILE_INVALID');
+        return;
+      }
+      const policy = strictAmm.freezePolicy(cohort, this.config, cohort);
+      const frozenCohort = { id: cohort.id, entryMode: LEGACY_ENTRY_MODE,
+        executionVersion: LEGACY_EXECUTION_VERSION, positionSizeSol: cohort.positionSizeSol,
+        maxEntryPriceJumpPct: cohort.maxEntryPriceJumpPct,
+        maxNegativeEntryJumpPct: cohort.maxNegativeEntryJumpPct,
+        maxEntryImpactPct: finite(cohort.maxEntryImpactPct, 15),
+        hardStopPct: cohort.hardStopPct, trailingActivationPct: cohort.trailingActivationPct,
+        trailingStopPct: cohort.trailingStopPct, maxHoldMs: cohort.maxHoldMs,
+        rugGuardMode: cohort.rugGuardMode, liveBridgeEnabled: cohort.liveBridgeEnabled === true,
+        liveStrategyId: cohort.liveStrategyId || null };
+      const gate = this._legacyGuard(cohort, trade, features.migrationAt, sourceAt);
+      const frozen = { executionVersion: LEGACY_EXECUTION_VERSION, entryMode: LEGACY_ENTRY_MODE,
+        sourceFeatures: features, sourceGuard: gate, liveEligible: !gate.blocked,
+        strictExecution: { policy, pool: trade.pool,
+          cursor: { ...strictAmm.observation(trade), seenEventKeys: [`${trade.signature}:${trade.eventIndex}`] },
+          source: this._legacyTradeEvidence(trade), cohort: frozenCohort,
+          costs: this.costsByCohort.get(cohort.id), tokenUnits: null } };
+      rows.push({ cohort, gate, record: { cohortId: cohort.id, episodeId,
+        mint: trade.mint, symbol: trade.symbol || candidate.state.symbol,
+        status: gate.blocked ? STATUS.NO_ENTRY : STATUS.PENDING_ENTRY,
+        rejectionReason: gate.blocked ? (String(gate.reason || '').startsWith('PRE_ENTRY_RUG_')
+          ? gate.reason : `PRE_ENTRY_RUG_${gate.reason || 'BLOCKED'}`) : null,
+        positionSol: cohort.positionSizeSol, configuredCostPct: frozen.strictExecution.costs.deterministicCostPct,
+        migrationAt: features.migrationAt, signalAt: sourceAt, signalPrice: price,
+        signalAgeMs: features.ageMs, features: frozen, rugGuard: gate,
+        entryTargetAt: sourceAt + policy.entryDelayMs,
+        entryDeadlineAt: sourceAt + policy.entryDelayMs + policy.entryTimeoutMs,
+        hardStopPct: cohort.hardStopPct, maxHoldMs: cohort.maxHoldMs } });
+    }
+    let savedRows;
+    try {
+      const insert = () => rows.map(item => ({ ...item,
+        saved: this.store.createMigrationSecondLegShadowPosition(item.record) }));
+      // The two small source rows commit together. No HTTP/RPC or guard scan
+      // occurs inside the transaction; a failed write cannot split the pair.
+      savedRows = this.store.db?.transaction ? this.store.db.transaction(insert)() : insert();
+    } catch (_) {
+      this.legacyMetrics.persistenceErrors += 1;
+      return;
+    }
+    this.legacyTracker.markSignaled(candidate);
+    for (const { cohort, gate, saved } of savedRows) {
+      if (!saved?.inserted) { this.metrics.deduplicated += 1; continue; }
+      this.metrics.matched += 1;
+      this.legacyMetrics.signals += 1;
+      if (gate.blocked) {
+        this.metrics.rugRejected += 1;
+        this.legacyMetrics.rugRejected += 1;
+        continue;
+      }
+      const pending = restore(saved);
+      this.pendingEntries.set(pending.id, pending);
+      this._index(pending);
+      // Persisted inserted=true is the only bridge permission. Restoring an
+      // existing row or replaying its source can never resubmit a live signal.
+      if (cohort.id === 'LEGACY-EARLY-FLOW-RUGX' && cohort.liveBridgeEnabled === true
+        && cohort.liveStrategyId === 'legacy_early_flow_rugx_live'
+        && typeof this.onLiveSignal === 'function') {
+        const event = { ...this._legacyTradeEvidence(trade), mint: trade.mint,
+          symbol: pending.symbol, timestampMs: sourceAt, price, reservePrice: price,
+          strategyId: cohort.liveStrategyId, episodeId,
+          features: { ...features, sourceCohortId: cohort.id, sourcePositionId: pending.id,
+            sourceEpisodeId: episodeId, sourceSignalAt: sourceAt,
+            sourceChainTimestampMs: trade.chainTimestampMs,
+            calibrationVersion: LEGACY_EXECUTION_VERSION, shadowPositionSol: 0.02,
+            sourceGuard: gate, sourceExecutionPolicy: pending.features.strictExecution.policy } };
+        try {
+          const result = this.onLiveSignal(event);
+          this.legacyMetrics.liveBridgeEmitted += 1;
+          if (result?.catch) result.catch(() => { this.legacyMetrics.liveBridgeErrors += 1; });
+        } catch (_) { this.legacyMetrics.liveBridgeErrors += 1; }
+      }
+    }
+    this.metrics.lastActionAt = this.now();
+  }
+
+  _legacyReject(reason) {
+    this.legacyMetrics.strictRejectedByReason[reason] =
+      (this.legacyMetrics.strictRejectedByReason[reason] || 0) + 1;
+  }
+
+  _withLegacyPersistence(position, operation, work) {
+    if (!this._isLegacy(position)) return work();
+    try { return work(); }
+    catch (error) { this._queueLegacyPersistenceFailure(position, error, operation); }
+  }
+
+  _queueLegacyPersistenceFailure(position, error, operation) {
+    if (this.legacyPersistenceFailures.has(position.id)) return;
+    const at = this.now();
+    const code = String(error?.code || error?.message || 'WRITE_FAILED');
+    const errorClass = code.includes('SQLITE_BUSY') ? 'SQLITE_BUSY'
+      : code.includes('SQLITE_LOCKED') ? 'SQLITE_LOCKED' : 'WRITE_FAILED';
+    position.features = { ...position.features, persistenceFailure: {
+      at, priorStatus: position.status, operation, errorClass,
+      resultUnknown: true, excludedFromStrictPairs: true } };
+    position.status = STATUS.DATA_ERROR;
+    this.pendingEntries.delete(position.id);
+    this.positions.delete(position.id);
+    this.noExitWatches.delete(position.id);
+    this._unindex(position);
+    this.legacyPersistenceFailures.set(position.id, { position, nextAttemptAt: at });
+    this.legacyMetrics.persistenceErrors += 1;
+    this.legacyMetrics.persistenceFailedRows += 1;
+    this.metrics.dataError += 1;
+    this.metrics.lastError = `LEGACY_STATE_PERSISTENCE:${errorClass}`;
+    // Do not retry the simulated fill against a later (more convenient) quote.
+    // Only its explicit unknown outcome is retried; no live action is invoked.
+    this._persistLegacyFailure(this.legacyPersistenceFailures.get(position.id), at);
+  }
+
+  _persistLegacyFailure(item, now) {
+    try {
+      this.store.updateMigrationSecondLegShadowPosition(item.position.id, {
+        status: STATUS.DATA_ERROR, rejectionReason: 'SHADOW_STATE_PERSISTENCE_FAILED',
+        features: item.position.features,
+      });
+      this.legacyPersistenceFailures.delete(item.position.id);
+    } catch (_) {
+      item.nextAttemptAt = now + 1_000;
+      this.legacyMetrics.persistenceRetryErrors += 1;
+    }
+  }
+
+  _retryLegacyPersistenceFailures(now, force = false) {
+    let attempted = 0;
+    for (const item of this.legacyPersistenceFailures.values()) {
+      if (!force && now < item.nextAttemptAt) continue;
+      if (attempted++ >= 16) break;
+      this._persistLegacyFailure(item, now);
+    }
+  }
+
+  _saveLegacy(position, patch = {}, force = false) {
+    const now = this.now();
+    if (!force && now - (position.strictSavedAt || 0) < 1_000) return;
+    this.store.updateMigrationSecondLegShadowPosition(position.id, {
+      features: position.features,
+      ...(position.entryAt ? { lastObservedAt: position.lastObservedAt, lastPrice: position.lastPrice,
+        highestPrice: position.highestPrice, lowestPrice: position.lowestPrice,
+        maxFavorableReturnPct: position.maxFavorableReturnPct,
+        maxAdverseReturnPct: position.maxAdverseReturnPct } : {}), ...patch,
+    });
+    position.strictSavedAt = now;
+  }
+
+  _observeLegacyPosition(position, trade) {
+    const state = position.features?.strictExecution;
+    const price = postPoolPrice(trade);
+    if (!state || !(price > 0)) { this._legacyReject('LEGACY_POST_POOL_UNAVAILABLE'); return; }
+    const normalized = { ...trade, reservePrice: price };
+    const reason = strictAmm.rejection(normalized, state, this.now(), {
+      notBeforeChainTimestampMs: position.strictRestoredAt });
+    if (reason) { this._legacyReject(reason); return; }
+    strictAmm.accept(normalized, state, this.now());
+    const at = trade.receivedAtMs;
+    if (this.noExitWatches.has(position.id)) {
+      if (at <= position.exitDeadlineAt
+        || at > position.exitDeadlineAt + finite(this.config.noExitObservationMs, 600_000)) return;
+      const execution = strictAmm.sell(normalized, state.tokenUnits, price);
+      if (!execution.available) { this._saveLegacy(position); return; }
+      state.lateExit = { ...this._legacyTradeEvidence(normalized), ...execution };
+      this._saveLegacy(position, { lateExitStatus: 'OBSERVED_EXECUTABLE', lateExitAt: at,
+        lateExitMarket: trade.market, lateExitMarkPrice: price, lateExitPrice: execution.price,
+        lateExitImpactPct: execution.impactPct, lateExitDelayMs: at - position.exitTargetAt,
+        lateExitAfterDeadlineMs: at - position.exitDeadlineAt,
+        lateExitNetReturnPct: (execution.proceedsSol / position.positionSol - 1) * 100 - position.configuredCostPct }, true);
+      this.noExitWatches.delete(position.id); this._unindex(position);
+      this.metrics.lateExitObserved += 1;
+      return;
+    }
+    if (position.status === STATUS.PENDING_ENTRY) {
+      this._saveLegacy(position);
+      if (!strictAmm.afterTarget(trade, position.entryTargetAt) || at > position.entryDeadlineAt) return;
+      const guard = this._legacyGuard(state.cohort, trade, position.migrationAt);
+      position.features.entryGuard = guard;
+      if (guard.blocked) {
+        this._saveLegacy(position, { status: STATUS.NO_ENTRY,
+          rejectionReason: String(guard.reason || '').startsWith('PRE_ENTRY_RUG_')
+            ? guard.reason : `PRE_ENTRY_RUG_${guard.reason || 'BLOCKED'}`, rugGuard: guard }, true);
+        this.pendingEntries.delete(position.id); this._unindex(position);
+        this.metrics.rugRejected += 1; this.legacyMetrics.rugRejected += 1;
+        return;
+      }
+      const execution = strictAmm.buy(normalized, position.positionSol, price);
+      if (!execution.available) { this._legacyReject(execution.reason || 'STRICT_BUY_UNAVAILABLE'); return; }
+      if (!Number.isFinite(execution.impactPct)
+        || execution.impactPct > state.cohort.maxEntryImpactPct) {
+        position.features.entryRejectedExecution = { ...this._legacyTradeEvidence(normalized), ...execution };
+        this._saveLegacy(position, { status: STATUS.NO_ENTRY,
+          rejectionReason: 'ENTRY_SELF_IMPACT', entryImpactPct: execution.impactPct }, true);
+        this.pendingEntries.delete(position.id); this._unindex(position);
+        this.metrics.noEntry += 1;
+        this._legacyReject('ENTRY_SELF_IMPACT');
+        return;
+      }
+      const jump = (execution.price / position.signalPrice - 1) * 100;
+      const maxUp = finite(state.cohort.maxEntryPriceJumpPct, 15);
+      const maxDown = finite(state.cohort.maxNegativeEntryJumpPct, 50);
+      if (jump > maxUp || jump < -maxDown) {
+        this._saveLegacy(position, { status: STATUS.PRICE_JUMP,
+          rejectionReason: `ENTRY_PRICE_JUMP_${jump.toFixed(2)}PCT`, entryJumpPct: jump }, true);
+        this.pendingEntries.delete(position.id); this._unindex(position); this.metrics.priceJump += 1;
+        return;
+      }
+      const next = { ...position, status: STATUS.OPEN, entryAt: at, entryPrice: execution.price,
+        highestPrice: price, lowestPrice: price, lastPrice: price, lastObservedAt: at,
+        maxFavorableReturnPct: 0, maxAdverseReturnPct: 0,
+        features: { ...position.features, strictExecution: { ...state,
+          tokenUnits: execution.tokenUnits,
+          entry: { ...this._legacyTradeEvidence(normalized), ...execution } } } };
+      this._saveLegacy(next, { status: STATUS.OPEN, entryAt: at, entryPrice: execution.price,
+        entryImpactPct: execution.impactPct, entryJumpPct: jump, rugGuard: guard }, true);
+      Object.assign(position, next);
+      this.pendingEntries.delete(position.id); this.positions.set(position.id, position);
+      this.metrics.opened += 1;
+      return;
+    }
+    if (at < position.entryAt) return;
+    const newPeak = price > position.highestPrice;
+    position.highestPrice = Math.max(position.highestPrice, price);
+    position.lowestPrice = Math.min(position.lowestPrice, price);
+    position.lastPrice = price; position.lastObservedAt = at;
+    position.maxFavorableReturnPct = Math.max(position.maxFavorableReturnPct,
+      (position.highestPrice / position.entryPrice - 1) * 100);
+    position.maxAdverseReturnPct = Math.min(position.maxAdverseReturnPct,
+      (position.lowestPrice / position.entryPrice - 1) * 100);
+    const execution = strictAmm.sell(normalized, state.tokenUnits, price);
+    if (position.status === STATUS.OPEN) {
+      const executableReturn = execution.available
+        ? (execution.proceedsSol / position.positionSol - 1) * 100 : null;
+      const markReturn = (price / position.entryPrice - 1) * 100;
+      if (markReturn <= -position.hardStopPct
+        || (executableReturn != null && executableReturn <= -position.hardStopPct)) {
+        this._requestExit(position, at, 'HARD_STOP');
+      } else if (position.maxFavorableReturnPct >= state.cohort.trailingActivationPct
+        && (1 - price / position.highestPrice) * 100 >= state.cohort.trailingStopPct) {
+        this._requestExit(position, at, 'TRAILING_STOP_A10_D5');
+      } else if (at >= position.entryAt + position.maxHoldMs) {
+        this._requestExit(position, position.entryAt + position.maxHoldMs, 'FIXED_HOLD');
+      }
+    }
+    if (position.status === STATUS.EXIT_PENDING && strictAmm.afterTarget(trade, position.exitTargetAt)
+      && at <= position.exitDeadlineAt && execution.available) {
+      state.exit = { ...this._legacyTradeEvidence(normalized), ...execution };
+      this._saveLegacy(position, { status: STATUS.CLOSED, exitAt: at, exitPrice: execution.price,
+        exitImpactPct: execution.impactPct, grossReturnPct: (price / position.entryPrice - 1) * 100,
+        netReturnPct: (execution.proceedsSol / position.positionSol - 1) * 100 - position.configuredCostPct }, true);
+      this.positions.delete(position.id); this._unindex(position); this.metrics.closed += 1;
+      return;
+    }
+    // The trailing watermark is exit-critical, not a heartbeat. Losing a new
+    // peak in the throttle interval could disable a valid stop after restart.
+    this._saveLegacy(position, {}, newPeak);
   }
 
   _observeLateExit(position, trade, price) {
@@ -794,6 +1272,7 @@ class MigrationSecondLegShadowSuite {
   }
 
   _cohort(position) {
+    if (this._isLegacy(position)) return position.features.strictExecution.cohort;
     return this.cohortById.get(position.cohortId) || {
       ...this.config,
       id: position.cohortId,

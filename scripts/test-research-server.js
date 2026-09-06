@@ -242,6 +242,8 @@ async function main() {
 
   const runtimeConfig = {
     ...config,
+    migrationSecondLegShadow: { ...config.migrationSecondLegShadow,
+      solUsdReference: { enabled: false } },
     storage: {
       ...config.storage,
       dbPath: ':memory:',
@@ -374,6 +376,10 @@ async function main() {
       assert.strictEqual(response.status, 200, `${route} should return 200`);
       assert.ok((await response.text()).length > 0, `${route} should return a body`);
     }
+    const detailedHealth = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json();
+    assert.equal(detailedHealth.solUsdReference.ready, false);
+    assert.equal(detailedHealth.solUsdReference.lastAttemptAt, null,
+      'offline runtime does not fetch a public FDV reference');
     const cyaSlotFlowResponse = await fetch(
       `http://127.0.0.1:${port}/api/cya-slot-flow-shadow?positionLimit=5`,
     );
@@ -466,7 +472,7 @@ async function main() {
     assert.strictEqual(oC80P500.positionSizeSol, 0.1);
     assert.strictEqual(oC80P500.coreExitPct, 0);
     assert.strictEqual(oC80P500.maxPostGraduationHoldMs, 240_000);
-    assert.strictEqual(graduationAccel.entryEnabled, true);
+    assert.strictEqual(graduationAccel.entryEnabled, false);
     assert.strictEqual(graduationAccel.code, 'O-C80-D5-B2-S0-NC');
     assert.strictEqual(graduationAccel.positionSizeSol, 0.1);
     assert.strictEqual(retiredV3.entryEnabled, false);
@@ -487,8 +493,10 @@ async function main() {
     assert.strictEqual(launchPullbackLive.entryEnabled, false);
     assert.strictEqual(launchPullbackLive.code, 'F-FO-RB10-X30');
     assert.strictEqual(launchPullbackLive.fixedHoldMs, 30_000);
-    assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0005);
-    assert.strictEqual(liveTrading.runtime.priorityFeeMicroLamports, 2_000_000);
+    assert.strictEqual(liveTrading.runtime.priorityFeeSol, 0.0001);
+    assert.strictEqual(liveTrading.runtime.priorityFeeMicroLamports, 400_000);
+    assert.strictEqual(liveTrading.runtime.emergencyPriorityFeeSol, 0.0001);
+    assert.strictEqual(liveTrading.runtime.emergencyPriorityFeeMicroLamports, 400_000);
     assert.strictEqual(continuity.fixedHoldMs, 120_000);
     assert.strictEqual(graduationAccel.coreExitPct, 50);
     assert.ok(Array.isArray(liveTrading.positions));
@@ -680,7 +688,7 @@ async function main() {
     assert.deepStrictEqual(migratedRebound.runtime.lifecycleStages, [
       { id: 'POST_MIGRATION', label: '毕业后', market: 'PUMP_AMM' },
     ]);
-    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 22);
+    assert.strictEqual(migratedRebound.runtime.entryProfiles.length, 23);
     assert.deepStrictEqual(
       migratedRebound.runtime.entryProfiles
         .filter((profile) => profile.id.startsWith('GRT_R23_'))
@@ -723,6 +731,7 @@ async function main() {
         'XB50', 'XB25',
         'V2_R2_H10', 'V2_R2_H15', 'V2_TIME_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
         'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15',
+        'X8_POST_EXEC1_V1',
       ],
     );
     assert.strictEqual(

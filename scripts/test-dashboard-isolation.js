@@ -11,7 +11,7 @@ const { DashboardReadModel, initializeDatabase } = require('../src/data/Dashboar
 const { RotatingReadSource, nextRefreshDelay } = require('../src/data/dashboard-preaggregate-worker');
 const { shanghaiDay } = require('../src/data/RawTradeShardManager');
 const { config } = require('../src/config');
-const { createReadStore, createSnapshotTasks, EXTRA_SHADOWS } = require('../src/data/dashboard-snapshot-tasks');
+const { createReadStore, createSnapshotTasks, observerAdapter, EXTRA_SHADOWS } = require('../src/data/dashboard-snapshot-tasks');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -134,6 +134,19 @@ function testAdaptersAndScheduling() {
     return { all() { reads += 1; return []; }, get() { reads += 1; return {}; } };
   } };
   const store = createReadStore(db, 'fixture');
+  const ebConfig = config.earlyPureBuyBurstShadow;
+  const eb = observerAdapter('EarlyPureBuyBurstShadowSuite', ebConfig, store);
+  assert.equal(eb.entryProfiles.size, ebConfig.entryProfiles.length,
+    'reader copies configured profiles only, without reconstructing live observer state');
+  assert.equal(eb.exitProfiles.size, ebConfig.exitProfiles.length);
+  assert.equal(eb.positions, undefined);
+  assert.equal(eb.states, undefined);
+  assert.equal(eb.entryProfiles.get('EB_A_EXEC_V1').positionSizeSol, 0.02);
+  const ebDashboard = eb.dashboard();
+  assert.ok(ebDashboard.rugComparisons.some((pair) =>
+    pair.filteredProfileId === 'EB_A_EXEC_V1_RUGX'
+      && pair.executionVersion === 'EB_EXEC_POST_TARGET_V1'),
+  'isolated reader must publish the strict EB pair even before its first trade');
   const tasks = createSnapshotTasks(store, { lane: 'HISTORY', shadowConfigs: config });
   const extraKeys = new Set(EXTRA_SHADOWS.map(([slug]) => `shadow:${slug}`));
   for (const task of tasks.filter((task) => extraKeys.has(task.key))) {

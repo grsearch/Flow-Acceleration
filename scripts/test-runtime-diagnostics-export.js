@@ -15,6 +15,25 @@ async function main() {
     stream: { transactionsReceived: 500, errors: 2, endpoint: secret, token: secret },
     liveTrading: { enabled: true, rejectedPositionTrades: 7, takeProfitQuoteRejected: 2,
       entries: 3, wallet: secret, lastError: secret },
+    runtimeDiagnostics: {
+      parser: { rejectedEvents: 9, rejectedByReason: { INVALID_CHAIN_TIMESTAMP: 9, [secret]: 1 },
+        rejectedByProgram: { PUMP: 9, [secret]: 1 }, lastRejectedEvent: { mint: secret } },
+      parserQuarantine: { pending: 1, persisted: 8, dropped: 0, lastError: secret },
+      taskTimings: { tasks: {
+        'smartWallet:ledgerQueueConsume': { calls: 3, lastMs: 1.5, maxMs: 8, error: secret },
+        [secret]: { calls: 100 },
+      }, recentSlow: [
+        { name: 'shadow:smartWalletRegistryAdvance', startedAt: 3000, finishedAt: 3100,
+          durationMs: 100, failed: false, secret },
+        { name: secret, startedAt: 3000 },
+      ] },
+    },
+    smartWalletMaintenance: { workerEnabled: true, actualLedger: {
+      status: 'REPAIRING', pendingSampleCount: 100, pendingSampleTruncated: true,
+      repair: { high_water_event_id: 900, last_scanned_event_id: 250, last_error: secret },
+      oldestPendingSample: { smart_event_id: 33, wallet: secret, last_error: secret },
+      replayRequired: [{ wallet: secret, mint: secret }],
+    } },
     preEntryRugRisk: {
       enabled: true, toxicTemplateCandidates: 4, toxicCollapsesLabeled: 1,
       toxicMemoryDbLoaded: 6, toxicHistoryPersisted: 6, toxicMemoryDirty: false,
@@ -38,6 +57,14 @@ async function main() {
   assert.equal(clean.liveTrading.rejectedPositionTrades, 7);
   assert.equal(clean.liveTrading.takeProfitQuoteRejected, 2);
   assert.equal(clean.liveTrading.entries, 3);
+  assert.equal(clean.runtimeDiagnostics.parser.rejectedByReason.INVALID_CHAIN_TIMESTAMP, 9);
+  assert.equal(clean.runtimeDiagnostics.parserQuarantine.persisted, 8);
+  assert.equal(clean.runtimeDiagnostics.taskTimings.tasks['smartWallet:ledgerQueueConsume'].lastMs, 1.5);
+  assert.equal(clean.runtimeDiagnostics.taskTimings.recentSlow.length, 1);
+  assert.equal(clean.smartWalletMaintenance.actualLedger.status, 'REPAIRING');
+  assert.equal(clean.smartWalletMaintenance.actualLedger.repair.last_scanned_event_id, 250);
+  assert.equal(clean.smartWalletMaintenance.actualLedger.replayRequiredSampleCount, 1);
+  assert.equal(clean.smartWalletMaintenance.actualLedger.oldestPending.smart_event_id, 33);
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-runtime-diagnostics-'));
   const file = path.join(directory, 'cache.json');
@@ -68,6 +95,11 @@ async function main() {
     assert.equal(captured.api.status, 'CAPTURED');
     assert.equal(captured.clock, 'CAPTURE_TIME_NOT_EXPORT_WINDOW_END');
     assert.match(captured.source.sourceFilesAtCapture['src/core/PreEntryRugRiskTracker.js'], /^[a-f0-9]{64}$/);
+    for (const name of ['src/core/SmartWalletRegistry.js', 'src/data/ResearchStore.js',
+      'src/core/PumpEventParser.js', 'src/runtime/RuntimeTaskMetrics.js',
+      'src/runtime/ParserRejectionAudit.js', 'scripts/export-research-window.js']) {
+      assert.match(captured.source.sourceFilesAtCapture[name], /^[a-f0-9]{64}$/);
+    }
     assert.equal(JSON.stringify(captured).includes(secret), false);
 
     responseMode = 'oversize';

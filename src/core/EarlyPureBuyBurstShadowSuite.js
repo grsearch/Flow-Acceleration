@@ -21,6 +21,60 @@ const {
 
 const MARKET = 'PUMP_BONDING_CURVE';
 const ACTIVE = new Set(['PENDING_ENTRY', 'OPEN', 'EXIT_PENDING']);
+const STRICT_EXECUTION_VERSION = 'EB_EXEC_POST_TARGET_V1';
+const STRICT_CURSOR_LIMIT = 256;
+
+function strictPoint(trade, now, maxAgeMs = 3_000) {
+  const point = {
+    timestampMs: number(trade?.timestampMs), receivedAtMs: number(trade?.receivedAtMs),
+    chainTimestampMs: number(trade?.chainTimestampMs), slot: number(trade?.slot),
+    eventIndex: number(trade?.eventIndex), signature: trade?.signature,
+    market: trade?.market, pool: trade?.bondingCurve,
+  };
+  if (point.market !== MARKET || typeof point.pool !== 'string' || !point.pool
+    || typeof point.signature !== 'string' || !point.signature
+    || !['timestampMs', 'receivedAtMs', 'chainTimestampMs', 'slot'].every(
+      (key) => Number.isSafeInteger(point[key]) && point[key] > 0,
+    ) || !Number.isSafeInteger(point.eventIndex) || point.eventIndex < 0) {
+    return { reason: 'STRICT_SOURCE_IDENTITY_MISSING' };
+  }
+  // Chain times are second-resolution. Tolerate at most one second of clock
+  // skew, never manufacture a timestamp for missing event metadata.
+  if (now - point.receivedAtMs > maxAgeMs || now - point.chainTimestampMs > maxAgeMs
+    || point.receivedAtMs - point.chainTimestampMs > maxAgeMs
+    || point.chainTimestampMs > now + 1_000 || point.receivedAtMs > now + 1_000
+    || point.timestampMs > now + 1_000 || now - point.timestampMs > maxAgeMs) {
+    return { reason: 'STRICT_QUOTE_STALE_OR_FUTURE' };
+  }
+  try {
+    for (const key of ['virtualTokenReservesRaw', 'virtualSolReservesRaw',
+      'realTokenReservesRaw', 'realSolReservesRaw']) {
+      if (trade[key] == null || !/^\d+$/.test(String(trade[key]))) throw new Error('missing reserves');
+    }
+    const virtualToken = BigInt(trade.virtualTokenReservesRaw);
+    const virtualSol = BigInt(trade.virtualSolReservesRaw);
+    const realToken = BigInt(trade.realTokenReservesRaw);
+    const realSol = BigInt(trade.realSolReservesRaw);
+    if (virtualToken <= 0n || virtualSol <= 0n || realToken < 0n || realSol < 0n
+      || realToken > virtualToken || realSol > virtualSol) throw new Error('reserves');
+    const markPrice = (Number(virtualSol) / 1e9) / (Number(virtualToken) / 1e6);
+    if (!(markPrice > 0) || !Number.isFinite(markPrice)) throw new Error('price');
+    return { ...point, markPrice };
+  } catch (_) { return { reason: 'STRICT_RESERVES_INVALID' }; }
+}
+
+function advanceStrictCursor(cursor, point) {
+  if (cursor && (point.pool !== cursor.pool || point.market !== cursor.market
+    || point.slot < cursor.slot || point.chainTimestampMs < cursor.chainTimestampMs
+    || point.timestampMs < cursor.timestampMs || point.receivedAtMs < cursor.receivedAtMs)) return null;
+  const keys = cursor?.slot === point.slot
+    ? (cursor.seenEventKeys || [`${cursor.signature}:${cursor.eventIndex}`]) : [];
+  const prefix = `${point.signature}:`;
+  if (keys.length >= STRICT_CURSOR_LIMIT
+    || keys.some((key) => key.startsWith(prefix)
+      && Number(key.slice(prefix.length)) >= point.eventIndex)) return null;
+  return { ...point, seenEventKeys: [...keys, `${point.signature}:${point.eventIndex}`] };
+}
 
 function number(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -58,10 +112,11 @@ function aggregate(rows) {
 }
 
 class EarlyPureBuyBurstShadowSuite {
-  constructor({ config, store, now = () => Date.now() }) {
+  constructor({ config, store, now = () => Date.now(), onLiveSignal = null }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.onLiveSignal = onLiveSignal;
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((profile) => [profile.id, profile]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((profile) => [profile.id, profile]));
@@ -72,12 +127,15 @@ class EarlyPureBuyBurstShadowSuite {
     this.positions = new Map();
     this.positionIdsByMint = new Map();
     this.seenMints = new Set();
+    this.strictSeen = new Set();
     this.counters = {
       trades: 0, excludedSmartTrades: 0, candidates: 0, signals: 0,
       observedVotingSmartOpens: 0, smartConsensusSignals: 0,
       blockedByRugGuard: 0, opened: 0, closed: 0, noEntry: 0, noExit: 0,
       rightCensored: 0,
       cachedReserveExits: 0,
+      strictSourceRejected: 0, strictQuoteRejected: 0, strictRejections: {},
+      liveSignals: 0, liveSignalErrors: 0,
       lastActionAt: null,
     };
     this._initStorage();
@@ -192,6 +250,9 @@ class EarlyPureBuyBurstShadowSuite {
     this.loadSeen = this.store.db.prepare(
       'SELECT DISTINCT mint FROM early_pure_buy_burst_shadow_positions',
     );
+    this.loadStrictSeen = this.store.db.prepare(
+      'SELECT DISTINCT mint FROM early_pure_buy_burst_shadow_positions WHERE entry_profile_id=?',
+    );
     this.updatePosition = this.store.db.prepare(`
       UPDATE early_pure_buy_burst_shadow_positions SET
         status=@status, rejection_reason=@rejectionReason,
@@ -209,13 +270,19 @@ class EarlyPureBuyBurstShadowSuite {
         exit_market_price=@exitMarketPrice, exit_impact_pct=@exitImpactPct,
         exit_reason=@exitReason, gross_return_pct=@grossReturnPct,
         net_return_pct=@netReturnPct, estimated_cost_sol=@estimatedCostSol,
-        hold_ms=@holdMs, updated_at=@updatedAt WHERE id=@id
+        hold_ms=@holdMs, features_json=@featuresJson, updated_at=@updatedAt WHERE id=@id
     `);
   }
 
   start() {
     if (!this.config.enabled) return;
     for (const row of this.loadSeen.all()) this.seenMints.add(row.mint);
+    for (const profile of this.entryProfiles.values()) {
+      if (!profile.strictExecution || profile.pairedBaselineProfileId) continue;
+      for (const row of this.loadStrictSeen.all(profile.id)) {
+        this.strictSeen.add(`${profile.id}:${row.mint}`);
+      }
+    }
     for (const row of this.loadActive.all()) this._trackPosition(this._position(row));
     for (const restored of recentVotingOpenSnapshots(
       this.store,
@@ -239,6 +306,26 @@ class EarlyPureBuyBurstShadowSuite {
       position[key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
     }
     position.lastPoolQuote = parsePoolQuote(row.last_pool_quote_json);
+    try {
+      position.features = JSON.parse(row.features_json || '{}');
+      position.strictExecution = position.features.strictExecution || null;
+    } catch (_) { position.features = {}; }
+    if (this.entryProfiles.get(position.entryProfileId)?.strictExecution
+      || /^EB_A_EXEC_V1(?:_RUGX)?$/.test(position.entryProfileId) || position.strictExecution) {
+      const execution = position.strictExecution;
+      if (!execution || typeof execution !== 'object' || !execution.source?.pool
+        || execution.source.market !== MARKET || !execution.source.signature
+        || !['timestampMs', 'receivedAtMs', 'chainTimestampMs', 'slot'].every(
+          (key) => Number.isSafeInteger(execution.source[key]) && execution.source[key] > 0,
+        ) || !Number.isSafeInteger(execution.source.eventIndex) || execution.source.eventIndex < 0
+        || !['maxHoldMs', 'entryTimeoutMs', 'exitTimeoutMs', 'maxQuoteChainAgeMs'].every(
+          (key) => Number.isFinite(execution[key]) && execution[key] > 0,
+        ) || !['entryDelayMs', 'exitDelayMs', 'hardStopPct'].every(
+          (key) => Number.isFinite(execution[key]) && execution[key] >= 0,
+        ) || !Number.isFinite(execution.costs?.deterministicCostPct)) {
+        position.strictExecution = { invalid: true };
+      }
+    }
     return position;
   }
 
@@ -270,6 +357,9 @@ class EarlyPureBuyBurstShadowSuite {
       grossReturnPct: position.grossReturnPct ?? null,
       netReturnPct: position.netReturnPct ?? null,
       estimatedCostSol: position.estimatedCostSol ?? null,
+      featuresJson: position.strictExecution
+        ? JSON.stringify({ ...position.features, strictExecution: position.strictExecution })
+        : position.featuresJson,
       holdMs: position.holdMs ?? null, updatedAt: this.now(),
     });
   }
@@ -346,7 +436,8 @@ class EarlyPureBuyBurstShadowSuite {
     };
   }
 
-  _baseline(trade, state) {
+  _baseline(trade, state, positionSizeSol = this.config.positionSizeSol,
+    maxEntryImpactPct = this.config.maxEntryImpactPct) {
     const base = this.config.base;
     const ageMs = number(trade.ageMs);
     const curvePct = number(trade.curvePct);
@@ -359,8 +450,8 @@ class EarlyPureBuyBurstShadowSuite {
       || features.buyers3s > base.maxBuyers3s
       || features.sellTx3s > base.maxSellTx3s
       || features.buyTxSharePct !== 100) return null;
-    const quote = executableBuy(trade, this.config.positionSizeSol, number(trade.price));
-    if (!quote.available || number(quote.impactPct, Infinity) > this.config.maxEntryImpactPct) return null;
+    const quote = executableBuy(trade, positionSizeSol, number(trade.price));
+    if (!quote.available || number(quote.impactPct, Infinity) > maxEntryImpactPct) return null;
     return { ...features, ageMs, curvePct, signalPrice: number(trade.price), quote };
   }
 
@@ -371,14 +462,43 @@ class EarlyPureBuyBurstShadowSuite {
     const allowedExits = new Set(profile.exitProfileIds || []);
     for (const exitProfile of this.exitProfiles.values()) {
       if (allowedExits.size && !allowedExits.has(exitProfile.id)) continue;
+      if (!profile.strictExecution && (exitProfile.strictExecution
+        || exitProfile.id === 'FIX20_H30_EXEC_V1')) continue;
+      const positionSol = profile.strictExecution ? number(profile.positionSizeSol, 0.02)
+        : this.config.positionSizeSol;
+      const costs = profile.strictExecution
+        ? costBreakdown({ ...this.config.costModel, ...profile.costModel, positionSizeSol: positionSol })
+        : this.costs;
+      const point = profile.strictExecution
+        ? strictPoint(trade, this.now(), number(profile.maxQuoteChainAgeMs, 3_000)) : null;
+      if (point?.reason) continue;
+      const execution = profile.strictExecution ? {
+        version: profile.executionVersion || STRICT_EXECUTION_VERSION,
+        source: point, cursor: point, entry: null, exit: null,
+        entryDelayMs: Math.max(0, number(profile.entryDelayMs, 1_000)),
+        exitDelayMs: Math.max(0, number(profile.exitDelayMs, 1_000)),
+        entryTimeoutMs: Math.max(1, number(profile.entryTimeoutMs, 15_000)),
+        exitTimeoutMs: Math.max(1, number(profile.exitTimeoutMs, 15_000)),
+        maxQuoteChainAgeMs: Math.max(1, number(profile.maxQuoteChainAgeMs, 3_000)),
+        maxHoldMs: Math.max(1, number(exitProfile.maxHoldMs, 20_000)),
+        hardStopPct: Math.max(0, number(exitProfile.hardStopPct, 30)),
+        maxEntryImpactPct: number(profile.maxEntryImpactPct, this.config.maxEntryImpactPct),
+        maxEntryPriceJumpPct: number(profile.maxEntryPriceJumpPct, this.config.maxEntryPriceJumpPct),
+        maxEntryPriceDropPct: number(profile.maxEntryPriceDropPct, this.config.maxEntryPriceDropPct),
+        rugGuardMode: profile.rugGuardMode || 'LABEL_ONLY', costs,
+        quoteRejections: 0, lastQuoteRejection: null,
+      } : null;
+      const entryTargetAt = execution
+        ? Math.max(point.timestampMs, point.receivedAtMs) + execution.entryDelayMs
+        : trade.timestampMs + this.config.entryDelayMs;
       const cohortId = `${profileId}:${exitProfile.id}`;
       const payload = {
         cohortId, entryProfileId: profileId, exitProfileId: exitProfile.id,
         mint: trade.mint, symbol: trade.symbol || null,
-        positionSol: this.config.positionSizeSol,
-        configuredCostPct: this.costs.deterministicCostPct,
+        positionSol,
+        configuredCostPct: costs.deterministicCostPct,
         signalAt: trade.timestampMs, signalMarket: MARKET,
-        signalPrice: number(trade.price), ageMs: number(trade.ageMs),
+        signalPrice: point?.markPrice || number(trade.price), ageMs: number(trade.ageMs),
         curvePct: number(trade.curvePct), buyers3s: features.buyers3s,
         buyTx3s: features.buyTx3s, sellTx3s: features.sellTx3s,
         buyFlow3s: features.buyFlow3s, sellFlow3s: features.sellFlow3s,
@@ -386,9 +506,11 @@ class EarlyPureBuyBurstShadowSuite {
         confirmationDelayMs: trade.timestampMs - anchor.at,
         deltaBuyers: extras.deltaBuyers ?? 0, deltaNetFlow: extras.deltaNetFlow ?? 0,
         drawdownPct: extras.drawdownPct ?? null, reclaimPct: extras.reclaimPct ?? null,
-        featuresJson: JSON.stringify({ ...features, ...extras, anchorAt: anchor.at }),
-        entryTargetAt: trade.timestampMs + this.config.entryDelayMs,
-        entryDeadlineAt: trade.timestampMs + this.config.entryTimeoutMs,
+        featuresJson: JSON.stringify({ ...features, ...extras, anchorAt: anchor.at,
+          ...(execution ? { strictExecution: execution } : {}) }),
+        entryTargetAt,
+        entryDeadlineAt: execution ? entryTargetAt + execution.entryTimeoutMs
+          : trade.timestampMs + this.config.entryTimeoutMs,
         createdAt: trade.timestampMs, updatedAt: trade.timestampMs,
       };
       const result = this.insertPosition.run(payload);
@@ -405,6 +527,9 @@ class EarlyPureBuyBurstShadowSuite {
       this.counters.signals += created.length;
       if (extras.smartConsensus) this.counters.smartConsensusSignals += 1;
       this.counters.lastActionAt = trade.timestampMs;
+      if (profile.strictExecution && profile.liveBridgeEnabled && !profile.pairedBaselineProfileId) {
+        this._bridgeStrictSignal(profile, trade, created[0]);
+      }
     }
     return created;
   }
@@ -485,7 +610,243 @@ class EarlyPureBuyBurstShadowSuite {
     return emitted;
   }
 
+  _strictRejected(reason, position = null) {
+    this.counters[position ? 'strictQuoteRejected' : 'strictSourceRejected'] += 1;
+    this.counters.strictRejections[reason] = (this.counters.strictRejections[reason] || 0) + 1;
+    if (position) {
+      position.strictExecution.quoteRejections += 1;
+      position.strictExecution.lastQuoteRejection = reason;
+      // Do not turn every rejected market event into a synchronous DB write.
+      // These bounded diagnostics are persisted on the next state transition.
+    }
+  }
+
+  _evaluateStrictSignals(trade, state) {
+    const profiles = [...this.entryProfiles.values()].filter((profile) => profile.strictExecution
+      && !profile.pairedBaselineProfileId && profile.newEntriesEnabled !== false);
+    if (!profiles.length) return [];
+    const maxAgeMs = Math.min(...profiles.map((profile) => number(profile.maxQuoteChainAgeMs, 3_000)));
+    const point = strictPoint(trade, this.now(), maxAgeMs);
+    if (point.reason) { this._strictRejected(point.reason); return []; }
+    const cursor = advanceStrictCursor(state.strictCursor, point);
+    if (!cursor) { this._strictRejected('STRICT_OUT_OF_ORDER_OR_DUPLICATE'); return []; }
+    state.strictCursor = cursor;
+    state.strictRows ||= [];
+    state.strictRows.push({ ...trade, price: point.markPrice });
+    state.strictRows = state.strictRows.filter((row) => row.timestampMs >= point.timestampMs - 3_000
+      && row.timestampMs <= point.timestampMs && row.bondingCurve === point.pool)
+      .slice(-Math.max(1, number(this.config.maxTradesPerMint, 256)));
+    // Legacy rows admitted null age/curve via JavaScript's null >= 0 coercion.
+    // Prove both bounds for a new source. Still keep an otherwise valid trade
+    // above in the flow window: an unknown-age SELL must not disappear and
+    // make subsequent known-age BUYs look like a pure-buy burst.
+    if (!Number.isFinite(number(trade.ageMs)) || !Number.isFinite(number(trade.curvePct))) {
+      this._strictRejected('STRICT_SOURCE_LIFECYCLE_UNKNOWN'); return [];
+    }
+    const emitted = [];
+    for (const profile of profiles) {
+      const seenKey = `${profile.id}:${trade.mint}`;
+      if (this.strictSeen.has(seenKey)) continue;
+      const features = this._baseline({ ...trade, price: point.markPrice },
+        { rows: state.strictRows }, number(profile.positionSizeSol, 0.02),
+        number(profile.maxEntryImpactPct, this.config.maxEntryImpactPct));
+      if (!features || trade.side !== 'BUY') continue;
+      if (features.quote.tokenUnits > Number(trade.realTokenReservesRaw) / 1e6) {
+        this._strictRejected('STRICT_BUY_CAPACITY_UNAVAILABLE'); continue;
+      }
+      const token = this.store.getToken?.(trade.mint);
+      const migrationAt = number(token?.migrated_at ?? token?.graduated_at);
+      if ((migrationAt > 0 && migrationAt <= point.receivedAtMs) || trade.complete === true) {
+        this._strictRejected('STRICT_CURVE_ALREADY_COMPLETE'); continue;
+      }
+      const anchor = { at: trade.timestampMs, price: point.markPrice, features, triggered: new Set() };
+      const baseline = this._emit(profile.id, trade, anchor, features, {
+        calibrationVersion: profile.executionVersion || STRICT_EXECUTION_VERSION,
+        sourceMarketPrice: number(trade.price), sourceReservePrice: point.markPrice,
+      });
+      if (!baseline.length) continue;
+      this.strictSeen.add(seenKey);
+      this.counters.candidates += 1;
+      emitted.push(...baseline);
+      for (const paired of this.entryProfiles.values()) {
+        if (!paired.strictExecution || paired.pairedBaselineProfileId !== profile.id
+          || paired.newEntriesEnabled === false) continue;
+        emitted.push(...this._emit(paired.id, trade, anchor, features, {
+          pairedBaselineProfileId: profile.id, sourcePositionId: baseline[0].id,
+          calibrationVersion: profile.executionVersion || STRICT_EXECUTION_VERSION,
+          sourceMarketPrice: number(trade.price), sourceReservePrice: point.markPrice,
+        }));
+      }
+    }
+    return emitted;
+  }
+
+  _bridgeStrictSignal(profile, trade, position) {
+    if (typeof this.onLiveSignal !== 'function' || !profile.liveStrategyId) return;
+    const point = strictPoint(trade, this.now(), position.strictExecution.maxQuoteChainAgeMs);
+    if (point.reason) { this._strictRejected(point.reason); return; }
+    // The bridge runs once at the causal source signal, not after a simulated
+    // entry. Actual transactions remain exclusively the live manager's job.
+    const signal = {
+      strategyId: profile.liveStrategyId,
+      episodeId: `${position.strictExecution.version}:${trade.mint}:${trade.timestampMs}`,
+      mint: trade.mint, symbol: trade.symbol || null,
+      timestampMs: trade.timestampMs, receivedAtMs: point.receivedAtMs,
+      chainTimestampMs: point.chainTimestampMs, signature: point.signature,
+      slot: point.slot, eventIndex: point.eventIndex, market: MARKET,
+      wallet: trade.wallet, side: trade.side, solAmount: trade.solAmount,
+      tokenAmount: trade.tokenAmount, price: point.markPrice, reservePrice: point.markPrice,
+      bondingCurve: point.pool, pool: trade.pool || null,
+      virtualSolReservesRaw: trade.virtualSolReservesRaw,
+      virtualTokenReservesRaw: trade.virtualTokenReservesRaw,
+      realSolReservesRaw: trade.realSolReservesRaw,
+      realTokenReservesRaw: trade.realTokenReservesRaw,
+      curvePct: number(trade.curvePct), ageMs: number(trade.ageMs),
+      features: {
+        sourceCohortId: position.cohortId, sourcePositionId: position.id,
+        sourceEntryProfileId: position.entryProfileId, sourceExitProfileId: position.exitProfileId,
+        calibrationVersion: position.strictExecution.version, shadowPositionSol: position.positionSol,
+        sourceSignalAt: position.signalAt, sourceReceivedAt: point.receivedAtMs,
+        sourceChainTimestampMs: point.chainTimestampMs, sourceMarket: MARKET,
+        sourceTradePrice: number(trade.price), sourceReservePrice: point.markPrice,
+        sourcePool: point.pool, sourceSignature: point.signature, sourceEventIndex: point.eventIndex,
+        simulatedEntryTargetAt: position.entryTargetAt,
+        simulatedExecutionDelayMs: position.strictExecution.entryDelayMs,
+      },
+    };
+    try {
+      const result = this.onLiveSignal(signal);
+      this.counters.liveSignals += 1;
+      if (result?.catch) result.catch(() => { this.counters.liveSignalErrors += 1; });
+    } catch (_) { this.counters.liveSignalErrors += 1; }
+  }
+
+  _strictPendingExit(position, triggerAt, reason, triggerPoint = null) {
+    const execution = position.strictExecution;
+    position.status = 'EXIT_PENDING';
+    position.exitReason = reason;
+    execution.exitTriggerAt = triggerAt;
+    execution.exitTriggerPoint = triggerPoint;
+    position.exitTargetAt = triggerAt + execution.exitDelayMs;
+    position.exitDeadlineAt = position.exitTargetAt + execution.exitTimeoutMs;
+    this._save(position);
+  }
+
+  _advanceStrictTime(position, now) {
+    const execution = position.strictExecution;
+    if (execution.invalid) {
+      this._finish(position, position.status === 'PENDING_ENTRY' ? 'NO_ENTRY' : 'NO_EXIT',
+        'STRICT_EXECUTION_METADATA_INVALID');
+      return;
+    }
+    if (position.status === 'PENDING_ENTRY' && now > position.entryDeadlineAt) {
+      this._finish(position, 'NO_ENTRY', 'STRICT_ENTRY_TIMEOUT');
+    } else {
+      if (position.status === 'OPEN' && now >= position.entryAt + execution.maxHoldMs) {
+        this._strictPendingExit(position, position.entryAt + execution.maxHoldMs,
+          `FIXED_${execution.maxHoldMs}MS`);
+      }
+      if (position.status === 'EXIT_PENDING' && now > position.exitDeadlineAt) {
+        this._finish(position, 'NO_EXIT', 'STRICT_POST_TARGET_EXIT_QUOTE_UNAVAILABLE');
+      }
+    }
+  }
+
+  _advanceStrictPosition(position, trade) {
+    if (trade.mint !== position.mint) return;
+    this._advanceStrictTime(position, this.now());
+    if (!ACTIVE.has(position.status)) return;
+    const execution = position.strictExecution;
+    const point = strictPoint(trade, this.now(), execution.maxQuoteChainAgeMs);
+    if (point.reason) return this._strictRejected(point.reason, position);
+    if (point.pool !== execution.source.pool || point.market !== execution.source.market) {
+      return this._strictRejected('STRICT_MARKET_OR_POOL_MISMATCH', position);
+    }
+    const token = this.store.getToken?.(position.mint);
+    const migrationAt = number(token?.migrated_at ?? token?.graduated_at);
+    if ((migrationAt > 0 && migrationAt <= point.receivedAtMs) || trade.complete === true) {
+      return this._strictRejected('STRICT_CURVE_ALREADY_COMPLETE', position);
+    }
+    const cursor = advanceStrictCursor(execution.cursor, point);
+    if (!cursor) return this._strictRejected('STRICT_OUT_OF_ORDER_OR_DUPLICATE', position);
+    execution.cursor = cursor;
+    const timestampMs = Math.max(point.timestampMs, point.receivedAtMs);
+    const marketPrice = point.markPrice;
+    if (position.status === 'PENDING_ENTRY') {
+      if (point.receivedAtMs <= execution.source.receivedAtMs
+        || point.receivedAtMs < position.entryTargetAt || this.now() < position.entryTargetAt
+        || point.chainTimestampMs < position.entryTargetAt
+        || timestampMs < position.entryTargetAt) {
+        return this._strictRejected('STRICT_ENTRY_BEFORE_TARGET', position);
+      }
+      if (timestampMs > position.entryDeadlineAt) return this._finish(position, 'NO_ENTRY', 'STRICT_ENTRY_TIMEOUT');
+      const selective = execution.rugGuardMode === 'LIVE_CURVE_CATASTROPHE';
+      const guard = evaluateUniversalRugGuard(this.store, {
+        strategyId: `EARLY_PURE_BUY:${position.entryProfileId}`,
+        mint: position.mint, timestampMs, source: 'SHADOW', market: MARKET,
+        lifecycleStage: 'CURVE_EARLY', enforcementMode: selective ? 'HARD_BLOCK' : 'LABEL_ONLY',
+        ...(selective ? {
+          hardBlockSignatures: hardBlockSignaturesForLifecycle({ market: MARKET, lifecycleStage: 'CURVE_EARLY' }),
+        } : {}),
+        policyReason: selective ? 'SHADOW_STRICT_EXECUTION_RUGX_PAIR' : 'SHADOW_STRICT_EXECUTION_UNFILTERED_BASELINE',
+      });
+      execution.entryGuard = { evaluatedAt: timestampMs, blocked: Boolean(guard.blocked), reason: guard.reason || null };
+      if (selective && guard.blocked) {
+        this.counters.blockedByRugGuard += 1;
+        return this._finish(position, 'NO_ENTRY', guard.reason || 'RUG_GUARD');
+      }
+      const quote = executableBuy(trade, position.positionSol, marketPrice);
+      if (!quote.available || quote.tokenUnits > Number(trade.realTokenReservesRaw) / 1e6) {
+        return this._strictRejected('STRICT_BUY_CAPACITY_UNAVAILABLE', position);
+      }
+      const jumpPct = (marketPrice / position.signalPrice - 1) * 100;
+      if (quote.impactPct > execution.maxEntryImpactPct
+        || jumpPct > execution.maxEntryPriceJumpPct || jumpPct < -execution.maxEntryPriceDropPct) {
+        return this._finish(position, 'NO_ENTRY', 'ENTRY_EXECUTION_GUARD');
+      }
+      Object.assign(position, {
+        status: 'OPEN', entryAt: timestampMs, entryMarket: MARKET,
+        entryPrice: quote.price, entryMarketPrice: marketPrice,
+        entryJumpPct: jumpPct, entryImpactPct: quote.impactPct, tokenUnits: quote.tokenUnits,
+        highestPrice: marketPrice, lowestPrice: marketPrice,
+        maxFavorableReturnPct: 0, maxAdverseReturnPct: 0,
+      });
+      execution.entry = point;
+      this.counters.opened += 1;
+      this._save(position);
+      return;
+    }
+    const exit = executableSell(trade, position.tokenUnits, marketPrice);
+    if (!exit.available || !Number.isFinite(exit.proceedsSol)
+      || exit.proceedsSol > Number(trade.realSolReservesRaw) / 1e9) {
+      return this._strictRejected('STRICT_SELL_CAPACITY_UNAVAILABLE', position);
+    }
+    if (position.status === 'OPEN') {
+      position.highestPrice = Math.max(position.highestPrice, marketPrice);
+      position.lowestPrice = Math.min(position.lowestPrice, marketPrice);
+      position.maxFavorableReturnPct = (position.highestPrice / position.entryPrice - 1) * 100;
+      position.maxAdverseReturnPct = (position.lowestPrice / position.entryPrice - 1) * 100;
+      if (execution.hardStopPct > 0
+        && (exit.proceedsSol / position.positionSol - 1) * 100 <= -execution.hardStopPct) {
+        this._strictPendingExit(position, timestampMs, 'EXECUTABLE_HARD_STOP', point);
+      } else this._save(position);
+      return;
+    }
+    if (position.status === 'EXIT_PENDING') {
+      if (point.receivedAtMs <= execution.exitTriggerAt
+        || point.receivedAtMs <= execution.entry.receivedAtMs
+        || point.receivedAtMs < position.exitTargetAt || this.now() < position.exitTargetAt
+        || point.chainTimestampMs < position.exitTargetAt || timestampMs < position.exitTargetAt) {
+        return this._strictRejected('STRICT_EXIT_BEFORE_TARGET', position);
+      }
+      if (timestampMs > position.exitDeadlineAt) return this._finish(position, 'NO_EXIT', 'STRICT_EXIT_TIMEOUT');
+      execution.exit = point;
+      this._close(position, { ...trade, timestampMs }, marketPrice);
+    }
+  }
+
   _advancePosition(position, trade) {
+    if (position.strictExecution) return this._advanceStrictPosition(position, trade);
     if (trade.mint !== position.mint || trade.market !== MARKET) return;
     const timestampMs = number(trade.timestampMs, this.now());
     const marketPrice = number(trade.price);
@@ -573,11 +934,14 @@ class EarlyPureBuyBurstShadowSuite {
     position.status = 'CLOSED'; position.exitAt = trade.timestampMs;
     position.exitMarket = trade.market; position.exitPrice = exit.price;
     position.exitMarketPrice = marketPrice; position.exitImpactPct = exit.impactPct;
-    position.exitReason = `FIXED_${this.exitProfiles.get(position.exitProfileId).maxHoldMs}MS`;
+    position.exitReason = position.strictExecution ? position.exitReason
+      : `FIXED_${this.exitProfiles.get(position.exitProfileId).maxHoldMs}MS`;
     position.grossReturnPct = grossReturnPct;
-    position.netReturnPct = grossReturnPct - this.costs.deterministicCostPct;
-    position.estimatedCostSol = this.costs.totalFixedCostSol
-      + position.positionSol * (this.costs.deterministicCostPct - this.costs.fixedCostPct) / 100;
+    const costs = position.strictExecution?.costs || this.costs;
+    position.netReturnPct = grossReturnPct - (position.strictExecution
+      ? position.configuredCostPct : costs.deterministicCostPct);
+    position.estimatedCostSol = costs.totalFixedCostSol
+      + position.positionSol * (costs.deterministicCostPct - costs.fixedCostPct) / 100;
     position.holdMs = trade.timestampMs - position.entryAt;
     this.counters.closed += 1;
     this._untrackPosition(position);
@@ -586,6 +950,7 @@ class EarlyPureBuyBurstShadowSuite {
   }
 
   _closeFromCachedQuote(position, now) {
+    if (position.strictExecution) return false;
     if (position.status !== 'EXIT_PENDING' || now < position.exitTargetAt) return false;
     if (!cacheIsUsableForExit({
       quote: position.lastPoolQuote,
@@ -631,7 +996,7 @@ class EarlyPureBuyBurstShadowSuite {
       return [];
     }
     const state = this._addTrade(trade);
-    return this._evaluateSignals(trade, state);
+    return [...this._evaluateSignals(trade, state), ...this._evaluateStrictSignals(trade, state)];
   }
 
   onSmartWalletEvent(event, { walletSnapshot = null, persist = true } = {}) {
@@ -703,6 +1068,10 @@ class EarlyPureBuyBurstShadowSuite {
 
   advanceTime(now = this.now()) {
     for (const position of [...this.positions.values()]) {
+      if (position.strictExecution) {
+        this._advanceStrictTime(position, now);
+        continue;
+      }
       if (position.status === 'PENDING_ENTRY' && now > position.entryDeadlineAt) {
         this._finish(position, 'NO_ENTRY', 'ENTRY_TIMEOUT');
       } else if (position.status === 'OPEN'
@@ -758,21 +1127,23 @@ class EarlyPureBuyBurstShadowSuite {
 
   dashboard({ positionLimit = 100 } = {}) {
     const cohorts = this.store.db.prepare(`
-      SELECT entry_profile_id, exit_profile_id,
+      SELECT cohort_id, entry_profile_id, exit_profile_id, position_sol, configured_cost_pct,
         COUNT(*) signals,
         SUM(CASE WHEN status='OPEN' OR status='EXIT_PENDING' THEN 1 ELSE 0 END) active,
         SUM(CASE WHEN status='NO_ENTRY' THEN 1 ELSE 0 END) no_entry,
         SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) no_exit
         , SUM(CASE WHEN status='RIGHT_CENSORED' THEN 1 ELSE 0 END) right_censored
       FROM early_pure_buy_burst_shadow_positions
-      GROUP BY entry_profile_id, exit_profile_id ORDER BY entry_profile_id, exit_profile_id
+      GROUP BY cohort_id, entry_profile_id, exit_profile_id, position_sol, configured_cost_pct
+      ORDER BY entry_profile_id, exit_profile_id
     `).all().map((row) => {
       const completedRows = this.store.db.prepare(`
         SELECT net_return_pct FROM early_pure_buy_burst_shadow_positions
-        WHERE entry_profile_id=? AND exit_profile_id=? AND status='CLOSED'
+        WHERE cohort_id=? AND position_sol=? AND configured_cost_pct=? AND status='CLOSED'
           AND net_return_pct IS NOT NULL
-      `).all(row.entry_profile_id, row.exit_profile_id);
-      return { ...row, ...aggregate(completedRows) };
+      `).all(row.cohort_id, row.position_sol, row.configured_cost_pct);
+      return { ...row, ...aggregate(completedRows),
+        executionVersion: this.entryProfiles.get(row.entry_profile_id)?.executionVersion || null };
     });
     const positions = this.store.db.prepare(`
       SELECT * FROM early_pure_buy_burst_shadow_positions
@@ -802,6 +1173,30 @@ class EarlyPureBuyBurstShadowSuite {
       exitProfileId: 'FIX20',
       rows: rugPairRows,
     })];
+    for (const filtered of this.entryProfiles.values()) {
+      if (!filtered.strictExecution || !filtered.pairedBaselineProfileId) continue;
+      for (const exitId of filtered.exitProfileIds || []) {
+        const rows = this.store.db.prepare(`
+          SELECT b.mint, b.signal_at,
+            b.status AS baseline_status, b.net_return_pct AS baseline_return_pct,
+            f.status AS filtered_status, f.net_return_pct AS filtered_return_pct,
+            f.rejection_reason AS filtered_reason
+          FROM early_pure_buy_burst_shadow_positions f
+          JOIN early_pure_buy_burst_shadow_positions b ON b.mint=f.mint
+            AND b.signal_at=f.signal_at AND b.position_sol=f.position_sol
+            AND b.configured_cost_pct=f.configured_cost_pct
+            AND b.exit_profile_id=f.exit_profile_id
+          WHERE b.entry_profile_id=? AND f.entry_profile_id=? AND b.exit_profile_id=?
+          ORDER BY f.signal_at DESC
+        `).all(filtered.pairedBaselineProfileId, filtered.id, exitId);
+        rugComparisons.push({ ...buildShadowRugPairComparison({
+          id: `${filtered.id}:${exitId}`, label: `严格执行 0.02 SOL · ${exitId}`,
+          baselineProfileId: filtered.pairedBaselineProfileId, filteredProfileId: filtered.id,
+          exitProfileId: exitId, rows,
+        }), positionSizeSol: filtered.positionSizeSol,
+        executionVersion: filtered.executionVersion || STRICT_EXECUTION_VERSION });
+      }
+    }
     return {
       health: this.health(),
       strategy: {

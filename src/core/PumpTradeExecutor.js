@@ -675,6 +675,7 @@ class PumpTradeExecutor {
     solAmount,
     referencePrice,
     maxPriceJumpPct,
+    maxSelfImpactPct = null,
     signalSlot = null,
     signalChainTimestampMs = null,
     maxSignalAgeMs = null,
@@ -759,6 +760,25 @@ class PumpTradeExecutor {
       }
 
       const { global, feeConfig } = protocol;
+      // Persist the fresh RPC quote state separately from the source trade.
+      // A source-to-fill difference is NOT automatically AMM/self-impact.
+      execution.bondingCurve = bondingCurvePda(mint).toBase58();
+      execution.curveQuoteState = Object.fromEntries([
+        'virtualTokenReserves', 'virtualSolReserves', 'realTokenReserves',
+        'realSolReserves', 'tokenTotalSupply',
+      ].map((key) => [key, state.bondingCurve[key]?.toString() ?? null]));
+      // Pump SDK V2 names these Quote reserves (the requested quote is native
+      // SOL); older SDKs used Sol. Normalize without treating absent as zero.
+      execution.curveQuoteState.virtualSolReserves = (
+        state.bondingCurve.virtualQuoteReserves ?? state.bondingCurve.virtualSolReserves
+      )?.toString() ?? null;
+      execution.curveQuoteState.realSolReserves = (
+        state.bondingCurve.realQuoteReserves ?? state.bondingCurve.realSolReserves
+      )?.toString() ?? null;
+      const virtualTokens = Number(execution.curveQuoteState.virtualTokenReserves) / 1e6;
+      const virtualSol = Number(execution.curveQuoteState.virtualSolReserves) / 1e9;
+      execution.freshCurveMidPrice = virtualTokens > 0 && virtualSol > 0
+        ? virtualSol / virtualTokens : null;
       if (state.bondingCurve.complete) {
         throw errorWithCode('Bonding curve already complete', 'CURVE_COMPLETE');
       }
@@ -782,6 +802,17 @@ class PumpTradeExecutor {
 
       const expectedPrice = solAmount / (Number(amount.toString()) / 1e6);
       execution.quotedPrice = expectedPrice;
+      execution.freshQuotePremiumPct = execution.freshCurveMidPrice > 0
+        ? (expectedPrice / execution.freshCurveMidPrice - 1) * 100 : null;
+      execution.sourceToFreshMarketPct = execution.freshCurveMidPrice > 0 && referencePrice > 0
+        ? (execution.freshCurveMidPrice / referencePrice - 1) * 100 : null;
+      execution.quotePremiumScope = 'CURVE_QUOTE_INCLUDES_PROTOCOL_FEES_AND_IMPACT';
+      if (maxSelfImpactPct != null && Number.isFinite(Number(maxSelfImpactPct))
+        && Number(maxSelfImpactPct) >= 0
+        && (!(execution.freshCurveMidPrice > 0)
+          || execution.freshQuotePremiumPct > Number(maxSelfImpactPct))) {
+        throw errorWithCode('Curve fresh quote premium exceeds entry guard', 'ENTRY_SELF_IMPACT');
+      }
       mark('quote_ready_ms');
       if (Number.isFinite(referencePrice) && referencePrice > 0 && maxPriceJumpPct >= 0) {
         const jumpPct = ((expectedPrice / referencePrice) - 1) * 100;

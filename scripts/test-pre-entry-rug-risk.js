@@ -653,6 +653,10 @@ const config = {
     timestampMs: base + 1_000, price: 0.2,
     market: 'PUMP_BONDING_CURVE', curvePct: 85,
   });
+  // Match the simulated learning clock: a real-time write must not become
+  // available to a historical as-of read merely because its label is old.
+  store.db.prepare('UPDATE pre_entry_rug_toxic_history SET created_at=? WHERE mint=?')
+    .run(base + 1_000, 'db-toxic-origin');
   const storedHistory = store.loadActivePreEntryRugToxicHistory(base + 2_000);
   assert.equal(storedHistory.length, 6);
   assert.ok(storedHistory.every((row) => row.lifecycleStage === 'CURVE_MIGRATION'

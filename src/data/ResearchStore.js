@@ -935,6 +935,59 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_smart_wallet_events_mint_ts
         ON smart_wallet_events(mint, timestamp_ms);
 
+      -- The accounting outbox belongs to the event transaction, not voting eligibility.
+      CREATE TABLE IF NOT EXISTS smart_wallet_pnl_pending_events (
+        smart_event_id INTEGER PRIMARY KEY,
+        wallet TEXT NOT NULL, mint TEXT NOT NULL, event_timestamp_ms INTEGER NOT NULL,
+        event_json TEXT NOT NULL, source TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_swr_pending_due
+        ON smart_wallet_pnl_pending_events(status, next_attempt_at, smart_event_id);
+      CREATE INDEX IF NOT EXISTS idx_swr_pending_wallet_mint_order
+        ON smart_wallet_pnl_pending_events(wallet, mint, event_timestamp_ms, smart_event_id);
+      CREATE TABLE IF NOT EXISTS smart_wallet_pnl_repair_state (
+        id INTEGER PRIMARY KEY CHECK(id=1), high_water_event_id INTEGER NOT NULL,
+        last_scanned_event_id INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL, scanned_events INTEGER NOT NULL DEFAULT 0,
+        queued_events INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS smart_wallet_pnl_accounting_cursors (
+        wallet TEXT NOT NULL, mint TEXT NOT NULL,
+        last_event_id INTEGER NOT NULL, last_timestamp_ms INTEGER NOT NULL,
+        PRIMARY KEY(wallet, mint)
+      );
+      CREATE TABLE IF NOT EXISTS smart_wallet_pnl_order_checks (
+        smart_event_id INTEGER PRIMARY KEY,
+        cursor_timestamp_ms INTEGER NOT NULL, cursor_event_id INTEGER NOT NULL,
+        upper_timestamp_ms INTEGER NOT NULL, upper_event_id INTEGER NOT NULL,
+        started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS smart_wallet_pnl_replay_required (
+        wallet TEXT NOT NULL, mint TEXT NOT NULL, first_event_id INTEGER NOT NULL,
+        first_timestamp_ms INTEGER NOT NULL, pending_events INTEGER NOT NULL DEFAULT 0,
+        reason TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY(wallet, mint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_swr_replay_required_time
+        ON smart_wallet_pnl_replay_required(first_timestamp_ms, first_event_id);
+
+      CREATE TABLE IF NOT EXISTS parser_event_quarantine (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signature TEXT NOT NULL DEFAULT '', event_index INTEGER NOT NULL,
+        program_id TEXT, reason TEXT NOT NULL, received_at_ms INTEGER NOT NULL,
+        data_length INTEGER, data_hash TEXT NOT NULL, details_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(signature, event_index, data_hash, reason)
+      );
+      CREATE INDEX IF NOT EXISTS idx_parser_quarantine_received
+        ON parser_event_quarantine(received_at_ms, id);
+      CREATE INDEX IF NOT EXISTS idx_parser_quarantine_created
+        ON parser_event_quarantine(created_at, id);
+
       CREATE TABLE IF NOT EXISTS smart_signal_confirmations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         signal_id INTEGER NOT NULL REFERENCES flow_signals(signal_id) ON DELETE CASCADE,
@@ -1125,6 +1178,34 @@ class ResearchStore {
         ON live_orders(position_id, id);
       CREATE INDEX IF NOT EXISTS idx_live_orders_created_id
         ON live_orders(created_at DESC, id DESC);
+
+      CREATE TABLE IF NOT EXISTS live_loss_rug_cases (
+        position_id INTEGER PRIMARY KEY,
+        mint TEXT NOT NULL,
+        strategy_id TEXT,
+        mode TEXT NOT NULL,
+        entry_at INTEGER,
+        entry_evidence_json TEXT,
+        trigger_at INTEGER,
+        trigger_evidence_json TEXT,
+        settled_at INTEGER,
+        realized_return_pct REAL,
+        pnl_sol REAL,
+        status TEXT NOT NULL DEFAULT 'CAPTURED',
+        classification TEXT,
+        attribution_json TEXT,
+        learning_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_live_loss_rug_cases_strategy_status
+        ON live_loss_rug_cases(strategy_id, mode, status, classification, realized_return_pct);
+      CREATE INDEX IF NOT EXISTS idx_live_loss_rug_cases_strategy_updated
+        ON live_loss_rug_cases(strategy_id, updated_at DESC, position_id DESC);
+      CREATE INDEX IF NOT EXISTS idx_live_loss_rug_cases_updated
+        ON live_loss_rug_cases(updated_at, position_id);
+      CREATE INDEX IF NOT EXISTS idx_live_loss_rug_cases_recovery
+        ON live_loss_rug_cases(mode, position_id, status);
 
       CREATE TABLE IF NOT EXISTS live_mint_entry_locks (
         mint TEXT PRIMARY KEY,
@@ -3026,6 +3107,9 @@ class ResearchStore {
     ensure('live_positions', 'hard_stop_slippage_pct', 'REAL');
     ensure('live_orders', 'wallet_sol_delta', 'REAL');
     ensure('live_orders', 'network_fee_sol', 'REAL');
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_live_positions_loss_rug_pending
+      ON live_positions(id) WHERE mode = 'LIVE' AND status = 'CLOSED'
+        AND realized_return_pct <= -50`);
   }
 
   _prepare() {
@@ -4707,6 +4791,7 @@ class ResearchStore {
           status = COALESCE(@status, status),
           rejection_reason = COALESCE(@rejectionReason, rejection_reason),
           rug_guard_json = COALESCE(@rugGuardJson, rug_guard_json),
+          features_json = COALESCE(@featuresJson, features_json),
           entry_at = COALESCE(@entryAt, entry_at),
           entry_price = COALESCE(@entryPrice, entry_price),
           entry_jump_pct = COALESCE(@entryJumpPct, entry_jump_pct),
@@ -4766,6 +4851,12 @@ class ResearchStore {
       }
     });
 
+    this.insertSmartWalletPnlPending = this.db.prepare(`
+      INSERT OR IGNORE INTO smart_wallet_pnl_pending_events (
+        smart_event_id, wallet, mint, event_timestamp_ms, event_json, source,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'LIVE', ?, ?)
+    `);
     this._writeSmartWalletEvent = this.db.transaction((row) => {
       const current = this.stmts.smartWalletPosition.get(row.wallet, row.mint);
       const before = Math.max(0, Number(current?.token_balance) || 0);
@@ -4794,6 +4885,8 @@ class ResearchStore {
         updatedAt: row.timestampMs,
       });
       const id = Number(result.lastInsertRowid);
+      this.insertSmartWalletPnlPending.run(id, row.wallet, row.mint, row.timestampMs,
+        JSON.stringify({ ...row, id }), Date.now(), Date.now());
       if (row.positionPhase === 'OPEN' && row.nearestFlowSignal) {
         this.stmts.insertSmartSignalConfirmation.run({
           signalId: row.nearestFlowSignal,
@@ -4886,11 +4979,12 @@ class ResearchStore {
     const rows = this.db.prepare(`
       SELECT kind, subject, mint, fingerprint, wallet, lifecycle_stage, market,
              wallet_role, labeled_at, expires_at, collapse_pct, total_buy_sol,
-             large_buy_count, burst_span_ms, details_json
+             large_buy_count, burst_span_ms, details_json, created_at
       FROM pre_entry_rug_toxic_history
-      WHERE expires_at > ?
+      WHERE expires_at > ? AND labeled_at > 0 AND labeled_at <= ?
+        AND created_at > 0 AND created_at <= ?
       ORDER BY labeled_at ASC, id ASC
-    `).all(now);
+    `).all(now, now, now);
     return rows.map((row) => {
       let details = {};
       try { details = JSON.parse(row.details_json || '{}'); } catch { details = {}; }
@@ -4904,6 +4998,7 @@ class ResearchStore {
         market: row.market || 'UNKNOWN',
         walletRole: row.wallet_role || null,
         labeledAt: row.labeled_at,
+        createdAt: row.created_at,
         expiresAt: row.expires_at,
         collapsePct: row.collapse_pct,
         totalBuySol: row.total_buy_sol,
@@ -5521,6 +5616,53 @@ class ResearchStore {
       id: result.changes > 0 ? Number(result.lastInsertRowid) : null,
       inserted: result.changes > 0,
     };
+  }
+
+  recordParserQuarantineBatch(rows = []) {
+    if (!Array.isArray(rows)) throw new TypeError('Parser quarantine batch must be an array');
+    if (rows.length > 100) throw new RangeError('Parser quarantine batch exceeds 100 rows');
+    if (!rows.length) return 0;
+    const normalized = rows.map((row) => {
+      const receivedAtMs = Number(row.receivedAtMs);
+      const eventIndex = Number(row.eventIndex ?? 0);
+      if (!Number.isSafeInteger(receivedAtMs) || receivedAtMs <= 0
+        || !Number.isSafeInteger(eventIndex) || eventIndex < 0
+        || !row.reason || !row.dataHash) throw new TypeError('Invalid parser quarantine row');
+      const detailsJson = JSON.stringify(row.details ?? {});
+      if (Buffer.byteLength(detailsJson, 'utf8') > 16_384) {
+        throw new RangeError('Parser quarantine details exceed 16 KiB');
+      }
+      return {
+        signature: row.signature == null ? '' : String(row.signature), eventIndex,
+        programId: row.programId == null ? null : String(row.programId),
+        reason: String(row.reason).slice(0, 240), receivedAtMs,
+        dataLength: Number.isSafeInteger(row.dataLength) ? row.dataLength : null,
+        dataHash: String(row.dataHash), detailsJson,
+        createdAt: Number.isSafeInteger(row.createdAt) ? row.createdAt : Date.now(),
+      };
+    });
+    const insert = this.db.prepare(`
+      INSERT OR IGNORE INTO parser_event_quarantine (
+        signature,event_index,program_id,reason,received_at_ms,data_length,data_hash,
+        details_json,created_at
+      ) VALUES (@signature,@eventIndex,@programId,@reason,@receivedAtMs,@dataLength,
+        @dataHash,@detailsJson,@createdAt)
+    `);
+    return this.withShortWriteBusyTimeout(() => this.db.transaction((batch) => batch.reduce(
+      (count, row) => count + insert.run(row).changes, 0,
+    ))(normalized));
+  }
+
+  withShortWriteBusyTimeout(callback, timeoutMs = 25) {
+    // Synchronous only: never leave a connection-wide PRAGMA changed across an await.
+    const previous = this.db.pragma('busy_timeout', { simple: true });
+    const short = Math.min(previous, Math.max(0, Math.min(25, Number(timeoutMs) || 0)));
+    this.db.pragma(`busy_timeout = ${short}`);
+    try {
+      return callback();
+    } finally {
+      this.db.pragma(`busy_timeout = ${previous}`);
+    }
   }
 
   recordSmartOpenDecision(decision) {
@@ -7663,6 +7805,7 @@ class ResearchStore {
       status: patch.status || null,
       rejectionReason: patch.rejectionReason || null,
       rugGuardJson: patch.rugGuard ? JSON.stringify(patch.rugGuard) : null,
+      featuresJson: patch.features == null ? null : JSON.stringify(patch.features),
       entryAt: numberOrNull('entryAt'),
       entryPrice: numberOrNull('entryPrice'),
       entryJumpPct: numberOrNull('entryJumpPct'),
@@ -7824,6 +7967,159 @@ class ResearchStore {
         rows: rugPairStatement.all(baselineProfileId, filteredProfileId),
       });
     });
+    // This new execution version must never inherit PMO/history joins or count
+    // an unavailable return as zero. These indexed reads run in the existing
+    // Dashboard read-model worker, not on the live entry path.
+    const legacyIds = ['LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX'];
+    const parseLegacyJson = raw => {
+      try {
+        const value = JSON.parse(raw || '{}');
+        return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      } catch (_) { return {}; }
+    };
+    const legacyPositions = legacyIds.flatMap(cohortId => this.db.prepare(`
+      SELECT *, CASE WHEN entry_at IS NOT NULL AND exit_at IS NOT NULL
+        THEN exit_at - entry_at ELSE NULL END AS hold_ms
+      FROM migration_second_leg_shadow_positions
+      WHERE cohort_id = ?
+      ORDER BY CASE WHEN status IN ('PENDING_ENTRY', 'OPEN', 'EXIT_PENDING')
+        THEN 0 ELSE 1 END, updated_at DESC, id DESC
+      LIMIT ?
+    `).all(cohortId, limit)).map(row => ({ ...row,
+      features: parseLegacyJson(row.features_json), rug_guard: parseLegacyJson(row.rug_guard_json),
+    }));
+    const legacyCohorts = this.db.prepare(`
+      SELECT cohort_id, position_sol, configured_cost_pct,
+        CASE WHEN json_valid(features_json) THEN json_extract(features_json, '$.executionVersion') END AS execution_version,
+        COUNT(*) AS signals, COUNT(DISTINCT mint) AS mints,
+        SUM(status = 'PENDING_ENTRY') AS pending_entries,
+        SUM(status IN ('OPEN', 'EXIT_PENDING')) AS active_positions,
+        SUM(entry_at IS NOT NULL) AS entered,
+        SUM(status = 'CLOSED' AND net_return_pct IS NOT NULL) AS resolved,
+        SUM(status = 'CLOSED' AND net_return_pct > 0) AS wins,
+        SUM(status = 'NO_EXIT') AS no_exit,
+        SUM(status = 'DATA_ERROR') AS data_error,
+        SUM(status = 'RIGHT_CENSORED') AS right_censored,
+        SUM(status = 'NO_ENTRY') AS no_entry,
+        SUM(status = 'PRICE_JUMP') AS price_jump,
+        SUM(status = 'NO_ENTRY' AND rejection_reason LIKE 'PRE_ENTRY_RUG_%') AS rug_rejected,
+        AVG(CASE WHEN status = 'CLOSED' THEN net_return_pct END) AS average_net_return_pct,
+        SUM(CASE WHEN status = 'CLOSED' AND net_return_pct > 0 THEN net_return_pct ELSE 0 END) AS gross_profit_pct,
+        ABS(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0 THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
+      FROM migration_second_leg_shadow_positions
+      WHERE cohort_id IN (?, ?)
+      GROUP BY cohort_id, position_sol, configured_cost_pct, execution_version
+      ORDER BY cohort_id, position_sol, configured_cost_pct, execution_version
+    `).all(...legacyIds).map(row => ({ ...row,
+      win_rate_pct: row.resolved > 0 ? row.wins / row.resolved * 100 : null,
+      profit_factor: row.gross_loss_pct > 0 ? row.gross_profit_pct / row.gross_loss_pct : null,
+    }));
+    const legacyPairStatement = this.db.prepare(`
+      SELECT b.mint, b.migration_at, b.signal_at, b.signal_price, b.position_sol,
+        b.configured_cost_pct, b.entry_target_at, b.entry_deadline_at, b.hard_stop_pct,
+        b.max_hold_ms, b.entry_at, b.entry_price, b.features_json,
+        f.mint AS filtered_mint, f.migration_at AS filtered_migration_at,
+        f.signal_at AS filtered_signal_at, f.signal_price AS filtered_signal_price,
+        f.position_sol AS filtered_position_sol, f.configured_cost_pct AS filtered_cost_pct,
+        f.entry_target_at AS filtered_entry_target_at, f.entry_deadline_at AS filtered_entry_deadline_at,
+        f.hard_stop_pct AS filtered_hard_stop_pct, f.max_hold_ms AS filtered_max_hold_ms,
+        b.status AS baseline_status, b.net_return_pct AS baseline_return_pct,
+        f.status AS filtered_status, f.net_return_pct AS filtered_return_pct,
+        f.entry_at AS filtered_entry_at, f.entry_price AS filtered_entry_price,
+        f.features_json AS filtered_features_json, f.rejection_reason AS filtered_reason,
+        f.rug_guard_json AS filtered_rug_guard_json
+      FROM migration_second_leg_shadow_positions b
+      JOIN migration_second_leg_shadow_positions f
+        ON f.cohort_id = ? AND f.episode_id = b.episode_id
+      WHERE b.cohort_id = ?
+      ORDER BY b.signal_at DESC
+    `);
+    const pairAudit = { candidatePairs: 0, sourceMismatch: 0,
+      protocolMismatch: 0, entryMismatch: 0, guardUnavailable: 0, incompleteOutcomes: 0 };
+    const sameFields = (left, right, fields) => fields.every(key => left?.[key] != null
+      && right?.[key] != null && left[key] === right[key]);
+    const quoteFields = ['pool', 'signature', 'slot', 'eventIndex', 'receivedAtMs',
+      'chainTimestampMs', 'ammQuoteState', 'poolBaseReservesRaw', 'poolQuoteReservesRaw'];
+    const sourceRows = [];
+    for (const row of legacyPairStatement.iterate(legacyIds[1], legacyIds[0])) {
+      pairAudit.candidatePairs += 1;
+      const baseline = parseLegacyJson(row.features_json);
+      const filtered = parseLegacyJson(row.filtered_features_json);
+      const bs = baseline.strictExecution;
+      const fs = filtered.strictExecution;
+      const sameSource = row.mint === row.filtered_mint
+        && row.migration_at === row.filtered_migration_at
+        && row.signal_at === row.filtered_signal_at
+        && row.signal_price === row.filtered_signal_price
+        && sameFields(bs?.source, fs?.source, quoteFields)
+        && bs.source.virtualQuoteReservesRaw === fs.source.virtualQuoteReservesRaw;
+      if (!sameSource) { pairAudit.sourceMismatch += 1; continue; }
+      const sameProtocol = baseline.executionVersion === 'LEGACY_EARLY_FLOW_EXEC_V1'
+        && filtered.executionVersion === baseline.executionVersion
+        && row.position_sol === row.filtered_position_sol
+        && row.configured_cost_pct === row.filtered_cost_pct
+        && row.entry_target_at === row.filtered_entry_target_at
+        && row.entry_deadline_at === row.filtered_entry_deadline_at
+        && row.hard_stop_pct === row.filtered_hard_stop_pct
+        && row.max_hold_ms === row.filtered_max_hold_ms
+        && sameFields(bs?.policy, fs?.policy, ['version', 'maxTradeAgeMs', 'entryDelayMs',
+          'exitDelayMs', 'entryTimeoutMs', 'exitTimeoutMs'])
+        && sameFields(bs?.cohort, fs?.cohort, ['entryMode', 'executionVersion', 'positionSizeSol',
+          'maxEntryPriceJumpPct', 'maxNegativeEntryJumpPct', 'maxEntryImpactPct', 'hardStopPct',
+          'trailingActivationPct', 'trailingStopPct', 'maxHoldMs'])
+        && sameFields(bs?.costs, fs?.costs, ['platformFeePct', 'buySlippagePct', 'sellSlippagePct',
+          'priceImpactPct', 'baseTxFeeSol', 'priorityFeeSol', 'jitoTipSol', 'fixedCostSol',
+          'positionSizeSol', 'entryFailureRatePct', 'entryFailureCostPct']);
+      if (!sameProtocol) { pairAudit.protocolMismatch += 1; continue; }
+      const result = { mint: row.mint, signal_at: row.signal_at,
+        baseline_status: row.baseline_status, baseline_return_pct: row.baseline_return_pct,
+        filtered_status: row.filtered_status, filtered_return_pct: row.filtered_return_pct,
+        filtered_reason: row.filtered_reason, filtered_rug_guard_json: row.filtered_rug_guard_json };
+      // The shared legacy helper coerces null with Number(null); explicitly
+      // keep missing CLOSED returns out of this new strict experiment.
+      if (!Number.isFinite(result.baseline_return_pct)) {
+        result.baseline_return_pct = undefined;
+        if (result.baseline_status === 'CLOSED') result.baseline_status = 'UNRESOLVED_RETURN';
+      }
+      if (!Number.isFinite(result.filtered_return_pct)) {
+        result.filtered_return_pct = undefined;
+        if (result.filtered_status === 'CLOSED') result.filtered_status = 'UNRESOLVED_RETURN';
+      }
+      const baselineEntryKnown = Number.isFinite(row.entry_at) && row.entry_at > 0
+        && Number.isFinite(row.entry_price) && row.entry_price > 0
+        && sameFields(bs?.entry, bs?.entry, quoteFields)
+        && Number.isFinite(bs?.tokenUnits) && bs.tokenUnits > 0;
+      if (result.baseline_status === 'CLOSED' && !baselineEntryKnown) {
+        result.baseline_status = 'ENTRY_EVIDENCE_UNKNOWN';
+      }
+      const guard = parseLegacyJson(row.filtered_rug_guard_json);
+      const rugBlocked = row.filtered_status === 'NO_ENTRY'
+        && String(row.filtered_reason || '').startsWith('PRE_ENTRY_RUG_');
+      if (rugBlocked && (guard.enabled !== true || guard.evidenceUnknown === true
+        || /UNAVAILABLE|GUARD_ERROR/.test(row.filtered_reason))) {
+        pairAudit.guardUnavailable += 1;
+        result.filtered_status = 'GUARD_UNAVAILABLE';
+      } else if (!rugBlocked && result.baseline_status === 'CLOSED' && result.filtered_status === 'CLOSED') {
+        const sameEntry = Number.isFinite(row.entry_at) && row.entry_at === row.filtered_entry_at
+          && Number.isFinite(row.entry_price) && row.entry_price === row.filtered_entry_price
+          && sameFields(bs?.entry, fs?.entry, quoteFields)
+          && bs.entry.virtualQuoteReservesRaw === fs.entry.virtualQuoteReservesRaw
+          && sameFields(bs, fs, ['tokenUnits']) && bs.tokenUnits > 0;
+        if (!sameEntry) {
+          pairAudit.entryMismatch += 1;
+          result.filtered_status = 'PAIR_ENTRY_MISMATCH';
+        }
+      }
+      if (result.baseline_status !== 'CLOSED'
+        || (result.filtered_status !== 'CLOSED' && result.filtered_status !== 'NO_ENTRY')
+        || (result.filtered_status === 'NO_ENTRY' && !rugBlocked)) pairAudit.incompleteOutcomes += 1;
+      sourceRows.push(result);
+    }
+    rugComparisons.push({ ...buildShadowRugPairComparison({
+      id: 'LEGACY-EARLY-FLOW-STRICT-PAIR', label: 'Legacy Early Flow · 同源同执行严格配对',
+      baselineProfileId: legacyIds[0], filteredProfileId: legacyIds[1],
+      rows: sourceRows,
+    }), pairAudit });
     const pmoStats = this.db.prepare(`
       SELECT COUNT(*) AS signals,
         COUNT(DISTINCT mint) AS mints,
@@ -7872,6 +8168,8 @@ class ResearchStore {
       positions,
       rugComparisons,
       pmoStats,
+      legacyCohorts,
+      legacyPositions,
     };
   }
 
@@ -9485,6 +9783,179 @@ class ResearchStore {
     return { cohorts, positions };
   }
 
+  _liveLossRugCaseFromRow(row) {
+    if (!row) return null;
+    const json = value => {
+      if (value == null) return null;
+      try { return JSON.parse(value); } catch (_) { return null; }
+    };
+    return { positionId: row.position_id, mint: row.mint, strategyId: row.strategy_id,
+      mode: row.mode, entryAt: row.entry_at, entryEvidence: json(row.entry_evidence_json),
+      triggerAt: row.trigger_at, triggerEvidence: json(row.trigger_evidence_json),
+      settledAt: row.settled_at, realizedReturnPct: row.realized_return_pct, pnlSol: row.pnl_sol,
+      status: row.status, classification: row.classification, attribution: json(row.attribution_json),
+      learning: json(row.learning_json), createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+
+  getLiveLossRugCase(positionId) {
+    return this._liveLossRugCaseFromRow(this.db.prepare(
+      'SELECT * FROM live_loss_rug_cases WHERE position_id = ?',
+    ).get(positionId));
+  }
+
+  upsertLiveLossRugCase(input) {
+    return this.withLiveLossRugWrite(() => this._upsertLiveLossRugCase(input));
+  }
+
+  withLiveLossRugWrite(callback) {
+    if (typeof callback !== 'function' || callback.constructor?.name === 'AsyncFunction') {
+      throw new TypeError('live loss writes require a synchronous callback');
+    }
+    const previous = this.db.pragma('busy_timeout', { simple: true });
+    const budget = Math.min(25, Math.max(0, Number(previous) || 0));
+    if (budget !== previous) this.db.pragma(`busy_timeout = ${budget}`);
+    try {
+      const result = callback();
+      if (result && typeof result.then === 'function') throw new TypeError('live loss writes cannot return a Promise');
+      return result;
+    } finally {
+      if (budget !== previous) this.db.pragma(`busy_timeout = ${previous}`);
+    }
+  }
+
+  _upsertLiveLossRugCase(input) {
+    if (!Number.isSafeInteger(input?.positionId) || input.positionId <= 0) {
+      throw new Error('live loss case requires a positive positionId');
+    }
+    const existing = this.getLiveLossRugCase(input.positionId);
+    if (!existing && (!input.mint || !input.mode)) throw new Error('live loss case requires mint and mode');
+    const fields = { mint: 'mint', strategyId: 'strategy_id', mode: 'mode', entryAt: 'entry_at',
+      entryEvidence: 'entry_evidence_json', triggerAt: 'trigger_at', triggerEvidence: 'trigger_evidence_json',
+      settledAt: 'settled_at', realizedReturnPct: 'realized_return_pct', pnlSol: 'pnl_sol',
+      status: 'status', classification: 'classification', attribution: 'attribution_json', learning: 'learning_json' };
+    const jsonFields = new Set(['entryEvidence', 'triggerEvidence', 'attribution', 'learning']);
+    const immutable = new Set(['mint', 'strategyId', 'mode', 'entryAt', 'entryEvidence', 'triggerAt', 'triggerEvidence']);
+    const supplied = Object.keys(fields).filter(key => input[key] !== undefined);
+    const now = Number.isFinite(input.updatedAt) ? input.updatedAt : Date.now();
+    const columns = ['position_id', ...supplied.map(key => fields[key]), 'created_at', 'updated_at'];
+    const values = [input.positionId, ...supplied.map(key => jsonFields.has(key)
+      ? input[key] == null ? null : JSON.stringify(input[key]) : input[key]), now, now];
+    const assignments = [...supplied.map(key => immutable.has(key)
+      ? `${fields[key]} = COALESCE(live_loss_rug_cases.${fields[key]}, excluded.${fields[key]})`
+      : `${fields[key]} = excluded.${fields[key]}`), 'updated_at = excluded.updated_at'];
+    // Existing identities satisfy INSERT constraints even when this is only a
+    // learning/status patch. Only supplied fields participate in the UPDATE.
+    if (existing) {
+      for (const key of ['mint', 'mode']) {
+        if (!supplied.includes(key)) { columns.push(fields[key]); values.push(existing[key]); }
+      }
+    }
+    this.db.prepare(`INSERT INTO live_loss_rug_cases (${columns.join(',')})
+      VALUES (${columns.map(() => '?').join(',')})
+      ON CONFLICT(position_id) DO UPDATE SET ${assignments.join(',')}`).run(...values);
+    return this.getLiveLossRugCase(input.positionId);
+  }
+
+  getLiveLossRugPosition(positionId) {
+    const row = this.db.prepare('SELECT * FROM live_positions WHERE id = ?').get(positionId);
+    if (!row) return null;
+    return { ...row, orders: this.db.prepare(
+      'SELECT * FROM live_orders WHERE position_id = ? ORDER BY id',
+    ).all(positionId) };
+  }
+
+  pendingLiveLossRugPositions(limit = 20, afterId = 0) {
+    const bounded = Math.min(50, Math.max(1, Math.trunc(Number(limit) || 20)));
+    const after = Math.max(0, Math.trunc(Number(afterId) || 0));
+    // LIMIT must precede unfinished filtering: a long prefix of FINAL cases
+    // must not turn a small recovery batch into a full history scan.
+    const losses = this.db.prepare(`SELECT id FROM live_positions INDEXED BY idx_live_positions_loss_rug_pending
+      WHERE mode = 'LIVE' AND status = 'CLOSED' AND realized_return_pct <= -50 AND id > ?
+      ORDER BY id LIMIT ?`).all(after, bounded);
+    const cases = this.db.prepare(`SELECT position_id AS id FROM live_loss_rug_cases
+      INDEXED BY idx_live_loss_rug_cases_recovery WHERE mode = 'LIVE' AND position_id > ?
+      ORDER BY position_id LIMIT ?`).all(after, bounded);
+    const ids = [...new Set([...losses, ...cases].map(row => row.id))].sort((a, b) => a - b).slice(0, bounded);
+    const rows = ids.length ? this.db.prepare(`SELECT p.*, c.status AS feedback_status,
+      c.learning_json AS feedback_learning_json, c.position_id AS feedback_case_id
+      FROM live_positions p LEFT JOIN live_loss_rug_cases c ON c.position_id = p.id
+      WHERE p.id IN (${ids.map(() => '?').join(',')}) ORDER BY p.id`).all(...ids) : [];
+    const pending = rows.filter(row => {
+      let learning = null;
+      try { learning = JSON.parse(row.feedback_learning_json || 'null'); } catch (_) {}
+      if (row.feedback_status === 'FINAL' && ['LEARNED', 'ALREADY_LEARNED', 'NOT_ELIGIBLE'].includes(learning?.status)) return false;
+      return row.mode === 'LIVE' && ((row.status === 'CLOSED' && row.realized_return_pct != null
+        && (row.realized_return_pct <= -50 || row.feedback_case_id != null))
+        || (row.status === 'ENTRY_FAILED' && row.feedback_case_id != null));
+    }).map(({ feedback_status, feedback_learning_json, feedback_case_id, ...row }) => row);
+    // Even an empty result can scan a full page. The recovery cursor follows
+    // inspected IDs, never only the returned unfinished positions.
+    pending.lastScannedId = ids.at(-1) ?? after;
+    pending.hasMore = ids.length === bounded;
+    pending.scannedCandidates = ids.length;
+    return pending;
+  }
+
+  liveLossRugFeedbackDashboard(strategyId = null) {
+    // Older exported databases remain readable without migrating a readonly
+    // Dashboard replica. A missing feature table is unknown, not zero losses.
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='live_loss_rug_cases'").get()) {
+      return { available: false, summary: null, cases: [] };
+    }
+    const filter = strategyId ? 'mode = \'LIVE\' AND strategy_id = ?' : "mode = 'LIVE'";
+    const bind = strategyId ? [String(strategyId)] : [];
+    const settledLoss = "settled_at IS NOT NULL AND realized_return_pct <= -50 AND status IN ('ANALYZED', 'FINAL')";
+    const learningJson = "CASE WHEN json_valid(learning_json) THEN learning_json ELSE '{}' END";
+    const summary = this.db.prepare(`SELECT COUNT(*) AS observed,
+      COALESCE(SUM(status = 'CAPTURED'), 0) AS captured,
+      COALESCE(SUM(status = 'TRIGGERED' AND settled_at IS NULL), 0) AS provisional,
+      COALESCE(SUM(settled_at IS NOT NULL AND realized_return_pct <= -50
+        AND status IN ('AWAITING_CONFIRMATION', 'ANALYZED', 'FINAL')), 0) AS largeLossCases,
+      COALESCE(SUM(settled_at IS NOT NULL AND realized_return_pct > -50
+        AND (trigger_at IS NOT NULL OR classification = 'RECOVERED')), 0) AS withdrawn,
+      COALESCE(SUM(${settledLoss} AND classification = 'CONFIRMED_RUG'), 0) AS confirmedRug,
+      COALESCE(SUM(${settledLoss} AND classification = 'EXECUTION_LOSS'), 0) AS executionLoss,
+      COALESCE(SUM(${settledLoss} AND classification = 'MIXED'), 0) AS mixedLoss,
+      COALESCE(SUM(${settledLoss} AND classification = 'MARKET_LOSS'), 0) AS marketLoss,
+      COALESCE(SUM(${settledLoss} AND classification = 'CANDIDATE'), 0) AS candidates,
+      COALESCE(SUM(${settledLoss} AND (classification IS NULL
+        OR classification IN ('INSUFFICIENT', 'UNKNOWN'))), 0) AS unknown,
+      COALESCE(SUM(${settledLoss} AND json_extract(${learningJson}, '$.status')
+        IN ('LEARNED', 'ALREADY_LEARNED')), 0) AS learnedCases,
+      COALESCE(SUM(CASE WHEN ${settledLoss} AND json_extract(${learningJson}, '$.status')
+        IN ('LEARNED', 'ALREADY_LEARNED') THEN MAX(0, COALESCE(CAST(json_extract(${learningJson}, '$.templatesAdded') AS INTEGER), 0)) ELSE 0 END), 0) AS templatesAdded,
+      COALESCE(SUM(CASE WHEN ${settledLoss} AND json_extract(${learningJson}, '$.status')
+        IN ('LEARNED', 'ALREADY_LEARNED') THEN MAX(0, COALESCE(CAST(json_extract(${learningJson}, '$.walletsAdded') AS INTEGER), 0)) ELSE 0 END), 0) AS walletsAdded,
+      COALESCE(SUM(status IN ('TRIGGERED', 'AWAITING_CONFIRMATION', 'ANALYZED', 'INVALID_SETTLEMENT')), 0) AS pending,
+      COALESCE(SUM(status = 'INVALID_SETTLEMENT'), 0) AS invalidSettlement
+      FROM live_loss_rug_cases WHERE ${filter}`).get(...bind);
+    const cases = this.db.prepare(`SELECT * FROM live_loss_rug_cases WHERE ${filter}
+      AND (trigger_at IS NOT NULL OR settled_at IS NOT NULL OR status <> 'CAPTURED')
+      ORDER BY updated_at DESC, position_id DESC LIMIT 20`).all(...bind)
+      .map(row => {
+        const item = this._liveLossRugCaseFromRow(row);
+        // Full immutable evidence is available in the case store/export, not
+        // every Dashboard refresh. Do not ship hundreds of KB per case.
+        return { ...item,
+          entryEvidence: item.entryEvidence == null ? null : {
+            capturedAt: item.entryEvidence.capturedAt ?? null,
+            evidenceUnavailable: item.entryEvidence.evidenceUnavailable === true
+              || item.entryEvidence.tracker?.evidenceUnavailable === true,
+          },
+          triggerEvidence: item.triggerEvidence == null ? null : {
+            capturedAt: item.triggerEvidence.capturedAt ?? null,
+            markReturnPct: item.triggerEvidence.markReturnPct ?? null,
+            evidenceUnavailable: item.triggerEvidence.evidenceUnavailable === true
+              || item.triggerEvidence.tracker?.evidenceUnavailable === true,
+          },
+          attribution: { knownAt: item.attribution?.knownAt ?? null,
+            reason: item.attribution?.analysis?.reason ?? item.attribution?.settlementValidation?.reason ?? null },
+        };
+      });
+    return { available: true, summary, cases,
+      note: 'Entry evidence is frozen; classification and learning reflect the current export/runtime snapshot, not a historical as-of result.' };
+  }
+
   liveTradingDashboard({
     strategyId = null,
     positionLimit = 100,
@@ -9666,6 +10137,7 @@ class ResearchStore {
       decisions,
       entryLocks: this.activeLiveMintEntryLocks(100),
       strategyId: strategy,
+      lossRugFeedback: this.liveLossRugFeedbackDashboard(strategy),
     };
   }
 

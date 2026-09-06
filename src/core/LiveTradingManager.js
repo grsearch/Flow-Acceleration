@@ -2,6 +2,8 @@
 
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 const { executableSell, ammQuoteStateRejection } = require('./ShadowExecutionModel');
+const { hardBlockSignaturesForLifecycle } = require('./RugGuardPolicy');
+const { LiveLossRugFeedback } = require('./LiveLossRugFeedback');
 
 const fs = require('fs');
 const path = require('path');
@@ -20,6 +22,11 @@ function executionOf(order) {
 function tradeEvidence(trade) {
   return {
     market: trade?.market || null,
+    bondingCurve: trade?.bondingCurve || null,
+    virtualSolReservesRaw: trade?.virtualSolReservesRaw ?? null,
+    virtualTokenReservesRaw: trade?.virtualTokenReservesRaw ?? null,
+    realSolReservesRaw: trade?.realSolReservesRaw ?? null,
+    realTokenReservesRaw: trade?.realTokenReservesRaw ?? null,
     pool: trade?.pool || trade?.poolAddress || null,
     slot: positiveNumber(trade?.slot),
     signature: trade?.signature || null,
@@ -241,6 +248,11 @@ class LiveTradingManager {
     this.executor = executor;
     this.now = now;
     this.mode = !config.enabled ? 'DISABLED' : (config.dryRun ? 'DRY_RUN' : 'LIVE');
+    this.lossRugFeedback = new LiveLossRugFeedback({
+      config: { ...config.lossRugFeedback,
+        enabled: config.lossRugFeedback?.enabled === true && this.mode === 'LIVE' },
+      store, tracker: store.preEntryRugRisk, now,
+    });
     this.strategies = new Map((config.strategies || [])
       .filter((strategy) => strategy.enabled !== false)
       .map((strategy) => [strategy.id, strategy]));
@@ -299,6 +311,8 @@ class LiveTradingManager {
       rejectedPositionTrades: 0,
       rejectedAmmQuoteStates: 0,
       takeProfitQuoteRejected: 0,
+      lossRugFeedbackErrors: 0,
+      lossRugFeedbackLastError: null,
     };
   }
 
@@ -500,6 +514,24 @@ class LiveTradingManager {
       && typeof this.store.unsettledLiveOrders === 'function') {
       this._scheduleSettlementReconciliation(this.now(), true);
     }
+    this._lossFeedback('start');
+  }
+
+  _lossFeedback(method, ...args) {
+    try { return this.lossRugFeedback?.[method]?.(...args); }
+    catch (error) {
+      // Research evidence must not suppress an exit or turn a confirmed chain
+      // transaction into an execution retry. Persistent failures stay visible.
+      this.metrics.lossRugFeedbackErrors += 1;
+      this.metrics.lossRugFeedbackLastError = errorText(error);
+      return null;
+    }
+  }
+
+  _refreshPositionSettlement(positionId) {
+    const totals = this.store.refreshLivePositionSettlement(positionId);
+    this._lossFeedback('onSettlement', positionId, totals);
+    return totals;
   }
 
   async _reconcileOrderSettlement({ orderId, positionId, signature, attempts = 5 }) {
@@ -529,7 +561,7 @@ class LiveTradingManager {
                 this._observePositionTrade(position, deferredTrade);
               }
             }
-            return this.store.refreshLivePositionSettlement(positionId);
+            return this._refreshPositionSettlement(positionId);
           }
         } catch (error) {
           if (attempt === attempts) this._rememberError(error);
@@ -548,7 +580,7 @@ class LiveTradingManager {
     const rows = this.store.unsettledLiveOrders(2_000);
     this.unsettledOrdersSnapshot = { count: rows.length, updatedAt: this.now() };
     for (const positionId of new Set(rows.map((row) => row.position_id))) {
-      this.store.refreshLivePositionSettlement(positionId);
+      this._refreshPositionSettlement(positionId);
     }
     const concurrency = 4;
     for (let index = 0; index < rows.length && !this.stopping; index += concurrency) {
@@ -646,6 +678,7 @@ class LiveTradingManager {
         mode: this.mode,
         ruleVersion: strategy.ruleVersion || LIVE_RULE_VERSION,
         runtimeMetrics: { ...this._strategyMetrics(strategy.id) },
+        ...(strategy.calibrationOnly ? { calibrationSafety: this._calibrationSafety(strategy) } : {}),
         activePositions: [...this.positions.values()]
           .filter((position) => position.strategyId === strategy.id).length,
       })),
@@ -665,6 +698,7 @@ class LiveTradingManager {
       pendingActions: this.pending.size,
       unsettledOrders: this.unsettledOrdersSnapshot.count,
       unsettledOrdersUpdatedAt: this.unsettledOrdersSnapshot.updatedAt,
+      lossRugFeedback: this._lossFeedback('health'),
       activeMintEntryLocks,
       activeMintEntryLocksLimit: this.activeMintEntryLocksSnapshot.limit || 1_000,
       activeMintEntryLocksStatus,
@@ -848,6 +882,7 @@ class LiveTradingManager {
       || position.lastAcceptedChainTimestampMs;
     position.lastAcceptedTrade = observedTrade;
     position.lastAmmQuoteRejectedAt = null;
+    this._lossFeedback('observePosition', position, observedTrade);
     if (position.entryPrice > 0) {
       position.lastObservedAt = observedTrade.timestampMs;
       const immediateStop = this._immediateHardStopReason(
@@ -954,6 +989,7 @@ class LiveTradingManager {
   }
 
   advanceTime(now = this.now()) {
+    this._lossFeedback('advanceTime', now);
     this._scheduleSettlementReconciliation(now);
     this._scheduleMintLockRecheck(now);
     for (const states of this.detectors.values()) {
@@ -1045,6 +1081,9 @@ class LiveTradingManager {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     await Promise.allSettled([...this.pending]);
+    // Unlike event-path telemetry, shutdown must expose undrained evidence so
+    // the existing safe-stop coordinator can retain the process and retry.
+    await this.lossRugFeedback?.stop();
   }
 
   _track(promise) {
@@ -1253,6 +1292,22 @@ class LiveTradingManager {
     this._track(this.entryQueue);
   }
 
+  _calibrationSafety(strategy) {
+    if (!strategy?.stopOnExecutionAnomaly) return { blocked: false, reason: null };
+    // Restored failed/unknown positions remain in this map until reconciled.
+    // No synchronous DB scan, cumulative-loss cap, or exit suppression here.
+    for (const position of this.positions.values()) {
+      if (position.status === 'EXIT_FAILED' || position.entryConfirmationUnknown) {
+        return { blocked: true, reason: 'UNRESOLVED_EXECUTION', positionId: position.id };
+      }
+      if (position.strategyId === strategy.id && position.status === 'OPEN'
+        && (!positiveNumber(position.entrySlot) || !position.entrySignature)) {
+        return { blocked: true, reason: 'ENTRY_METADATA_UNVERIFIED', positionId: position.id };
+      }
+    }
+    return { blocked: false, reason: null };
+  }
+
   _riskReason(event) {
     const quoteRejection = ammQuoteStateRejection(event);
     if (quoteRejection) return quoteRejection;
@@ -1260,6 +1315,31 @@ class LiveTradingManager {
     const receivedAt = Number(event.receivedAtMs ?? event.createdAt);
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy || strategy.entryEnabled === false) return 'STRATEGY_ENTRY_DISABLED';
+    if (strategy.calibrationOnly) {
+      if (strategy.positionSizeSol !== 0.02) return 'CALIBRATION_SIZE_MISMATCH';
+      if (event.features?.sourceCohortId !== strategy.sourceShadowCohortId
+        || event.features?.calibrationVersion !== strategy.ruleVersion
+        || event.features?.shadowPositionSol !== strategy.positionSizeSol) {
+        return 'CALIBRATION_SOURCE_MISMATCH';
+      }
+      const sourcePool = event.market === 'PUMP_AMM' ? event.pool : event.bondingCurve;
+      if (event.market !== strategy.market || typeof sourcePool !== 'string'
+        || !sourcePool.trim() || typeof event.signature !== 'string' || !event.signature
+        || event.eventIndex == null || !Number.isSafeInteger(Number(event.eventIndex))
+        || Number(event.eventIndex) < 0 || !Number.isSafeInteger(Number(event.slot))
+        || Number(event.slot) <= 0 || !Number.isSafeInteger(receivedAt) || receivedAt <= 0
+        || !Number.isSafeInteger(Number(event.timestampMs)) || Number(event.timestampMs) <= 0
+        || receivedAt > this.now() + 1_000 || Number(event.timestampMs) > this.now() + 1_000) {
+        return 'CALIBRATION_SOURCE_IDENTITY_MISSING';
+      }
+      if (strategy.requirePostTradeQuote && event.ammQuoteState !== 'POST_TRADE_V1') {
+        return 'CALIBRATION_POST_TRADE_QUOTE_REQUIRED';
+      }
+      if (strategy.requirePostTradeQuote && (receivedAt > this.now()
+        || Number(event.chainTimestampMs) > receivedAt)) return 'CALIBRATION_SOURCE_IDENTITY_MISSING';
+      const safety = this._calibrationSafety(strategy);
+      if (safety.blocked) return `CALIBRATION_${safety.reason}`;
+    }
     if (typeof this.store.activeLiveMintEntryLock === 'function'
       && this.store.activeLiveMintEntryLock(event.mint)) {
       return 'MINT_WALLET_BALANCE_LOCK';
@@ -1305,6 +1385,11 @@ class LiveTradingManager {
       return 'MAX_POSITIONS_PER_MINT';
     }
     if (this.positions.size >= this.config.maxConcurrentPositions) return 'MAX_POSITIONS';
+    if (strategy.maxTotalConcurrentPositions > 0
+      && this.positions.size >= strategy.maxTotalConcurrentPositions) return 'STRATEGY_MAX_TOTAL_POSITIONS';
+    if (strategy.maxConcurrentPositions > 0 && [...this.positions.values()]
+      .filter((position) => position.strategyId === strategy.id).length
+        >= strategy.maxConcurrentPositions) return 'STRATEGY_MAX_POSITIONS';
     const failedEntryCooldownMs = Number.isFinite(Number(strategy.failedEntryCooldownMs))
       ? Math.max(0, Number(strategy.failedEntryCooldownMs))
       : Math.max(0, Number(this.config.failedEntryCooldownMs) || 0);
@@ -1357,7 +1442,8 @@ class LiveTradingManager {
     if (this.stopping) return;
     const strategy = this.strategies.get(event.strategyId);
     if (!strategy) return;
-    const rugGuard = evaluateUniversalRugGuard(this.store, {
+    let rugGuard;
+    try { rugGuard = evaluateUniversalRugGuard(this.store, {
       strategyId: strategy.id,
       mint: event.mint,
       timestampMs: this.now(),
@@ -1370,8 +1456,56 @@ class LiveTradingManager {
           ?? event.features?.graduationAgeMs
           ?? event.features?.ageMs,
       ),
-    });
+      ...(strategy.rugGuardMode === 'HARD_BLOCK' ? {
+        enforcementMode: 'HARD_BLOCK',
+        hardBlockSignatures: hardBlockSignaturesForLifecycle({
+          market: event.market || strategy.market, lifecycleStage: event.lifecycleStage,
+        }).filter((signature) => strategy.hardBlockSignatures?.includes(signature)),
+        policyReason: 'LIVE_LEGACY_EARLY_FLOW_STAGE_SCOPED_REPEAT_ACTOR',
+      } : {}),
+    }); } catch (error) {
+      if (!strategy.calibrationOnly && !strategy.requireRugGuard) throw error;
+      rugGuard = { enabled: false, blocked: true, reason: 'CALIBRATION_RUG_GUARD_UNAVAILABLE' };
+    }
+    const enforcedSignatures = strategy.rugGuardMode === 'HARD_BLOCK'
+      ? hardBlockSignaturesForLifecycle({ market: event.market || strategy.market,
+        lifecycleStage: event.lifecycleStage })
+        .filter((signature) => strategy.hardBlockSignatures?.includes(signature)) : null;
+    if (strategy.calibrationOnly || strategy.requireRugGuard) {
+      // Real tracker decisions omit enabled; only the disabled wrapper sets
+      // enabled:false. Validate the actual tracker and decision contract.
+      const tracker = this.store?.preEntryRugRisk;
+      const available = tracker?.config?.enabled === true
+        && typeof tracker.evaluateGuard === 'function'
+        && rugGuard && typeof rugGuard === 'object' && rugGuard.enabled !== false
+        && typeof rugGuard.blocked === 'boolean' && typeof rugGuard.then !== 'function'
+        && (!enforcedSignatures || enforcedSignatures.length === 2);
+      rugGuard = available ? { ...rugGuard, enabled: true }
+        : { enabled: false, blocked: true, reason: 'CALIBRATION_RUG_GUARD_UNAVAILABLE' };
+    }
     const rugGuardAudit = rugGuardAuditSnapshot(rugGuard);
+    if (strategy.id === 'legacy_early_flow_rugx_live') {
+      // The RUG learner's AMM clock begins at its first observed AMM trade;
+      // the entry window uses confirmed migration. Preserve both clocks, not
+      // a requested migration age masquerading as evaluated template age.
+      const rawAge = rugGuard.firstCliffCounterfactual?.lifecycleAgeMs;
+      const actualAge = rawAge != null && Number.isFinite(Number(rawAge)) ? Number(rawAge) : null;
+      const requestedAge = positiveNumber(event.features?.ageMs ?? event.lifecycleAgeMs);
+      const requestedStage = requestedAge != null
+        ? (requestedAge <= 10_000 ? 'AMM_EARLY' : 'AMM_MATURE') : (event.lifecycleStage || null);
+      const actualStage = rugGuard.lifecycleStage || null;
+      Object.assign(rugGuardAudit, { lifecycleAgeMs: actualAge,
+        evaluatedLifecycleStage: actualStage, evaluatedLifecycleAgeMs: actualAge,
+        requestedLifecycleStage: requestedStage, requestedLifecycleAgeMs: requestedAge,
+        lifecycleClockMismatch: actualStage && requestedStage
+          ? actualStage !== requestedStage || (actualAge != null && requestedAge != null && actualAge !== requestedAge)
+          : null });
+    }
+    if ((strategy.calibrationOnly || strategy.requireRugGuard) && rugGuard.enabled !== true) {
+      rugGuard.blocked = true;
+      rugGuard.reason = 'CALIBRATION_RUG_GUARD_UNAVAILABLE';
+      Object.assign(rugGuardAudit, { blocked: true, reason: rugGuard.reason });
+    }
     if (typeof this.store.updateLiveStrategyDecisionAudit === 'function') {
       this.store.updateLiveStrategyDecisionAudit(decision.id, {
         features: {
@@ -1435,6 +1569,7 @@ class LiveTradingManager {
       return;
     }
 
+    this._lossFeedback('captureEntry', position, event);
     let submittedAt = this.now();
     let entryAttempt = 1;
     position.entryStartedAt = submittedAt;
@@ -1472,6 +1607,7 @@ class LiveTradingManager {
           solAmount: strategy.positionSizeSol,
           referencePrice: event.price,
           maxPriceJumpPct: strategy.maxEntryPriceJumpPct,
+          maxSelfImpactPct: strategy.calibrationOnly ? strategy.maxEntrySelfImpactPct : null,
           signalSlot: event.slot,
           signalChainTimestampMs: event.chainTimestampMs,
           maxSignalAgeMs: strategy.maxSignalAgeMs || this.config.maxSignalAgeMs,
@@ -1543,7 +1679,7 @@ class LiveTradingManager {
         highestPrice: position.highestPrice,
         openedAt,
       });
-      const entryTotals = this.store.refreshLivePositionSettlement(position.id);
+      const entryTotals = this._refreshPositionSettlement(position.id);
       if (entryTotals?.entrySolDelta < 0) position.entryWalletCostSol = -entryTotals.entrySolDelta;
       if (position.mode === 'LIVE' && !settlement && result.signature) {
         this._track(this._reconcileOrderSettlement({
@@ -1670,7 +1806,7 @@ class LiveTradingManager {
           ? 'ENTRY_WALLET_RESERVE_REJECTED'
         : error.code === 'MARKET_PRICE_MOVED'
           ? 'ENTRY_MARKET_PRICE_MOVED'
-          : error.code === 'SELF_IMPACT_REJECTED'
+          : ['SELF_IMPACT_REJECTED', 'ENTRY_SELF_IMPACT'].includes(error.code)
             ? 'ENTRY_SELF_IMPACT_REJECTED'
             : 'ENTRY_REJECTED';
       this.store.updateLivePosition(position.id, {
@@ -1680,6 +1816,7 @@ class LiveTradingManager {
         exitReason: rejectionReason,
       });
       this.store.updateLiveStrategyDecision(decision.id, 'ENTRY_FAILED', error.code || errorText(error));
+      this._lossFeedback('onEntryFailed', { ...position, status: 'ENTRY_FAILED' });
       this._removePosition(position);
       this.metrics.entryFailures += 1;
       this._noteStrategyOutcome(
@@ -1767,6 +1904,7 @@ class LiveTradingManager {
         exitError: null,
       });
       this._updatePositionDecision(position, 'ENTRY_FAILED', failure);
+      this._lossFeedback('onEntryFailed', position);
       this._removePosition(position);
       this.metrics.entryFailures += 1;
       this.metrics.entryTransactionFailures += 1;
@@ -1854,6 +1992,7 @@ class LiveTradingManager {
         exitError: null,
       });
       this._updatePositionDecision(position, 'ENTRY_FAILED', 'ENTRY_EXPIRED_UNOBSERVED');
+      this._lossFeedback('onEntryFailed', position);
       this._removePosition(position);
       this.metrics.entryFailures += 1;
       this.metrics.entryTransactionFailures += 1;
@@ -2311,7 +2450,7 @@ class LiveTradingManager {
         exitReason: confirmedReason,
         exitError: null,
       });
-      this.store.refreshLivePositionSettlement(position.id);
+      this._refreshPositionSettlement(position.id);
       if (position.mode === 'LIVE' && !settlement && result.signature) {
         this._track(this._reconcileOrderSettlement({
           orderId,
@@ -2507,7 +2646,7 @@ class LiveTradingManager {
           exitReason: reason,
           closedAt,
         });
-        this.store.refreshLivePositionSettlement(position.id);
+        this._refreshPositionSettlement(position.id);
         if (position.mode === 'LIVE' && !settlement && result.signature) {
           this._track(this._reconcileOrderSettlement({
             orderId,
