@@ -143,6 +143,7 @@ async function assertCleanup() {
       assert.strictEqual(options.skipPreflight, false);
       assert.strictEqual(options.maxRetries, 0);
       assert.strictEqual(options.preflightCommitment, 'finalized');
+      assert.strictEqual(options.minContextSlot, 102);
       return bs58.encode(Transaction.from(raw).signature);
     },
     async getBlockHeight(commitment) { assert.strictEqual(commitment, 'finalized'); return height; },
@@ -153,9 +154,11 @@ async function assertCleanup() {
     },
   };
   assert.strictEqual(validateEmptyTokenAccount(candidate, currentInfo, owner).refundLamports, '1887234');
-  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(1n), owner), /TOKEN_ACCOUNT_NOT_SAFELY_EMPTY/);
-  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(0n, { delegateOption: 1, delegate: signer.publicKey }), owner));
-  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(0n, { closeAuthorityOption: 1, closeAuthority: PublicKey.unique() }), owner));
+  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(1n), owner), /TOKEN_ACCOUNT_BALANCE_NONZERO/);
+  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(0n, { delegateOption: 1, delegate: signer.publicKey }), owner), /TOKEN_ACCOUNT_DELEGATED/);
+  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(0n, { delegatedAmount: 1n }), owner), /TOKEN_ACCOUNT_DELEGATED/);
+  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(0n, { closeAuthorityOption: 1, closeAuthority: PublicKey.unique() }), owner), /TOKEN_ACCOUNT_AUTHORITY_MISMATCH/);
+  assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(0n, { owner: PublicKey.unique() }), owner), /TOKEN_ACCOUNT_AUTHORITY_MISMATCH/);
   assert.throws(() => validateEmptyTokenAccount(candidate, accountInfo(0n, { state: 2 }), owner));
   const unsafe = accountInfo();
   unsafe.data.writeUInt16LE(2, 166);
@@ -170,7 +173,14 @@ async function assertCleanup() {
   await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), { code: 'ACCOUNT_CREATION_UNVERIFIED' });
   source = receipt();
   currentInfo = accountInfo(2n);
-  await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), { code: 'TOKEN_ACCOUNT_NOT_SAFELY_EMPTY' });
+  await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), error => {
+    assert.strictEqual(error.code, 'TOKEN_ACCOUNT_BALANCE_NONZERO');
+    assert.strictEqual(error.recoveryStage, 'ACCOUNT_SNAPSHOT');
+    assert.deepStrictEqual(error.recoveryDiagnostics.account, { status: 'REJECTED', tokenAmountRaw: '2',
+      contextSlot: 101, reason: 'TOKEN_ACCOUNT_BALANCE_NONZERO' });
+    assert.deepStrictEqual(error.recoveryDiagnostics.quoteAttempts, []);
+    return true;
+  });
   currentInfo = accountInfo(); currentInfo.lamports += 1;
   await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), { code: 'ACCOUNT_FUNDING_CHANGED' });
   currentInfo = accountInfo(); currentSlot = 99;
@@ -282,6 +292,109 @@ async function assertCleanup() {
       assert.strictEqual(calls, nullFirst ? 2 : 1);
     }
     executor.connection.getFeeForMessage = feeReader;
+    // Real web3 Connections expose the raw transport; the request must carry
+    // minContextSlot, not silently route through the commitment-only helper.
+    let rawCalls = 0;
+    executor.connection.getFeeForMessage = async () => { throw new Error('Public fee helper must not be used'); };
+    executor.connection._rpcRequest = async (method, args) => {
+      rawCalls++;
+      assert.strictEqual(method, 'getFeeForMessage');
+      assert.strictEqual(typeof args[0], 'string');
+      assert(Buffer.from(args[0], 'base64').length > 0);
+      assert.deepStrictEqual(args[1], { commitment: 'finalized', minContextSlot: 102 });
+      return { jsonrpc: '2.0', id: 1, result: { context: { slot: 103 }, value: 105000 } };
+    };
+    const rawPrepared = await executor.prepareEmptyTokenAccountClose(candidate);
+    assert.strictEqual(rawCalls, 1);
+    assert.deepStrictEqual(rawPrepared.recoveryDiagnostics, {
+      version: 'ACCOUNT_RECOVERY_DIAGNOSTICS_V1',
+      account: { status: 'EMPTY', tokenAmountRaw: '0', contextSlot: 101, reason: null },
+      quoteAttempts: [{ rpc: 'PRIMARY', blockhashSlot: 102, feeSlot: 103, feeLamports: 105000, result: 'READY' }],
+    });
+    assert.strictEqual(rawPrepared.contextSlot, 103);
+    const unsafeBodies = [null, { jsonrpc: '2.0', result: null },
+      { jsonrpc: '2.0', result: { value: 105000 } },
+      { jsonrpc: '2.0', result: { context: { slot: '102' }, value: 105000 } }];
+    for (const response of unsafeBodies) {
+      executor.connection._rpcRequest = async () => response;
+      const before = signatures;
+      await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), { code: 'CLEANUP_FEE_RESPONSE_INVALID' });
+      assert.strictEqual(signatures, before);
+    }
+    // Two primary null quotes can use one preconfigured read-only fallback.
+    // Its fee must use its own blockhash's minimum slot; only the eventual
+    // validated transaction is signed, never a failed primary candidate.
+    const rpcMarker = 'https://never-expose.invalid/private-provider-body';
+    for (const primaryFailure of ['NULL', 'RPC_ERROR', 'STALE']) {
+      const calls = [];
+      executor.connection._rpcRequest = async () => {
+        calls.push('PRIMARY');
+        if (primaryFailure === 'RPC_ERROR') return { jsonrpc: '2.0', id: 1, error: { code: -32016, message: rpcMarker } };
+        return { jsonrpc: '2.0', id: 1, result: { context: { slot: primaryFailure === 'STALE' ? 101 : 102 },
+          value: primaryFailure === 'NULL' ? null : 105000 } };
+      };
+      const fallbackHash = Keypair.fromSeed(Buffer.alloc(32, 99)).publicKey.toBase58();
+      executor.contextFallbackConnection = {
+        async getLatestBlockhashAndContext(config) {
+          assert.deepStrictEqual(config, { commitment: 'finalized', minContextSlot: 101 });
+          return { context: { slot: 104 }, value: { blockhash: fallbackHash, lastValidBlockHeight: 210 } };
+        },
+        async _rpcRequest(method, args) {
+          calls.push('FALLBACK');
+          assert.strictEqual(method, 'getFeeForMessage');
+          assert.deepStrictEqual(args[1], { commitment: 'finalized', minContextSlot: 104 });
+          return { jsonrpc: '2.0', id: 1, result: { context: { slot: 105 }, value: 105000 } };
+        },
+      };
+      const before = signatures;
+      const fallbackPrepared = await executor.prepareEmptyTokenAccountClose(candidate);
+      assert.deepStrictEqual(calls, ['PRIMARY', 'PRIMARY', 'FALLBACK']);
+      assert.strictEqual(fallbackPrepared.blockhash, fallbackHash);
+      assert.strictEqual(fallbackPrepared.contextSlot, 105);
+      assert.strictEqual(signatures - before, 1);
+      assert.strictEqual(fallbackPrepared.recoveryDiagnostics.quoteAttempts.length, 3);
+      assert.strictEqual(fallbackPrepared.recoveryDiagnostics.quoteAttempts[2].rpc, 'FALLBACK');
+      assert(!JSON.stringify(fallbackPrepared.recoveryDiagnostics).includes(rpcMarker));
+      assert(!JSON.stringify(fallbackPrepared.recoveryDiagnostics).includes(fallbackPrepared.rawTransactionBase64));
+    }
+    executor.connection._rpcRequest = async () => ({ jsonrpc: '2.0', id: 1,
+      result: { context: { slot: 102 }, value: null } });
+    executor.contextFallbackConnection._rpcRequest = async () => ({ jsonrpc: '2.0', id: 1,
+      result: { context: { slot: 104 }, value: null } });
+    const beforeFallbackFailure = signatures;
+    await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), error => {
+      assert.strictEqual(error.code, 'CLEANUP_FEE_UNAVAILABLE');
+      assert.deepStrictEqual(error.recoveryDiagnostics.quoteAttempts.map(row => row.rpc), ['PRIMARY', 'PRIMARY', 'FALLBACK']);
+      assert(error.recoveryDiagnostics.quoteAttempts.every(row => row.result === 'FEE_UNAVAILABLE'));
+      return true;
+    });
+    assert.strictEqual(signatures, beforeFallbackFailure);
+    const fallbackAbort = new AbortController();
+    executor.contextFallbackConnection._rpcRequest = async () => {
+      fallbackAbort.abort();
+      return { jsonrpc: '2.0', id: 1, result: { context: { slot: 104 }, value: 105000 } };
+    };
+    await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate, { signal: fallbackAbort.signal }), error => {
+      assert.strictEqual(error.code, 'ACCOUNT_RECOVERY_ABORTED');
+      assert.strictEqual(error.recoveryDiagnostics.quoteAttempts.at(-1).result, 'ABORTED');
+      return true;
+    });
+    assert.strictEqual(signatures, beforeFallbackFailure, 'fallback cannot sign after deadline');
+    let unsafeFallbackCalls = 0;
+    executor.connection._rpcRequest = async () => ({ jsonrpc: '2.0', id: 1,
+      result: { context: { slot: 102 }, value: 200000 } });
+    executor.contextFallbackConnection._rpcRequest = async () => { unsafeFallbackCalls++; throw new Error('Not allowed'); };
+    await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), error => {
+      assert.strictEqual(error.code, 'CLEANUP_FEE_TOO_HIGH');
+      assert.strictEqual(error.recoveryDiagnostics.quoteAttempts.length, 1);
+      assert.strictEqual(error.recoveryDiagnostics.quoteAttempts[0].result, 'FEE_TOO_HIGH');
+      return true;
+    });
+    assert.strictEqual(unsafeFallbackCalls, 0, 'fallback must not override a valid fee cap rejection');
+    assert.strictEqual(signatures, beforeFallbackFailure);
+    delete executor.connection._rpcRequest;
+    delete executor.contextFallbackConnection;
+    executor.connection.getFeeForMessage = feeReader;
     for (const fundedLamports of [null, 1.5]) {
       const before = signatures;
       await assert.rejects(executor.prepareEmptyTokenAccountClose({ ...candidate, fundedLamports }),
@@ -297,6 +410,8 @@ async function assertCleanup() {
     Transaction.prototype.sign = originalSign;
     executor.connection.getFeeForMessage = feeReader;
     executor.connection.getLatestBlockhashAndContext = hashReader;
+    delete executor.connection._rpcRequest;
+    delete executor.contextFallbackConnection;
     currentInfo = accountInfo();
   }
   const prepared = await executor.prepareEmptyTokenAccountClose(candidate);

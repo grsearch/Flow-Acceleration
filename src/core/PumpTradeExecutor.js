@@ -468,17 +468,55 @@ class PumpTradeExecutor {
   // SELL, where a nonempty/extended account could cause the entire sell to fail.
   async prepareEmptyTokenAccountClose(candidate, { signal } = {}) {
     let stage = 'CANDIDATE';
+    const recoveryDiagnostics = { version: 'ACCOUNT_RECOVERY_DIAGNOSTICS_V1',
+      account: { status: 'UNCHECKED', tokenAmountRaw: null, contextSlot: null, reason: null },
+      quoteAttempts: [] };
     try {
-      return await this._prepareEmptyTokenAccountClose(candidate, { signal, onStage: value => { stage = value; } });
+      const prepared = await this._prepareEmptyTokenAccountClose(candidate, {
+        signal, recoveryDiagnostics, onStage: value => { stage = value; },
+      });
+      return { ...prepared, recoveryDiagnostics };
     } catch (error) {
       // Stable stage only: do not expose RPC URLs, provider bodies or wallet keys.
       const failure = error instanceof Error ? error : errorWithCode('Cleanup RPC failed', 'ACCOUNT_RECOVERY_RPC_ERROR');
       failure.recoveryStage = stage;
+      if (stage === 'ACCOUNT_SNAPSHOT') {
+        recoveryDiagnostics.account.status = 'REJECTED';
+        recoveryDiagnostics.account.reason = String(failure.code || 'ACCOUNT_SNAPSHOT_UNAVAILABLE');
+      }
+      failure.recoveryDiagnostics = recoveryDiagnostics;
       throw failure;
     }
   }
 
-  async _prepareEmptyTokenAccountClose(candidate, { signal, onStage }) {
+  async _recoveryFeeForMessage(connection, message, minContextSlot) {
+    // web3.js's public helper accepts commitment but omits RPC minContextSlot.
+    // Use this same Connection's transport (and configured endpoint) to require
+    // a bank at least as new as its blockhash. Never introduce a new RPC URL.
+    if (typeof connection?._rpcRequest !== 'function') {
+      // Injected/offline connection adapters may expose only the public helper;
+      // their returned context is still strictly checked before signing.
+      return connection.getFeeForMessage(message, 'finalized');
+    }
+    let response;
+    try {
+      response = await connection._rpcRequest('getFeeForMessage', [
+        Buffer.from(message.serialize()).toString('base64'),
+        { commitment: 'finalized', minContextSlot },
+      ]);
+    } catch (_) { throw errorWithCode('Cleanup fee RPC unavailable', 'CLEANUP_FEE_RPC_ERROR'); }
+    if (response?.error != null) throw errorWithCode('Cleanup fee RPC rejected the request', 'CLEANUP_FEE_RPC_ERROR');
+    if (!response || response.jsonrpc !== '2.0' || !response.result
+      || typeof response.result !== 'object' || Array.isArray(response.result)
+      || !Object.prototype.hasOwnProperty.call(response.result, 'value')
+      || !response.result.context || typeof response.result.context !== 'object'
+      || !Number.isSafeInteger(response.result.context.slot) || response.result.context.slot < 0) {
+      throw errorWithCode('Malformed cleanup fee RPC response', 'CLEANUP_FEE_RESPONSE_INVALID');
+    }
+    return response.result;
+  }
+
+  async _prepareEmptyTokenAccountClose(candidate, { signal, onStage, recoveryDiagnostics }) {
     const read = task => accountRecoveryRead(signal, task);
     const owner = this.signer.publicKey.toBase58();
     const identity = canonicalCandidate(candidate, owner);
@@ -507,14 +545,19 @@ class PumpTradeExecutor {
       commitment: 'finalized', minContextSlot: creationSlot,
     }));
     const contextSlot = normalizedSlot(snapshot?.context?.slot);
+    recoveryDiagnostics.account.contextSlot = contextSlot;
     if (contextSlot === null || contextSlot < creationSlot) throw errorWithCode('Account snapshot is stale', 'ACCOUNT_CONTEXT_STALE');
-    if (!snapshot.value) return { status: 'ABSENT', account: identity.address, owner, contextSlot };
+    if (!snapshot.value) {
+      recoveryDiagnostics.account.status = 'ABSENT';
+      return { status: 'ABSENT', account: identity.address, owner, contextSlot };
+    }
     let empty;
-    try { empty = validateEmptyTokenAccount(identity, snapshot.value, owner); }
+    try { empty = validateEmptyTokenAccount(identity, snapshot.value, owner, recoveryDiagnostics.account); }
     catch (error) {
       if (error.code === 'INVALID_ACCOUNT_FUNDING') throw errorWithCode('Account lamports are invalid', 'ACCOUNT_BALANCE_INVALID');
       throw error;
     }
+    recoveryDiagnostics.account.status = 'EMPTY';
     if (empty.refundLamports !== originalFunding.toString()) {
       throw errorWithCode('Account funding changed since the verified creation', 'ACCOUNT_FUNDING_CHANGED');
     }
@@ -548,43 +591,76 @@ class PumpTradeExecutor {
       }
       if (changed) throw errorWithCode('Account was closed, recreated or refunded after creation', 'ACCOUNT_LIFECYCLE_CHANGED');
     }
-    let latest, transaction, fee;
+    let latest, transaction, fee, quoteContextSlot;
     let unavailableCode = 'CLEANUP_FEE_UNAVAILABLE';
-    // RPC explicitly allows a null fee (e.g. a blockhash not yet visible at
-    // the selected commitment). Refresh at most once, still entirely unsigned.
-    // This does not retry or replace a PREPARED/UNKNOWN signed transaction.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      onStage('BLOCKHASH');
-      const blockhash = await read(() => this.connection.getLatestBlockhashAndContext({ commitment: 'finalized', minContextSlot: contextSlot }));
-      const blockhashSlot = normalizedSlot(blockhash?.context?.slot);
-      if (blockhashSlot === null || blockhashSlot < contextSlot) {
-        unavailableCode = 'CLEANUP_BLOCKHASH_CONTEXT_STALE'; continue;
+    // RPC may return null or a lagging context. Try primary at most twice,
+    // then only an already configured alternative once. Each blockhash/fee
+    // pair stays on one Connection. This path is entirely unsigned and cannot
+    // replace a PREPARED/UNKNOWN transaction.
+    const quoteSources = [{ rpc: 'PRIMARY', connection: this.connection },
+      { rpc: 'PRIMARY', connection: this.connection }];
+    if (this.contextFallbackConnection && this.contextFallbackConnection !== this.connection) {
+      quoteSources.push({ rpc: 'FALLBACK', connection: this.contextFallbackConnection });
+    }
+    for (const source of quoteSources) {
+      const diagnostic = { rpc: source.rpc, blockhashSlot: null, feeSlot: null,
+        feeLamports: null, result: 'PENDING' };
+      recoveryDiagnostics.quoteAttempts.push(diagnostic);
+      try {
+        onStage('BLOCKHASH');
+        const blockhash = await read(() => source.connection.getLatestBlockhashAndContext({ commitment: 'finalized', minContextSlot: contextSlot }));
+        const blockhashSlot = normalizedSlot(blockhash?.context?.slot);
+        diagnostic.blockhashSlot = blockhashSlot;
+        if (blockhashSlot === null || blockhashSlot < contextSlot) {
+          diagnostic.result = 'BLOCKHASH_CONTEXT_STALE';
+          unavailableCode = 'CLEANUP_BLOCKHASH_CONTEXT_STALE'; continue;
+        }
+        latest = blockhash.value;
+        let validHash = false;
+        try { validHash = typeof latest?.blockhash === 'string' && bs58.decode(latest.blockhash).length === 32; } catch (_) {}
+        if (!Number.isSafeInteger(latest?.lastValidBlockHeight) || latest.lastValidBlockHeight < 0
+          || !validHash) {
+          throw errorWithCode('Missing blockhash validity', 'CLEANUP_BLOCKHASH_INVALID');
+        }
+        transaction = new Transaction({ feePayer: this.signer.publicKey,
+          blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight });
+        // Exactly 0.0001 SOL priority budget, independent of the trading CU limit.
+        transaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 20_000 }),
+          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5_000_000 }),
+          createCloseAccountInstruction(new PublicKey(identity.address), this.signer.publicKey,
+            this.signer.publicKey, [], new PublicKey(identity.programId)));
+        onStage('FEE_QUOTE');
+        const feeResponse = await read(() => this._recoveryFeeForMessage(source.connection, transaction.compileMessage(), blockhashSlot));
+        diagnostic.feeSlot = normalizedSlot(feeResponse?.context?.slot);
+        if (feeResponse?.value == null) {
+          diagnostic.result = 'FEE_UNAVAILABLE'; unavailableCode = 'CLEANUP_FEE_UNAVAILABLE'; continue;
+        }
+        const feeSlot = normalizedSlot(feeResponse.context?.slot);
+        if (feeSlot === null || feeSlot < blockhashSlot) {
+          diagnostic.result = 'FEE_CONTEXT_STALE'; unavailableCode = 'CLEANUP_FEE_CONTEXT_STALE'; continue;
+        }
+        if (typeof feeResponse.value !== 'number' || !Number.isSafeInteger(feeResponse.value) || feeResponse.value <= 0) {
+          throw errorWithCode('Fee quote must be a positive integer', 'CLEANUP_FEE_INVALID');
+        }
+        fee = BigInt(feeResponse.value);
+        diagnostic.feeLamports = feeResponse.value;
+        if (fee > 105_000n || fee >= originalFunding) throw errorWithCode('Cleanup fee is not economical', 'CLEANUP_FEE_TOO_HIGH');
+        diagnostic.result = 'READY';
+        quoteContextSlot = Math.max(contextSlot, blockhashSlot, feeSlot);
+        break;
+      } catch (error) {
+        const resultCodes = { CLEANUP_BLOCKHASH_INVALID: 'BLOCKHASH_INVALID',
+          CLEANUP_FEE_INVALID: 'FEE_INVALID', CLEANUP_FEE_TOO_HIGH: 'FEE_TOO_HIGH',
+          CLEANUP_FEE_RESPONSE_INVALID: 'FEE_RESPONSE_INVALID',
+          ACCOUNT_RECOVERY_ABORTED: 'ABORTED' };
+        diagnostic.result = resultCodes[error?.code] || 'RPC_ERROR';
+        if (error?.code === 'CLEANUP_FEE_RPC_ERROR' || isMinimumContextSlotError(error)) {
+          unavailableCode = error?.code === 'CLEANUP_FEE_RPC_ERROR'
+            ? 'CLEANUP_FEE_RPC_ERROR' : 'CLEANUP_BLOCKHASH_CONTEXT_STALE';
+          continue;
+        }
+        throw error;
       }
-      latest = blockhash.value;
-      let validHash = false;
-      try { validHash = typeof latest?.blockhash === 'string' && bs58.decode(latest.blockhash).length === 32; } catch (_) {}
-      if (!Number.isSafeInteger(latest?.lastValidBlockHeight) || latest.lastValidBlockHeight < 0
-        || !validHash) {
-        throw errorWithCode('Missing blockhash validity', 'CLEANUP_BLOCKHASH_INVALID');
-      }
-      transaction = new Transaction({ feePayer: this.signer.publicKey,
-        blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight });
-      // Exactly 0.0001 SOL priority budget, independent of the trading CU limit.
-      transaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 20_000 }),
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5_000_000 }),
-        createCloseAccountInstruction(new PublicKey(identity.address), this.signer.publicKey,
-          this.signer.publicKey, [], new PublicKey(identity.programId)));
-      onStage('FEE_QUOTE');
-      const feeResponse = await read(() => this.connection.getFeeForMessage(transaction.compileMessage(), 'finalized'));
-      if (feeResponse?.value == null) { unavailableCode = 'CLEANUP_FEE_UNAVAILABLE'; continue; }
-      const feeSlot = normalizedSlot(feeResponse.context?.slot);
-      if (feeSlot === null || feeSlot < blockhashSlot) { unavailableCode = 'CLEANUP_FEE_CONTEXT_STALE'; continue; }
-      if (typeof feeResponse.value !== 'number' || !Number.isSafeInteger(feeResponse.value) || feeResponse.value <= 0) {
-        throw errorWithCode('Fee quote must be a positive integer', 'CLEANUP_FEE_INVALID');
-      }
-      fee = BigInt(feeResponse.value);
-      if (fee > 105_000n || fee >= originalFunding) throw errorWithCode('Cleanup fee is not economical', 'CLEANUP_FEE_TOO_HIGH');
-      break;
     }
     if (fee == null) throw errorWithCode('Cleanup quote is unavailable; defer without signing', unavailableCode);
     // Abort can arrive while the final RPC resolves. No late signing after the
@@ -595,7 +671,9 @@ class PumpTradeExecutor {
     return { status: 'READY', ...identity, account: identity.address,
       signature: bs58.encode(transaction.signature), rawTransactionBase64: transaction.serialize().toString('base64'),
       blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight,
-      contextSlot, sourceSignature: candidate.sourceSignature,
+      // A fallback may be ahead of the send Connection. Carry the validated
+      // read watermark into its single preflight, not just the older ATA slot.
+      contextSlot: quoteContextSlot, sourceSignature: candidate.sourceSignature,
       expectedRefundLamports: originalFunding.toString(), estimatedFeeLamports: fee.toString() };
   }
 

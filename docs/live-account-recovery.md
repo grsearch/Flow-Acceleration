@@ -11,7 +11,7 @@
 
 默认启用 FLOW_LIVE_ACCOUNT_RECOVERY_ENABLED=true，仅在 LIVE 模式工作；无需额外定时服务。
 
-每 60 秒后台运行一轮，最多处理 3 个回收候选，另扫描至多 3 条历史订单补齐完整链上资金证据。不是每次买入前扫描钱包；旧订单按 ID 固定小页推进。回收不加入紧急 SELL 指令，不因关闭失败阻止卖出。
+每 60 秒后台运行一轮，最多处理 3 个回收候选，另扫描至多 3 条历史订单补齐完整链上资金证据。不是每次买入前扫描钱包；旧订单按 ID 固定小页推进。回收不加入紧急 SELL 指令，不因关闭失败阻止卖出。已签名结果核对优先；当两个队列都有到期任务且批次上限大于 1 时，为未签账户保留 1 个名额，防止长时间 UNKNOWN 占满所有批次。批次总上限不增加。
 
 历史订单使用数据库已保存签名查询回执；不扫描整个钱包，也不关闭手工持仓的账户。候选建立后至少等待 60 秒，且必须没有该 mint 的活动仓位或未处理交易。历史订单多时需要多轮，不能保证所有旧账户在首次启动即完成。
 
@@ -24,7 +24,13 @@
 5. 同 mint 未决回收时不允许另一笔关闭或新开仓。链上 CloseAccount 也会原子拒绝非零余额；与手工转入发生竞态时宁可失败，不能烧币。
 6. 关闭交易优先费 0.0001 SOL，总网络费校验不超过 0.000105 SOL，且费用必须小于可回收资金。
 
-费用校验使用 finalized blockhash 和对应上下文的费用报价。[Solana getFeeForMessage](https://solana.com/docs/rpc/http/getfeeformessage) 允许返回 `null`；这不是账户资金为零，也不能按零手续费发送。遇到空报价或旧上下文时，最多刷新一次未签名交易报价；仍不可用则保持 PENDING，等待下一轮维护。不会重签 PREPARED/UNKNOWN 交易，不增加广播次数或费用上限。
+费用校验使用 finalized blockhash 和对应上下文的费用报价。[Solana getFeeForMessage](https://solana.com/docs/rpc/http/getfeeformessage) 允许返回 `null`；这不是账户资金为零，也不能按零手续费发送。报价请求明确携带 `minContextSlot`，并再次核验返回槽位不早于本次 blockhash。主 RPC 最多尝试 2 次；仅当已经配置备用 RPC 时，才可追加 1 次未签只读备用报价，且每对 blockhash/fee 必须来自同一连接。单候选总时限仍为 30 秒，超时后禁止继续签名。不会新增 RPC 地址、重签 PREPARED/UNKNOWN 交易、增加广播次数或费用上限。
+
+同一未签失败原因连续出现时，重试间隔按 60 / 120 / 240 / 480 / 600 秒逐步退避，最多 10 分钟（若人工配置的维护周期更长，以其为下限）。原因变化或成功后重置连续失败次数；重启保留下一次检查时间。已签交易仍按普通维护周期查原签名，不采用重新发送来“加速”。最低账户年龄尚未满足时直接安排到期时间，避免每轮占用名额。
+
+`checks` 统计未签账户的准备检查次数，`attempts` 仅统计已经持久化的签名次数，不代表广播成功次数。因此 `attempts=0` 不等于程序没检查。每项记录 `last_checked_at` / `next_attempt_at`、连续失败次数，以及最多 3 条报价的 PRIMARY/FALLBACK 标签、blockhash/fee 槽位、手续费与结果。诊断只保存白名单字段，不保存 RPC URL、凭据或任意响应内容。旧只读快照缺少这些字段时显示未知，不虚构零次检查。
+
+界面把排队未发送、费用报价重试、账户仍有代币、等待交易结束、权限/安全检查、已签结果核对和退款已确认分开展示。概览计数按当前策略全部回收任务汇总，不把最近 20 条详情当作全部。`TOKEN_ACCOUNT_BALANCE_NONZERO` 会延后重查，绝不自动烧掉残余代币；权限不符/委托等危险状态停止自动回收，需人工检查。旧 `TOKEN_ACCOUNT_NOT_SAFELY_EMPTY` 保留笼统安全校验说明，不能反推一定是残余代币。
 
 错误会标明阶段（如 ACCOUNT_SNAPSHOT、ACCOUNT_HISTORY、BLOCKHASH、FEE_QUOTE），区分账户资金非法与 CLEANUP_FEE_UNAVAILABLE / CLEANUP_FEE_CONTEXT_STALE。上轮有处理错误时 health 显示 DEGRADED；`ready` 只表示维护器已初始化，不代表资金已退回。不要仅凭过去笼统的 INVALID_ACCOUNT_FUNDING 错误断定具体 RPC 故障来源。
 

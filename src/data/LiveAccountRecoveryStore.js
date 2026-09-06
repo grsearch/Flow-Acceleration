@@ -1,6 +1,7 @@
 'use strict';
 
 const { PublicKey } = require('@solana/web3.js');
+const { recoveryDiagnostics } = require('../core/AccountRecoveryDiagnostics');
 const VERSION = 'TOKEN_ACCOUNT_FUNDING_V1';
 const TOKEN_PROGRAMS = new Set(['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']);
 const ASSOCIATED = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
@@ -123,17 +124,25 @@ const liveAccountRecoveryMethods = {
     CREATE INDEX IF NOT EXISTS idx_live_orders_signature_position ON live_orders(signature,position_id,id);
     CREATE INDEX IF NOT EXISTS idx_live_orders_mint_status ON live_orders(mint,status,id);`);
     ensure('live_account_recoveries', 'error_stage', 'TEXT');
+    ensure('live_account_recoveries', 'checks', 'INTEGER NOT NULL DEFAULT 0');
+    ensure('live_account_recoveries', 'consecutive_failures', 'INTEGER NOT NULL DEFAULT 0');
+    ensure('live_account_recoveries', 'last_checked_at', 'INTEGER');
+    ensure('live_account_recoveries', 'diagnostics_json', 'TEXT');
   },
 
   liveAccountRecoveryCandidates({ now = Date.now(), limit = 10 } = {}) {
     const n = Math.min(50, Math.max(1, Math.trunc(Number(limit) || 10)));
     const query = this.db.prepare(`SELECT * FROM live_account_recoveries INDEXED BY idx_live_account_recoveries_status_due
       WHERE status=? AND next_attempt_at<=? ORDER BY next_attempt_at,id LIMIT ?`);
-    // Reconcile possibly broadcast bytes before unsigned work, also when new
-    // cleanup is disabled. Each status range is index ordered before LIMIT.
+    // Reconcile possibly broadcast bytes first, also when new cleanup is
+    // disabled. Reserve one slot for unsigned work if both lanes are due so
+    // persistent UNKNOWN receipts cannot starve other accounts indefinitely.
+    // The total batch budget is unchanged, and each range is index bounded.
     const signed = [...query.all('PREPARED', now, n), ...query.all('UNKNOWN', now, n)]
       .sort((a, b) => a.next_attempt_at - b.next_attempt_at || a.id - b.id).slice(0, n);
-    return signed.length === n ? signed : [...signed, ...query.all('PENDING', now, n - signed.length)];
+    const pending = query.all('PENDING', now, n);
+    const signedCount = Math.min(signed.length, pending.length && n > 1 ? n - 1 : n);
+    return [...signed.slice(0, signedCount), ...pending.slice(0, n - signedCount)];
   },
 
   liveAccountRecoveryPendingLocks() {
@@ -243,8 +252,17 @@ const liveAccountRecoveryMethods = {
         if (!row) throw new Error('Recovery candidate missing');
         const fields = { status: 'status', signature: 'signature', refundLamports: 'refund_lamports',
           networkFeeSol: 'network_fee_sol', walletSolDelta: 'wallet_sol_delta', attempts: 'attempts',
-          nextAttemptAt: 'next_attempt_at', error: 'error', errorStage: 'error_stage', updatedAt: 'updated_at' };
+          nextAttemptAt: 'next_attempt_at', error: 'error', errorStage: 'error_stage', updatedAt: 'updated_at',
+          checks: 'checks', consecutiveFailures: 'consecutive_failures', lastCheckedAt: 'last_checked_at' };
         const update = { ...patch, updatedAt: Number.isFinite(patch.updatedAt) ? patch.updatedAt : Date.now() };
+        for (const key of ['checks', 'consecutiveFailures', 'lastCheckedAt']) {
+          if (update[key] != null && (!Number.isSafeInteger(update[key]) || update[key] < 0)) throw new Error('Invalid recovery check diagnostic');
+        }
+        if (patch.diagnostics !== undefined) {
+          const safe = recoveryDiagnostics(patch.diagnostics);
+          update.diagnosticsJson = safe ? JSON.stringify(safe) : null;
+          fields.diagnosticsJson = 'diagnostics_json';
+        }
         if (patch.prepared !== undefined || patch.preparedJson !== undefined) {
           const prepared = patch.prepared ?? patch.preparedJson;
           update.preparedJson = typeof prepared === 'string' ? prepared : JSON.stringify(prepared);
@@ -337,16 +355,24 @@ const liveAccountRecoveryMethods = {
   liveAccountRecoveryPositionStates(positionIds = []) {
     const ids = [...new Set(positionIds.filter(id => Number.isSafeInteger(id) && id > 0))].slice(0, 500);
     const result = new Map(ids.map(id => [id, { account_recovery_states: {}, account_recovery_error: null,
-      account_recovery_error_stage: null }]));
+      account_recovery_error_stage: null, account_recovery_last_checked_at: null,
+      account_recovery_next_attempt_at: null, account_recovery_checks: null }]));
     if (!ids.length || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='live_account_recoveries'").get()) return new Map();
     // Indexed, bounded to the displayed positions; never infer per-position state
     // from the separately truncated recent-20 recovery panel.
-    const hasErrorStage = this.db.pragma('table_info(live_account_recoveries)').some(column => column.name === 'error_stage');
-    const rows = this.db.prepare(`SELECT position_id,status,error,${hasErrorStage ? 'error_stage' : 'NULL AS error_stage'} FROM live_account_recoveries
+    const columns = new Set(this.db.pragma('table_info(live_account_recoveries)').map(column => column.name));
+    const extra = ['error_stage', 'checks', 'last_checked_at'].map(key => columns.has(key) ? key : `NULL AS ${key}`).join(',');
+    const rows = this.db.prepare(`SELECT position_id,status,error,next_attempt_at,${extra} FROM live_account_recoveries
       WHERE position_id IN (${ids.map(() => '?').join(',')}) ORDER BY updated_at DESC,id DESC`).all(...ids);
     for (const row of rows) {
       const value = result.get(row.position_id);
       value.account_recovery_states[row.status] = (value.account_recovery_states[row.status] || 0) + 1;
+      if (columns.has('checks')) value.account_recovery_checks = (value.account_recovery_checks || 0) + row.checks;
+      if (Number.isFinite(row.last_checked_at)) value.account_recovery_last_checked_at = Math.max(value.account_recovery_last_checked_at || 0, row.last_checked_at);
+      if (['PENDING','PREPARED','UNKNOWN'].includes(row.status) && Number.isFinite(row.next_attempt_at)) {
+        value.account_recovery_next_attempt_at = value.account_recovery_next_attempt_at == null
+          ? row.next_attempt_at : Math.min(value.account_recovery_next_attempt_at, row.next_attempt_at);
+      }
       if (!value.account_recovery_error && row.error && row.status !== 'CONFIRMED') {
         value.account_recovery_error = row.error;
         value.account_recovery_error_stage = row.error_stage;
@@ -376,19 +402,39 @@ const liveAccountRecoveryMethods = {
       SUM(p.recovery_refund_sol) AS refund_sol, SUM(p.recovery_network_fee_sol) AS recovery_fee_sol,
       SUM(CASE WHEN p.status='CLOSED' AND p.account_funding_cash_pnl_sol=p.realized_pnl_sol THEN p.cash_after_recovery_pnl_sol END) AS cash_after_recovery_pnl_sol
       FROM live_positions p WHERE ${filter}`).get(...binds);
-    const states = this.db.prepare(`SELECT r.status,COUNT(*) AS n FROM live_account_recoveries r
-      JOIN live_positions p ON p.id=r.position_id WHERE ${filter} GROUP BY r.status`).all(...binds);
+    const groups = this.db.prepare(`SELECT r.status,CASE
+      WHEN r.status IN ('PREPARED','UNKNOWN') THEN 'SIGNED_UNCONFIRMED'
+      WHEN r.status <> 'PENDING' THEN r.status
+      WHEN r.error LIKE 'CLEANUP_FEE_%' OR r.error LIKE 'CLEANUP_BLOCKHASH_%' THEN 'WAITING_FEE_QUOTE'
+      WHEN r.error='TOKEN_ACCOUNT_BALANCE_NONZERO' THEN 'WAITING_ACCOUNT_EMPTY'
+      WHEN r.error IN ('ACTIVE_POSITION_OR_UNRESOLVED_ORDER','STATE_CHANGED_BEFORE_CLOSE') THEN 'WAITING_TRADING'
+      WHEN r.error IS NULL OR r.error='ACCOUNT_RECOVERY_MIN_AGE' THEN 'QUEUED'
+      ELSE 'WAITING_SAFETY' END AS queue_class,COUNT(*) AS n
+      FROM live_account_recoveries r JOIN live_positions p ON p.id=r.position_id
+      WHERE ${filter} GROUP BY r.status,queue_class`).all(...binds);
+    const states = {}, queueCounts = Object.fromEntries(['WAITING_FEE_QUOTE', 'WAITING_ACCOUNT_EMPTY',
+      'WAITING_TRADING', 'WAITING_SAFETY', 'QUEUED', 'SIGNED_UNCONFIRMED', 'CONFIRMED', 'BLOCKED', 'ABSENT']
+      .map(key => [key, 0]));
+    for (const row of groups) {
+      states[row.status] = (states[row.status] || 0) + row.n;
+      queueCounts[row.queue_class] = (queueCounts[row.queue_class] || 0) + row.n;
+    }
     // An independently refreshed read-only Dashboard snapshot can still have
     // the previous ledger schema. Missing diagnostics must not break the page.
-    const hasErrorStage = this.db.pragma('table_info(live_account_recoveries)').some(column => column.name === 'error_stage');
+    const columns = new Set(this.db.pragma('table_info(live_account_recoveries)').map(column => column.name));
+    const extra = ['error_stage', 'checks', 'consecutive_failures', 'last_checked_at', 'diagnostics_json']
+      .map(key => columns.has(key) ? `r.${key}` : `NULL AS ${key}`).join(',');
     const cases = this.db.prepare(`SELECT r.id,r.account_address,r.mint,r.position_id,r.status,r.funded_lamports,
-      r.signature,r.refund_lamports,r.network_fee_sol,r.wallet_sol_delta,r.attempts,r.next_attempt_at,r.error,${hasErrorStage ? 'r.error_stage' : 'NULL AS error_stage'},r.updated_at
+      r.signature,r.refund_lamports,r.network_fee_sol,r.wallet_sol_delta,r.attempts,r.next_attempt_at,r.error,${extra},r.updated_at
       FROM live_account_recoveries r JOIN live_positions p ON p.id=r.position_id WHERE ${filter}
-      ORDER BY r.updated_at DESC,r.id DESC LIMIT 20`).all(...binds);
+      ORDER BY r.updated_at DESC,r.id DESC LIMIT 20`).all(...binds).map(row => {
+        const { diagnostics_json, ...rest } = row;
+        return { ...rest, diagnostics: recoveryDiagnostics(parsed(diagnostics_json)) };
+      });
     return { available: true, summary: { ...summary,
       economic_pnl_sol: summary.closed_positions > 0 && summary.closed_positions === summary.funding_complete_positions
         ? summary.verified_economic_pnl_sol : null,
-      states: Object.fromEntries(states.map(row => [row.status, row.n])) }, cases };
+      states, queueCounts }, cases };
   },
 
   liveAccountRecoveryHealth() {

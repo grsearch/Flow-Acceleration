@@ -1,5 +1,7 @@
 'use strict';
 
+const { recoveryDiagnostics } = require('./AccountRecoveryDiagnostics');
+
 const ERROR_STAGES = new Set(['CANDIDATE', 'CREATION_RECEIPT', 'ACCOUNT_SNAPSHOT',
   'ACCOUNT_HISTORY', 'BLOCKHASH', 'FEE_QUOTE', 'SIGNING', 'BROADCAST', 'RECONCILE']);
 const errorStage = error => ERROR_STAGES.has(error?.recoveryStage) ? error.recoveryStage : null;
@@ -22,6 +24,7 @@ class LiveAccountRecovery {
     this.batchSize = Math.max(1, Math.min(5, Number(config.batchSize) || 3));
     this.backfillBatchSize = Math.max(1, Math.min(10, Number(config.backfillBatchSize) || 3));
     this.minAgeMs = Math.max(30_000, Number(config.minAgeMs) || 60_000);
+    this.maxRetryDelayMs = Math.max(this.intervalMs, 10 * 60_000);
     this.locks = new Map();
     this.timer = null;
     this.running = null;
@@ -115,7 +118,8 @@ class LiveAccountRecovery {
           : !this.ready ? 'UNAVAILABLE' : this.stats.lastRunErrors > 0 ? 'DEGRADED'
             : this.locks.size ? 'RECONCILING' : 'READY',
       intervalMs: this.intervalMs, batchSize: this.batchSize,
-      backfillBatchSize: this.backfillBatchSize, pendingMintLocks: new Set(this.locks.values()).size,
+      backfillBatchSize: this.backfillBatchSize, maxRetryDelayMs: this.maxRetryDelayMs,
+      pendingMintLocks: new Set(this.locks.values()).size,
       ...this.stats };
   }
 
@@ -178,20 +182,41 @@ class LiveAccountRecovery {
     return saved;
   }
 
-  _defer(row, reason, stage = null) {
+  _defer(row, reason, stage = null, { failure = false, diagnostics } = {}) {
     this.stats.deferred += 1;
+    const previous = Number.isSafeInteger(row.consecutive_failures) && row.consecutive_failures >= 0
+      ? row.consecutive_failures : 0;
+    const failures = failure ? Math.min(1000, row.error === reason ? previous + 1 : 1) : 0;
+    // Do not let repeated unsigned RPC failures monopolize the next batch.
+    // Signed reconciliation stays on the normal cadence and never re-signs.
+    const delay = row.status === 'PENDING' && failure
+      ? Math.min(this.maxRetryDelayMs, this.intervalMs * 2 ** Math.min(10, failures - 1))
+      : this.intervalMs;
     return this._save(row, { status: row.status || 'PENDING', error: reason, errorStage: stage,
-      nextAttemptAt: this.now() + this.intervalMs });
+      consecutiveFailures: failures, nextAttemptAt: this.now() + delay,
+      ...(diagnostics !== undefined ? { diagnostics: recoveryDiagnostics(diagnostics) } : {}) });
   }
 
   async _process(row) {
     const id = Number(row.id);
     if (['PREPARED', 'UNKNOWN'].includes(row.status)) {
       this.locks.set(id, row.mint);
-      return this._reconcile(row);
+      try {
+        row = this._save(row, { status: row.status, lastCheckedAt: this.now() });
+        return await this._reconcile(row);
+      } catch (error) {
+        // An RPC exception used to leave next_attempt_at perpetually overdue.
+        // Keep the original signed payload/lock, but release the queue slot
+        // until the next check. Store guards reject resurrecting terminal rows.
+        this._defer(row, 'ACCOUNT_CLOSE_RECONCILE_RETRY', 'RECONCILE', { failure: true });
+        throw error;
+      }
     }
     if (row.status !== 'PENDING' || !this.enabled || !this.canRun()) return;
-    if (this.now() - Number(row.created_at) < this.minAgeMs) return;
+    if (this.now() - Number(row.created_at) < this.minAgeMs) {
+      return this._save(row, { status: 'PENDING', error: 'ACCOUNT_RECOVERY_MIN_AGE', errorStage: null,
+        nextAttemptAt: Number(row.created_at) + this.minAgeMs });
+    }
     if ([...this.locks].some(([otherId, mint]) => otherId !== id && mint === row.mint)
       || this.isMintBusy(row.mint) || this.store.liveAccountRecoveryMintBlocked(row.mint)) {
       return this._defer(row, 'ACTIVE_POSITION_OR_UNRESOLVED_ORDER');
@@ -204,6 +229,8 @@ class LiveAccountRecovery {
     this.locks.set(id, row.mint);
     let durable = false;
     try {
+      row = this._save(row, { status: 'PENDING', lastCheckedAt: this.now(),
+        checks: (Number.isSafeInteger(row.checks) && row.checks >= 0 ? row.checks : 0) + 1 });
       const prepared = await this._rpc(signal => this.executor.prepareEmptyTokenAccountClose({
         address: row.account_address, mint: row.mint, owner: row.owner,
         programId: row.token_program, sourceSignature: row.creation_signature,
@@ -211,7 +238,8 @@ class LiveAccountRecovery {
       }, { signal }));
       if (prepared?.status === 'ABSENT') {
         // Absence is NOT an attributed refund. No invented PnL or signature.
-        this._save(row, { status: 'ABSENT', error: 'ACCOUNT_ALREADY_ABSENT_REFUND_UNATTRIBUTED', errorStage: null });
+        this._save(row, { status: 'ABSENT', error: 'ACCOUNT_ALREADY_ABSENT_REFUND_UNATTRIBUTED', errorStage: null,
+          consecutiveFailures: 0, nextAttemptAt: null, diagnostics: recoveryDiagnostics(prepared.recoveryDiagnostics) });
         this.stats.absent += 1;
         return;
       }
@@ -236,7 +264,8 @@ class LiveAccountRecovery {
       durable = true;
       const saved = this._save(row, { status: 'PREPARED', preparedJson: JSON.stringify(prepared),
         signature: prepared.signature, attempts: (Number(row.attempts) || 0) + 1,
-        nextAttemptAt: this.now() + this.intervalMs, error: null, errorStage: null });
+        nextAttemptAt: this.now() + this.intervalMs, error: null, errorStage: null,
+        consecutiveFailures: 0, diagnostics: recoveryDiagnostics(prepared.recoveryDiagnostics) });
       // Refuse to use a mismatched/old outbox record even if the store accepted it.
       if (saved.signature !== prepared.signature || saved.prepared_json !== JSON.stringify(prepared)) {
         throw new Error('ACCOUNT_CLOSE_PREPARED_READBACK_MISMATCH');
@@ -259,10 +288,13 @@ class LiveAccountRecovery {
       if (!durable) {
         const permanent = ['ACCOUNT_HISTORY_TRUNCATED', 'ACCOUNT_LIFECYCLE_CHANGED',
           'ACCOUNT_FUNDING_CHANGED', 'UNSAFE_TOKEN_ACCOUNT_EXTENSION', 'UNSAFE_TOKEN_ACCOUNT_STATE',
-          'UNSAFE_TOKEN_ACCOUNT', 'NON_CANONICAL_TOKEN_ACCOUNT', 'CLEANUP_FEE_TOO_HIGH'].includes(error?.code);
+          'UNSAFE_TOKEN_ACCOUNT', 'NON_CANONICAL_TOKEN_ACCOUNT', 'TOKEN_ACCOUNT_AUTHORITY_MISMATCH',
+          'TOKEN_ACCOUNT_DELEGATED', 'CLEANUP_FEE_TOO_HIGH'].includes(error?.code);
         if (permanent) this._save(row, { status: 'BLOCKED', error: error.code, errorStage: errorStage(error),
-          nextAttemptAt: null, walletSolDelta: 0, networkFeeSol: 0, refundLamports: '0' });
-        else this._defer(row, String(error?.code || error?.message || error), errorStage(error));
+          nextAttemptAt: null, walletSolDelta: 0, networkFeeSol: 0, refundLamports: '0',
+          diagnostics: recoveryDiagnostics(error?.recoveryDiagnostics) });
+        else this._defer(row, String(error?.code || error?.message || error), errorStage(error),
+          { failure: true, diagnostics: error?.recoveryDiagnostics ?? null });
       }
       throw error;
     } finally {
@@ -293,7 +325,8 @@ class LiveAccountRecovery {
         throw new Error('ACCOUNT_CLOSE_SETTLEMENT_INCONSISTENT');
       }
       this._save(row, { status: 'CONFIRMED', refundLamports: refund.toString(),
-        walletSolDelta: cash, networkFeeSol: fee, error: null, errorStage: null, nextAttemptAt: null });
+        walletSolDelta: cash, networkFeeSol: fee, error: null, errorStage: null, nextAttemptAt: null,
+        consecutiveFailures: 0 });
       this.locks.delete(id);
       this.stats.confirmed += 1;
       this.stats.lastConfirmedAt = this.now();
