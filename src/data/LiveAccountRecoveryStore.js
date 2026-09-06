@@ -10,6 +10,40 @@ const STATES = new Set([...TERMINAL, 'PENDING', 'PREPARED', 'UNKNOWN']);
 const parsed = value => { try { return JSON.parse(value || 'null'); } catch (_) { return null; } };
 const bigint = value => typeof value === 'string' && /^-?\d+$/.test(value) ? BigInt(value) : null;
 const sol = value => Number(value) / 1e9;
+// Reporting only. Keep the original wallet-cash fields and all live/RUG risk
+// decisions unchanged. A numeric economic value alone is not verified evidence.
+const ECONOMIC_VERIFIED_SQL = `p.mode='LIVE' AND p.status='CLOSED'
+  AND p.account_funding_complete=1 AND p.account_recovery_complete=1
+  AND p.realized_pnl_sol BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308
+  AND p.account_funding_cash_pnl_sol=p.realized_pnl_sol
+  AND p.economic_pnl_sol BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308
+  AND p.economic_return_pct BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308`;
+function economicPositionVerified(row) {
+  return row.mode === 'LIVE' && row.status === 'CLOSED'
+    && row.account_funding_complete === 1 && row.account_recovery_complete === 1
+    && Number.isFinite(row.realized_pnl_sol)
+    && row.account_funding_cash_pnl_sol === row.realized_pnl_sol
+    && Number.isFinite(row.economic_pnl_sol) && Number.isFinite(row.economic_return_pct);
+}
+
+function economicPerformance(summary) {
+  const basis = 'ECONOMIC_VERIFIED_CLOSED_V1';
+  if (!summary) return { basis, status: 'UNAVAILABLE', closed_positions: null,
+    verified_closed_positions: null, unverified_closed_positions: null, wins: null,
+    win_rate_pct: null, average_return_pct: null, verified_pnl_sol: null,
+    total_pnl_sol: null, coverage_pct: null };
+  const closed = Number(summary.closed_positions) || 0;
+  const verified = Number(summary.funding_complete_positions) || 0;
+  const wins = Number(summary.economic_wins) || 0;
+  return { basis, status: !closed ? 'EMPTY' : verified === closed ? 'COMPLETE' : 'PARTIAL',
+    closed_positions: closed, verified_closed_positions: verified,
+    unverified_closed_positions: closed - verified, wins,
+    win_rate_pct: verified > 0 ? wins / verified * 100 : null,
+    average_return_pct: verified > 0 ? summary.average_economic_return_pct : null,
+    verified_pnl_sol: verified > 0 ? summary.verified_economic_pnl_sol : null,
+    total_pnl_sol: closed > 0 && verified === closed ? summary.verified_economic_pnl_sol : null,
+    coverage_pct: closed > 0 ? verified / closed * 100 : null };
+}
 const canonical = account => {
   try { return TOKEN_PROGRAMS.has(account.programId) && account.mint !== WSOL
     && PublicKey.findProgramAddressSync([new PublicKey(account.owner).toBuffer(),
@@ -323,13 +357,21 @@ const liveAccountRecoveryMethods = {
 
   liveAccountRecoveryDashboard(strategyId = null) {
     if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='live_account_recoveries'").get()) return { available: false, summary: null, cases: [] };
+    const positionColumns = new Set(this.db.pragma('table_info(live_positions)').map(column => column.name));
+    if (!['economic_pnl_sol', 'economic_return_pct', 'account_funding_complete', 'account_recovery_complete',
+      'account_funding_cash_pnl_sol', 'account_retained_funding_sol', 'recovery_refund_sol',
+      'recovery_network_fee_sol', 'cash_after_recovery_pnl_sol'].every(column => positionColumns.has(column))) {
+      return { available: false, summary: null, cases: [] };
+    }
     const filter = strategyId ? "p.mode='LIVE' AND p.strategy_id=?" : "p.mode='LIVE'";
     const binds = strategyId ? [strategyId] : [];
     const summary = this.db.prepare(`SELECT COUNT(*) AS positions,
       SUM(p.status='CLOSED') AS closed_positions,
       SUM(CASE WHEN p.status='CLOSED' THEN p.realized_pnl_sol END) AS cash_pnl_sol,
-      SUM(p.status='CLOSED' AND p.economic_pnl_sol IS NOT NULL AND p.account_funding_cash_pnl_sol=p.realized_pnl_sol) AS funding_complete_positions,
-      SUM(CASE WHEN p.status='CLOSED' AND p.account_funding_cash_pnl_sol=p.realized_pnl_sol THEN p.economic_pnl_sol END) AS verified_economic_pnl_sol,
+      COALESCE(SUM(CASE WHEN ${ECONOMIC_VERIFIED_SQL} THEN 1 ELSE 0 END),0) AS funding_complete_positions,
+      SUM(CASE WHEN ${ECONOMIC_VERIFIED_SQL} THEN p.economic_pnl_sol END) AS verified_economic_pnl_sol,
+      COALESCE(SUM(CASE WHEN ${ECONOMIC_VERIFIED_SQL} AND p.economic_pnl_sol > 0 THEN 1 ELSE 0 END),0) AS economic_wins,
+      AVG(CASE WHEN ${ECONOMIC_VERIFIED_SQL} THEN p.economic_return_pct END) AS average_economic_return_pct,
       SUM(p.account_retained_funding_sol) AS retained_funding_sol,
       SUM(p.recovery_refund_sol) AS refund_sol, SUM(p.recovery_network_fee_sol) AS recovery_fee_sol,
       SUM(CASE WHEN p.status='CLOSED' AND p.account_funding_cash_pnl_sol=p.realized_pnl_sol THEN p.cash_after_recovery_pnl_sol END) AS cash_after_recovery_pnl_sol
@@ -355,4 +397,4 @@ const liveAccountRecoveryMethods = {
   },
 };
 
-module.exports = { liveAccountRecoveryMethods, validateFunding };
+module.exports = { liveAccountRecoveryMethods, validateFunding, economicPositionVerified, economicPerformance };

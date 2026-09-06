@@ -70,6 +70,10 @@ try {
   assert.equal(pendingDisplay.account_recovery_error, 'CLEANUP_FEE_UNAVAILABLE');
   assert.equal(pendingDisplay.account_recovery_error_stage, 'FEE_QUOTE');
   approx(pendingDisplay.economic_cost_basis_sol, 0.0201);
+  assert.equal(pendingDisplay.economic_verified, true, 'unsigned pending refund does not erase verified account assets');
+  const pendingPerformance = store.liveTradingDashboard({ strategyId: 'test' }).performance;
+  assert.equal(pendingPerformance.status, 'COMPLETE');
+  approx(pendingPerformance.total_pnl_sol, original.realizedPnlSol + F);
   approx(pendingDisplay.cash_after_recovery_pnl_sol, original.realizedPnlSol, 'pending funds are not a cash refund');
   approx(pendingDisplay.recovery_refund_sol, 0);
   const prepared = { signature: 'close-1', rawTransactionBase64: 'fixture-only', account: ata };
@@ -83,6 +87,8 @@ try {
   assert.equal(store.liveAccountRecoveryPendingLocks().length, 1);
   assert.throws(() => store.updateLiveAccountRecovery(recovery.id, { status: 'PENDING' }), /unsigned pending/);
   assert.equal(p(1).economic_pnl_sol, null, 'prepared/unknown close cannot claim fully reconciled economic PnL');
+  assert.equal(store.liveTradingDashboard({ strategyId: 'test' }).performance.verified_closed_positions, 0);
+  assert.equal(store.liveTradingDashboard({ strategyId: 'test' }).performance.total_pnl_sol, null);
   assert.throws(() => store.updateLiveAccountRecovery(recovery.id, { signature: 'another-close' }), /immutable/);
   const close = { status: 'CONFIRMED', refundLamports: FUND, networkFeeSol: 0.000105,
     walletSolDelta: F - 0.000105, nextAttemptAt: null };
@@ -98,6 +104,10 @@ try {
   assert.deepEqual(confirmedDisplay.account_recovery_states, { CONFIRMED: 1 });
   assert.equal(confirmedDisplay.account_recovery_error, null);
   assert.equal(confirmedDisplay.account_recovery_error_stage, null);
+  assert.equal(confirmedDisplay.economic_verified, true);
+  const confirmedPerformance = store.liveTradingDashboard({ strategyId: 'test' }).performance;
+  approx(confirmedPerformance.total_pnl_sol, pendingPerformance.total_pnl_sol - 0.000105);
+  assert.equal(confirmedPerformance.status, 'COMPLETE', 'refund is not counted twice as economic profit');
   approx(p(2).recovery_refund_sol, 0, 'refund stays with creator position, not later shared-ATA trader');
   assert.throws(() => store.updateLiveAccountRecovery(recovery.id, { status: 'PENDING' }), /transition/);
   store.updateLiveOrder(buyId, { execution: { extra: true, settlement: { transactionSlot: 100 } } });
