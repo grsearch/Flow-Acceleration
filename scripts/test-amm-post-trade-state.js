@@ -3,11 +3,12 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { PumpEventParser, BorshReader } = require('../src/core/PumpEventParser');
-const { executableBuy, executableSell } = require('../src/core/ShadowExecutionModel');
 const fixtures = require('./fixtures/amm-post-trade-receipts.json').fixtures;
 const AMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
 const WSOL = 'So11111111111111111111111111111111111111112';
-const parser = new PumpEventParser({ pumpAmmProgramId: AMM, wsolMint: WSOL });
+const rejected = [];
+const parser = new PumpEventParser({ pumpAmmProgramId: AMM, wsolMint: WSOL,
+  onRejectedEvent: (record) => rejected.push(record) });
 const idl = JSON.parse(fs.readFileSync(require.resolve('@pump-fun/pump-swap-sdk')
   .replace(/dist[\\/].*$/, 'src/idl/pump_amm.json'), 'utf8'));
 
@@ -161,16 +162,20 @@ function testNegativeVirtualQuote() {
 }
 
 function assertInvalid(fixture, buffer) {
+  const before = rejected.length;
   const events = parse(fixture, [buffer]);
-  assert.equal(events.length, 1, 'well-formed but impossible reserve state remains an explicitly invalid observation');
-  const event = events[0];
-  assert.equal(event.ammQuoteState, 'INVALID');
-  assert.equal(event.poolBaseReservesRaw, null);
-  assert.equal(event.poolQuoteReservesRaw, null);
-  assert.equal(event.reservePrice, null);
-  assert.ok(event.price > 0, 'keep the event price for diagnostics, not executable fallback');
-  assert.equal(executableBuy(event, 0.1, event.price).available, false);
-  assert.equal(executableSell(event, 100, event.price).available, false);
+  assert.equal(events.length, 0, 'impossible reserves must not contaminate trade/flow signals');
+  assert.equal(rejected.length, before + 1);
+  const record = rejected.at(-1);
+  assert.equal(record.reason, 'INVALID_AMM_RESERVES');
+  assert.equal(record.details.ammQuoteState, 'INVALID');
+  assert.ok(record.details.ammQuoteStateReason);
+  assert.equal(record.details.poolBaseReservesRaw, null);
+  assert.equal(record.details.poolQuoteReservesRaw, null);
+  assert.equal(record.details.reservePrice, null);
+  assert.ok(record.details.price > 0, 'retain bounded diagnostic evidence in quarantine, not the trade path');
+  assert.equal(record.dataLength, buffer.length);
+  assert.match(record.dataHash, /^[0-9a-f]{64}$/);
 }
 
 function testMalformedAndImpossibleStatesFailClosed() {

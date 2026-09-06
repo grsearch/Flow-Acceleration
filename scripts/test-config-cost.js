@@ -197,7 +197,7 @@ assert.strictEqual(config.liveTrading.dryRun, true);
 assert.strictEqual(config.liveTrading.maxDailySpendSol, undefined);
 assert.strictEqual(config.liveTrading.maxDailyTrades, undefined);
 assert.strictEqual(config.liveTrading.maxDailyLossSol, undefined);
-assert.strictEqual(config.liveTrading.maxConcurrentPositions, 10);
+assert.strictEqual(config.liveTrading.maxConcurrentPositions, 3);
 assert.strictEqual(config.liveTrading.maxConcurrentPositionsPerMint, 3);
 assert.strictEqual(config.liveTrading.failedEntryCooldownMs, 30_000);
 assert.strictEqual(config.liveTrading.failedEntryWindowMs, 5 * 60_000);
@@ -282,7 +282,7 @@ assert.strictEqual(liveContinuityT12.exitMode, 'TRAILING');
 assert.strictEqual(liveContinuityT12.minHoldMs, 10_000);
 assert.strictEqual(liveContinuityT12.trailingActivationPct, 15);
 assert.strictEqual(liveContinuityT12.trailingStopPct, 12.5);
-assert.strictEqual(liveO90.entryEnabled, true);
+assert.strictEqual(liveO90.entryEnabled, false);
 assert.strictEqual(liveO90.positionSizeSol, 0.1);
 assert.strictEqual(liveO90.postMigrationGate.windowMs, 5_000);
 assert.strictEqual(liveO90.postMigrationGate.minBuyers, 25);
@@ -297,7 +297,7 @@ assert.strictEqual(liveQualityLeader.maxHoldMs, 300_000);
 assert.strictEqual(liveQualityLeader.protectedFloors.length, 4);
 assert.strictEqual(liveQualityLeader.maxEntryPriceJumpPct, 10);
 assert.strictEqual(liveQualityLeader.maxShadowEntryImpactPct, 12);
-assert.strictEqual(liveQualityLeaderGuard.entryEnabled, true);
+assert.strictEqual(liveQualityLeaderGuard.entryEnabled, false);
 assert.strictEqual(liveQualityLeaderGuard.positionSizeSol, 0.1);
 assert.strictEqual(liveQualityLeaderGuard.code, 'QL-STRICT-GUARD');
 assert.strictEqual(liveQualityLeaderGuard.market, 'PUMP_BONDING_CURVE');
@@ -327,7 +327,7 @@ assert.strictEqual(
   liveGe30V2Exec01.sourceShadowCohortId,
   'POST_GE30_D25_32_R24_F1_EXEC1_V2_R2_H15_0_1SOL',
 );
-assert.strictEqual(liveGd25X8.entryEnabled, true);
+assert.strictEqual(liveGd25X8.entryEnabled, false);
 assert.strictEqual(liveGd25X8.positionSizeSol, 0.1);
 assert.strictEqual(liveGd25X8.code, 'POST-GD25-35-X8');
 assert.strictEqual(liveGd25X8.exitMode, 'FIXED_HOLD');
@@ -340,7 +340,7 @@ assert.strictEqual(liveLaunchPullback.exitMode, 'FIXED_HOLD');
 assert.strictEqual(liveLaunchPullback.fixedHoldMs, 30_000);
 assert.strictEqual(liveLaunchPullback.sourceShadowCohortId, 'FO_RB10_30S');
 assert.strictEqual(liveGraduationAccel.positionSizeSol, 0.1);
-assert.strictEqual(liveGraduationAccel.entryEnabled, true);
+assert.strictEqual(liveGraduationAccel.entryEnabled, false);
 assert.strictEqual(liveGraduationAccel.code, 'O-C80-D5-B2-S0-NC');
 assert.strictEqual(liveGraduationAccel.ruleVersion, 'graduation_accel_o_c80_d5_b2_s0_nc_live_v4');
 assert.strictEqual(liveGraduationAccel.market, 'PUMP_BONDING_CURVE');
@@ -382,7 +382,7 @@ assert.strictEqual(liveCobD.sourceShadowCohortId, 'COB_D_T30_10_X60');
 assert.strictEqual(config.cyaOrganicBurstShadow.enabled, true);
 assert.ok(config.cyaOrganicBurstShadow.entryProfiles
   .filter((profile) => ['COB_D', 'COB_F'].includes(profile.id))
-  .every((profile) => profile.newEntriesEnabled === true));
+  .every((profile) => profile.newEntriesEnabled === false));
 assert.deepStrictEqual(
   config.cyaOrganicBurstShadow.entryProfiles
     .filter((profile) => ['COB_D', 'COB_F'].includes(profile.id))
@@ -451,8 +451,8 @@ assert.strictEqual(liveGd25F1.maxEntrySelfImpactPct, 10);
 assert.strictEqual(liveGd25F1.trailingActivationPct, 8);
 assert.strictEqual(liveGd25F1.trailingStopPct, 3);
 assert.strictEqual(liveGd25F1.maxHoldMs, 15_000);
-assert.strictEqual(config.liveTrading.priorityFeeSol, 0.0005);
-assert.strictEqual(config.liveTrading.priorityFeeMicroLamports, 2_000_000);
+assert.strictEqual(config.liveTrading.priorityFeeSol, 0.0001);
+assert.strictEqual(config.liveTrading.priorityFeeMicroLamports, 400_000);
 assert.strictEqual(liveV3.market, 'PUMP_AMM');
 assert.strictEqual(liveV3.dropMinPct, 20);
 assert.strictEqual(liveV3.dropMaxPct, 35);
@@ -472,8 +472,8 @@ assert.strictEqual(config.liveTrading.strategies
 assert.strictEqual(config.liveTrading.buySlippagePct, 10);
 assert.strictEqual(config.liveTrading.sellSlippagePct, 15);
 assert.strictEqual(config.liveTrading.emergencySellSlippagePct, 100);
-assert.strictEqual(config.liveTrading.emergencyPriorityFeeSol, 0.002);
-assert.strictEqual(config.liveTrading.emergencyPriorityFeeMicroLamports, 8_000_000);
+assert.strictEqual(config.liveTrading.emergencyPriorityFeeSol, 0.0001);
+assert.strictEqual(config.liveTrading.emergencyPriorityFeeMicroLamports, 400_000);
 assert.strictEqual(config.liveTrading.emergencyExitRetryDelayMs, 100);
 assert.strictEqual(config.liveTrading.entryReconcileCount, 5);
 assert.strictEqual(config.liveTrading.expiredEntryReleaseMs, 10 * 60_000);
@@ -485,10 +485,7 @@ assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
   [
-    'POST-GD25-35-X8',
-    'O90-M5-STAIR120',
-    'QL-STRICT-GUARD',
-    'O-C80-D5-B2-S0-NC',
+    'LEGACY-EARLY-FLOW-RUGX',
   ],
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
@@ -803,6 +800,7 @@ assert.deepStrictEqual(
     ['GFR_300', 30_000, 1],
     ['GFR_600', 30_000, 1],
     ['GFR_1000', 30_000, 1],
+    ['GD25_35_POST_EXEC1_V1', null, null],
   ],
 );
 assert.deepStrictEqual(
@@ -843,6 +841,7 @@ assert.deepStrictEqual(
     'XB50', 'XB25',
     'V2_R2_H10', 'V2_R2_H15', 'V2_TIME_R2_H15', 'V2_B75_H20', 'V2_B75_H60',
     'XR3_H12', 'XR3_H15', 'XR4_H12', 'XR4_H15',
+    'X8_POST_EXEC1_V1',
   ],
 );
 assert.ok(config.migratedDropReboundShadow.exitProfiles
@@ -1227,11 +1226,16 @@ assert.deepStrictEqual(
     'PMO-FLOW-H20-A50-D20-X300', 'PMO-FLOW-H20-A50-D20-X300-RUGX',
     'PMO-FLOW-H20-A75-D25-X300', 'PMO-FLOW-H20-A75-D25-X300-RUGX',
     'PMO-FLOW-H25-A100-D30-X600', 'PMO-FLOW-H25-A100-D30-X600-RUGX',
+    'LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX',
   ],
 );
 assert.ok(config.migrationSecondLegShadow.cohorts
-  .filter((cohort) => cohort.enabled !== false)
+  .filter((cohort) => cohort.enabled !== false && cohort.id.startsWith('PMO-FLOW-'))
   .every((cohort) => cohort.positionSizeSol === 0.1 && !cohort.liveStrategyId));
+assert.ok(config.migrationSecondLegShadow.cohorts
+  .filter((cohort) => cohort.id.startsWith('LEGACY-EARLY-FLOW-'))
+  .every((cohort) => cohort.positionSizeSol === 0.02
+    && cohort.liveBridgeEnabled === (cohort.id === 'LEGACY-EARLY-FLOW-RUGX')));
 assert.ok(config.migrationSecondLegShadow.cohorts
   .filter((cohort) => cohort.id.startsWith('PMO-FLOW-') && cohort.id.endsWith('-RUGX'))
   .every((cohort) => cohort.rugGuardMode === 'HARD_BLOCK'

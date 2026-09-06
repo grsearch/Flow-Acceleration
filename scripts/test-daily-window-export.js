@@ -63,6 +63,13 @@ function main() {
       smart_event_id INTEGER PRIMARY KEY, position_id INTEGER,
       accounting_status TEXT NOT NULL, created_at INTEGER NOT NULL
     );
+    CREATE TABLE smart_wallet_events (
+      id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, wallet TEXT, mint TEXT
+    );
+    CREATE TABLE parser_event_quarantine (
+      id INTEGER PRIMARY KEY, received_at_ms INTEGER NOT NULL, created_at INTEGER NOT NULL,
+      reason TEXT
+    );
     CREATE TABLE smart_wallet_consensus_overlay_meta (
       id INTEGER PRIMARY KEY, model_version TEXT NOT NULL,
       started_at INTEGER NOT NULL, last_sync_at INTEGER, updated_at INTEGER NOT NULL
@@ -128,6 +135,20 @@ function main() {
     .run(501, 51, 'PARTIAL', startMs - 20_000);
   db.prepare('INSERT INTO smart_wallet_pnl_processed_events VALUES (?, ?, ?, ?)')
     .run(502, 52, 'CLOSED', startMs - 30_000);
+  db.prepare('INSERT INTO smart_wallet_events VALUES (?, ?, ?, ?)')
+    .run(503, startMs + 80, 'ignored-wallet', 'orphan');
+  db.prepare('INSERT INTO smart_wallet_events VALUES (?, ?, ?, ?)')
+    .run(504, startMs - 80, 'ignored-wallet', 'old-orphan');
+  db.prepare('INSERT INTO smart_wallet_pnl_processed_events VALUES (?, ?, ?, ?)')
+    .run(503, null, 'IGNORED_ORPHAN_SELL', endMs + 1000);
+  db.prepare('INSERT INTO smart_wallet_pnl_processed_events VALUES (?, ?, ?, ?)')
+    .run(504, null, 'IGNORED_ORPHAN_SELL', startMs - 70);
+  db.prepare('INSERT INTO parser_event_quarantine VALUES (?, ?, ?, ?)')
+    .run(1, startMs + 20, endMs + 20, 'RECEIVED_IN_WINDOW');
+  db.prepare('INSERT INTO parser_event_quarantine VALUES (?, ?, ?, ?)')
+    .run(2, startMs - 20, startMs + 20, 'PERSISTED_IN_WINDOW');
+  db.prepare('INSERT INTO parser_event_quarantine VALUES (?, ?, ?, ?)')
+    .run(3, startMs - 20, startMs - 10, 'OUTSIDE');
   db.prepare('INSERT INTO smart_wallet_consensus_overlay_meta VALUES (?, ?, ?, ?, ?)')
     .run(1, 'SWC_OVERLAY_V1', startMs - 20_000, startMs + 100, startMs + 100);
   db.prepare('INSERT INTO smart_wallet_consensus_overlay_rows VALUES (?, ?, ?, ?, ?)')
@@ -209,8 +230,15 @@ function main() {
   assert.deepStrictEqual(
     exported.prepare('SELECT smart_event_id FROM smart_wallet_pnl_processed_events ORDER BY smart_event_id')
       .all().map((row) => row.smart_event_id),
-    [500, 501],
+    [500, 501, 503],
   );
+  assert.deepStrictEqual(exported.prepare(
+    'SELECT id FROM parser_event_quarantine ORDER BY id',
+  ).all().map((row) => row.id), [1, 2],
+  'quarantine must include received-in-window and delayed persistence, not unrelated old rows');
+  assert.strictEqual(exported.prepare(`SELECT position_id FROM smart_wallet_pnl_processed_events
+    WHERE smart_event_id=503`).get().position_id, null,
+  'ignored processed events must survive export even without a position');
   assert.strictEqual(exported.prepare('SELECT COUNT(*) count FROM smart_wallet_consensus_overlay_meta')
     .get().count, 1, 'the overlay deployment boundary must be exported in full');
   assert.deepStrictEqual(

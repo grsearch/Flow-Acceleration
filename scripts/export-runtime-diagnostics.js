@@ -36,9 +36,34 @@ const RUG_THRESHOLDS = `crossMintEnabled templateWindowMs templateMinLargeBuys
   firstCliffCurveMigrationCandidateWalletBuyTxSharePct firstCliffAmmEarlyCandidateRecoveryMaxPct
   firstCliffAmmEarlyCandidateWalletBuyTxSharePct extremeDumpabilityEnabled`.split(/\s+/);
 const SOURCE_FILES = ['src/index.js', 'src/config.js', 'src/core/PreEntryRugRiskTracker.js',
+  'src/core/ResearchCalibrationPolicy.js', 'src/core/EarlyPureBuyBurstShadowSuite.js',
+  'src/core/StrictAmmShadowExecution.js', 'src/core/MigratedDropReboundShadowSuite.js',
   'src/core/UniversalRugGuard.js', 'src/core/RugGuardPolicy.js',
   'src/core/GraduationAccelerationShadowSuite.js', 'src/core/LiveTradingManager.js',
-  'src/core/ShadowExecutionModel.js'];
+  'src/core/ShadowExecutionModel.js', 'src/core/PumpEventParser.js',
+  'src/core/SmartWalletRegistry.js', 'src/core/SmartWalletRegistryMaintenanceWorker.js',
+  'src/core/PumpFlowStream.js', 'src/data/ResearchStore.js',
+  'src/runtime/RuntimeTaskMetrics.js', 'src/runtime/ParserRejectionAudit.js',
+  'scripts/export-research-window.js', 'scripts/export-runtime-diagnostics.js'];
+const PARSER_REASONS = `TRUNCATED_EVENT INVALID_BORSH_BOOL INVALID_STRING_LENGTH
+  PROGRAM_MISMATCH INVALID_RECEIVED_TIMESTAMP INVALID_CHAIN_TIMESTAMP
+  CHAIN_TIMESTAMP_IN_FUTURE INVALID_TRADE_AMOUNT INVALID_AMM_RESERVES
+  INVALID_FEE_BASIS_POINTS INVALID_CURVE_RESERVES INVALID_CREATE_RESERVES
+  INVALID_MIGRATION_AMOUNT MALFORMED_EVENT`.split(/\s+/);
+// These are fixed implementation names, never arbitrary keys from API payloads.
+const TIMED_TASKS = ['parser:transaction', 'maintenance:parserQuarantineFlush',
+  'maintenance:engineCleanup', 'maintenance:labelAdvance', 'maintenance:traderAdvance',
+  'maintenance:refreshAmmSubscriptions',
+  ...['smartWalletRegistry', 'smartWalletRegistryAdvance', 'smartWalletRegistryGraduate',
+    'smartWalletRegistryEvent', 'smartWalletLedgerWake', 'smartVotingSnapshot',
+    'smartConsensusV2', 'smartConsensusV2Event', 'smartConsensusV2Advance',
+    'graduationAcceleration', 'graduationAccelerationAdvance', 'migratedDropRebound',
+    'migratedDropReboundAdvance'].map((name) => `shadow:${name}`),
+  ...['eligibilitySnapshot', 'eligibilitySnapshotForced', 'legacyLedgerRepair',
+    'ledgerQueueConsume', 'workerApply:GRADES', 'workerApply:CLUSTERS']
+    .map((name) => `smartWallet:${name}`)];
+const TASK_FIELDS = `calls failures slowCalls totalMs maxMs lastMs lastStartedAt
+  lastFinishedAt lastLoggedAt`.split(/\s+/);
 
 function numbers(source, keys) {
   const result = {};
@@ -58,6 +83,55 @@ function scopeCounts(source, scopes) {
       roles: numbers(source[scope].roles, ROLES) };
   }
   return result;
+}
+
+function runtimeDiagnostics(source) {
+  const timings = source?.taskTimings;
+  return {
+    parser: { ...numbers(source?.parser, ['acceptedEvents', 'ignoredEvents', 'rejectedEvents',
+      'rejectionCallbackErrors']),
+    rejectedByReason: numbers(source?.parser?.rejectedByReason, PARSER_REASONS),
+    rejectedByProgram: numbers(source?.parser?.rejectedByProgram,
+      ['PUMP', 'PUMP_AMM', 'OTHER', 'UNATTRIBUTED']) },
+    parserQuarantine: numbers(source?.parserQuarantine, ['observed', 'persisted',
+      'duplicatePending', 'dropped', 'invalidRecords', 'writeErrors', 'lastRejectedAt', 'lastPersistedAt',
+      'lastErrorAt', 'pending', 'oldestPendingAt', 'nextAttemptAt', 'capacity']),
+    taskTimings: {
+      scope: 'SYNCHRONOUS_CALLBACK_ONLY',
+      ...numbers(timings, ['untrackedNames', 'logErrors']),
+      tasks: Object.fromEntries(TIMED_TASKS.filter((name) => timings?.tasks?.[name])
+        .map((name) => [name, numbers(timings.tasks[name], TASK_FIELDS)])),
+      recentSlow: (Array.isArray(timings?.recentSlow) ? timings.recentSlow : []).slice(-32)
+        .filter((row) => TIMED_TASKS.includes(row?.name))
+        .map((row) => ({ name: row.name,
+          ...numbers(row, ['startedAt', 'finishedAt', 'durationMs', 'failed']) })),
+    },
+  };
+}
+
+function walletMaintenance(source) {
+  const ledger = source?.actualLedger;
+  return {
+    ...numbers(source, ['enabled', 'workerEnabled', 'eligibilitySnapshotGeneratedAt',
+      'eligibilitySnapshotExpiresAt', 'eligibilitySnapshotDirty', 'eligibilitySnapshotWallets',
+      'eligibilitySnapshotMonitored', 'eligibilitySnapshotVoting', 'actualEventBackfillPending',
+      'actualEventBackfillBatchSize', 'actualEventBackfillIntervalMs', 'maintenanceRunsStarted',
+      'maintenanceRunsCompleted', 'maintenanceRunsFailed', 'maintenanceTimeouts',
+      'lastMaintenanceStartedAt', 'lastMaintenanceCompletedAt', 'lastMaintenanceDurationMs']),
+    actualLedger: {
+      status: ['UNINITIALIZED', 'REPAIRING', 'REPLAY_REQUIRED', 'PENDING', 'CAUGHT_UP']
+        .includes(ledger?.status) ? ledger.status : 'UNKNOWN',
+      ...numbers(ledger, ['generatedAt', 'pendingSampleCount', 'pendingSampleTruncated',
+        'replayRequiredTruncated']),
+      repair: numbers(ledger?.repair, ['high_water_event_id', 'last_scanned_event_id',
+        'scanned_events', 'queued_events', 'started_at', 'updated_at']),
+      // No wallet/mint identifiers, error text, or SQL are copied to the summary.
+      oldestPending: numbers(ledger?.oldestPendingSample,
+        ['smart_event_id', 'event_timestamp_ms', 'attempts']),
+      replayRequiredSampleCount: Array.isArray(ledger?.replayRequired)
+        ? Math.min(10, ledger.replayRequired.length) : 0,
+    },
+  };
 }
 
 function sanitizeHealth(source) {
@@ -80,6 +154,8 @@ function sanitizeHealth(source) {
     liveTrading: numbers(source?.liveTrading, ['enabled', 'dryRun', 'safetyLock',
       'evaluated', 'signals', 'entries', 'exits', 'riskRejected', 'entryFailures',
       'rejectedPositionTrades', 'takeProfitQuoteRejected', 'activePositions', 'lastActionAt']),
+    runtimeDiagnostics: runtimeDiagnostics(source?.runtimeDiagnostics),
+    smartWalletMaintenance: walletMaintenance(source?.smartWalletMaintenance),
     preEntryRugRisk: rug ? {
       ...numbers(rug, RUG_COUNTERS),
       thresholds: numbers(rug.thresholds, RUG_THRESHOLDS),

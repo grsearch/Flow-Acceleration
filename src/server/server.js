@@ -148,7 +148,7 @@ function loadRetentionMaintenance(dbPath) {
 
 class ResearchServer {
   constructor({
-    config, runtimeIdentity = null, runtimeSnapshotState = null, store, engine, stream, labeler,
+    config, runtimeIdentity = null, runtimeSnapshotState = null, runtimeDiagnostics = null, store, engine, stream, labeler,
     trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     flowSmartConfirmShadow = null,
@@ -171,6 +171,7 @@ class ResearchServer {
     launchPullbackShadow = null, launchQualityObserver = null,
     migrationSecondLegObserver = null,
     migrationSecondLegShadow = null,
+    solUsdReference = null,
     migratedDropReboundShadow = null,
     migrationContinuityShadow = null,
     rangeScalperShadow = null,
@@ -187,6 +188,7 @@ class ResearchServer {
     this.config = config;
     this.runtimeIdentity = runtimeIdentity;
     this.runtimeSnapshotState = runtimeSnapshotState;
+    this.runtimeDiagnostics = runtimeDiagnostics;
     this.store = store;
     this.engine = engine;
     this.stream = stream;
@@ -217,6 +219,7 @@ class ResearchServer {
     this.launchQualityObserver = launchQualityObserver;
     this.migrationSecondLegObserver = migrationSecondLegObserver;
     this.migrationSecondLegShadow = migrationSecondLegShadow;
+    this.solUsdReference = solUsdReference;
     this.migratedDropReboundShadow = migratedDropReboundShadow;
     this.migrationContinuityShadow = migrationContinuityShadow;
     this.rangeScalperShadow = rangeScalperShadow;
@@ -263,6 +266,14 @@ class ResearchServer {
 
   _liveSourceDiagnostics(strategy) {
     if (!strategy) return null;
+    if (strategy.id === 'legacy_early_flow_rugx_live') {
+      const runtime = this.migrationSecondLegShadow?.health() || {};
+      const cohort = this.config.migrationSecondLegShadow?.cohorts
+        ?.find((row) => row.id === 'LEGACY-EARLY-FLOW-RUGX');
+      return { kind: 'LEGACY_EARLY_FLOW', ...(runtime.legacyEarlyFlow || {}),
+        liveBridgeEnabled: cohort?.liveBridgeEnabled === true,
+        minLifecycleAgeMs: 15_000, maxLifecycleAgeMs: 25_000 };
+    }
     const migratedProfiles = {
       MIGRATED_GE30_R23_F2_ONLY_G2_XLEG: 'GE30_R23_F2_ONLY',
       MIGRATED_GRT_R23_F3_V2_XLEG: 'GRT_R23_F3_V2',
@@ -435,6 +446,12 @@ class ResearchServer {
           'launch-quality': enabled('launchQualityObserver'),
           'migration-second-leg': enabled('migrationSecondLegObserver')
             || enabled('migrationSecondLegShadow'),
+          'legacy-early-flow-base': enabled('migrationSecondLegShadow')
+            && this.config.migrationSecondLegShadow?.cohorts?.some((row) => row.id === 'LEGACY-EARLY-FLOW-BASE'
+              && row.enabled !== false && row.newEntriesEnabled !== false) === true,
+          'legacy-early-flow-rugx': enabled('migrationSecondLegShadow')
+            && this.config.migrationSecondLegShadow?.cohorts?.some((row) => row.id === 'LEGACY-EARLY-FLOW-RUGX'
+              && row.enabled !== false && row.newEntriesEnabled !== false) === true,
           'holder-growth': enabled('holderGrowthShadow'),
           'quality-leader': enabled('qualityLeaderShadow'),
           'big-winner': enabled('bigWinnerShadow'),
@@ -1395,6 +1412,7 @@ class ResearchServer {
           lastAmmTradeObservedAt: migratedRebound.lastAmmTradeObservedAt,
         },
         smartWalletMaintenance: this.smartWalletRegistry?.maintenanceHealth() || null,
+        runtimeDiagnostics: this.runtimeDiagnostics?.health() || null,
       });
     });
 
@@ -1413,6 +1431,8 @@ class ResearchServer {
         dataLatencyMs: engine.lastTradeAt ? Math.max(0, now - engine.lastTradeAt) : null,
         runtime: this.runtimeIdentity,
         runtimeSnapshot,
+        runtimeDiagnostics: this.runtimeDiagnostics?.health() || null,
+        smartWalletMaintenance: this.smartWalletRegistry?.maintenanceHealth() || null,
         configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         engine,
         labels: this.labeler.stats(),
@@ -1452,6 +1472,7 @@ class ResearchServer {
         launchQualityObserver: this.launchQualityObserver?.health() || null,
         migrationSecondLegObserver: this.migrationSecondLegObserver?.health() || null,
         migrationSecondLegShadow: this.migrationSecondLegShadow?.health() || null,
+        solUsdReference: this.solUsdReference?.health() || null,
         holderGrowthShadow: this.holderGrowthShadow?.health() || null,
         qualityLeaderShadow: this.qualityLeaderShadow?.health() || null,
         bigWinnerShadow: this.bigWinnerShadow?.health() || null,

@@ -4,6 +4,7 @@ require('dotenv').config();
 
 const { costBreakdown, normalizeCostModel } = require('./core/CostModel');
 const { PRIMARY_THRESHOLD_VARIANTS } = require('./core/PrimaryThresholdProfiles');
+const { applyResearchCalibrationPolicy, LIVE_PRIORITY_FEE_SOL } = require('./core/ResearchCalibrationPolicy');
 
 function numberEnv(name, fallback, { min = -Infinity, max = Infinity } = {}) {
   const raw = process.env[name];
@@ -676,6 +677,15 @@ const config = {
 
   liveTrading: {
     ...guardedLiveTrading,
+    lossRugFeedback: {
+      enabled: booleanEnv('FLOW_LIVE_LOSS_RUG_FEEDBACK_ENABLED', true),
+      lossThresholdPct: 50,
+      flushIntervalMs: 1_000,
+      batchSize: 10,
+      recoveryBatchSize: 25,
+      recoveryIntervalMs: 30_000,
+      maxPending: 256,
+    },
     rpcUrl: process.env.FLOW_RPC_URL || '',
     contextFallbackRpcUrl: process.env.FLOW_LIVE_CONTEXT_FALLBACK_RPC_URL || '',
     privateKey: process.env.FLOW_LIVE_PRIVATE_KEY || '',
@@ -724,10 +734,9 @@ const config = {
       min: 100_000,
       max: 1_400_000,
     }),
-    priorityFeeSol: numberEnv('FLOW_LIVE_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
-    emergencyPriorityFeeSol: numberEnv(
-      'FLOW_LIVE_EMERGENCY_PRIORITY_FEE_SOL', 0.002, { min: 0 },
-    ),
+    // User-fixed across ordinary/emergency buys and sells; ignore stale env.
+    priorityFeeSol: LIVE_PRIORITY_FEE_SOL,
+    emergencyPriorityFeeSol: LIVE_PRIORITY_FEE_SOL,
     // The transaction stream is processed-level. Quote against the same newest view,
     // but retain confirmed-level finality for position state and reconciliation.
     readCommitment: process.env.FLOW_LIVE_READ_COMMITMENT || 'processed',
@@ -8939,6 +8948,11 @@ if (graduationPostHo500Baseline) {
   });
 }
 
+applyResearchCalibrationPolicy(config, {
+  focusEnabled: booleanEnv('FLOW_RESEARCH_FOCUS_ENABLED', true),
+  calibrationEntryEnabled: booleanEnv('FLOW_LIVE_LEGACY_EARLY_FLOW_RUGX_ENTRY_ENABLED', true),
+});
+
 // Solana requests priority price per CU, while operators reason about the total
 // fee per transaction. Derive one shared buy/sell CU price from the SOL target.
 config.liveTrading.priorityFeeMicroLamports = priorityFeeMicroLamports(
@@ -9072,7 +9086,9 @@ function validateConfig() {
       && !process.env.FLOW_LIVE_POST_GD20_35_R1_5_5_AGE60_XLEG_V3_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD25_32_R2_4_AGE30_XLEG_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_POST_GD25_35_F1_XLEG_POSITION_SOL
-      && !process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL) {
+      && !process.env.FLOW_LIVE_POST_GD25_35_XLEG_POSITION_SOL
+      && !(config.researchCalibration.liveEntryEnabled
+        && config.researchCalibration.positionSizeSol === 0.02)) {
       errors.push(
         'At least one active live strategy POSITION_SOL must be explicitly set (a previous XLEG size is accepted during migration)',
       );

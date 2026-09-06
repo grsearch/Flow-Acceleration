@@ -2,8 +2,23 @@
 
 const bs58Module = require('bs58');
 const { PublicKey } = require('@solana/web3.js');
+const { createHash } = require('node:crypto');
 
 const bs58 = bs58Module.default || bs58Module;
+
+// Coarse wire sanity, not the trading freshness gate. A replay must supply its
+// historical receivedAt; no comparison with the machine's current date is made.
+const MAX_FUTURE_SKEW_MS = 5 * 60_000;
+const EARLIEST_CHAIN_TIMESTAMP_MS = 1_577_836_800_000; // 2020-01-01, before Pump existed.
+const MAX_SAFE_TIMESTAMP_SECONDS = BigInt(Math.floor(Number.MAX_SAFE_INTEGER / 1000));
+
+class EventValidationError extends Error {
+  constructor(reason, details = {}) {
+    super(reason);
+    this.reason = reason;
+    this.details = details;
+  }
+}
 
 const DISCRIMINATORS = {
   pumpTrade: Buffer.from([189, 219, 127, 211, 78, 230, 97, 238]),
@@ -31,7 +46,7 @@ class BorshReader {
 
   require(size) {
     if (this.offset + size > this.buffer.length) {
-      throw new RangeError(`borsh buffer ended at ${this.offset}; need ${size} bytes`);
+      throw new EventValidationError('TRUNCATED_EVENT', { offset: this.offset, requiredBytes: size });
     }
   }
 
@@ -41,7 +56,9 @@ class BorshReader {
   }
 
   bool() {
-    return this.u8() !== 0;
+    const value = this.u8();
+    if (value !== 0 && value !== 1) throw new EventValidationError('INVALID_BORSH_BOOL', { value });
+    return value === 1;
   }
 
   u16() {
@@ -93,7 +110,7 @@ class BorshReader {
 
   string() {
     const length = this.u32();
-    if (length > 1_048_576) throw new RangeError(`borsh string is too large: ${length}`);
+    if (length > 1_048_576) throw new EventValidationError('INVALID_STRING_LENGTH', { length });
     this.require(length);
     const value = this.buffer.toString('utf8', this.offset, this.offset + length);
     this.offset += length;
@@ -106,9 +123,11 @@ function numberOf(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function timestampMs(seconds) {
-  const value = numberOf(seconds);
-  return value == null ? null : value * 1_000;
+function timestampMs(seconds, details = {}) {
+  if (typeof seconds !== 'bigint' || seconds <= 0n || seconds > MAX_SAFE_TIMESTAMP_SECONDS) {
+    throw new EventValidationError('INVALID_CHAIN_TIMESTAMP', { ...details, chainTimestampSeconds: String(seconds) });
+  }
+  return Number(seconds) * 1_000;
 }
 
 function deriveBondingCurve(mint, pumpProgramId) {
@@ -173,7 +192,10 @@ function decodePumpTrade(data, context) {
   const tokenAmountRaw = reader.u64();
   const isBuy = reader.bool();
   const wallet = reader.pubkey();
-  const chainTimestampMs = timestampMs(reader.i64());
+  const chainTimestampMs = timestampMs(reader.i64(), {
+    type: 'trade', mint, wallet, side: isBuy ? 'BUY' : 'SELL',
+    solAmount: numberOf(solAmountRaw) / 1e9, tokenAmount: numberOf(tokenAmountRaw) / 1e6,
+  });
   const virtualSolReservesRaw = reader.u64();
   const virtualTokenReservesRaw = reader.u64();
   const realSolReservesRaw = reader.u64();
@@ -214,7 +236,7 @@ function decodePumpCreate(data) {
   const bondingCurve = reader.pubkey();
   const user = reader.pubkey();
   const creator = reader.pubkey();
-  const createdAt = timestampMs(reader.i64());
+  const createdAt = timestampMs(reader.i64(), { type: 'create', mint });
   const initialVirtualTokenReservesRaw = reader.u64();
   const initialVirtualSolReservesRaw = reader.u64();
   const initialRealTokenReservesRaw = reader.u64();
@@ -444,22 +466,117 @@ function decodeAmmSell(data, context) {
   };
 }
 
+const EVENT_DECODERS = [
+  ['pumpTrade', 'pumpProgramId', decodePumpTrade],
+  ['pumpCreate', 'pumpProgramId', decodePumpCreate],
+  ['pumpComplete', 'pumpProgramId', decodePumpComplete],
+  ['pumpMigration', 'pumpProgramId', decodePumpMigration],
+  ['ammBuy', 'pumpAmmProgramId', decodeAmmBuy],
+  ['ammSell', 'pumpAmmProgramId', decodeAmmSell],
+];
+
 function decodeEvent(data, currentProgram, context) {
-  if (matches(data, DISCRIMINATORS.pumpTrade)) return decodePumpTrade(data, context);
-  if (matches(data, DISCRIMINATORS.pumpCreate)) return decodePumpCreate(data);
-  if (matches(data, DISCRIMINATORS.pumpComplete)) return decodePumpComplete(data);
-  if (matches(data, DISCRIMINATORS.pumpMigration)) return decodePumpMigration(data);
-  if (matches(data, DISCRIMINATORS.ammBuy)) return decodeAmmBuy(data, context);
-  if (matches(data, DISCRIMINATORS.ammSell)) return decodeAmmSell(data, context);
+  for (const [name, ownerKey, decode] of EVENT_DECODERS) {
+    if (!matches(data, DISCRIMINATORS[name])) continue;
+    // The discriminator is not globally unique. Only the runtime's currently
+    // executing, configured owner may emit this event; missing ownership fails closed.
+    if (!currentProgram || !context[ownerKey] || currentProgram !== context[ownerKey]) {
+      throw new EventValidationError('PROGRAM_MISMATCH', {
+        eventName: name, expectedProgramId: context[ownerKey] || null,
+      });
+    }
+    try {
+      return decode(data, context);
+    } catch (error) {
+      if (error instanceof EventValidationError) error.details = { eventName: name, ...error.details };
+      throw error;
+    }
+  }
   return null;
+}
+
+function validateEvent(event, receivedAt) {
+  if (!Number.isSafeInteger(receivedAt) || receivedAt <= 0) {
+    throw new EventValidationError('INVALID_RECEIVED_TIMESTAMP');
+  }
+  const at = event.chainTimestampMs ?? event.createdAt ?? event.completedAt ?? event.migratedAt;
+  if (!Number.isSafeInteger(at) || at < EARLIEST_CHAIN_TIMESTAMP_MS) {
+    throw new EventValidationError('INVALID_CHAIN_TIMESTAMP', { chainTimestampMs: at });
+  }
+  if (at - receivedAt > MAX_FUTURE_SKEW_MS) {
+    throw new EventValidationError('CHAIN_TIMESTAMP_IN_FUTURE', { chainTimestampMs: at });
+  }
+  const positive = (value) => Number.isFinite(value) && value > 0;
+  if (event.type === 'trade' || event.type === 'ammTrade') {
+    if (![event.solAmount, event.tokenAmount, event.price].every(positive)) {
+      throw new EventValidationError('INVALID_TRADE_AMOUNT');
+    }
+    if (event.type === 'ammTrade') {
+      if (event.ammQuoteState !== 'POST_TRADE_V1' || !positive(event.reservePrice)) {
+        throw new EventValidationError('INVALID_AMM_RESERVES', { ammQuoteStateReason: event.ammQuoteStateReason });
+      }
+      const fees = event.ammExecutionFees;
+      for (const key of ['lpFeeBasisPoints', 'protocolFeeBasisPoints', 'coinCreatorFeeBasisPoints',
+        'cashbackFeeBasisPoints', 'buybackFeeBasisPoints']) {
+        if (fees[key] != null && (!Number.isSafeInteger(fees[key]) || fees[key] < 0 || fees[key] > 10_000)) {
+          throw new EventValidationError('INVALID_FEE_BASIS_POINTS', { field: key, value: fees[key] });
+        }
+      }
+    } else if (!positive(event.reservePrice)
+      || BigInt(event.virtualSolReservesRaw) <= 0n || BigInt(event.virtualTokenReservesRaw) <= 0n
+      || BigInt(event.realSolReservesRaw) > BigInt(event.virtualSolReservesRaw)
+      || BigInt(event.realTokenReservesRaw) > BigInt(event.virtualTokenReservesRaw)) {
+      throw new EventValidationError('INVALID_CURVE_RESERVES');
+    }
+  } else if (event.type === 'create') {
+    if (BigInt(event.initialVirtualTokenReservesRaw) <= 0n || BigInt(event.initialVirtualSolReservesRaw) <= 0n
+      || BigInt(event.tokenTotalSupplyRaw) <= 0n
+      || BigInt(event.initialRealTokenReservesRaw) > BigInt(event.initialVirtualTokenReservesRaw)
+      || BigInt(event.initialRealTokenReservesRaw) > BigInt(event.tokenTotalSupplyRaw)) {
+      throw new EventValidationError('INVALID_CREATE_RESERVES');
+    }
+  } else if (event.type === 'migration'
+    && (!positive(event.solAmount) || BigInt(event.mintAmountRaw) <= 0n)) {
+    throw new EventValidationError('INVALID_MIGRATION_AMOUNT');
+  }
+}
+
+// Bounded whitelist: never retain raw log text, transaction payloads or errors
+// from external callbacks. Raw integer strings preserve the forensic evidence.
+function rejectionDetails(event, error) {
+  const details = {};
+  const input = { ...event, ...error.details };
+  for (const key of ['eventName', 'expectedProgramId', 'type', 'market', 'mint', 'wallet', 'pool', 'side',
+    'chainTimestampMs', 'chainTimestampSeconds', 'solAmount', 'tokenAmount', 'price', 'reservePrice',
+    'virtualSolReservesRaw', 'virtualTokenReservesRaw', 'realSolReservesRaw', 'realTokenReservesRaw',
+    'prePoolBaseReservesRaw', 'prePoolQuoteReservesRaw', 'poolBaseReservesRaw', 'poolQuoteReservesRaw',
+    'virtualQuoteReservesRaw', 'ammQuoteState', 'ammQuoteStateReason', 'offset', 'requiredBytes',
+    'length', 'field', 'value']) {
+    const value = input[key];
+    if (typeof value === 'string') details[key] = value.slice(0, 160);
+    else if (typeof value === 'number' && Number.isFinite(value)) details[key] = value;
+    else if (value === null || typeof value === 'boolean') details[key] = value;
+  }
+  if (event?.ammExecutionFees) {
+    details.ammExecutionFees = {};
+    for (const key of ['quoteAmountRaw', 'poolQuoteAmountRaw', 'userQuoteAmountRaw', 'lpFeeRaw',
+      'protocolFeeRaw', 'coinCreatorFeeRaw', 'cashbackRaw', 'buybackRaw', 'ixName']) {
+      const value = event.ammExecutionFees[key];
+      if (typeof value === 'string') details.ammExecutionFees[key] = value.slice(0, 160);
+    }
+  }
+  return details;
 }
 
 function extractProgramData(logMessages) {
   const stack = [];
   const rows = [];
   for (const line of logMessages || []) {
-    const invoke = /^Program ([1-9A-HJ-NP-Za-km-z]{32,44}) invoke/.exec(line);
+    const invoke = /^Program ([1-9A-HJ-NP-Za-km-z]{32,44}) invoke \[(\d+)\]$/.exec(line);
     if (invoke) {
+      const depth = Number(invoke[2]);
+      if (depth === 1) stack.length = 0;
+      if (depth !== stack.length + 1) { stack.length = 0; continue; }
       stack.push(invoke[1]);
       continue;
     }
@@ -467,6 +584,7 @@ function extractProgramData(logMessages) {
     if (done) {
       const index = stack.lastIndexOf(done[1]);
       if (index >= 0) stack.splice(index);
+      else stack.length = 0; // Broken/truncated ownership must not leak to later data.
       continue;
     }
     const data = /^Program data: ([A-Za-z0-9+/=]+)$/.exec(line);
@@ -478,10 +596,49 @@ function extractProgramData(logMessages) {
 }
 
 class PumpEventParser {
-  constructor({ pumpProgramId, pumpAmmProgramId, wsolMint }) {
+  constructor({ pumpProgramId, pumpAmmProgramId, wsolMint, onRejectedEvent } = {}) {
     this.pumpProgramId = pumpProgramId;
     this.pumpAmmProgramId = pumpAmmProgramId;
     this.wsolMint = wsolMint;
+    this.onRejectedEvent = typeof onRejectedEvent === 'function' ? onRejectedEvent : null;
+    this.stats = { acceptedEvents: 0, ignoredEvents: 0, rejectedEvents: 0,
+      rejectionCallbackErrors: 0, rejectedByReason: {}, rejectedByProgram: {}, lastRejectedEvent: null };
+  }
+
+  getStats() {
+    return { ...this.stats, rejectedByReason: { ...this.stats.rejectedByReason },
+      rejectedByProgram: { ...this.stats.rejectedByProgram },
+      lastRejectedEvent: this.stats.lastRejectedEvent && { ...this.stats.lastRejectedEvent,
+        details: this.copyRejectionDetails(this.stats.lastRejectedEvent.details) } };
+  }
+
+  copyRejectionDetails(details) {
+    return { ...details, ...(details.ammExecutionFees
+      ? { ammExecutionFees: { ...details.ammExecutionFees } } : {}) };
+  }
+
+  recordRejectedEvent(row, error, event, context) {
+    const reason = error instanceof EventValidationError ? error.reason : 'MALFORMED_EVENT';
+    const record = { signature: context.signature, slot: context.slot, eventIndex: context.eventIndex,
+      programId: row.programId, program: row.programId, reason,
+      receivedAtMs: Number.isSafeInteger(context.receivedAt) ? context.receivedAt : null,
+      dataLength: row.data.length, dataHash: createHash('sha256').update(row.data).digest('hex'),
+      details: rejectionDetails(event, error) };
+    this.stats.rejectedEvents += 1;
+    this.stats.rejectedByReason[reason] = (this.stats.rejectedByReason[reason] || 0) + 1;
+    const owner = !row.programId ? 'UNATTRIBUTED' : row.programId === this.pumpProgramId ? 'PUMP'
+      : row.programId === this.pumpAmmProgramId ? 'PUMP_AMM' : 'OTHER';
+    this.stats.rejectedByProgram[owner] = (this.stats.rejectedByProgram[owner] || 0) + 1;
+    this.stats.lastRejectedEvent = record;
+    if (!this.onRejectedEvent) return;
+    try {
+      const result = this.onRejectedEvent({ ...record, details: this.copyRejectionDetails(record.details) });
+      if (result && typeof result.then === 'function') {
+        Promise.resolve(result).catch(() => { this.stats.rejectionCallbackErrors += 1; });
+      }
+    } catch (_) {
+      this.stats.rejectionCallbackErrors += 1;
+    }
   }
 
   parseTransaction(txMessage, receivedAt = Date.now()) {
@@ -493,6 +650,7 @@ class PumpEventParser {
     const candidateMint = extractCandidateMint(meta, this.wsolMint);
     const context = {
       pumpProgramId: this.pumpProgramId,
+      pumpAmmProgramId: this.pumpAmmProgramId,
       candidateMint,
     };
 
@@ -500,9 +658,11 @@ class PumpEventParser {
     const programData = extractProgramData(meta.logMessages || meta.log_messages || []);
     for (let eventIndex = 0; eventIndex < programData.length; eventIndex += 1) {
       const row = programData[eventIndex];
+      let event;
       try {
-        const event = decodeEvent(row.data, row.programId, context);
-        if (!event) continue;
+        event = decodeEvent(row.data, row.programId, context);
+        if (!event) { this.stats.ignoredEvents += 1; continue; }
+        validateEvent(event, receivedAt);
         events.push({
           ...event,
           signature,
@@ -512,9 +672,11 @@ class PumpEventParser {
           receivedAtMs: receivedAt,
           programId: row.programId,
         });
-      } catch (_) {
-        // A program upgrade can append fields, but the documented prefix stays
-        // decodable. Malformed or unrelated Program data is ignored safely.
+        this.stats.acceptedEvents += 1;
+      } catch (error) {
+        // Appended fields after a complete known layout remain compatible;
+        // truncated/misaligned layouts and impossible states are quarantined.
+        this.recordRejectedEvent(row, error, event, { signature, slot, eventIndex, receivedAt });
       }
     }
     return events;
@@ -528,4 +690,6 @@ module.exports = {
   deriveBondingCurve,
   extractSignature,
   extractProgramData,
+  MAX_FUTURE_SKEW_MS,
+  EARLIEST_CHAIN_TIMESTAMP_MS,
 };

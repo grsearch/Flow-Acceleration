@@ -2,6 +2,7 @@
 
 const { costBreakdown } = require('./CostModel');
 const { executableSell } = require('./ShadowExecutionModel');
+const strictAmm = require('./StrictAmmShadowExecution');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 
 const STATUS = Object.freeze({
@@ -316,6 +317,7 @@ class MigratedDropReboundShadowSuite {
     }
     for (const row of this.store.activeMigratedDropReboundShadowPositions()) {
       const position = rowPosition(row);
+      if (this._strictState(position)) position.strictRestoredAt = now;
       if (position.status === STATUS.PENDING_ENTRY) this.pendingEntries.set(position.id, position);
       else this.positions.set(position.id, position);
       this._indexRow(position);
@@ -347,7 +349,11 @@ class MigratedDropReboundShadowSuite {
     this.advanceTime(now);
   }
 
-  stop() {}
+  stop() {
+    for (const position of [...this.pendingEntries.values(), ...this.positions.values()]) {
+      if (this._strictState(position)) this._saveStrictState(position, true);
+    }
+  }
 
   _profileDiagnostics(profileId) {
     if (!this.profileDiagnostics.has(profileId)) {
@@ -461,7 +467,7 @@ class MigratedDropReboundShadowSuite {
       this.metrics.missingMigratedAtAmmTrades += 1;
       this.metrics.lastMissingMigratedAtAmmTradeAt = timestampMs;
     }
-    if (!this._acceptAmmPrice(trade, price)) return;
+    const legacyPriceAccepted = this._acceptAmmPrice(trade, price);
     const lifecycleStage = trade.market === 'PUMP_BONDING_CURVE'
       && (!(graduatedAt > 0) || timestampMs < graduatedAt)
       ? 'PRE_MIGRATION'
@@ -472,10 +478,10 @@ class MigratedDropReboundShadowSuite {
       this.metrics.postMigrationEligibleTrades += 1;
       this.metrics.lastPostMigrationEligibleTradeAt = timestampMs;
     }
-    if (lifecycleStage === 'POST_MIGRATION' && this._needsFastFlowTrade(trade.mint)) {
+    if (legacyPriceAccepted && lifecycleStage === 'POST_MIGRATION' && this._needsFastFlowTrade(trade.mint)) {
       this._recordFastFlowTrade(trade);
     }
-    this._observeRowsForMint(trade, price, { replay });
+    this._observeRowsForMint(trade, price, { replay, legacyPriceAccepted });
     // A disabled lifecycle stage has no detector. Ignore it here so one
     // research suite cannot abort the shared runtime trade pipeline.
     if (!lifecycleStage || !this.lifecycleStageIds.has(lifecycleStage)) return;
@@ -491,6 +497,7 @@ class MigratedDropReboundShadowSuite {
       : finite(token?.created_at, timestampMs);
     for (const profile of this.entryProfiles.values()) {
       if (profile.newEntriesEnabled === false) continue;
+      if (!profile.strictExecution && !legacyPriceAccepted) continue;
       const maxLifecycleAgeMs = finite(
         profile.maxLifecycleAgeMs,
         this.config.trackingAgeMs,
@@ -824,6 +831,11 @@ class MigratedDropReboundShadowSuite {
     const timestampMs = trade.timestampMs;
     const state = this._state(lifecycleStage, profile.id, trade.mint);
     if (!state) return;
+    if (profile.strictExecution) {
+      if (replay || lifecycleStage !== 'POST_MIGRATION') return;
+      state.strictExecution ||= { policy: strictAmm.freezePolicy(profile, this.config) };
+      if (!strictAmm.accept(trade, state.strictExecution, this.now())) return;
+    }
     if (state.lastTimestampMs && timestampMs < state.lastTimestampMs) return;
     state.lastTimestampMs = timestampMs;
     state.prices.push({
@@ -1102,6 +1114,7 @@ class MigratedDropReboundShadowSuite {
         && !exitProfile.entryProfileIds.includes(profile.id)) continue;
       if (Array.isArray(profile.exitProfileIds)
         && !profile.exitProfileIds.includes(exitProfile.id)) continue;
+      const strictPolicy = strictAmm.freezePolicy(profile, this.config, exitProfile);
       const positionSols = Array.isArray(profile.positionSols) && profile.positionSols.length
         ? profile.positionSols : [this.config.positionSizeSol];
       for (const positionSol of positionSols) {
@@ -1110,14 +1123,24 @@ class MigratedDropReboundShadowSuite {
         if (this.retiredCohortPrefixes.some((prefix) => cohortId.startsWith(prefix))) continue;
         const costs = costBreakdown({
           ...this.config.costModel,
+          ...(strictPolicy ? profile.costModel : {}),
           positionSizeSol: positionSol,
         });
         const configuredCostPct = costs.deterministicCostPct
-          - (profile.capacityAware ? costs.priceImpactPct : 0)
+          - (profile.capacityAware || strictPolicy ? costs.priceImpactPct : 0)
           + (BLEND_EXIT_MODES.has(exitProfile.exitMode) ? costs.fixedCostPct : 0);
         const confirmationMs = finite(profile.fastConfirmation?.confirmationMs, null);
-        const entryTargetAt = trade.timestampMs
-          + (confirmationMs == null ? this.config.entryDelayMs : confirmationMs);
+        const entryTargetAt = (strictPolicy ? trade.receivedAtMs : trade.timestampMs)
+          + (strictPolicy?.entryDelayMs
+            ?? (confirmationMs == null ? this.config.entryDelayMs : confirmationMs));
+        const strictExecution = strictPolicy ? {
+          policy: strictPolicy, pool: trade.pool, cursor: strictAmm.observation(trade),
+          maxPlausibleReturnPct: finite(this.config.maxPlausibleReturnPct, 1_000),
+          costs: { ...costs, priceImpactPct: 0,
+            deterministicCostPct: configuredCostPct, feeConvention: 'ROUND_TRIP_ONCE' },
+          entryProfile: { ...profile, capacityAware: true,
+            maxEntryPriceJumpPct: profile.maxEntryPriceJumpPct ?? this.config.maxEntryPriceJumpPct },
+        } : null;
         const saved = this.store.createMigratedDropReboundShadowPosition({
           cohortId,
           lifecycleStage,
@@ -1148,11 +1171,12 @@ class MigratedDropReboundShadowSuite {
           reboundElapsedMs: trade.timestampMs - candidate.startedAt,
           reboundFromLowMs: trade.timestampMs - candidate.lowAt,
           entryTargetAt,
-          entryDeadlineAt: entryTargetAt + this.config.entryTimeoutMs,
-          confirmationJson: rugRisk || confirmationDetails
+          entryDeadlineAt: entryTargetAt + (strictPolicy?.entryTimeoutMs ?? this.config.entryTimeoutMs),
+          confirmationJson: rugRisk || confirmationDetails || strictExecution
             ? JSON.stringify({
               ...(rugRisk ? { preEntryRugRisk: rugRisk } : {}),
               ...(confirmationDetails || {}),
+              ...(strictExecution ? { strictExecution } : {}),
             })
             : null,
           exitMode: exitProfile.exitMode,
@@ -1177,7 +1201,7 @@ class MigratedDropReboundShadowSuite {
     this.metrics.lastActionAt = this.now();
   }
 
-  _observeRowsForMint(trade, price, { replay = false } = {}) {
+  _observeRowsForMint(trade, price, { replay = false, legacyPriceAccepted = true } = {}) {
     const ids = [...(this.rowsByMint.get(trade.mint) || [])];
     const fastCache = {
       features: new Map(),
@@ -1186,11 +1210,20 @@ class MigratedDropReboundShadowSuite {
     for (const id of ids) {
       const position = this.pendingEntries.get(id) || this.positions.get(id);
       if (!position) continue;
+      const strict = this._strictState(position);
+      if (!strict && !legacyPriceAccepted) continue;
+      if (strict) {
+        if (replay || !strictAmm.accept(trade, strict, this.now(), {
+          notBeforeChainTimestampMs: position.strictRestoredAt,
+        })) continue;
+        this._saveStrictState(position);
+      }
       if (position.status === STATUS.PENDING_ENTRY) {
         if (!this._eligibleEntryTrade(position, trade)) continue;
         if (trade.timestampMs < position.entryTargetAt
           || trade.timestampMs > position.entryDeadlineAt) continue;
-        const entryProfile = this.entryProfiles.get(position.entryProfileId);
+        if (strict && !strictAmm.afterTarget(trade, position.entryTargetAt)) continue;
+        const entryProfile = strict?.entryProfile || this.entryProfiles.get(position.entryProfileId);
         const universalRugGuard = evaluateUniversalRugGuard(this.store, {
           strategyId: `MIGRATED_DROP_REBOUND:${position.cohortId}`,
           mint: position.mint,
@@ -1260,9 +1293,15 @@ class MigratedDropReboundShadowSuite {
             { replay },
           );
         } else {
-          fill = entryProfile?.capacityAware && position.lifecycleStage === 'POST_MIGRATION'
+          fill = strict ? strictAmm.buy(trade, position.positionSol, price)
+            : entryProfile?.capacityAware && position.lifecycleStage === 'POST_MIGRATION'
             ? ammBuyAveragePrice(trade, position.positionSol, price)
             : { price, impactPct: null };
+        }
+        if (strict && !fill.available) {
+          strict.lastExecutionRejection = { at: this.now(), reason: fill.reason };
+          this._saveStrictState(position);
+          continue;
         }
         const maxEntryImpactPct = finite(entryProfile?.maxEntryImpactPct, null);
         if (maxEntryImpactPct != null
@@ -1317,7 +1356,8 @@ class MigratedDropReboundShadowSuite {
       if (position.status === STATUS.EXIT_PENDING) {
         if (!this._eligibleExitTrade(position, trade, price)) continue;
         if (trade.timestampMs >= position.exitTargetAt
-          && trade.timestampMs <= position.exitDeadlineAt) this._close(position, trade, price);
+          && trade.timestampMs <= position.exitDeadlineAt
+          && (!strict || strictAmm.afterTarget(trade, position.exitTargetAt))) this._close(position, trade, price);
         continue;
       }
       if (position.status !== STATUS.OPEN || trade.timestampMs < position.entryAt
@@ -1331,7 +1371,8 @@ class MigratedDropReboundShadowSuite {
       this._evaluateExit(position, trade.timestampMs, price);
       if (position.status === STATUS.EXIT_PENDING) {
         if (trade.timestampMs >= position.exitTargetAt
-          && trade.timestampMs <= position.exitDeadlineAt) this._close(position, trade, price);
+          && trade.timestampMs <= position.exitDeadlineAt
+          && (!strict || strictAmm.afterTarget(trade, position.exitTargetAt))) this._close(position, trade, price);
         else if (trade.timestampMs > position.exitDeadlineAt) this._markNoExit(position);
       }
     }
@@ -1394,6 +1435,7 @@ class MigratedDropReboundShadowSuite {
   }
 
   _emitOpenedLiveSignal(position, profile, trade, price, { replay = false } = {}) {
+    if (this._strictState(position)) return; // research-only, even with inherited live mappings
     const strategyId = profile?.liveExitStrategies?.[position.exitProfileId]
       || profile?.liveStrategyId;
     if (!this.onLiveSignal || !strategyId) return;
@@ -1595,6 +1637,12 @@ class MigratedDropReboundShadowSuite {
       ((position.lowestPrice / position.entryPrice) - 1) * 100,
     );
     const patch = { lastObservedAt: timestampMs, lastPrice: price };
+    if (this._strictState(position)) {
+      patch.confirmationJson = this._strictJson(position);
+      if (position.highestPrice === previousHigh && position.lowestPrice === previousLow
+        && timestampMs - (position.strictSnapshotAt || 0) < 1_000) return;
+      position.strictSnapshotAt = timestampMs;
+    }
     if (position.highestPrice !== previousHigh) {
       patch.highestPrice = position.highestPrice;
       patch.maxFavorableReturnPct = position.maxFavorableReturnPct;
@@ -1759,9 +1807,12 @@ class MigratedDropReboundShadowSuite {
     position.status = STATUS.EXIT_PENDING;
     position.exitReason = reason;
     position.exitTriggerAt = triggerAt;
-    position.exitTargetAt = triggerAt + this.config.exitDelayMs;
-    position.exitDeadlineAt = position.exitTargetAt + this.config.exitTimeoutMs;
+    const strict = this._strictState(position);
+    position.exitTargetAt = triggerAt + (strict?.policy.exitDelayMs ?? this.config.exitDelayMs);
+    position.exitDeadlineAt = position.exitTargetAt
+      + (strict?.policy.exitTimeoutMs ?? this.config.exitTimeoutMs);
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
+      ...(strict ? { confirmationJson: this._strictJson(position) } : {}),
       status: STATUS.EXIT_PENDING,
       exitReason: reason,
       exitTriggerAt: position.exitTriggerAt,
@@ -1771,17 +1822,24 @@ class MigratedDropReboundShadowSuite {
   }
 
   _close(position, trade, price) {
+    const strict = this._strictState(position);
+    const strictFill = strict ? strictAmm.sell(trade, position.positionSol / position.entryPrice, price) : null;
+    if (strict && (!strictAmm.afterTarget(trade, position.exitTargetAt) || !strictFill.available)) {
+      strict.lastExecutionRejection = { at: this.now(), reason: strictFill.reason || 'STRICT_BEFORE_EXECUTION_TARGET' };
+      this._saveStrictState(position);
+      return;
+    }
     this._updateExtrema(position, trade.timestampMs, price);
     const entryProfile = this.entryProfiles.get(position.entryProfileId);
     const markReturnPct = ((price / position.entryPrice) - 1) * 100;
-    const exitFill = entryProfile?.capacityAware
+    const exitFill = strictFill || (entryProfile?.capacityAware
       ? executableSell(
         trade,
         position.positionSol / position.entryPrice,
         price,
         { rugMarkReturnPct: markReturnPct },
       )
-      : { price, impactPct: null };
+      : { price, impactPct: null });
     const runnerExitPrice = exitFill.price;
     const runnerGrossReturnPct = ((runnerExitPrice / position.entryPrice) - 1) * 100;
     let grossReturnPct = runnerGrossReturnPct;
@@ -1799,7 +1857,8 @@ class MigratedDropReboundShadowSuite {
         : `RUNNER_${position.runnerHoldMs}MS`;
       exitReason = `BLEND_${position.coreExitReason || 'CORE_AT_RUNNER'}_${runnerTag}`;
     }
-    const maxPlausibleReturnPct = finite(this.config.maxPlausibleReturnPct, 1_000);
+    const maxPlausibleReturnPct = strict?.maxPlausibleReturnPct
+      ?? finite(this.config.maxPlausibleReturnPct, 1_000);
     if (
       !Number.isFinite(grossReturnPct)
       || grossReturnPct < -100
@@ -1810,6 +1869,7 @@ class MigratedDropReboundShadowSuite {
     }
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
       status: STATUS.CLOSED,
+      ...(strict ? { confirmationJson: this._strictJson(position) } : {}),
       exitAt: trade.timestampMs,
       exitMarket: trade.market,
       exitPrice,
@@ -1832,6 +1892,7 @@ class MigratedDropReboundShadowSuite {
   _markNoExit(position, reason = 'NO_EXECUTABLE_EXIT_TRADE') {
     this.store.updateMigratedDropReboundShadowPosition(position.id, {
       status: STATUS.NO_EXIT,
+      ...(this._strictState(position) ? { confirmationJson: this._strictJson(position) } : {}),
       rejectionReason: reason,
       exitReason: reason,
       maxFavorableReturnPct: position.maxFavorableReturnPct,
@@ -1842,6 +1903,34 @@ class MigratedDropReboundShadowSuite {
     this.metrics.closed += 1;
     this.metrics.noExit += 1;
     this.metrics.lastActionAt = this.now();
+  }
+
+  _strictState(position) {
+    if (position.strictExecution !== undefined) return position.strictExecution;
+    try { position.strictExecution = JSON.parse(position.confirmationJson || '{}').strictExecution || null; }
+    catch (_) { position.strictExecution = null; }
+    return position.strictExecution;
+  }
+
+  _strictJson(position) {
+    let metadata;
+    try { metadata = JSON.parse(position.confirmationJson || '{}'); } catch (_) { metadata = {}; }
+    position.confirmationJson = JSON.stringify({ ...metadata, strictExecution: this._strictState(position) });
+    return position.confirmationJson;
+  }
+
+  _saveStrictState(position, force = false) {
+    this._strictJson(position);
+    const at = this.now();
+    if (!force && at - (position.strictCursorSavedAt || 0) < 1_000) return;
+    this.store.updateMigratedDropReboundShadowPosition(position.id, {
+      confirmationJson: position.confirmationJson,
+      ...(position.entryAt ? { lastObservedAt: position.lastObservedAt, lastPrice: position.lastPrice,
+        highestPrice: position.highestPrice, lowestPrice: position.lowestPrice,
+        maxFavorableReturnPct: position.maxFavorableReturnPct,
+        maxAdverseReturnPct: position.maxAdverseReturnPct } : {}),
+    });
+    position.strictCursorSavedAt = at;
   }
 
   _indexRow(position) {

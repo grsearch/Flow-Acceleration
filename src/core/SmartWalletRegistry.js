@@ -81,11 +81,12 @@ function copyWeight(grade) {
 class SmartWalletRegistry {
   constructor({
     config, store, now = () => Date.now(), fetchImpl = globalThis.fetch,
-    transactionParser = null, maintenanceWorkerFactory = null,
+    transactionParser = null, maintenanceWorkerFactory = null, measureTask = null,
   }) {
     this.config = config;
     this.store = store;
     this.now = now;
+    this.measureTask = measureTask || ((_name, callback) => callback());
     this.fetchImpl = fetchImpl;
     this.transactionParser = transactionParser;
     this.maintenanceWorkerFactory = maintenanceWorkerFactory
@@ -128,6 +129,8 @@ class SmartWalletRegistry {
     this.lastSeenWrites = new Map();
     this.actualEventBackfillPending = true;
     this.lastActualEventBackfillAt = 0;
+    this.actualLedgerSnapshot = { status: 'UNINITIALIZED', pendingSampleCount: 0,
+      pendingSampleTruncated: false, replayRequired: [], repair: null };
     this.stopping = false;
     this.stopPromise = null;
     this.metrics = {
@@ -183,6 +186,9 @@ class SmartWalletRegistry {
       actualBackfillLastBatchSize: 0,
       actualBackfillLastBatchAt: null,
       actualBackfillLastError: null,
+      actualQueueRetries: 0,
+      actualReplayRequired: 0,
+      actualLegacyRepairScanned: 0,
       lastActionAt: null,
     };
     if (config.skipStorageInit !== true) this._initStorage();
@@ -531,6 +537,35 @@ class SmartWalletRegistry {
         smart_event_id, position_id, accounting_status, created_at
       ) VALUES (@smartEventId, @positionId, @accountingStatus, @createdAt)
     `);
+    this.deletePendingActualEvent = this.store.db.prepare(
+      'DELETE FROM smart_wallet_pnl_pending_events WHERE smart_event_id=?',
+    );
+    this.deleteActualOrderCheck = this.store.db.prepare(
+      'DELETE FROM smart_wallet_pnl_order_checks WHERE smart_event_id=?',
+    );
+    this.getActualAccountingCursor = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_pnl_accounting_cursors WHERE wallet=? AND mint=?
+    `);
+    this.upsertActualAccountingCursor = this.store.db.prepare(`
+      INSERT INTO smart_wallet_pnl_accounting_cursors (
+        wallet,mint,last_event_id,last_timestamp_ms
+      ) VALUES (?,?,?,?) ON CONFLICT(wallet,mint) DO UPDATE SET
+        last_event_id=excluded.last_event_id,last_timestamp_ms=excluded.last_timestamp_ms
+      WHERE excluded.last_timestamp_ms>last_timestamp_ms
+        OR (excluded.last_timestamp_ms=last_timestamp_ms AND excluded.last_event_id>last_event_id)
+    `);
+    this.getPendingActualHead = this.store.db.prepare(`
+      SELECT smart_event_id,status FROM smart_wallet_pnl_pending_events
+      WHERE wallet=? AND mint=? ORDER BY event_timestamp_ms,smart_event_id LIMIT 1
+    `);
+    this.getActualReplayRequired = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_pnl_replay_required WHERE wallet=? AND mint=?
+    `);
+    this.getDueActualEvents = this.store.db.prepare(`
+      SELECT * FROM smart_wallet_pnl_pending_events
+      WHERE status='PENDING' AND next_attempt_at<=?
+      ORDER BY next_attempt_at,smart_event_id LIMIT ?
+    `);
     this.getActiveActualPosition = this.store.db.prepare(`
       SELECT * FROM smart_wallet_actual_positions
       WHERE wallet=? AND mint=? AND status IN ('OPEN','PARTIAL')
@@ -610,6 +645,13 @@ class SmartWalletRegistry {
       accountingStatus,
       createdAt: this.now(),
     });
+    this.deletePendingActualEvent.run(event.smartEventId);
+    this.deleteActualOrderCheck.run(event.smartEventId);
+    if (event.wallet && event.mint) {
+      this.upsertActualAccountingCursor.run(
+        event.wallet, event.mint, event.smartEventId, event.timestampMs,
+      );
+    }
     this.metrics.actualEventsProcessed += 1;
     if (accountingStatus.startsWith('IGNORED_')) this.metrics.actualEventsIgnored += 1;
     this.metrics.lastActionAt = this.now();
@@ -621,6 +663,8 @@ class SmartWalletRegistry {
     if (!(event.smartEventId > 0)) return null;
     const processed = this.getProcessedActualEvent.get(event.smartEventId);
     if (processed) {
+      this.deletePendingActualEvent.run(event.smartEventId);
+      this.deleteActualOrderCheck.run(event.smartEventId);
       return {
         positionId: processed.position_id,
         accountingStatus: processed.accounting_status,
@@ -735,31 +779,238 @@ class SmartWalletRegistry {
     return this._markActualEvent(event, active.id, closes ? 'CLOSED' : 'PARTIAL');
   }
 
+  _repairLegacyActualEvents(limit, at) {
+    // One durable high-water sweep. Reading N rowids bounds examined source rows,
+    // unlike LIMIT on a full-history anti-join. Queue insertion and cursor advance
+    // share a transaction, so a failure can never advance past an unqueued hole.
+    const existing = this.store.db.prepare(
+      'SELECT status FROM smart_wallet_pnl_repair_state WHERE id=1',
+    ).get();
+    if (existing?.status === 'COMPLETE') return 0;
+    return this.store.withShortWriteBusyTimeout(() => this.store.db.transaction(() => {
+      this.store.db.prepare(`
+        INSERT OR IGNORE INTO smart_wallet_pnl_repair_state (
+          id,high_water_event_id,status,started_at,updated_at
+        ) SELECT 1,COALESCE(MAX(id),0),'SCANNING',?,? FROM smart_wallet_events
+      `).run(at, at);
+      const state = this.store.db.prepare(
+        'SELECT * FROM smart_wallet_pnl_repair_state WHERE id=1',
+      ).get();
+      if (state.status === 'COMPLETE') return 0;
+      const rows = this.store.db.prepare(`
+        SELECT * FROM smart_wallet_events WHERE id>? AND id<=? ORDER BY id LIMIT ?
+      `).all(state.last_scanned_event_id, state.high_water_event_id, limit);
+      const enqueue = this.store.db.prepare(`
+        INSERT OR IGNORE INTO smart_wallet_pnl_pending_events (
+          smart_event_id,wallet,mint,event_timestamp_ms,event_json,source,created_at,updated_at
+        ) VALUES (?,?,?,?,?,'LEGACY_REPAIR',?,?)
+      `);
+      let queued = 0;
+      let scanned = 0;
+      let cursor = state.last_scanned_event_id;
+      const startedAt = Date.now();
+      for (const event of rows) {
+        if (scanned > 0 && Date.now() - startedAt >= 20) break;
+        scanned += 1;
+        cursor = event.id;
+        if ((event.event_source || 'LIVE') !== 'LIVE'
+          || this.getProcessedActualEvent.get(event.id)) continue;
+        queued += enqueue.run(event.id, event.wallet, event.mint, event.timestamp_ms,
+          JSON.stringify(event), at, at).changes;
+      }
+      const complete = cursor >= state.high_water_event_id
+        || (scanned === rows.length && rows.length < limit);
+      this.store.db.prepare(`
+        UPDATE smart_wallet_pnl_repair_state SET last_scanned_event_id=?,status=?,
+          scanned_events=scanned_events+?,queued_events=queued_events+?,
+          last_error=NULL,updated_at=? WHERE id=1
+      `).run(complete ? state.high_water_event_id : cursor,
+        complete ? 'COMPLETE' : 'SCANNING', scanned, queued, at);
+      this.metrics.actualLegacyRepairScanned += scanned;
+      return queued;
+    })());
+  }
+
+  _requireActualReplay(row, reason, at) {
+    const changed = this.store.db.prepare(`
+      UPDATE smart_wallet_pnl_pending_events SET status='REPLAY_REQUIRED',
+        last_error=?,updated_at=? WHERE smart_event_id=? AND status='PENDING'
+    `).run(reason, at, row.smart_event_id).changes;
+    if (!changed) return;
+    this.store.db.prepare(`
+      INSERT INTO smart_wallet_pnl_replay_required (
+        wallet,mint,first_event_id,first_timestamp_ms,pending_events,reason,created_at,updated_at
+      ) VALUES (?,?,?,?,1,?,?,?) ON CONFLICT(wallet,mint) DO UPDATE SET
+        first_event_id=CASE WHEN excluded.first_timestamp_ms<first_timestamp_ms
+          OR (excluded.first_timestamp_ms=first_timestamp_ms AND excluded.first_event_id<first_event_id)
+          THEN excluded.first_event_id ELSE first_event_id END,
+        first_timestamp_ms=MIN(first_timestamp_ms,excluded.first_timestamp_ms),
+        pending_events=pending_events+1,updated_at=excluded.updated_at
+    `).run(row.wallet, row.mint, row.smart_event_id, row.event_timestamp_ms, reason, at, at);
+    this.metrics.actualReplayRequired += 1;
+  }
+
+  _actualReplayConflict(row) {
+    let event;
+    try { event = this._normalizeActualEvent(JSON.parse(row.event_json)); }
+    catch (_) { return 'INVALID_PENDING_PAYLOAD'; }
+    if (event.smartEventId !== row.smart_event_id || event.wallet !== row.wallet
+      || event.mint !== row.mint) return 'INVALID_PENDING_PAYLOAD_IDENTITY';
+    const active = this.getActiveActualPosition.get(row.wallet, row.mint);
+    if (event.phase === 'OPEN' && active) return 'OPEN_WITH_EXISTING_POSITION';
+    if (active && event.tokenBalanceBefore != null) {
+      const tolerance = Math.max(1e-7, Math.abs(active.token_balance) * 1e-6);
+      if (Math.abs(event.tokenBalanceBefore - active.token_balance) > tolerance) {
+        return 'SOURCE_BALANCE_ACCOUNTING_GAP';
+      }
+    }
+    const cursor = this.getActualAccountingCursor.get(row.wallet, row.mint);
+    if (cursor) {
+      return cursor.last_timestamp_ms > row.event_timestamp_ms
+        || (cursor.last_timestamp_ms === row.event_timestamp_ms
+          && cursor.last_event_id > row.smart_event_id) ? 'ALREADY_ACCOUNTED_LATER_EVENT' : null;
+    }
+    // A pre-upgrade ledger has no per-mint cursor. Page through the existing mint
+    // index to prove no later same-wallet event was processed. A busy mint is not
+    // itself a conflict: persist the check cursor and resume it on a later turn.
+    let check = this.store.db.prepare(`SELECT * FROM smart_wallet_pnl_order_checks
+      WHERE smart_event_id=?`).get(row.smart_event_id);
+    if (!check) {
+      const upper = this.store.db.prepare(`SELECT id,timestamp_ms FROM smart_wallet_events
+        WHERE mint=? ORDER BY timestamp_ms DESC,id DESC LIMIT 1`).get(row.mint);
+      check = { cursor_timestamp_ms: row.event_timestamp_ms, cursor_event_id: row.smart_event_id,
+        upper_timestamp_ms: upper?.timestamp_ms ?? row.event_timestamp_ms,
+        upper_event_id: upper?.id ?? row.smart_event_id };
+    }
+    const later = this.store.db.prepare(`
+      SELECT id,wallet,timestamp_ms FROM smart_wallet_events
+      WHERE mint=? AND (timestamp_ms,id)>(?,?) AND (timestamp_ms,id)<=(?,?)
+      ORDER BY timestamp_ms,id LIMIT 501
+    `).all(row.mint, check.cursor_timestamp_ms, check.cursor_event_id,
+      check.upper_timestamp_ms, check.upper_event_id);
+    for (const event of later.slice(0, 500)) {
+      if (event.wallet === row.wallet && this.getProcessedActualEvent.get(event.id)) {
+        return 'ALREADY_ACCOUNTED_LATER_EVENT';
+      }
+    }
+    if (later.length <= 500) return null;
+    const cursorEvent = later[499];
+    this.store.db.prepare(`INSERT INTO smart_wallet_pnl_order_checks (
+      smart_event_id,cursor_timestamp_ms,cursor_event_id,upper_timestamp_ms,upper_event_id,
+      started_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?) ON CONFLICT(smart_event_id) DO UPDATE SET
+      cursor_timestamp_ms=excluded.cursor_timestamp_ms,cursor_event_id=excluded.cursor_event_id,
+      updated_at=excluded.updated_at
+    `).run(row.smart_event_id, cursorEvent.timestamp_ms, cursorEvent.id,
+      check.upper_timestamp_ms, check.upper_event_id, this.now(), this.now());
+    return 'ORDER_CHECK_IN_PROGRESS';
+  }
+
+  _consumeActualEventQueue(limit, at) {
+    const rows = this.getDueActualEvents.all(at, limit);
+    if (!rows.length) return 0;
+    const startedAt = Date.now();
+    let processed = 0;
+    let visited = 0;
+    const metricsBefore = { ...this.metrics };
+    try {
+      this.store.withShortWriteBusyTimeout(() => this.store.db.transaction(() => {
+        for (const row of rows) {
+          if (this.stopping || (visited > 0 && Date.now() - startedAt >= 20)) break;
+          visited += 1;
+          if (this.getProcessedActualEvent.get(row.smart_event_id)) {
+            this.deletePendingActualEvent.run(row.smart_event_id);
+            this.deleteActualOrderCheck.run(row.smart_event_id);
+            processed += 1;
+            continue;
+          }
+          const blocked = this.getActualReplayRequired.get(row.wallet, row.mint);
+          if (blocked) {
+            this._requireActualReplay(row, `BLOCKED_BY_REPLAY:${blocked.first_event_id}`, at);
+            continue;
+          }
+          const head = this.getPendingActualHead.get(row.wallet, row.mint);
+          if (head?.smart_event_id !== row.smart_event_id) {
+            this.store.db.prepare(`UPDATE smart_wallet_pnl_pending_events
+              SET next_attempt_at=?,updated_at=? WHERE smart_event_id=?`
+            ).run(at + 1000, at, row.smart_event_id);
+            continue;
+          }
+          const conflict = this._actualReplayConflict(row);
+          if (conflict === 'ORDER_CHECK_IN_PROGRESS') {
+            this.store.db.prepare(`UPDATE smart_wallet_pnl_pending_events
+              SET next_attempt_at=?,last_error=?,updated_at=? WHERE smart_event_id=?`
+            ).run(at + 1000, conflict, at, row.smart_event_id);
+            continue;
+          }
+          if (conflict) {
+            this._requireActualReplay(row, conflict, at);
+            continue;
+          }
+          const beforeEvent = { ...this.metrics };
+          try {
+            // A nested transaction is a savepoint: one failed event cannot leak
+            // half a position, nor can its later same-mint events overtake it.
+            this.processActualWalletEvent(JSON.parse(row.event_json));
+            processed += 1;
+          } catch (error) {
+            this.metrics = beforeEvent;
+            const attempts = row.attempts + 1;
+            this.store.db.prepare(`UPDATE smart_wallet_pnl_pending_events SET attempts=?,
+              next_attempt_at=?,last_error=?,updated_at=? WHERE smart_event_id=?`
+            ).run(attempts, at + Math.min(60_000, 1000 * 2 ** Math.min(attempts - 1, 6)),
+              String(error.message).slice(0, 240), at, row.smart_event_id);
+            this.metrics.actualQueueRetries += 1;
+            this.metrics.actualBackfillLastError = String(error.message).slice(0, 240);
+          }
+        }
+      })());
+    } catch (error) {
+      this.metrics = metricsBefore;
+      throw error;
+    }
+    return processed;
+  }
+
+  _refreshActualLedgerSnapshot(at) {
+    const pending = this.store.db.prepare(`SELECT smart_event_id,wallet,mint,
+      event_timestamp_ms,status,attempts,last_error FROM smart_wallet_pnl_pending_events
+      ORDER BY smart_event_id LIMIT 101`).all();
+    const replay = this.store.db.prepare(`SELECT * FROM smart_wallet_pnl_replay_required
+      ORDER BY first_timestamp_ms,first_event_id LIMIT 11`).all();
+    const repair = this.store.db.prepare('SELECT * FROM smart_wallet_pnl_repair_state WHERE id=1').get();
+    this.actualLedgerSnapshot = {
+      status: replay.length ? 'REPLAY_REQUIRED' : repair?.status !== 'COMPLETE'
+        ? 'REPAIRING' : pending.length ? 'PENDING' : 'CAUGHT_UP',
+      generatedAt: at, pendingSampleCount: Math.min(100, pending.length),
+      pendingSampleTruncated: pending.length > 100, oldestPendingSample: pending[0] || null,
+      replayRequired: replay.slice(0, 10), replayRequiredTruncated: replay.length > 10,
+      repair: repair || null,
+    };
+    this.actualEventBackfillPending = pending.length > 0 || repair?.status !== 'COMPLETE';
+  }
+
   _backfillActualWalletEvents(limit = null) {
-    const capped = limit != null && Number.isFinite(Number(limit))
-      ? Math.max(1, Math.trunc(Number(limit))) : null;
-    const rows = this.store.db.prepare(`
-      SELECT event.* FROM smart_wallet_events event
-      JOIN smart_wallet_registry registry ON registry.wallet=event.wallet
-      LEFT JOIN smart_wallet_pnl_processed_events processed
-        ON processed.smart_event_id=event.id
-      WHERE processed.smart_event_id IS NULL
-        AND COALESCE(event.event_source, 'LIVE')<>'HISTORICAL_BACKFILL'
-      ORDER BY event.timestamp_ms, event.id
-      ${capped == null ? '' : 'LIMIT ?'}
-    `).all(...(capped == null ? [] : [capped]));
-    const processed = rows.length ? this.processActualWalletEventBatch(rows) : 0;
+    return this.store.withShortWriteBusyTimeout(() => this._backfillActualWalletEventsShort(limit));
+  }
+
+  _backfillActualWalletEventsShort(limit) {
+    const capped = Math.max(1, Math.min(5000, Math.trunc(limit == null ? 250 : finite(limit, 250))));
+    const at = this.now();
+    this.measureTask('legacyLedgerRepair', () => this._repairLegacyActualEvents(capped, at));
+    const processed = this.measureTask('ledgerQueueConsume', () => this._consumeActualEventQueue(capped, at));
     this.metrics.actualBackfilled += processed;
     this.metrics.actualBackfillBatches += 1;
     this.metrics.actualBackfillLastBatchSize = processed;
     this.metrics.actualBackfillLastBatchAt = this.now();
-    this.metrics.actualBackfillLastError = null;
-    this.actualEventBackfillPending = capped != null && rows.length >= capped;
+    this._refreshActualLedgerSnapshot(at);
     return processed;
   }
 
   _advanceActualEventBackfill(at = this.now(), { force = false } = {}) {
-    if (!this.actualEventBackfillPending || this.stopping) return 0;
+    // Always poll the indexed outbox, including after it was empty. New inserts
+    // require no cached eligibility and no in-memory wakeup to remain recoverable.
+    if (this.stopping) return 0;
     const intervalMs = Math.max(
       1_000,
       finite(this.config.actualEventBackfillIntervalMs, 5_000),
@@ -784,11 +1035,18 @@ class SmartWalletRegistry {
       SELECT * FROM smart_wallet_events
       WHERE wallet=? ORDER BY timestamp_ms, id
     `).all(wallet);
+    this.store.db.prepare(`DELETE FROM smart_wallet_pnl_order_checks WHERE smart_event_id IN (
+      SELECT smart_event_id FROM smart_wallet_pnl_pending_events WHERE wallet=?
+    )`).run(wallet);
     this.store.db.prepare(`
       DELETE FROM smart_wallet_pnl_processed_events
       WHERE smart_event_id IN (SELECT id FROM smart_wallet_events WHERE wallet=?)
     `).run(wallet);
     this.store.db.prepare('DELETE FROM smart_wallet_actual_positions WHERE wallet=?').run(wallet);
+    this.store.db.prepare('DELETE FROM smart_wallet_pnl_accounting_cursors WHERE wallet=?').run(wallet);
+    this.store.db.prepare('DELETE FROM smart_wallet_pnl_replay_required WHERE wallet=?').run(wallet);
+    this.store.db.prepare(`UPDATE smart_wallet_pnl_pending_events
+      SET status='PENDING',next_attempt_at=0,last_error=NULL WHERE wallet=?`).run(wallet);
     this.store.db.prepare('DELETE FROM smart_wallet_positions WHERE wallet=?').run(wallet);
     const balances = new Map();
     let orphanEvents = 0;
@@ -1458,7 +1716,12 @@ class SmartWalletRegistry {
     return votingEligible ? { ...snapshot, votingEligible: true } : snapshot;
   }
 
-  _refreshWalletEligibilitySnapshot(at = this.now(), { force = false } = {}) {
+  _refreshWalletEligibilitySnapshot(at = this.now(), options = {}) {
+    return this.measureTask(options.force ? 'eligibilitySnapshotForced' : 'eligibilitySnapshot',
+      () => this._refreshWalletEligibilitySnapshotInternal(at, options));
+  }
+
+  _refreshWalletEligibilitySnapshotInternal(at, { force = false } = {}) {
     const current = this.walletEligibilitySnapshot;
     // A dirty registry is allowed to remain eventually consistent until the
     // configured refresh boundary. Live trade handling must never turn a
@@ -1726,7 +1989,8 @@ class SmartWalletRegistry {
           // cluster calculation. All mutations are committed through the main
           // ResearchStore connection so realtime writes never compete with a
           // second SQLite writer.
-          applied = this._applyMaintenanceResult(task.type, message.value, task.at);
+          applied = this.measureTask(`workerApply:${task.type}`,
+            () => this._applyMaintenanceResult(task.type, message.value, task.at));
         } catch (applyError) {
           successful = false;
           failure = applyError.message;
@@ -2800,27 +3064,51 @@ class SmartWalletRegistry {
     return this.trackedWallets(at).filter((wallet) => Boolean(this.walletSnapshot(wallet, at)));
   }
 
-  onSmartWalletEvent(event, observedSnapshot = null) {
-    if (!this.config.enabled || !event?.wallet || !event?.mint) return null;
+  onPersistedSmartWalletEvent(event, observedSnapshot = null) {
+    if (!(finite(event?.id ?? event?.smartEventId, 0) > 0)) return null;
+    // ResearchStore committed the event and outbox atomically. This is only an
+    // optional wakeup; maintenance also polls after idle/restart without it.
+    this.actualEventBackfillPending = true;
+    if (!this.stopping && observedSnapshot) this._touchMonitoredWallet(event, observedSnapshot);
+    return { queued: true, smartEventId: event.id ?? event.smartEventId };
+  }
+
+  _touchMonitoredWallet(event, snapshot) {
     const signalAt = finite(event.timestampMs ?? event.timestamp_ms);
-    if (!(signalAt > 0)) return null;
-    // Candidate wallets are labelled from discovery time, but walletSnapshot()
-    // keeps them out of consensus until they are graded and clustered.
-    const snapshot = observedSnapshot || this.monitoringSnapshot(event.wallet, signalAt);
-    if (!snapshot) return null;
+    if (!(signalAt > 0) || !snapshot) return;
     const lastSeenWriteAt = Math.max(
-      finite(this.lastSeenWrites.get(event.wallet), 0),
-      finite(snapshot.lastSeenAt, 0),
+      finite(this.lastSeenWrites.get(event.wallet), 0), finite(snapshot.lastSeenAt, 0),
     );
     if (signalAt - lastSeenWriteAt >= this._lastSeenWriteIntervalMs()) {
-      this.store.db.prepare(`
-        UPDATE smart_wallet_registry SET last_seen_at=?, updated_at=? WHERE wallet=?
-      `).run(signalAt, this.now(), event.wallet);
+      this.store.db.prepare(`UPDATE smart_wallet_registry
+        SET last_seen_at=?,updated_at=? WHERE wallet=?`
+      ).run(signalAt, this.now(), event.wallet);
       this.lastSeenWrites.set(event.wallet, signalAt);
       this.metrics.lastSeenWrites += 1;
     } else {
       this.metrics.lastSeenWritesSkipped += 1;
     }
+  }
+
+  touchMonitoredWalletEvent(event, snapshot) {
+    if (!this.stopping && snapshot) this._touchMonitoredWallet(event, snapshot);
+  }
+
+  onSmartWalletEvent(event, observedSnapshot = null) {
+    if (!this.config.enabled || !event?.wallet || !event?.mint) return null;
+    const signalAt = finite(event.timestampMs ?? event.timestamp_ms);
+    if (!(signalAt > 0)) return null;
+    if (this.store.db.prepare('SELECT 1 FROM smart_wallet_events WHERE id=?')
+      .get(event.id ?? event.smartEventId ?? event.smart_event_id ?? 0)) {
+      return this.onPersistedSmartWalletEvent(event, observedSnapshot);
+    }
+    // Compatibility for explicit synthetic/import callers. Runtime persisted
+    // events always use the durable queue above, regardless of AGE/vote gates.
+    // Candidate wallets are labelled from discovery time, but walletSnapshot()
+    // keeps them out of consensus until they are graded and clustered.
+    const snapshot = observedSnapshot || this.monitoringSnapshot(event.wallet, signalAt);
+    if (!snapshot) return null;
+    this._touchMonitoredWallet(event, snapshot);
     // Eligibility is based on the wallet's own on-chain BUY/SELL ledger. The old
     // fixed-size 30s/300s follower simulation remains readable as legacy research,
     // but no new forward labels are created here.
@@ -3526,6 +3814,7 @@ class SmartWalletRegistry {
       eventMonitoringRequiresResolvedAge:
         this.config.eventMonitoringRequiresResolvedAge !== false,
       actualEventBackfillPending: this.actualEventBackfillPending,
+      actualLedger: this.actualLedgerSnapshot,
       actualEventBackfillBatchSize: Math.max(
         10,
         Math.trunc(finite(this.config.actualEventBackfillBatchSize, 250)),
@@ -3619,6 +3908,7 @@ class SmartWalletRegistry {
       eventMonitoringRequiresResolvedAge:
         this.config.eventMonitoringRequiresResolvedAge !== false,
       actualEventBackfillPending: this.actualEventBackfillPending,
+      actualLedger: this.actualLedgerSnapshot,
       actualEventBackfillBatchSize: Math.max(
         10,
         Math.trunc(finite(this.config.actualEventBackfillBatchSize, 250)),

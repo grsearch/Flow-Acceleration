@@ -107,6 +107,12 @@ async function main() {
       engine: { stats: () => ({ lastTradeAt: Date.now(), trades: 1 }) },
       stream: { health: () => ({ regions: [{ state: 'connected' }], transactionsReceived: 1 }) },
       labeler: { stats: () => ({ labels: 0 }) },
+      solUsdReference: { health: () => ({ ready: true,
+        reference: { priceUsd: 100, observedAt: 1788660000000,
+          expiresAt: 1788660300000, source: 'OFFLINE_FIXTURE' } }) },
+      runtimeDiagnostics: { health: () => ({ parser: { rejectedEvents: 9 },
+        parserQuarantine: { pending: 2 }, taskTimings: { scope: 'SYNCHRONOUS_CALLBACK_ONLY',
+          tasks: { 'parser:transaction': { calls: 100, maxMs: 3.5 } } } }) },
     };
     let initPacket;
     wrapper = new DashboardProcessServer(options, { forkFactory(file, args, childOptions) {
@@ -145,10 +151,16 @@ async function main() {
     assert.equal(health.json.ready, true);
     assert.equal(health.json.runtimeSnapshot.mode, 'INDEPENDENT_HTTP_PROCESS');
     assert.equal(health.json.runtimeSnapshot.dashboardPid, wrapper.child.pid);
+    assert.equal(health.json.runtimeDiagnostics.parser.rejectedEvents, 9,
+      'runtime diagnostics must survive parent snapshot and read-only child health proxy');
     const detailed = await request(wrapper.port, '/api/health');
     assert.equal(detailed.json.status, 'streaming');
     assert.equal(detailed.json.database.pendingWrites, 1);
     assert.equal(detailed.json.dashboardReadModel.mode, 'INDEPENDENT_READ_MODEL');
+    assert.equal(detailed.json.runtimeDiagnostics.parserQuarantine.pending, 2);
+    assert.equal(detailed.json.runtimeDiagnostics.taskTimings.tasks['parser:transaction'].calls, 100);
+    assert.equal(detailed.json.solUsdReference.reference.priceUsd, 100,
+      'cached FDV reference health survives the independent Dashboard process');
     const missing = await request(wrapper.port, '/api/not-a-real-test-route');
     assert.equal(missing.status, 404);
     assert.equal(missing.json.error, 'api route not found');

@@ -5,11 +5,14 @@ const path = require('path');
 const { config, validateConfig, streamTokenFor } = require('./config');
 const { collectRuntimeIntegrity } = require('./runtime/RuntimeIntegrity');
 const { GracefulShutdown, createSignalShutdown } = require('./runtime/GracefulShutdown');
+const { RuntimeTaskMetrics } = require('./runtime/RuntimeTaskMetrics');
+const { ParserRejectionAudit } = require('./runtime/ParserRejectionAudit');
 const { PumpEventParser } = require('./core/PumpEventParser');
 const PumpFlowStream = require('./core/PumpFlowStream');
 const FlowAccelerationEngine = require('./core/FlowAccelerationEngine');
 const SignalLabeler = require('./core/SignalLabeler');
 const LiveTradingManager = require('./core/LiveTradingManager');
+const { SolUsdReference } = require('./core/SolUsdReference');
 const { PrimarySignalShadowSuite } = require('./core/PrimarySignalShadowSuite');
 const { FlowFirstShadowSuite } = require('./core/FlowFirstShadowSuite');
 const { SmartPullbackShadowSuite } = require('./core/SmartPullbackShadowSuite');
@@ -104,6 +107,11 @@ function createRuntime(runtimeConfig = config) {
   );
   console.log('[Startup] creating research store');
   const store = new ResearchStore(runtimeConfig.storage, runtimeConfig.labels);
+  const runtimeTasks = new RuntimeTaskMetrics({ onSlow: (row) => {
+    console.warn(`[Runtime:slow] ${row.name} ${row.durationMs.toFixed(1)}ms`
+      + ` startedAt=${row.startedAt} finishedAt=${row.finishedAt} failed=${row.failed}`);
+  } });
+  const parserRejections = new ParserRejectionAudit({ store });
   const startupReplayCacheMs = Math.max(
     0,
     Number(runtimeConfig.storage.startupReplayCacheMs) || 0,
@@ -125,7 +133,12 @@ function createRuntime(runtimeConfig = config) {
     pumpProgramId: runtimeConfig.pump.programId,
     pumpAmmProgramId: runtimeConfig.pump.ammProgramId,
     wsolMint: runtimeConfig.pump.wsolMint,
+    onRejectedEvent: (event) => parserRejections.enqueue(event),
   });
+  const runtimeDiagnostics = { health: () => ({
+    parser: parser.getStats(), parserQuarantine: parserRejections.health(),
+    taskTimings: runtimeTasks.health(),
+  }) };
   const stream = new PumpFlowStream({ config: runtimeConfig, tokenForEndpoint: streamTokenFor });
   const executor = runtimeConfig.liveTrading.enabled && !runtimeConfig.liveTrading.dryRun
     ? new PumpTradeExecutor(runtimeConfig.liveTrading)
@@ -163,6 +176,7 @@ function createRuntime(runtimeConfig = config) {
     },
     store,
     transactionParser: parser,
+    measureTask: (name, callback) => runtimeTasks.run(`smartWallet:${name}`, callback),
   });
   smartWalletRegistry.start();
   const smartWalletConsensusFlowRunnerShadow = new SmartWalletConsensusFlowRunnerShadowSuite({
@@ -275,6 +289,7 @@ function createRuntime(runtimeConfig = config) {
       smartWallets: [...smartWallets],
     },
     store,
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   earlyPureBuyBurstShadow.start();
   const sameSlotDumpBackrunShadow = new SameSlotDumpBackrunShadowSuite({
@@ -316,9 +331,17 @@ function createRuntime(runtimeConfig = config) {
     },
   });
   launchQualityObserver.start();
+  const solUsdReference = new SolUsdReference({ config: {
+    ...runtimeConfig.migrationSecondLegShadow.solUsdReference,
+    enabled: runtimeConfig.migrationSecondLegShadow.enabled === true
+      && runtimeConfig.migrationSecondLegShadow.solUsdReference?.enabled !== false,
+  } });
+  solUsdReference.start();
   const migrationSecondLegShadow = new MigrationSecondLegShadowSuite({
     config: runtimeConfig.migrationSecondLegShadow,
     store,
+    getSolUsdReference: () => solUsdReference.snapshot(),
+    onLiveSignal: (event) => trader.onExternalStrategySignal(event),
   });
   migrationSecondLegShadow.start();
   const migrationSecondLegObserver = new MigrationSecondLegObserver({
@@ -398,6 +421,7 @@ function createRuntime(runtimeConfig = config) {
   const server = new DashboardServer({
     config: runtimeConfig,
     runtimeIdentity,
+    runtimeDiagnostics,
     store,
     engine,
     stream,
@@ -428,6 +452,7 @@ function createRuntime(runtimeConfig = config) {
     launchQualityObserver,
     migrationSecondLegObserver,
     migrationSecondLegShadow,
+    solUsdReference,
     migratedDropReboundShadow,
     migrationContinuityShadow,
     rangeScalperShadow,
@@ -451,29 +476,14 @@ function createRuntime(runtimeConfig = config) {
     lastMaintenanceErrorAt: null,
     lastMaintenanceError: null,
   };
-  const slowTaskLastLoggedAt = new Map();
   const maintenanceErrorLastLoggedAt = new Map();
-  const runTimed = (name, callback, thresholdMs = 100) => {
-    const startedAt = process.hrtime.bigint();
-    try {
-      return callback();
-    } finally {
-      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
-      if (durationMs >= thresholdMs) {
-        const now = Date.now();
-        if (now - (slowTaskLastLoggedAt.get(name) || 0) >= 30_000) {
-          slowTaskLastLoggedAt.set(name, now);
-          console.warn(`[Runtime:slow] ${name} ${durationMs.toFixed(1)}ms`);
-        }
-      }
-    }
-  };
+  const runTimed = (name, callback, thresholdMs = 100) => runtimeTasks.run(name, callback, thresholdMs);
   const observeShadow = (name, callback) => {
     try {
       return runTimed(`shadow:${name}`, callback);
     } catch (error) {
       runtimeMetrics.shadowModuleErrors[name] = (runtimeMetrics.shadowModuleErrors[name] || 0) + 1;
-      console.error(`[Shadow:${name}] isolated failure:`, error.message);
+      console.error(`[Shadow:${name}] isolated failure at=${Date.now()}:`, error.message);
       return undefined;
     }
   };
@@ -618,6 +628,9 @@ function createRuntime(runtimeConfig = config) {
     observeShadow('migrationSecondLegGraduate', () => (
       migrationSecondLegObserver.onGraduated(migratedToken || lifecycleEvent)
     ));
+    observeShadow('legacyEarlyFlowMigration', () => (
+      migrationSecondLegShadow.observeGraduation(migratedToken || lifecycleEvent)
+    ));
     observeShadow('postMigrationSurvivorGraduate', () => (
       postMigrationSurvivor.onGraduated(migratedToken || lifecycleEvent)
     ));
@@ -638,7 +651,7 @@ function createRuntime(runtimeConfig = config) {
     if (stopping) return;
     let events;
     try {
-      events = parser.parseTransaction(transaction, context.receivedAt);
+      events = runTimed('parser:transaction', () => parser.parseTransaction(transaction, context.receivedAt));
     } catch (error) {
       runtimeMetrics.parseErrors += 1;
       console.error('[Parser] transaction failed:', error.message);
@@ -683,6 +696,9 @@ function createRuntime(runtimeConfig = config) {
           ));
           observeShadow('migrationSecondLegGraduate', () => (
             migrationSecondLegObserver.onGraduated(token || event)
+          ));
+          observeShadow('legacyEarlyFlowGraduate', () => (
+            migrationSecondLegShadow.observeGraduation(token || event)
           ));
           observeShadow('postMigrationSurvivorGraduate', () => (
             postMigrationSurvivor.onGraduated(token || event)
@@ -810,6 +826,11 @@ function createRuntime(runtimeConfig = config) {
           const smartEvent = store.recordSmartWalletEvent(trade);
           if (smartEvent?.inserted) {
             const normalizedSmartEvent = { ...trade, ...smartEvent, id: smartEvent.id };
+            // A durable PnL work item was saved atomically with the event. Wake
+            // accounting independently of AGE/grade/consensus eligibility.
+            observeShadow('smartWalletLedgerWake', () => (
+              smartWalletRegistry.onPersistedSmartWalletEvent(normalizedSmartEvent)
+            ));
             observeShadow('individualSmartWalletEvent', () => (
               individualSmartWalletShadows.onSmartWalletEvent(normalizedSmartEvent)
             ));
@@ -825,7 +846,7 @@ function createRuntime(runtimeConfig = config) {
             ));
             if (isRegistryMonitoredWalletTrade) {
               observeShadow('smartWalletRegistryEvent', () => (
-                smartWalletRegistry.onSmartWalletEvent(
+                smartWalletRegistry.touchMonitoredWalletEvent(
                   normalizedSmartEvent, registryMonitoringSnapshot,
                 )
               ));
@@ -1118,6 +1139,7 @@ function createRuntime(runtimeConfig = config) {
       if (groupIndex === 0) {
         runMaintenance('engineCleanup', () => engine.cleanup(now));
         runMaintenance('labelAdvance', () => labeler.advanceTime(now));
+        runMaintenance('parserQuarantineFlush', () => parserRejections.flush());
       }
       const group = shadowMaintenanceGroups[groupIndex];
       for (const [name, target] of group) {
@@ -1152,7 +1174,7 @@ function createRuntime(runtimeConfig = config) {
         migratedDropReboundShadow, migrationContinuityShadow, rangeScalperShadow,
         cyaEarlyPyramidShadow, bondingCurveMomentumShadow, graduationHoldShadow,
         graduationAccelerationShadow, featureEdgeAudit, smartWalletConsensusOverlay,
-        postMigrationSurvivor };
+        postMigrationSurvivor, solUsdReference };
       shutdownSequence = new GracefulShutdown([
         ['STOP_MAINTENANCE', () => {
           if (maintenanceTimer) clearInterval(maintenanceTimer);
@@ -1165,6 +1187,16 @@ function createRuntime(runtimeConfig = config) {
         ['STOP_STREAM', () => stream.stop()],
         ['SETTLE_TRADING', () => trader.stop()],
         ...Object.entries(observers).map(([name, target]) => [`STOP_${name}`, () => target.stop()]),
+        ['FLUSH_PARSER_QUARANTINE', () => {
+          const deadline = Date.now() + 250;
+          while (parserRejections.health().pending && Date.now() < deadline) {
+            if (!parserRejections.flush()) break;
+          }
+          if (parserRejections.health().pending) {
+            console.warn(`[Parser:quarantine] shutdown pending=${parserRejections.health().pending}`
+              + ' diagnostic samples not persisted; canonical accounting queue remains durable');
+          }
+        }],
         ['DRAIN_DATABASE', (report) => store.drainPendingWrites({ timeoutMs: 60_000,
           onProgress: (progress) => report({ database: progress }) })],
         ['STOP_DASHBOARD', () => server.stop()],
@@ -1180,6 +1212,7 @@ function createRuntime(runtimeConfig = config) {
   function health() {
     return {
       runtime: runtimeMetrics,
+      runtimeDiagnostics: runtimeDiagnostics.health(),
       engine: engine.stats(),
       labels: labeler.stats(),
       stream: stream.health(),
@@ -1209,6 +1242,7 @@ function createRuntime(runtimeConfig = config) {
       launchQualityObserver: launchQualityObserver.health(),
       migrationSecondLegObserver: migrationSecondLegObserver.health(),
       migrationSecondLegShadow: migrationSecondLegShadow.health(),
+      solUsdReference: solUsdReference.health(),
       holderGrowthShadow: holderGrowthShadow.health(),
       qualityLeaderShadow: qualityLeaderShadow.health(),
       bigWinnerShadow: bigWinnerShadow.health(),
@@ -1227,6 +1261,7 @@ function createRuntime(runtimeConfig = config) {
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
+    runtimeDiagnostics,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow,
     smartWalletRegistry, smartWalletConsensusFlowRunnerShadow,
