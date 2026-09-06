@@ -48,6 +48,8 @@ try {
   assert.equal(original.complete, true);
   approx(p(1).realized_pnl_sol, buy.walletSolDelta + sell.walletSolDelta);
   approx(p(1).economic_pnl_sol, original.realizedPnlSol + F);
+  approx(p(1).economic_cost_basis_sol, 0.0201);
+  approx(p(1).economic_return_pct, p(1).economic_pnl_sol / p(1).economic_cost_basis_sol * 100);
   approx(p(1).account_retained_funding_sol, F);
   assert.equal(candidate(1).funded_lamports, FUND);
   store.recordLiveAccountFunding(buyId, buy);
@@ -62,9 +64,17 @@ try {
   assert.equal(candidate(2), undefined, 'shared ATA not recreated incurs no new funding candidate');
   approx(p(2).account_net_funding_sol, 0);
   const recovery = candidate(1);
+  store.updateLiveAccountRecovery(recovery.id, { status: 'PENDING', error: 'CLEANUP_FEE_UNAVAILABLE', errorStage: 'FEE_QUOTE' });
+  const pendingDisplay = store.liveTradingDashboard({ strategyId: 'test' }).positions.find(row => row.id === 1);
+  assert.deepEqual(pendingDisplay.account_recovery_states, { PENDING: 1 });
+  assert.equal(pendingDisplay.account_recovery_error, 'CLEANUP_FEE_UNAVAILABLE');
+  assert.equal(pendingDisplay.account_recovery_error_stage, 'FEE_QUOTE');
+  approx(pendingDisplay.economic_cost_basis_sol, 0.0201);
+  approx(pendingDisplay.cash_after_recovery_pnl_sol, original.realizedPnlSol, 'pending funds are not a cash refund');
+  approx(pendingDisplay.recovery_refund_sol, 0);
   const prepared = { signature: 'close-1', rawTransactionBase64: 'fixture-only', account: ata };
   const syncBefore = store.db.pragma('synchronous', { simple: true });
-  const saved = store.updateLiveAccountRecovery(recovery.id, { status: 'PREPARED', signature: 'close-1', preparedJson: JSON.stringify(prepared), attempts: 1 });
+  const saved = store.updateLiveAccountRecovery(recovery.id, { status: 'PREPARED', signature: 'close-1', preparedJson: JSON.stringify(prepared), attempts: 1, error: null, errorStage: null });
   assert.equal(saved.prepared_json, JSON.stringify(prepared));
   assert.equal(store.db.pragma('synchronous', { simple: true }), syncBefore);
   const independent = new Database(source, { readonly: true });
@@ -84,6 +94,10 @@ try {
   approx(p(1).cash_after_recovery_pnl_sol, original.realizedPnlSol + F - 0.000105);
   approx(p(1).account_retained_funding_sol, 0);
   approx(p(1).recovery_refund_sol, F);
+  const confirmedDisplay = store.liveTradingDashboard({ strategyId: 'test' }).positions.find(row => row.id === 1);
+  assert.deepEqual(confirmedDisplay.account_recovery_states, { CONFIRMED: 1 });
+  assert.equal(confirmedDisplay.account_recovery_error, null);
+  assert.equal(confirmedDisplay.account_recovery_error_stage, null);
   approx(p(2).recovery_refund_sol, 0, 'refund stays with creator position, not later shared-ATA trader');
   assert.throws(() => store.updateLiveAccountRecovery(recovery.id, { status: 'PENDING' }), /transition/);
   store.updateLiveOrder(buyId, { execution: { extra: true, settlement: { transactionSlot: 100 } } });
@@ -181,7 +195,23 @@ try {
   assert(exported.prepare('SELECT COUNT(*) n FROM live_account_recoveries').get().n >= 4);
   assert(exported.prepare('SELECT COUNT(*) n FROM live_positions WHERE id=1').get().n === 1);
   exported.close();
+  // The independent Dashboard can briefly serve yesterday's read-only schema.
+  // Diagnostics missing from that snapshot must degrade to null, not SQL error.
+  store.db.exec('ALTER TABLE live_account_recoveries DROP COLUMN error_stage');
+  store.db.exec('ALTER TABLE live_positions DROP COLUMN economic_cost_basis_sol');
+  const oldSchema = new Database(source, { readonly: true });
+  const oldReader = Object.create(ResearchStore.prototype); oldReader.db = oldSchema;
+  try {
+    const oldStates = oldReader.liveAccountRecoveryPositionStates([1, 6]);
+    assert.deepEqual(oldStates.get(1).account_recovery_states, { CONFIRMED: 1 });
+    assert.equal(oldStates.get(6).account_recovery_error_stage, null);
+    assert.equal(oldReader.liveAccountRecoveryDashboard('test').available, true);
+    const oldPage = store.liveTradingDashboard({ strategyId: 'test' });
+    assert(oldPage.positions.length > 0);
+    assert(oldPage.positions.every(row => row.account_recovery_error_stage == null));
+  } finally { oldSchema.close(); }
   store.db.exec('DROP TABLE live_account_recoveries');
   assert.equal(store.liveAccountRecoveryDashboard('test').available, false);
+  assert.equal(store.liveAccountRecoveryPositionStates([1]).size, 0, 'absent ledger means unknown, not completed');
   console.log('Live account recovery Store tests passed: verified funding, durable outbox, refund idempotency, shared ATA generations, cash/economic separation, unknown legacy, export.');
 } finally { store.close(); fs.rmSync(directory, { recursive: true, force: true }); }

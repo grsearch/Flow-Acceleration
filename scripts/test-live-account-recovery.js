@@ -20,7 +20,7 @@ function fixture({ enabled = true, initial = [], mode = 'LIVE' } = {}) {
     },
     updateLiveAccountRecovery(id, patch) {
       events.push(`save:${patch.status}`);
-      const map = { preparedJson: 'prepared_json', nextAttemptAt: 'next_attempt_at',
+      const map = { preparedJson: 'prepared_json', nextAttemptAt: 'next_attempt_at', errorStage: 'error_stage',
         refundLamports: 'refund_lamports', networkFeeSol: 'network_fee_sol', walletSolDelta: 'wallet_sol_delta' };
       const row = rows.get(id);
       for (const [key, value] of Object.entries(patch)) row[map[key] || key] = value;
@@ -61,6 +61,35 @@ function candidate(id = 1, mint = 'mint-1') {
 }
 
 async function main() {
+  {
+    const f = fixture({ initial: [candidate()] });
+    const prepare = f.executor.prepareEmptyTokenAccountClose;
+    f.executor.prepareEmptyTokenAccountClose = async () => {
+      f.events.push('prepare-unavailable');
+      throw Object.assign(new Error('Cleanup quote unavailable'), { code: 'CLEANUP_FEE_UNAVAILABLE', recoveryStage: 'FEE_QUOTE' });
+    };
+    f.worker.start(); await f.worker.tick();
+    assert.equal(f.state.sends, 0);
+    assert.equal(f.rows.get(1).status, 'PENDING');
+    assert.equal(f.rows.get(1).signature, undefined);
+    assert.equal(f.rows.get(1).attempts, 0, 'no signed/broadcast attempt took place');
+    assert.equal(f.rows.get(1).error, 'CLEANUP_FEE_UNAVAILABLE');
+    assert.equal(f.rows.get(1).error_stage, 'FEE_QUOTE');
+    assert.equal(f.worker.health().status, 'DEGRADED');
+    assert.equal(f.worker.health().lastRunErrors, 1);
+    assert.equal(f.worker.health().lastErrorStage, 'FEE_QUOTE');
+    assert(!f.worker.blocksMint('mint-1'), 'unsigned failure must not retain entry lock');
+    await f.worker.tick();
+    assert.equal(f.events.filter(item => item === 'prepare-unavailable').length, 1, 'wait for normal bounded maintenance interval');
+    f.executor.prepareEmptyTokenAccountClose = prepare;
+    f.advance(); await f.worker.tick();
+    assert.equal(f.state.sends, 1);
+    assert.equal(f.rows.get(1).status, 'CONFIRMED');
+    assert.equal(f.rows.get(1).error, null); assert.equal(f.rows.get(1).error_stage, null);
+    assert.equal(f.worker.health().lastRunErrors, 0);
+    assert.equal(f.worker.health().status, 'READY');
+    await f.worker.stop();
+  }
   {
     const f = fixture({ initial: [candidate()] }); f.worker.start(); await f.worker.tick();
     assert.equal(f.state.sends, 1);

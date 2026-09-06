@@ -467,6 +467,18 @@ class PumpTradeExecutor {
   // Cleanup is a separate durable workflow: never add CloseAccount to an urgent
   // SELL, where a nonempty/extended account could cause the entire sell to fail.
   async prepareEmptyTokenAccountClose(candidate, { signal } = {}) {
+    let stage = 'CANDIDATE';
+    try {
+      return await this._prepareEmptyTokenAccountClose(candidate, { signal, onStage: value => { stage = value; } });
+    } catch (error) {
+      // Stable stage only: do not expose RPC URLs, provider bodies or wallet keys.
+      const failure = error instanceof Error ? error : errorWithCode('Cleanup RPC failed', 'ACCOUNT_RECOVERY_RPC_ERROR');
+      failure.recoveryStage = stage;
+      throw failure;
+    }
+  }
+
+  async _prepareEmptyTokenAccountClose(candidate, { signal, onStage }) {
     const read = task => accountRecoveryRead(signal, task);
     const owner = this.signer.publicKey.toBase58();
     const identity = canonicalCandidate(candidate, owner);
@@ -474,7 +486,10 @@ class PumpTradeExecutor {
       || bs58.decode(candidate.sourceSignature).length !== 64) {
       throw errorWithCode('Cleanup requires a verified creation receipt', 'ACCOUNT_CREATION_UNVERIFIED');
     }
-    const originalFunding = fundingInteger(candidate.fundedLamports);
+    let originalFunding;
+    try { originalFunding = fundingInteger(candidate.fundedLamports); }
+    catch (_) { throw errorWithCode('Candidate funding is not a nonnegative integer', 'ACCOUNT_CANDIDATE_FUNDING_INVALID'); }
+    onStage('CREATION_RECEIPT');
     const source = await read(() => this.connection.getTransaction(candidate.sourceSignature, {
       commitment: 'finalized', maxSupportedTransactionVersion: 0,
     }));
@@ -487,19 +502,26 @@ class PumpTradeExecutor {
       || source?.transaction?.signatures?.[0] !== candidate.sourceSignature) {
       throw errorWithCode('Finalized creation receipt did not prove this account', 'ACCOUNT_CREATION_UNVERIFIED');
     }
+    onStage('ACCOUNT_SNAPSHOT');
     const snapshot = await read(() => this.connection.getAccountInfoAndContext(new PublicKey(identity.address), {
       commitment: 'finalized', minContextSlot: creationSlot,
     }));
     const contextSlot = normalizedSlot(snapshot?.context?.slot);
     if (contextSlot === null || contextSlot < creationSlot) throw errorWithCode('Account snapshot is stale', 'ACCOUNT_CONTEXT_STALE');
     if (!snapshot.value) return { status: 'ABSENT', account: identity.address, owner, contextSlot };
-    const empty = validateEmptyTokenAccount(identity, snapshot.value, owner);
+    let empty;
+    try { empty = validateEmptyTokenAccount(identity, snapshot.value, owner); }
+    catch (error) {
+      if (error.code === 'INVALID_ACCOUNT_FUNDING') throw errorWithCode('Account lamports are invalid', 'ACCOUNT_BALANCE_INVALID');
+      throw error;
+    }
     if (empty.refundLamports !== originalFunding.toString()) {
       throw errorWithCode('Account funding changed since the verified creation', 'ACCOUNT_FUNDING_CHANGED');
     }
     // A deterministic ATA can have been closed/recreated since our original
     // funding. Bound the proof to 32 address-local transactions and fail closed
     // rather than scanning the wallet or assuming equal rent means same account.
+    onStage('ACCOUNT_HISTORY');
     const history = await read(() => this.connection.getSignaturesForAddress(new PublicKey(identity.address), {
       limit: 32, minContextSlot: contextSlot,
     }, 'finalized'));
@@ -526,18 +548,49 @@ class PumpTradeExecutor {
       }
       if (changed) throw errorWithCode('Account was closed, recreated or refunded after creation', 'ACCOUNT_LIFECYCLE_CHANGED');
     }
-    const latest = await read(() => this.connection.getLatestBlockhash({ commitment: 'finalized', minContextSlot: contextSlot }));
-    if (!Number.isSafeInteger(latest?.lastValidBlockHeight) || latest.lastValidBlockHeight < 0) throw errorWithCode('Missing blockhash validity', 'CLEANUP_BLOCKHASH_INVALID');
-    const transaction = new Transaction({ feePayer: this.signer.publicKey,
-      blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight });
-    // Exactly 0.0001 SOL priority budget, independent of the trading CU limit.
-    transaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 20_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5_000_000 }),
-      createCloseAccountInstruction(new PublicKey(identity.address), this.signer.publicKey,
-        this.signer.publicKey, [], new PublicKey(identity.programId)));
-    const feeResponse = await read(() => this.connection.getFeeForMessage(transaction.compileMessage(), 'finalized'));
-    const fee = fundingInteger(feeResponse?.value, 'cleanup fee');
-    if (fee <= 0n || fee > 105_000n || fee >= originalFunding) throw errorWithCode('Cleanup fee is not economical', 'CLEANUP_FEE_TOO_HIGH');
+    let latest, transaction, fee;
+    let unavailableCode = 'CLEANUP_FEE_UNAVAILABLE';
+    // RPC explicitly allows a null fee (e.g. a blockhash not yet visible at
+    // the selected commitment). Refresh at most once, still entirely unsigned.
+    // This does not retry or replace a PREPARED/UNKNOWN signed transaction.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      onStage('BLOCKHASH');
+      const blockhash = await read(() => this.connection.getLatestBlockhashAndContext({ commitment: 'finalized', minContextSlot: contextSlot }));
+      const blockhashSlot = normalizedSlot(blockhash?.context?.slot);
+      if (blockhashSlot === null || blockhashSlot < contextSlot) {
+        unavailableCode = 'CLEANUP_BLOCKHASH_CONTEXT_STALE'; continue;
+      }
+      latest = blockhash.value;
+      let validHash = false;
+      try { validHash = typeof latest?.blockhash === 'string' && bs58.decode(latest.blockhash).length === 32; } catch (_) {}
+      if (!Number.isSafeInteger(latest?.lastValidBlockHeight) || latest.lastValidBlockHeight < 0
+        || !validHash) {
+        throw errorWithCode('Missing blockhash validity', 'CLEANUP_BLOCKHASH_INVALID');
+      }
+      transaction = new Transaction({ feePayer: this.signer.publicKey,
+        blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight });
+      // Exactly 0.0001 SOL priority budget, independent of the trading CU limit.
+      transaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 20_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5_000_000 }),
+        createCloseAccountInstruction(new PublicKey(identity.address), this.signer.publicKey,
+          this.signer.publicKey, [], new PublicKey(identity.programId)));
+      onStage('FEE_QUOTE');
+      const feeResponse = await read(() => this.connection.getFeeForMessage(transaction.compileMessage(), 'finalized'));
+      if (feeResponse?.value == null) { unavailableCode = 'CLEANUP_FEE_UNAVAILABLE'; continue; }
+      const feeSlot = normalizedSlot(feeResponse.context?.slot);
+      if (feeSlot === null || feeSlot < blockhashSlot) { unavailableCode = 'CLEANUP_FEE_CONTEXT_STALE'; continue; }
+      if (typeof feeResponse.value !== 'number' || !Number.isSafeInteger(feeResponse.value) || feeResponse.value <= 0) {
+        throw errorWithCode('Fee quote must be a positive integer', 'CLEANUP_FEE_INVALID');
+      }
+      fee = BigInt(feeResponse.value);
+      if (fee > 105_000n || fee >= originalFunding) throw errorWithCode('Cleanup fee is not economical', 'CLEANUP_FEE_TOO_HIGH');
+      break;
+    }
+    if (fee == null) throw errorWithCode('Cleanup quote is unavailable; defer without signing', unavailableCode);
+    // Abort can arrive while the final RPC resolves. No late signing after the
+    // coordinator's deadline, including the null->valid bounded retry path.
+    await read(() => undefined);
+    onStage('SIGNING');
     transaction.sign(this.signer);
     return { status: 'READY', ...identity, account: identity.address,
       signature: bs58.encode(transaction.signature), rawTransactionBase64: transaction.serialize().toString('base64'),

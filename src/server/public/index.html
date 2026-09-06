@@ -541,7 +541,7 @@
             <article class="card record-section">
               <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；已关闭实盘按链上钱包 SOL 实际收支结算，包含链上费用</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 出场价</th><th>链上实际盈亏</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
+                <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 退出触发参考价</th><th>链上实际盈亏</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
                 <tbody id="live-position-rows"></tbody>
               </table></div>
             </article>
@@ -1928,13 +1928,39 @@
         ['已验证子集经济盈亏', amount(s.verified_economic_pnl_sol), '只覆盖证据完整仓位，不冒充全体'],
         ['已知仍留存账户资金', amount(s.retained_funding_sol), '未知或已缺失账户不推算'],
         ['单独回收退款', amount(s.refund_sol), `回收费用 ${amount(s.recovery_fee_sol)}`],
-        ['回收后现金盈亏（已知部分）', amount(s.cash_after_recovery_pnl_sol), '原现金 + 已核对回收现金变化'],
+        ['截至目前现金盈亏（已知部分）', amount(s.cash_after_recovery_pnl_sol), '原现金 + 已确认回收现金变化；不含待回收资金'],
       ]);
-      note.textContent = '经济盈亏 = 原现金 + 已验证账户净占款 − 回收费用；退款只减少留存资金并进入回收后现金，不再给经济盈亏加一次。PREPARED/UNKNOWN 或账户消失但退款无法归因时，相关经济盈亏待验证。共享账户仅归属首次创建仓位，正常卖出中的退款已包含在原现金。最新最多 20 条，不展示待发送交易内容。';
+      note.textContent = '经济盈亏 = 原现金 + 已验证账户净占款 − 回收费用；退款只减少留存资金并进入截至目前现金，不再给经济盈亏加一次。待回收不等于已退款；PREPARED/UNKNOWN 或账户消失但退款无法归因时，相关经济盈亏待验证。现金收益率以买入实际现金支出为基数，经济收益率以剔除账户占款后的买入支出为基数。共享账户仅归属首次创建仓位，正常卖出中的退款已包含在原现金。最新最多 20 条，不展示待发送交易内容。';
       const labels = { PENDING: '待检查', PREPARED: '已持久签名，待核对', UNKNOWN: '确认未知，保留锁', CONFIRMED: '退款已确认', ABSENT: '账户已不存在', BLOCKED: '已停止此回收' };
       const cases = Array.isArray(data.cases) ? data.cases.slice(0, 20) : [];
-      rows.innerHTML = cases.length ? cases.map(row => `<tr><td>#${number(row.position_id)}<br>${walletLink(row.account_address, true)}</td><td>${escapeHtml(labels[row.status] || row.status || '待确认')}</td><td>${lamports(row.funded_lamports)}</td><td>${lamports(row.refund_lamports)}<br>费用 ${amount(row.network_fee_sol)}</td><td>${amount(row.wallet_sol_delta)}</td><td>${transactionLink(row.signature) || '—'}<br>${escapeHtml(row.error || '')}</td></tr>`).join('')
+      rows.innerHTML = cases.length ? cases.map(row => `<tr><td>#${number(row.position_id)}<br>${walletLink(row.account_address, true)}</td><td>${escapeHtml(labels[row.status] || row.status || '待确认')}</td><td>${lamports(row.funded_lamports)}</td><td>${lamports(row.refund_lamports)}<br>费用 ${amount(row.network_fee_sol)}</td><td>${amount(row.wallet_sol_delta)}</td><td>${transactionLink(row.signature) || '—'}<br>${escapeHtml(row.error || '')}${row.error_stage ? ` · 阶段 ${escapeHtml(row.error_stage)}` : ''}</td></tr>`).join('')
         : '<tr><td colspan="6" class="empty">暂无经过创建收据验证的回收候选</td></tr>';
+    }
+
+    function renderLivePositions(positions) {
+      const amount = value => Number.isFinite(value) ? `${number(value, 8)} SOL` : '待验证';
+      const recoveryStatus = row => {
+        const states = row.account_recovery_states;
+        if (!states || typeof states !== 'object') return '回收状态待验证';
+        const labels = { PENDING: '待回收（未退款）', PREPARED: '已签名待确认（不预计退款）',
+          UNKNOWN: '确认未知（不预计退款）', CONFIRMED: '退款已确认', ABSENT: '账户已不存在，退款归因看证据',
+          BLOCKED: '回收已停止，需检查' };
+        const status = Object.entries(states).filter(([, count]) => Number(count) > 0)
+          .map(([key, count]) => `${labels[key] || key} ${number(count)} 项`).join('；');
+        return `${status || '无单独回收任务'}${row.account_recovery_error ? ` · ${row.account_recovery_error}` : ''}${row.account_recovery_error_stage ? ` · 阶段 ${row.account_recovery_error_stage}` : ''}`;
+      };
+      document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
+        const signatures = [transactionLink(row.entry_signature, '买'), transactionLink(row.exit_signature, '卖')].filter(Boolean).join('<br>') || '—';
+        const settled = row.realized_pnl_sol == null
+          ? (row.mode === 'DRY_RUN' ? pct(row.price_return_pct) : '待链上结算')
+          : `原交易现金 ${row.realized_pnl_sol >= 0 ? '+' : ''}${number(row.realized_pnl_sol,6)} SOL / ${pct(row.realized_return_pct)}`;
+        const cashBasis = row.entry_sol_delta < 0 ? -row.entry_sol_delta : null;
+        const priceNote = row.price_return_pct == null ? '' : `<br><span class="table-note">触发参考价涨跌 ${pct(row.price_return_pct)}（非成交收益）</span>`;
+        const fundingNote = row.mode !== 'LIVE' ? '' : `<br><span class="table-note">现金收益基数 ${amount(cashBasis)}（含账户占款）<br>经济 ${Number.isFinite(row.economic_pnl_sol) ? `${number(row.economic_pnl_sol,6)} SOL / ${pct(row.economic_return_pct)}` : '待验证'} · 收益基数 ${amount(row.economic_cost_basis_sol)}（剔除账户占款）<br>账户留存 ${amount(row.account_retained_funding_sol)} · 已确认退款 ${amount(row.recovery_refund_sol)} · 回收费 ${amount(row.recovery_network_fee_sol)}<br>${escapeHtml(recoveryStatus(row))}<br>截至目前现金 ${amount(row.cash_after_recovery_pnl_sol)}（仅计已确认回收，不含待回收资金）</span>`;
+        const positionReason = row.entry_failure_category || row.exit_reason
+          || row.entry_error || row.exit_error || '—';
+        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}${fundingNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;
+      }).join('') : '<tr><td colspan="10" class="empty">暂无仓位记录；策略判定仍会继续采集</td></tr>';
     }
 
     function renderLiveLossRugFeedback(data) {
@@ -2317,18 +2343,7 @@
       renderLiveLossRugFeedback(data.lossRugFeedback);
       renderLiveAccountRecovery(data.accountRecovery);
 
-      const positions = data.positions || [];
-      document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
-        const signatures = [transactionLink(row.entry_signature, '买'), transactionLink(row.exit_signature, '卖')].filter(Boolean).join('<br>') || '—';
-        const settled = row.realized_pnl_sol == null
-          ? (row.mode === 'DRY_RUN' ? pct(row.price_return_pct) : '待链上结算')
-          : `${row.realized_pnl_sol >= 0 ? '+' : ''}${number(row.realized_pnl_sol,6)} SOL<br>${pct(row.realized_return_pct)}`;
-        const priceNote = row.price_return_pct == null ? '' : `<br><span class="table-note">价格 ${pct(row.price_return_pct)}</span>`;
-        const fundingNote = `<br><span class="table-note">经济 ${Number.isFinite(row.economic_pnl_sol) ? `${number(row.economic_pnl_sol,6)} SOL / ${pct(row.economic_return_pct)}` : '待验证'} · 留存 ${Number.isFinite(row.account_retained_funding_sol) ? `${number(row.account_retained_funding_sol,6)} SOL` : '未知'}<br>回收后现金 ${Number.isFinite(row.cash_after_recovery_pnl_sol) ? `${number(row.cash_after_recovery_pnl_sol,6)} SOL` : '待验证'}</span>`;
-        const positionReason = row.entry_failure_category || row.exit_reason
-          || row.entry_error || row.exit_error || '—';
-        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}${fundingNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;
-      }).join('') : '<tr><td colspan="10" class="empty">暂无仓位记录；策略判定仍会继续采集</td></tr>';
+      renderLivePositions(data.positions || []);
 
       document.querySelector('#live-order-summary').textContent = `共 ${number(stats.orders)} 笔 · 确认 ${number(stats.confirmed_orders)} · 失败 ${number(stats.failed_orders)} · 状态未知 ${number(stats.unknown_orders)}`;
       const orders = data.orders || [];
