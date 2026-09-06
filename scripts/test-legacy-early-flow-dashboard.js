@@ -104,7 +104,54 @@ assert(element('#live-mode-description').textContent.includes('不代表已验�
 assert(element('#live-runtime-strip').innerHTML.includes('未触发（仍受其他执行保护约束）'));
 assert(element('#live-metrics').innerHTML.includes('EARLY_FLOW源头评估'));
 assert(element('#live-metrics').innerHTML.includes('允许发送信号'));
+assert(element('#live-metrics').innerHTML.includes('FDV参考价'));
+assert(element('#live-metrics').innerHTML.includes('待确认 · 非正常结论'));
+assert(!element('#live-metrics').innerHTML.includes('READY · 可计算FDV'));
 assert(!/undefined|NaN/.test(allText()));
+
+const referenceNow = Date.now();
+const readyReference = { status: 'READY', ready: true, refreshing: false,
+  reference: { priceUsd: 105.25, observedAt: referenceNow - 5_000, expiresAt: referenceNow + 295_000 },
+  lastAttemptAt: referenceNow - 6_000, lastCompletedAt: referenceNow - 5_000,
+  lastSuccessAt: referenceNow - 5_000, nextRefreshAt: referenceNow + 54_000,
+  failures: 2, timeouts: 1, consecutiveFailures: 0, lastError: null, lastErrorCode: null,
+  lastHttpStatus: 200, requestTimeoutMs: 3_000, refreshIntervalMs: 60_000 };
+const fdvSource = { kind: 'LEGACY_EARLY_FLOW', evaluated: 45_841, sourceSignals: 0,
+  rugRejected: 0, liveBridgeEnabled: true,
+  rejectedByReason: { FDV_REFERENCE_UNAVAILABLE: 724 },
+  fdvRejectedByReason: { TOKEN_SUPPLY_UNAVAILABLE: 4, SOL_USD_REFERENCE_UNAVAILABLE: 700,
+    SOL_USD_REFERENCE_EXPIRED: 19, SOL_USD_REFERENCE_NOT_YET_KNOWN: 1 } };
+renderLive(live, { sourceDiagnostics: { ...fdvSource, solUsdReference: readyReference } });
+let fdvMetrics = element('#live-metrics').innerHTML;
+assert(fdvMetrics.includes('READY · 可计算FDV'));
+assert(fdvMetrics.includes('缓存 $105.25 / SOL'));
+assert(fdvMetrics.includes('FDV缺数据阻断</span><strong>724'));
+assert(fdvMetrics.includes('SOL/USD缺失 700'));
+assert(fdvMetrics.includes('代币供应量缺失 4'));
+assert(fdvMetrics.includes('参考价晚于事件 1'));
+assert(fdvMetrics.includes('累计评估次数，非币数或已命中信号，不计RUG拦截'));
+assert(fdvMetrics.includes('参考价失败 / 超时</span><strong>2 / 1'));
+assert(fdvMetrics.includes('最近尝试'));
+assert(fdvMetrics.includes('下次刷新'));
+renderLive(live, { sourceDiagnostics: { ...fdvSource, solUsdReference: {
+  ...readyReference, status: 'UNAVAILABLE', ready: false, reference: null,
+  refreshing: true, pendingAgeMs: 2_000, lastErrorCode: '<bad> & timeout',
+} } });
+fdvMetrics = element('#live-metrics').innerHTML;
+assert(fdvMetrics.includes('缺失 · 无法判断机会'));
+assert(fdvMetrics.includes('刷新中 2s'));
+assert(fdvMetrics.includes('&lt;bad&gt; &amp; timeout'));
+assert(!fdvMetrics.includes('<bad>'));
+assert(fdvMetrics.includes('不代表市场没有机会，也不是RUG拒绝'));
+renderLive(live, { sourceDiagnostics: { ...fdvSource, solUsdReference: {
+  ...readyReference, reference: { ...readyReference.reference, expiresAt: referenceNow - 1 },
+} } });
+assert(element('#live-metrics').innerHTML.includes('过期 · 无法判断机会'), 'cached READY must expire in the UI too');
+assert(!element('#live-metrics').innerHTML.includes('READY · 可计算FDV'));
+renderLive(live, { sourceDiagnostics: { ...fdvSource, solUsdReference: readyReference },
+  runtimeSnapshot: { status: 'STALE' } });
+assert(element('#live-metrics').innerHTML.includes('运行快照过期 · 待确认'));
+assert(!element('#live-metrics').innerHTML.includes('READY · 可计算FDV'));
 
 renderLive({ ...live, hardStopPct: 25, trailingActivationPct: 12, trailingStopPct: 6,
   maxHoldMs: 3_600_000, positionSizeSol: 0.03 });
@@ -221,10 +268,21 @@ assert(element('#legacy-early-flow-cohort-rows').innerHTML.includes('等待前�
 sandbox.shadowFixture = { ...shadow, runtimeSnapshot: { status: 'STALE' } };
 run('renderLegacyEarlyFlowShadow(shadowFixture)');
 assert(!element('#legacy-early-flow-metrics').innerHTML.includes('允许发送信号'));
+
+sandbox.shadowFixture = { ...shadow, solUsdReference: readyReference,
+  runtimeShadow: { ...shadow.runtimeShadow, legacyEarlyFlow: fdvSource } };
+run('renderLegacyEarlyFlowShadow(shadowFixture)');
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('READY · 可计算FDV'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('FDV缺数据阻断'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('724'));
+sandbox.shadowFixture.solUsdReference = { ...readyReference, status: 'STALE', ready: false, reference: null };
+run('renderLegacyEarlyFlowShadow(shadowFixture)');
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('过期 · 无法判断机会'));
 sandbox.shadowFixture = { ...shadow, runtimeShadow: { ...shadow.runtimeShadow, newEntriesEnabled: false } };
 run('renderLegacyEarlyFlowShadow(shadowFixture)');
 assert(element('#legacy-early-flow-cohort-rows').innerHTML.includes('停止新增；存量继续退出'));
 assert(!element('#legacy-early-flow-metrics').innerHTML.includes('允许发送信号'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('待确认 · 非正常结论'));
 
 run('renderLegacyEarlyFlowShadow({dashboardQuery:{status:"PREPARING"}})');
 rows = element('#legacy-early-flow-cohort-rows').innerHTML;
@@ -237,4 +295,62 @@ assert(element('#legacy-early-flow-expression').textContent.includes('后台准�
 assert(element('#legacy-early-flow-pair-rows').innerHTML.includes('等待严格配对'));
 assert(!/undefined|NaN/.test(allText()));
 assert.equal(requests, 0);
-console.log('PASS Legacy Early Flow Dashboard: two exact cohorts, independent live rules, calibrated runtime, strict pair isolation and unknown handling');
+
+async function testCachedSourceDiagnosticsApi() {
+  const ResearchServer = require('../src/server/server');
+  let currentReference = readyReference;
+  let healthReads = 0;
+  const server = new ResearchServer({
+    config: { storage: { dbPath: ':memory:' }, dashboardCache: { enabled: true },
+      liveTrading: { strategies: [live] }, migrationSecondLegShadow: { cohorts: configs },
+      smartWallets: [] },
+    store: { config: { dbPath: ':memory:' },
+      dashboardQueryInWorker: async () => ({ shadow: {}, solUsdReference: { status: 'POISON_STORED' } }) },
+    trader: { health: () => ({ mode: 'LIVE', strategies: [live] }) },
+    migrationSecondLegShadow: { health: () => ({ legacyEarlyFlow: fdvSource }) },
+    migrationSecondLegObserver: { health: () => ({ enabled: true }) },
+    solUsdReference: { health() { healthReads++; return currentReference; },
+      refresh() { throw new Error('HTTP must not refresh SOL/USD'); } },
+  });
+  // Exercise the production snapshot path without opening a file-backed DB.
+  server.dashboardReadModel.enabled = true;
+  server.dashboardReadModel.read = () => ({ status: 'READY', generatedAt: Date.now(),
+    value: { stats: {}, shadow: {}, solUsdReference: { status: 'POISON_STORED' },
+      sourceDiagnostics: { solUsdReference: { status: 'POISON_STORED' } } } });
+  const httpServer = await new Promise(resolve => {
+    const listening = server.app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  const api = async route => {
+    const response = await fetch(`http://127.0.0.1:${httpServer.address().port}${route}`);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  try {
+    let response = await api(`/api/live-trading?strategyId=${live.id}`);
+    assert.deepEqual(response.sourceDiagnostics.solUsdReference, readyReference);
+    assert.equal(response.sourceDiagnostics.rejectedByReason.FDV_REFERENCE_UNAVAILABLE, 724);
+    assert.equal(response.sourceDiagnostics.fdvRejectedByReason.SOL_USD_REFERENCE_UNAVAILABLE, 700);
+    response = await api('/api/migration-second-leg-observer');
+    assert.deepEqual(response.solUsdReference, readyReference, 'independent HTTP cached route must report current owner reference');
+    server.dashboardReadModel.enabled = false;
+    response = await api('/api/migration-second-leg-observer');
+    assert.deepEqual(response.solUsdReference, readyReference, 'direct worker route must expose same contract');
+    server.dashboardReadModel.enabled = true;
+    currentReference = { status: 'UNAVAILABLE', ready: false, reference: null,
+      refreshing: false, timeouts: 3, lastErrorCode: 'SOL_USD_REQUEST_TIMEOUT' };
+    response = await api(`/api/live-trading?strategyId=${live.id}`);
+    assert.deepEqual(response.sourceDiagnostics.solUsdReference, currentReference, 'runtime error is not replaced by stale historical cache');
+    assert.equal(healthReads, 4, 'one cached health read per request, no feed polling');
+    server.solUsdReference = null;
+    response = await api(`/api/live-trading?strategyId=${live.id}`);
+    assert.equal(response.sourceDiagnostics.solUsdReference, null, 'missing owner stays unknown');
+    response = await api('/api/migration-second-leg-observer');
+    assert.equal(response.solUsdReference, null);
+  } finally {
+    await new Promise(resolve => httpServer.close(resolve));
+  }
+}
+
+testCachedSourceDiagnosticsApi().then(() => {
+  console.log('PASS Legacy Early Flow Dashboard: cached FDV readiness/failure diagnostics, HTTP contracts, strict pairs and unknown handling');
+}).catch(error => { console.error(error); process.exitCode = 1; });

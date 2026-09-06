@@ -271,6 +271,7 @@ class ResearchServer {
       const cohort = this.config.migrationSecondLegShadow?.cohorts
         ?.find((row) => row.id === 'LEGACY-EARLY-FLOW-RUGX');
       return { kind: 'LEGACY_EARLY_FLOW', ...(runtime.legacyEarlyFlow || {}),
+        solUsdReference: this.solUsdReference?.health() || null,
         liveBridgeEnabled: cohort?.liveBridgeEnabled === true,
         minLifecycleAgeMs: 15_000, maxLifecycleAgeMs: 25_000 };
     }
@@ -357,7 +358,12 @@ class ResearchServer {
         runtime, dashboardSnapshot: cached.metadata };
       if (Object.hasOwn(value, 'health')) value.health = runtime;
       if (key === 'smart-consensus-v2') Object.assign(value, runtime);
-      if (key === 'migration-second-leg') value.runtimeShadow = this.migrationSecondLegShadow?.health() || null;
+      if (key === 'migration-second-leg') {
+        value.runtimeShadow = this.migrationSecondLegShadow?.health() || null;
+        // Runtime reference health is independent of historical aggregates.
+        // Read the owner's cached snapshot; never fetch a price on this route.
+        value.solUsdReference = this.solUsdReference?.health() || null;
+      }
       response.json(value);
     });
     this.app.use((request, response, next) => {
@@ -662,8 +668,8 @@ class ResearchServer {
         runtime,
         configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         monitoredWallets: this.config.smartWallets,
-        sourceDiagnostics: this._liveSourceDiagnostics(strategy),
         ...databaseDashboard,
+        sourceDiagnostics: this._liveSourceDiagnostics(strategy),
         dashboardSnapshot: this.dashboardReadModel.enabled
           ? snapshotMetadata(cached)
           : { status: 'DIRECT' },
@@ -807,6 +813,7 @@ class ResearchServer {
             guardRequired: true,
           },
           ...dashboard,
+          solUsdReference: this.solUsdReference?.health() || null,
         });
       } catch (error) {
         next(error);

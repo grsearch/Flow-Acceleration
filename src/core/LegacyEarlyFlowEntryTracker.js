@@ -64,12 +64,19 @@ class LegacyEarlyFlowEntryTracker {
     this.thresholds = { ...DEFAULT_THRESHOLDS, ...(config.thresholds || {}) };
     this.policy = { version: strictAmm.VERSION, maxTradeAgeMs: 3_000 };
     this.metrics = { evaluated: 0, signals: 0, migrationsObserved: 0,
-      tokenLookups: 0, rejectedByReason: {}, lastSignalAt: null };
+      tokenLookups: 0, rejectedByReason: {}, fdvRejectedByReason: {}, lastSignalAt: null };
   }
 
   reject(reason) {
     this.metrics.rejectedByReason[reason] = (this.metrics.rejectedByReason[reason] || 0) + 1;
     return null;
+  }
+
+  rejectFdv(reason) {
+    this.metrics.fdvRejectedByReason[reason] = (this.metrics.fdvRejectedByReason[reason] || 0) + 1;
+    // Keep the existing aggregate for API consumers; these are evaluations,
+    // not distinct mints or signals that already passed all entry conditions.
+    return this.reject('FDV_REFERENCE_UNAVAILABLE');
   }
 
   observeGraduation(token, explicit = true) {
@@ -154,13 +161,15 @@ class LegacyEarlyFlowEntryTracker {
     let reference;
     try { reference = this.getSolUsdReference(); } catch (_) { reference = null; }
     const solPriceUsd = numeric(reference?.priceUsd);
-    if (!(supply > 0) || !Number.isFinite(supply) || !(solPriceUsd > 0)
-      || !timestamp(reference?.observedAt) || !timestamp(reference?.expiresAt)
-      || reference.observedAt > trade.receivedAtMs || reference.observedAt > now
-      || reference.expiresAt < now || reference.expiresAt < trade.receivedAtMs
-      || now - reference.observedAt > 300_000) {
-      return this.reject('FDV_REFERENCE_UNAVAILABLE');
+    if (!(supply > 0) || !Number.isFinite(supply)) return this.rejectFdv('TOKEN_SUPPLY_UNAVAILABLE');
+    if (!(solPriceUsd > 0) || !timestamp(reference?.observedAt) || !timestamp(reference?.expiresAt)) {
+      return this.rejectFdv('SOL_USD_REFERENCE_UNAVAILABLE');
     }
+    if (reference.observedAt > trade.receivedAtMs || reference.observedAt > now) {
+      return this.rejectFdv('SOL_USD_REFERENCE_NOT_YET_KNOWN');
+    }
+    if (reference.expiresAt <= now || reference.expiresAt <= trade.receivedAtMs
+      || now - reference.observedAt > 300_000) return this.rejectFdv('SOL_USD_REFERENCE_EXPIRED');
     const last5 = state.events.filter(event => event.at >= at - 5_000);
     const buys = last5.filter(event => event.side === 'BUY');
     const buySol = buys.reduce((sum, event) => sum + event.solAmount, 0);
@@ -198,7 +207,9 @@ class LegacyEarlyFlowEntryTracker {
   }
 
   trackedMints() { this.advanceTime(); return [...this.states.keys()]; }
-  health() { return { ...this.metrics, trackedMints: this.states.size, maxMints: this.maxMints,
+  health() { return { ...this.metrics, rejectedByReason: { ...this.metrics.rejectedByReason },
+    fdvRejectedByReason: { ...this.metrics.fdvRejectedByReason },
+    trackedMints: this.states.size, maxMints: this.maxMints,
     maxEventsPerMint: this.maxEvents, fdvReferenceMode: 'CACHED_SOL_USD_AND_RECORDED_TOKEN_SUPPLY',
     thresholds: { ...this.thresholds } }; }
 }

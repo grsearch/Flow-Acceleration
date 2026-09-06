@@ -168,7 +168,49 @@ function guardAndUnknownTests() {
   }
   const f = fixture('missing-supply');
   f.store.getToken(f.mint).token_total_supply_raw = null;
-  f.seed(); assert.strictEqual(f.rows().length, 0); done(f);
+  f.seed(); assert.strictEqual(f.rows().length, 0);
+  assert.strictEqual(f.suite.health().legacyEarlyFlow.fdvRejectedByReason.TOKEN_SUPPLY_UNAVAILABLE, 1);
+  done(f);
+}
+
+function referenceRecoveryTests() {
+  let reference = null;
+  const f = fixture('reference-recovered', { reference: () => reference });
+  f.seed();
+  const blocked = f.suite.health().legacyEarlyFlow;
+  assert.strictEqual(blocked.fdvRejectedByReason.SOL_USD_REFERENCE_UNAVAILABLE, 1);
+  assert.strictEqual(blocked.rejectedByReason.FDV_REFERENCE_UNAVAILABLE, 1);
+  assert.strictEqual(f.calls.length, 0);
+  assert.strictEqual(f.guards.length, 0, 'missing reference is upstream of RUG filtering');
+  blocked.fdvRejectedByReason.SOL_USD_REFERENCE_UNAVAILABLE = 99;
+  assert.strictEqual(f.suite.health().legacyEarlyFlow.fdvRejectedByReason.SOL_USD_REFERENCE_UNAVAILABLE, 1,
+    'health snapshots cannot rewrite counters');
+  reference = { priceUsd: 100, observedAt: T + 15_100, expiresAt: T + 75_100 };
+  assert.strictEqual(f.calls.length, 0, 'cache recovery by itself must not replay a blocked trade');
+  f.emit(16_000);
+  assert.strictEqual(f.calls.length, 1, 'subsequent eligible fresh trade may signal without restart');
+  assert.strictEqual(f.calls[0].features.fdvUsd, 40_000);
+  assert.strictEqual(f.rows().length, 2, 'baseline and RUGX still share the same source');
+  done(f);
+
+  const cases = [
+    ['SOL_USD_REFERENCE_EXPIRED', now => ({ priceUsd: 100, observedAt: now - 1_000, expiresAt: now })],
+    ['SOL_USD_REFERENCE_EXPIRED', now => ({ priceUsd: 100, observedAt: now - 300_001, expiresAt: now + 1 })],
+    ['SOL_USD_REFERENCE_NOT_YET_KNOWN', now => ({ priceUsd: 100, observedAt: now + 1, expiresAt: now + 60_000 })],
+    ['SOL_USD_REFERENCE_UNAVAILABLE', now => ({ priceUsd: 0, observedAt: now - 1, expiresAt: now + 60_000 })],
+  ];
+  for (const [reason, getReference] of cases) {
+    const invalid = fixture(reason, { reference: getReference }); invalid.seed();
+    assert.strictEqual(invalid.suite.health().legacyEarlyFlow.fdvRejectedByReason[reason], 1);
+    assert.strictEqual(invalid.calls.length, 0); done(invalid);
+  }
+  let late = null;
+  const expiredOpportunity = fixture('reference-after-age-window', { reference: () => late });
+  expiredOpportunity.seed();
+  late = { priceUsd: 100, observedAt: T + 25_100, expiresAt: T + 85_100 };
+  expiredOpportunity.emit(26_000);
+  assert.strictEqual(expiredOpportunity.calls.length, 0, 'recovery never extends the 15-25 second entry window');
+  done(expiredOpportunity);
 }
 
 function exitTests() {
@@ -499,4 +541,5 @@ function actualRugLifecycleTests() {
 
 thresholdTests(); sourceAndFillTests(); guardAndUnknownTests(); exitTests(); recoveryTests(); boundaryTests();
 entryImpactTests(); persistenceFailureTests(); actualRugLifecycleTests();
+referenceRecoveryTests();
 console.log('test-legacy-early-flow-shadow: ok');
