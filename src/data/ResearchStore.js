@@ -10,7 +10,7 @@ const {
   RawTradeShardManager, ensureRawExecutionColumns, normalizeRawExecutionContext,
 } = require('./RawTradeShardManager');
 const { serializeAmmExecutionContext, restoreRawExecutionContext } = require('./RawExecutionContext');
-const { liveAccountRecoveryMethods } = require('./LiveAccountRecoveryStore');
+const { liveAccountRecoveryMethods, economicPositionVerified, economicPerformance } = require('./LiveAccountRecoveryStore');
 
 const MIGRATION_SOURCE = Object.freeze({
   CHAIN_EVENT: 'CHAIN_EVENT',
@@ -10021,6 +10021,7 @@ class ResearchStore {
           && /(?:bonding curve already complete|curve complete)/i.test(row.entry_error || '');
         return {
           ...row,
+          economic_verified: economicPositionVerified(row),
           entry_failure_category: legacyCurveComplete
             ? 'ENTRY_MIGRATED_BEFORE_SUBMIT'
             : null,
@@ -10152,6 +10153,7 @@ class ResearchStore {
     `).get(...(strategy ? [strategy] : []));
     const settledClosed = Number(positionStats.settled_closed_positions) || 0;
     const wins = Number(positionStats.wins) || 0;
+    const accountRecovery = this.liveAccountRecoveryDashboard(strategy);
 
     return {
       stats: {
@@ -10166,7 +10168,8 @@ class ResearchStore {
       entryLocks: this.activeLiveMintEntryLocks(100),
       strategyId: strategy,
       lossRugFeedback: this.liveLossRugFeedbackDashboard(strategy),
-      accountRecovery: this.liveAccountRecoveryDashboard(strategy),
+      accountRecovery,
+      performance: economicPerformance(accountRecovery.summary),
     };
   }
 

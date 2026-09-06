@@ -539,9 +539,9 @@
               </table></div>
             </article>
             <article class="card record-section">
-              <div class="section-title"><h2>实盘仓位记录</h2><p>活动仓位优先；已关闭实盘按链上钱包 SOL 实际收支结算，包含链上费用</p></div>
+              <div class="section-title"><h2>实盘仓位记录</h2><p>主表现仅统计已核实经济盈亏；现金与账户资金分开对账，未核实不计输赢</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 退出触发参考价</th><th>链上实际盈亏</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
+                <thead><tr><th>更新时间</th><th>状态</th><th>模式</th><th>Mint / Signal</th><th>仓位</th><th>入场 / 最高 / 退出触发参考价</th><th>经济盈亏 / 现金对账</th><th>持仓</th><th>退出原因</th><th>交易签名</th></tr></thead>
                 <tbody id="live-position-rows"></tbody>
               </table></div>
             </article>
@@ -1951,16 +1951,54 @@
       };
       document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
         const signatures = [transactionLink(row.entry_signature, '买'), transactionLink(row.exit_signature, '卖')].filter(Boolean).join('<br>') || '—';
-        const settled = row.realized_pnl_sol == null
-          ? (row.mode === 'DRY_RUN' ? pct(row.price_return_pct) : '待链上结算')
-          : `原交易现金 ${row.realized_pnl_sol >= 0 ? '+' : ''}${number(row.realized_pnl_sol,6)} SOL / ${pct(row.realized_return_pct)}`;
+        const economicVerified = row.mode === 'LIVE' && row.status === 'CLOSED' && row.economic_verified === true
+          && Number.isFinite(row.economic_pnl_sol) && Number.isFinite(row.economic_return_pct);
+        const cash = row.realized_pnl_sol == null ? '待链上结算'
+          : `${row.realized_pnl_sol >= 0 ? '+' : ''}${number(row.realized_pnl_sol,6)} SOL / ${pct(row.realized_return_pct)}`;
+        const settled = row.mode === 'DRY_RUN'
+          ? (row.realized_pnl_sol == null ? `模拟收益 ${pct(row.price_return_pct)}` : `模拟收益 ${cash}`)
+          : economicVerified ? `已核实经济 ${row.economic_pnl_sol >= 0 ? '+' : ''}${number(row.economic_pnl_sol,6)} SOL / ${pct(row.economic_return_pct)}`
+            : '经济待核实（不计输赢）';
+        const primaryTone = row.mode === 'DRY_RUN' ? tone(row.gross_return_pct)
+          : tone(economicVerified ? row.economic_pnl_sol : null);
         const cashBasis = row.entry_sol_delta < 0 ? -row.entry_sol_delta : null;
         const priceNote = row.price_return_pct == null ? '' : `<br><span class="table-note">触发参考价涨跌 ${pct(row.price_return_pct)}（非成交收益）</span>`;
-        const fundingNote = row.mode !== 'LIVE' ? '' : `<br><span class="table-note">现金收益基数 ${amount(cashBasis)}（含账户占款）<br>经济 ${Number.isFinite(row.economic_pnl_sol) ? `${number(row.economic_pnl_sol,6)} SOL / ${pct(row.economic_return_pct)}` : '待验证'} · 收益基数 ${amount(row.economic_cost_basis_sol)}（剔除账户占款）<br>账户留存 ${amount(row.account_retained_funding_sol)} · 已确认退款 ${amount(row.recovery_refund_sol)} · 回收费 ${amount(row.recovery_network_fee_sol)}<br>${escapeHtml(recoveryStatus(row))}<br>截至目前现金 ${amount(row.cash_after_recovery_pnl_sol)}（仅计已确认回收，不含待回收资金）</span>`;
+        const fundingNote = row.mode !== 'LIVE' ? '' : `<br><span class="table-note">经济收益基数 ${amount(economicVerified ? row.economic_cost_basis_sol : null)}（剔除账户占款）<br>原交易现金 ${cash}<br>现金收益基数 ${amount(cashBasis)}（含账户占款）<br>账户留存 ${amount(row.account_retained_funding_sol)} · 已确认退款 ${amount(row.recovery_refund_sol)} · 回收费 ${amount(row.recovery_network_fee_sol)}<br>${escapeHtml(recoveryStatus(row))}<br>截至目前现金 ${amount(row.cash_after_recovery_pnl_sol)}（仅计已确认回收，不含待回收资金）</span>`;
         const positionReason = row.entry_failure_category || row.exit_reason
           || row.entry_error || row.exit_error || '—';
-        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}${fundingNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;
+        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${primaryTone}">${settled}${priceNote}${fundingNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;
       }).join('') : '<tr><td colspan="10" class="empty">暂无仓位记录；策略判定仍会继续采集</td></tr>';
+    }
+
+    function economicPerformanceMetrics(performance) {
+      const valid = performance?.basis === 'ECONOMIC_VERIFIED_CLOSED_V1'
+        && ['COMPLETE', 'PARTIAL', 'EMPTY', 'UNAVAILABLE'].includes(performance.status);
+      const p = valid ? performance : {};
+      const count = value => Number.isSafeInteger(value) && value >= 0;
+      const coverageKnown = valid && count(p.closed_positions) && count(p.verified_closed_positions)
+        && count(p.unverified_closed_positions)
+        && p.verified_closed_positions + p.unverified_closed_positions === p.closed_positions;
+      const subsetReady = coverageKnown && ['COMPLETE', 'PARTIAL'].includes(p.status)
+        && p.verified_closed_positions > 0;
+      const complete = subsetReady && p.status === 'COMPLETE' && p.unverified_closed_positions === 0;
+      const noClosed = coverageKnown && p.status === 'EMPTY' && p.closed_positions === 0;
+      const pending = noClosed ? '暂无已平仓' : '待核实';
+      const coverage = coverageKnown
+        ? `已核实 ${number(p.verified_closed_positions)} / ${number(p.closed_positions)} 仓；待核实 ${number(p.unverified_closed_positions)} 仓`
+        : '经济证据待核实；不以现金收益替代';
+      const percent = (value, signed = false) => Number.isFinite(value) ? (signed ? pct(value) : rate(value)) : '待核实';
+      const amount = value => Number.isFinite(value) ? `${number(value, 6)} SOL` : '待核实';
+      return [
+        ['经济胜率（已核实）', subsetReady ? percent(p.win_rate_pct) : pending,
+          `${subsetReady && count(p.wins) ? `盈利 ${number(p.wins)} 仓；` : ''}${coverage}`],
+        ['平均经济收益（已核实）', subsetReady ? percent(p.average_return_pct, true) : pending,
+          `仅已核实仓位；${coverage}`, tone(subsetReady ? p.average_return_pct : null)],
+        ['累计经济盈亏（全体已平仓）', complete ? amount(p.total_pnl_sol) : pending,
+          complete ? coverage : `${coverage}；未核实不按零计入`, tone(complete ? p.total_pnl_sol : null)],
+        ['已核实经济盈亏（子集）', subsetReady ? amount(p.verified_pnl_sol) : pending,
+          `不冒充全体累计；${coverage}`, tone(subsetReady ? p.verified_pnl_sol : null)],
+        ['经济核实覆盖', coverageKnown && p.closed_positions > 0 ? percent(p.coverage_pct) : pending, coverage],
+      ];
     }
 
     function renderLiveLossRugFeedback(data) {
@@ -2188,12 +2226,14 @@
         ['提交前已毕业', number(stats.pre_submit_migrated_positions), '未签名、未花费 SOL'],
         ['提交前保护拒绝', number(stats.pre_submit_guard_rejected_positions), '追价 / 余额 / 自身冲击保护'],
         ['真实入场失败', number(stats.execution_entry_failed_positions), '已进入交易执行阶段'],
-        ['链上实际胜率', rate(stats.win_rate_pct), `赢家 ${number(stats.wins)}`],
-        ['平均实际收益', pct(stats.average_realized_return_pct), `累计 ${number(stats.total_realized_pnl_sol,6)} SOL`],
+        ...(mode === 'DRY_RUN' ? [
+          ['模拟胜率', rate(stats.win_rate_pct), `模拟赢家 ${number(stats.wins)}`],
+          ['平均模拟收益', pct(stats.average_realized_return_pct), `模拟累计 ${number(stats.total_realized_pnl_sol,6)} SOL`],
+        ] : economicPerformanceMetrics(data.performance)),
         ['累计开仓规模', `${number(stats.deployed_sol,4)} SOL`, `平均持仓 ${age(stats.average_hold_ms)}`],
         ['订单确认 / 失败', `${number(stats.confirmed_orders)} / ${number(stats.failed_orders)}`, `状态未知 ${number(stats.unknown_orders)}`],
       ];
-      document.querySelector('#live-metrics').innerHTML = metrics.map(([label,value,note]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join('');
+      document.querySelector('#live-metrics').innerHTML = metrics.map(([label,value,note,color]) => `<article class="metric"><span>${label}</span><strong${color ? ` class="${color}"` : ''}>${value}</strong><small>${note}</small></article>`).join('');
 
       const commitmentPath = execution.readCommitment && execution.confirmationCommitment
         ? `${execution.readCommitment} → ${execution.confirmationCommitment}`
