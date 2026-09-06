@@ -182,9 +182,12 @@ const settlement = walletSolSettlementFromTransaction({
   },
 }, receiptOwner);
 assert.deepStrictEqual(settlement, {
+  wallet: receiptOwner,
   walletSolDelta: -0.9895,
   networkFeeSol: 0.0005,
   walletIndex: 0,
+  accountFunding: { version: 'TOKEN_ACCOUNT_FUNDING_V1', owner: receiptOwner,
+    verified: false, reason: 'INCOMPLETE_TOKEN_META', accounts: [], netFundingLamports: null },
 });
 const receivedRaw = tokenDeltaFromTransaction({
   meta: {

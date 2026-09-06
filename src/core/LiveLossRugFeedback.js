@@ -53,7 +53,32 @@ class LiveLossRugFeedback {
       completedCases: 0, learnedCases: 0, duplicateRequests: 0, ignoredNonLive: 0,
       ignoredSettlement: 0, invalidSettlements: 0, evidenceErrors: 0, writeErrors: 0,
       learningErrors: 0, recoveryErrors: 0, recoveredPositions: 0, dropped: 0,
+      entryEvidenceUnavailable: 0, consecutiveEvidenceErrors: 0,
+      lastEvidenceError: null, lastEvidenceErrorAt: null, lastSuccessfulCaptureAt: null,
       lastError: null, lastErrorAt: null, lastPersistedAt: null, lastCompletedAt: null };
+  }
+
+  _resolveTracker() {
+    // Runtime may restore the manager before binding the collector. Never
+    // freeze that initial undefined reference, or keep a replaced collector.
+    return this.store?.preEntryRugRisk ?? this.tracker;
+  }
+
+  _trackerState() {
+    const tracker = this._resolveTracker();
+    const collecting = Boolean(tracker) && tracker.config?.enabled !== false;
+    return { trackerBound: Boolean(tracker), trackerEnabled: collecting,
+      captureReady: collecting && typeof tracker.captureLossEvidence === 'function',
+      analyzerReady: collecting && typeof tracker.analyzeLossEvidence === 'function',
+      learningReady: collecting && typeof tracker.learnFromLossCase === 'function' };
+  }
+
+  _evidenceError(reason) {
+    this.stats.evidenceErrors += 1;
+    this.stats.consecutiveEvidenceErrors += 1;
+    // Only stable codes, never arbitrary exception text or provider secrets.
+    this.stats.lastEvidenceError = reason;
+    this.stats.lastEvidenceErrorAt = this.now();
   }
 
   start() {
@@ -80,18 +105,32 @@ class LiveLossRugFeedback {
       if (!text || Buffer.byteLength(text, 'utf8') > this.maxEvidenceBytes) throw new Error('EVIDENCE_LIMIT');
       return JSON.parse(text);
     } catch (_) {
-      this.stats.evidenceErrors += 1;
+      this._evidenceError('EVIDENCE_NOT_SERIALIZABLE_OR_LIMIT');
       return { version: VERSION, capturedAt, evidenceUnavailable: true, reason: 'EVIDENCE_NOT_SERIALIZABLE_OR_LIMIT' };
     }
   }
 
   _capture(mint, phase, capturedAt) {
+    const unavailable = reason => {
+      this._evidenceError(reason);
+      return { version: VERSION, mint, phase, capturedAt, evidenceUnavailable: true, reason };
+    };
+    const tracker = this._resolveTracker();
+    if (tracker?.config?.enabled === false) return unavailable('CAPTURE_DISABLED');
+    if (typeof tracker?.captureLossEvidence !== 'function') return unavailable('CAPTURE_UNAVAILABLE');
     try {
-      if (typeof this.tracker?.captureLossEvidence !== 'function') throw new Error('CAPTURE_UNAVAILABLE');
-      return this._copyEvidence(this.tracker.captureLossEvidence(mint, capturedAt, { phase }), capturedAt);
+      const value = tracker.captureLossEvidence(mint, capturedAt, { phase });
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || typeof value.then === 'function') return unavailable('INVALID_CAPTURE_RESULT');
+      if (value.evidenceUnavailable === true) return unavailable('CAPTURE_REPORTED_UNAVAILABLE');
+      const captured = this._copyEvidence(value, capturedAt);
+      if (captured.evidenceUnavailable !== true) {
+        this.stats.lastSuccessfulCaptureAt = capturedAt;
+        this.stats.consecutiveEvidenceErrors = 0;
+      }
+      return captured;
     } catch (_) {
-      this.stats.evidenceErrors += 1;
-      return { version: VERSION, mint, phase, capturedAt, evidenceUnavailable: true, reason: 'CAPTURE_UNAVAILABLE' };
+      return unavailable('CAPTURE_FAILED');
     }
   }
 
@@ -107,6 +146,7 @@ class LiveLossRugFeedback {
     const capturedAt = this.now();
     const entryEvidence = { version: VERSION, ...identity, capturedAt, phase: 'ENTRY',
       tracker: this._capture(identity.mint, 'ENTRY', capturedAt), signal: evidenceSignal(event) };
+    if (entryEvidence.tracker.evidenceUnavailable === true) this.stats.entryEvidenceUnavailable += 1;
     this.tracked.set(identity.positionId, { ...identity, entryEvidence, triggerEvidence: null });
     this.stats.capturedEntries += 1;
     return this._enqueue(identity.positionId, { ...identity, entryEvidence, status: 'CAPTURED', updatedAt: capturedAt });
@@ -376,10 +416,13 @@ class LiveLossRugFeedback {
       resolutionTracker = this._capture(identity.mint, 'SETTLEMENT', knownAt);
       const entryEvidence = existing?.entryEvidence || memory?.entryEvidence || null;
       const triggerEvidence = { ...(existing?.triggerEvidence || memory?.triggerEvidence || {}), resolutionTracker };
+      const tracker = this._resolveTracker();
       analysis = !entryEvidence || !entryEvidence.tracker || entryEvidence.tracker.evidenceUnavailable === true
         ? { classification: 'INSUFFICIENT', reason: 'ENTRY_EVIDENCE_UNAVAILABLE', learningCandidate: null }
-        : typeof this.tracker?.analyzeLossEvidence === 'function'
-        ? await this.tracker.analyzeLossEvidence({ entryEvidence, triggerEvidence,
+        : resolutionTracker.evidenceUnavailable === true
+        ? { classification: 'INSUFFICIENT', reason: 'SETTLEMENT_EVIDENCE_UNAVAILABLE', learningCandidate: null }
+        : typeof tracker?.analyzeLossEvidence === 'function'
+        ? await tracker.analyzeLossEvidence({ entryEvidence, triggerEvidence,
           position, orders, settlement: validation, knownAt })
         : { classification: 'INSUFFICIENT', reason: 'LOSS_ANALYZER_UNAVAILABLE', learningCandidate: null };
       analysis = this._copyEvidence(analysis, knownAt);
@@ -409,8 +452,9 @@ class LiveLossRugFeedback {
     let learning = { status: 'NOT_ELIGIBLE', templatesAdded: 0, walletsAdded: 0 };
     if (analysis.classification === 'CONFIRMED_RUG' && analysis.learningCandidate) {
       try {
-        if (typeof this.tracker?.learnFromLossCase !== 'function') throw new Error('LEARNING_UNAVAILABLE');
-        learning = await this.tracker.learnFromLossCase({ caseId: `LIVE_LOSS:${item.positionId}`, analysis, knownAt });
+        const tracker = this._resolveTracker();
+        if (tracker?.config?.enabled === false || typeof tracker?.learnFromLossCase !== 'function') throw new Error('LEARNING_UNAVAILABLE');
+        learning = await tracker.learnFromLossCase({ caseId: `LIVE_LOSS:${item.positionId}`, analysis, knownAt });
         if (!['LEARNED', 'ALREADY_LEARNED', 'NOT_ELIGIBLE'].includes(learning?.status)) throw new Error('LEARNING_RESULT_INVALID');
       } catch (error) { error.feedbackPhase = 'LEARNING'; throw error; }
     }
@@ -431,7 +475,7 @@ class LiveLossRugFeedback {
   _maybeReleaseEvidence(mint) {
     if (!mint || [...this.tracked.values()].some(row => row.mint === mint)
       || [...this.pending.values()].some(row => row.patch.mint === mint)) return;
-    try { this.tracker?.releaseLossEvidence?.(mint); } catch (_) { this.stats.evidenceErrors += 1; }
+    try { this._resolveTracker()?.releaseLossEvidence?.(mint); } catch (_) { this._evidenceError('RELEASE_EVIDENCE_FAILED'); }
   }
 
   async stop() {
@@ -455,7 +499,11 @@ class LiveLossRugFeedback {
   }
 
   health() {
+    const tracker = this._trackerState();
+    const ready = this.enabled && tracker.captureReady && tracker.analyzerReady && tracker.learningReady
+      && this.stats.consecutiveEvidenceErrors === 0;
     return { enabled: this.enabled, version: VERSION, mode: 'LOCAL_EVIDENCE_SETTLEMENT_VERIFIED',
+      ready, status: !this.enabled ? 'DISABLED' : ready ? 'READY' : 'DEGRADED', ...tracker,
       lossThresholdPct: this.lossThresholdPct, ...this.stats, pending: this.pending.size,
       trackedPositions: this.tracked.size, capacity: this.maxPending, batchSize: this.batchSize,
       recoveryAfterId: this.recoveryAfterId, nextRecoveryAt: this.nextRecoveryAt || null,

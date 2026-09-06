@@ -524,6 +524,12 @@
             <div class="grid live-metric-grid" id="live-metrics"></div>
             <div class="grid strategy-grid" id="live-strategy-cards"></div>
             <article class="card record-section">
+              <div class="section-title"><h2>现金盈亏 · 账户资金 · 回收对账</h2><p>原现金盈亏及 RUG 大亏门槛保持不变。只剔除收据已验证的代币账户净占款；旧凭证缺失时不推算固定租金。</p></div>
+              <div class="grid live-metric-grid" id="live-account-recovery-metrics"></div>
+              <p class="table-note" id="live-account-recovery-note">账户证据待加载。</p>
+              <div class="table-wrap"><table><thead><tr><th>仓位 / 账户</th><th>状态</th><th>创建占款</th><th>已归因退款 / 回收费用</th><th>回收现金变化</th><th>签名 / 异常</th></tr></thead><tbody id="live-account-recovery-rows"></tbody></table></div>
+            </article>
+            <article class="card record-section">
               <div class="section-title"><h2>实盘 ≥50% 大亏复盘与 RUG 学习</h2><p>按当前策略统计；首次入场/触发证据冻结，归因与学习为最新状态，不是历史时点回放。</p></div>
               <div class="grid live-metric-grid" id="live-loss-rug-metrics"></div>
               <p class="table-note" id="live-loss-rug-note">案例数据待加载；仅捕获入场证据不算大亏。</p>
@@ -1903,6 +1909,34 @@
       target.innerHTML = rows.map(row => `<article class="card"><p class="eyebrow">配置种子钱包</p><div class="wallet-address">${walletLink(row.wallet, true)}</div><div class="wallet-metrics"><div><span>交易次数</span><b>${number(row.trades)}</b></div><div><span>买入币种</span><b>${number(row.boughtTokens)}</b></div><div><span>平均持仓</span><b>${age(row.averageHoldMs)}</b></div><div><span>OPEN / ADD</span><b>${number(row.openBuys)} / ${number(row.addBuys)}</b></div><div><span>OPEN 5秒覆盖</span><b>${pct(row.openSignalOverlap5Pct,1)}</b></div><div><span>OPEN 10秒覆盖</span><b>${pct(row.openSignalOverlap10Pct,1)}</b></div><div><span>OPEN 30秒覆盖</span><b>${pct(row.openSignalOverlap30Pct,1)}</b></div><div><span>ADD 30秒覆盖</span><b>${pct(row.addSignalOverlap30Pct,1)}</b></div><div><span>全部买入30秒覆盖</span><b>${pct(row.primaryOverlap30Pct,1)}</b></div></div></article>`).join('');
     }
 
+    function renderLiveAccountRecovery(data) {
+      const metrics = document.querySelector('#live-account-recovery-metrics');
+      const rows = document.querySelector('#live-account-recovery-rows');
+      const note = document.querySelector('#live-account-recovery-note');
+      if (data?.available !== true || !data.summary) {
+        metrics.innerHTML = '<div class="empty">账户资金口径不可用；旧收据未知，不是零占款。</div>';
+        rows.innerHTML = '<tr><td colspan="6" class="empty">所选策略账户证据待加载</td></tr>';
+        note.textContent = '现金口径保持原值；不能把未知账户资金当成零。';
+        return;
+      }
+      const s = data.summary;
+      const amount = value => Number.isFinite(value) ? `${number(value, 8)} SOL` : '待验证';
+      const lamports = value => typeof value === 'string' && /^\d+$/.test(value) ? amount(Number(value) / 1e9) : '待验证';
+      metrics.innerHTML = metricCards([
+        ['原交易现金盈亏', amount(s.cash_pnl_sol), '未包含单独账户回收'],
+        ['经济盈亏（全体已平仓）', amount(s.economic_pnl_sol), `已验证 ${number(s.funding_complete_positions)} / ${number(s.closed_positions)} 仓`],
+        ['已验证子集经济盈亏', amount(s.verified_economic_pnl_sol), '只覆盖证据完整仓位，不冒充全体'],
+        ['已知仍留存账户资金', amount(s.retained_funding_sol), '未知或已缺失账户不推算'],
+        ['单独回收退款', amount(s.refund_sol), `回收费用 ${amount(s.recovery_fee_sol)}`],
+        ['回收后现金盈亏（已知部分）', amount(s.cash_after_recovery_pnl_sol), '原现金 + 已核对回收现金变化'],
+      ]);
+      note.textContent = '经济盈亏 = 原现金 + 已验证账户净占款 − 回收费用；退款只减少留存资金并进入回收后现金，不再给经济盈亏加一次。PREPARED/UNKNOWN 或账户消失但退款无法归因时，相关经济盈亏待验证。共享账户仅归属首次创建仓位，正常卖出中的退款已包含在原现金。最新最多 20 条，不展示待发送交易内容。';
+      const labels = { PENDING: '待检查', PREPARED: '已持久签名，待核对', UNKNOWN: '确认未知，保留锁', CONFIRMED: '退款已确认', ABSENT: '账户已不存在', BLOCKED: '已停止此回收' };
+      const cases = Array.isArray(data.cases) ? data.cases.slice(0, 20) : [];
+      rows.innerHTML = cases.length ? cases.map(row => `<tr><td>#${number(row.position_id)}<br>${walletLink(row.account_address, true)}</td><td>${escapeHtml(labels[row.status] || row.status || '待确认')}</td><td>${lamports(row.funded_lamports)}</td><td>${lamports(row.refund_lamports)}<br>费用 ${amount(row.network_fee_sol)}</td><td>${amount(row.wallet_sol_delta)}</td><td>${transactionLink(row.signature) || '—'}<br>${escapeHtml(row.error || '')}</td></tr>`).join('')
+        : '<tr><td colspan="6" class="empty">暂无经过创建收据验证的回收候选</td></tr>';
+    }
+
     function renderLiveLossRugFeedback(data) {
       const metrics = document.querySelector('#live-loss-rug-metrics');
       const rows = document.querySelector('#live-loss-rug-rows');
@@ -1952,6 +1986,7 @@
       document.querySelector('#live-metrics').innerHTML = '<article class="card empty">统计尚未加载，暂无可展示的数值。</article>';
       document.querySelector('#live-strategy-cards').innerHTML = '<article class="card empty">完整规则参数待加载；不使用其他策略的参数。</article>';
       renderLiveLossRugFeedback(null);
+      renderLiveAccountRecovery(null);
       document.querySelector('#live-order-summary').textContent = '订单统计待加载';
       for (const [selector, columns] of [['#live-position-rows',10], ['#live-order-rows',9], ['#live-decision-rows',9]]) {
         document.querySelector(selector).innerHTML = `<tr><td colspan="${columns}" class="empty">此策略数据待加载</td></tr>`;
@@ -2280,6 +2315,7 @@
       ];
       document.querySelector('#live-strategy-cards').innerHTML = cards.map(([title,rows]) => `<article class="card strategy-card"><h3>${title}</h3><div class="health-list">${rows.map(([label,value]) => `<div class="health-row"><span>${label}</span><b>${escapeHtml(value)}</b></div>`).join('')}</div></article>`).join('');
       renderLiveLossRugFeedback(data.lossRugFeedback);
+      renderLiveAccountRecovery(data.accountRecovery);
 
       const positions = data.positions || [];
       document.querySelector('#live-position-rows').innerHTML = positions.length ? positions.map(row => {
@@ -2288,9 +2324,10 @@
           ? (row.mode === 'DRY_RUN' ? pct(row.price_return_pct) : '待链上结算')
           : `${row.realized_pnl_sol >= 0 ? '+' : ''}${number(row.realized_pnl_sol,6)} SOL<br>${pct(row.realized_return_pct)}`;
         const priceNote = row.price_return_pct == null ? '' : `<br><span class="table-note">价格 ${pct(row.price_return_pct)}</span>`;
+        const fundingNote = `<br><span class="table-note">经济 ${Number.isFinite(row.economic_pnl_sol) ? `${number(row.economic_pnl_sol,6)} SOL / ${pct(row.economic_return_pct)}` : '待验证'} · 留存 ${Number.isFinite(row.account_retained_funding_sol) ? `${number(row.account_retained_funding_sol,6)} SOL` : '未知'}<br>回收后现金 ${Number.isFinite(row.cash_after_recovery_pnl_sol) ? `${number(row.cash_after_recovery_pnl_sol,6)} SOL` : '待验证'}</span>`;
         const positionReason = row.entry_failure_category || row.exit_reason
           || row.entry_error || row.exit_error || '—';
-        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;
+        return `<tr><td>${dateTime(row.updated_at)}</td><td>${statusChip(row.status)}</td><td>${statusChip(row.mode)}</td><td>${mintLink(row.mint)}<br><span class="table-note">${escapeHtml(row.strategy_id || 'legacy')}</span></td><td>${number(row.position_sol,4)} SOL</td><td>${number(row.entry_price,10)} / ${number(row.highest_price,10)} / ${number(row.exit_price,10)}</td><td class="${tone(row.gross_return_pct)}">${settled}${priceNote}${fundingNote}</td><td>${age(row.hold_ms)}</td><td class="wrap-cell">${escapeHtml(positionReason)}</td><td>${signatures}</td></tr>`;
       }).join('') : '<tr><td colspan="10" class="empty">暂无仓位记录；策略判定仍会继续采集</td></tr>';
 
       document.querySelector('#live-order-summary').textContent = `共 ${number(stats.orders)} 笔 · 确认 ${number(stats.confirmed_orders)} · 失败 ${number(stats.failed_orders)} · 状态未知 ${number(stats.unknown_orders)}`;

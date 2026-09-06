@@ -82,6 +82,7 @@ const EXPLICIT_FILTERS = Object.freeze({
   primary_live_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
   live_strategy_decisions: { where: 'timestamp_ms >= ? AND timestamp_ms < ?', anchor: 'timestamp_ms' },
   live_loss_rug_cases: { where: 'updated_at >= ? AND updated_at < ?', anchor: 'updated_at' },
+  live_account_recoveries: { where: "(updated_at >= ? AND updated_at < ?) OR status IN ('PENDING','PREPARED','UNKNOWN')", anchor: 'updated_at' },
   live_positions: {
     where: `(
       (created_at >= ? AND created_at < ?)
@@ -221,12 +222,14 @@ function chooseFilter(table, columns, sourceTables = null) {
   // A case can be resolved/learned well after its position was closed. Carry its
   // whole accounting evidence, not just orders that happen to fall in the window.
   // Old archives lack this table and must remain exportable without migration.
-  if (sourceTables?.has('live_loss_rug_cases') && ['live_positions', 'live_orders'].includes(table)) {
+  const linkedTables = ['live_loss_rug_cases', 'live_account_recoveries'].filter(name => sourceTables?.has(name));
+  if (linkedTables.length && ['live_positions', 'live_orders'].includes(table)) {
     const key = table === 'live_positions' ? 'id' : 'position_id';
     return { ...explicit,
-      where: `(${explicit.where}) OR ${key} IN (SELECT position_id FROM source.live_loss_rug_cases
-        WHERE updated_at >= ? AND updated_at < ?)`,
-      bind: (startMs, endMs) => [...(explicit.bind ? explicit.bind(startMs, endMs) : [startMs, endMs]), startMs, endMs],
+      where: `(${explicit.where}) OR ${key} IN (${linkedTables.map(name =>
+        `SELECT position_id FROM source.${name} WHERE ${EXPLICIT_FILTERS[name].where}`).join(' UNION ')})`,
+      bind: (startMs, endMs) => [...(explicit.bind ? explicit.bind(startMs, endMs) : [startMs, endMs]),
+        ...linkedTables.flatMap(() => [startMs, endMs])],
     };
   }
   if (explicit) return explicit;
@@ -549,6 +552,11 @@ function exportResearchWindow({
       included: tableStats.some(row => row.table === 'live_loss_rug_cases'),
       selection: 'CASE_UPDATED_IN_WINDOW_WITH_ASSOCIATED_POSITION_AND_ALL_ORDERS',
       temporalScope: 'Entry and first-trigger evidence are frozen when captured. Classification and learning are the pinned export snapshot, not a historical as-of result; linked position/order evidence may lie outside the requested window.',
+    },
+    liveAccountRecovery: {
+      included: tableStats.some(row => row.table === 'live_account_recoveries'),
+      selection: 'WINDOW_UPDATED_OR_UNFINISHED_RECOVERIES_WITH_LINKED_POSITION_AND_ORDERS',
+      temporalScope: 'Current pinned recovery/funding snapshot, not historical as-of. Original trade cash PnL remains unchanged; economic PnL requires verified receipt funding. Prepared signed jobs are audit evidence, never permission to broadcast from an export.',
     },
     safety: {
       sourceWritesExecuted: false,

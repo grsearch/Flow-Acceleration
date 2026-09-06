@@ -143,6 +143,14 @@ function createRuntime(runtimeConfig = config) {
   const executor = runtimeConfig.liveTrading.enabled && !runtimeConfig.liveTrading.dryRun
     ? new PumpTradeExecutor(runtimeConfig.liveTrading)
     : null;
+  const preEntryRugRisk = new PreEntryRugRiskTracker({
+    config: runtimeConfig.preEntryRugRisk,
+    store,
+  });
+  preEntryRugRisk.start();
+  // Bind before restoring/starting live feedback. Its entry evidence must use
+  // the same forward-only tracker as the live and Shadow entry guards.
+  store.preEntryRugRisk = preEntryRugRisk;
   const trader = new LiveTradingManager({
     config: runtimeConfig.liveTrading,
     store,
@@ -160,14 +168,6 @@ function createRuntime(runtimeConfig = config) {
       .map((profile) => profile.targetWallet)
       .filter(Boolean),
   );
-  const preEntryRugRisk = new PreEntryRugRiskTracker({
-    config: runtimeConfig.preEntryRugRisk,
-    store,
-  });
-  preEntryRugRisk.start();
-  // All entry-capable live and Shadow strategies share this forward-only guard.
-  // Observers still collect every trade so risk labels remain available for research.
-  store.preEntryRugRisk = preEntryRugRisk;
   const smartWalletRegistry = new SmartWalletRegistry({
     config: {
       ...runtimeConfig.smartWalletRegistry,
