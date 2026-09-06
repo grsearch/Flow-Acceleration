@@ -64,7 +64,7 @@ const liveAccountRecoveryMethods = {
     ensure('live_orders', 'account_funding_verified', 'INTEGER');
     ensure('live_orders', 'account_net_funding_lamports', 'TEXT');
     for (const name of ['account_net_funding_sol', 'account_retained_funding_sol', 'economic_pnl_sol',
-      'economic_return_pct', 'recovery_refund_sol', 'recovery_network_fee_sol', 'cash_after_recovery_pnl_sol', 'account_funding_cash_pnl_sol']) ensure('live_positions', name, 'REAL');
+      'economic_return_pct', 'economic_cost_basis_sol', 'recovery_refund_sol', 'recovery_network_fee_sol', 'cash_after_recovery_pnl_sol', 'account_funding_cash_pnl_sol']) ensure('live_positions', name, 'REAL');
     ensure('live_positions', 'account_funding_complete', 'INTEGER');
     ensure('live_positions', 'account_recovery_complete', 'INTEGER');
     this.db.exec(`CREATE TABLE IF NOT EXISTS live_account_recoveries (
@@ -88,6 +88,7 @@ const liveAccountRecoveryMethods = {
       WHERE signature IS NOT NULL AND side IN ('BUY','SELL');
     CREATE INDEX IF NOT EXISTS idx_live_orders_signature_position ON live_orders(signature,position_id,id);
     CREATE INDEX IF NOT EXISTS idx_live_orders_mint_status ON live_orders(mint,status,id);`);
+    ensure('live_account_recoveries', 'error_stage', 'TEXT');
   },
 
   liveAccountRecoveryCandidates({ now = Date.now(), limit = 10 } = {}) {
@@ -208,7 +209,7 @@ const liveAccountRecoveryMethods = {
         if (!row) throw new Error('Recovery candidate missing');
         const fields = { status: 'status', signature: 'signature', refundLamports: 'refund_lamports',
           networkFeeSol: 'network_fee_sol', walletSolDelta: 'wallet_sol_delta', attempts: 'attempts',
-          nextAttemptAt: 'next_attempt_at', error: 'error', updatedAt: 'updated_at' };
+          nextAttemptAt: 'next_attempt_at', error: 'error', errorStage: 'error_stage', updatedAt: 'updated_at' };
         const update = { ...patch, updatedAt: Number.isFinite(patch.updatedAt) ? patch.updatedAt : Date.now() };
         if (patch.prepared !== undefined || patch.preparedJson !== undefined) {
           const prepared = patch.prepared ?? patch.preparedJson;
@@ -291,12 +292,33 @@ const liveAccountRecoveryMethods = {
     const basis = complete && Number.isFinite(position.entry_sol_delta) ? Math.abs(position.entry_sol_delta) - sol(entryFunding) : null;
     const retained = complete && recoveryComplete ? Math.max(0, net - refund - releasedInTrade) : null;
     this.db.prepare(`UPDATE live_positions SET account_funding_complete=?,account_recovery_complete=?,
-      account_net_funding_sol=?,account_retained_funding_sol=?,economic_pnl_sol=?,economic_return_pct=?,
+      account_net_funding_sol=?,account_retained_funding_sol=?,economic_pnl_sol=?,economic_return_pct=?,economic_cost_basis_sol=?,
       recovery_refund_sol=?,recovery_network_fee_sol=?,cash_after_recovery_pnl_sol=? WHERE id=?`)
       .run(complete ? 1 : 0, recoveryComplete ? 1 : 0, net, retained, economic,
-        economic != null && basis > 0 ? economic / basis * 100 : null, refund, fees,
+        economic != null && basis > 0 ? economic / basis * 100 : null, basis > 0 ? basis : null, refund, fees,
         Number.isFinite(cash) && recoveryComplete ? cash + cashDelta : null, positionId);
     this.db.prepare('UPDATE live_positions SET account_funding_cash_pnl_sol=? WHERE id=?').run(cash, positionId);
+  },
+
+  liveAccountRecoveryPositionStates(positionIds = []) {
+    const ids = [...new Set(positionIds.filter(id => Number.isSafeInteger(id) && id > 0))].slice(0, 500);
+    const result = new Map(ids.map(id => [id, { account_recovery_states: {}, account_recovery_error: null,
+      account_recovery_error_stage: null }]));
+    if (!ids.length || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='live_account_recoveries'").get()) return new Map();
+    // Indexed, bounded to the displayed positions; never infer per-position state
+    // from the separately truncated recent-20 recovery panel.
+    const hasErrorStage = this.db.pragma('table_info(live_account_recoveries)').some(column => column.name === 'error_stage');
+    const rows = this.db.prepare(`SELECT position_id,status,error,${hasErrorStage ? 'error_stage' : 'NULL AS error_stage'} FROM live_account_recoveries
+      WHERE position_id IN (${ids.map(() => '?').join(',')}) ORDER BY updated_at DESC,id DESC`).all(...ids);
+    for (const row of rows) {
+      const value = result.get(row.position_id);
+      value.account_recovery_states[row.status] = (value.account_recovery_states[row.status] || 0) + 1;
+      if (!value.account_recovery_error && row.error && row.status !== 'CONFIRMED') {
+        value.account_recovery_error = row.error;
+        value.account_recovery_error_stage = row.error_stage;
+      }
+    }
+    return result;
   },
 
   liveAccountRecoveryDashboard(strategyId = null) {
@@ -314,8 +336,11 @@ const liveAccountRecoveryMethods = {
       FROM live_positions p WHERE ${filter}`).get(...binds);
     const states = this.db.prepare(`SELECT r.status,COUNT(*) AS n FROM live_account_recoveries r
       JOIN live_positions p ON p.id=r.position_id WHERE ${filter} GROUP BY r.status`).all(...binds);
+    // An independently refreshed read-only Dashboard snapshot can still have
+    // the previous ledger schema. Missing diagnostics must not break the page.
+    const hasErrorStage = this.db.pragma('table_info(live_account_recoveries)').some(column => column.name === 'error_stage');
     const cases = this.db.prepare(`SELECT r.id,r.account_address,r.mint,r.position_id,r.status,r.funded_lamports,
-      r.signature,r.refund_lamports,r.network_fee_sol,r.wallet_sol_delta,r.attempts,r.next_attempt_at,r.error,r.updated_at
+      r.signature,r.refund_lamports,r.network_fee_sol,r.wallet_sol_delta,r.attempts,r.next_attempt_at,r.error,${hasErrorStage ? 'r.error_stage' : 'NULL AS error_stage'},r.updated_at
       FROM live_account_recoveries r JOIN live_positions p ON p.id=r.position_id WHERE ${filter}
       ORDER BY r.updated_at DESC,r.id DESC LIMIT 20`).all(...binds);
     return { available: true, summary: { ...summary,

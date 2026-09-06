@@ -10012,6 +10012,7 @@ class ResearchStore {
         if (row.account_funding_cash_pnl_sol !== row.realized_pnl_sol) {
           row.economic_pnl_sol = null;
           row.economic_return_pct = null;
+          row.economic_cost_basis_sol = null;
           row.cash_after_recovery_pnl_sol = null;
           row.account_funding_complete = 0;
         }
@@ -10025,6 +10026,8 @@ class ResearchStore {
             : null,
         };
       });
+    const recoveryStates = this.liveAccountRecoveryPositionStates(positions.map(row => row.id));
+    for (const position of positions) Object.assign(position, recoveryStates.get(position.id) || {});
     const orders = this.db.prepare(`
       SELECT * FROM live_orders ${filter}
       ORDER BY created_at DESC, id DESC

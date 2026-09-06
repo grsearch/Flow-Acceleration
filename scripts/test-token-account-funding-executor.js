@@ -125,12 +125,13 @@ async function assertCleanup() {
       assert.strictEqual(config.minContextSlot, 100);
       return { context: { slot: currentSlot }, value: currentInfo };
     },
-    async getLatestBlockhash(config) {
+    async getLatestBlockhashAndContext(config) {
       latestCalls += 1;
       assert.strictEqual(config.commitment, 'finalized');
-      return { blockhash: PublicKey.default.toBase58(), lastValidBlockHeight: 200 };
+      assert.strictEqual(config.minContextSlot, 101);
+      return { context: { slot: 102 }, value: { blockhash: PublicKey.default.toBase58(), lastValidBlockHeight: 200 } };
     },
-    async getFeeForMessage(message, commitment) { assert.strictEqual(commitment, 'finalized'); return { value: fee }; },
+    async getFeeForMessage(message, commitment) { assert.strictEqual(commitment, 'finalized'); return { context: { slot: 102 }, value: fee }; },
     async getSignaturesForAddress(account, config, commitment) {
       assert.strictEqual(account.toBase58(), address);
       assert.strictEqual(config.limit, 32);
@@ -221,6 +222,83 @@ async function assertCleanup() {
   assert.strictEqual(latestCalls, callsBeforeAbort, 'a late RPC cannot continue to blockhash/fee/sign after timeout');
   assert.strictEqual(sendCalls, 0);
   executor.connection.getSignaturesForAddress = historyReader;
+  // A null fee is a documented RPC result, not malformed account funding.
+  // All retry/error fixtures are offline and must remain unsigned until a
+  // fresh, valid bounded fee is obtained. No test broadcasts to a real RPC.
+  const feeReader = executor.connection.getFeeForMessage;
+  const hashReader = executor.connection.getLatestBlockhashAndContext;
+  const originalSign = Transaction.prototype.sign;
+  let signatures = 0;
+  Transaction.prototype.sign = function (...args) { signatures++; return originalSign.apply(this, args); };
+  try {
+    for (const first of [{ value: null }, { context: { slot: 101 }, value: 105000 }]) {
+      let calls = 0;
+      executor.connection.getFeeForMessage = async (...args) => ++calls === 1 ? first : feeReader(...args);
+      const before = signatures, hashes = latestCalls;
+      assert.strictEqual((await executor.prepareEmptyTokenAccountClose(candidate)).status, 'READY');
+      assert.strictEqual(calls, 2); assert.strictEqual(latestCalls - hashes, 2);
+      assert.strictEqual(signatures - before, 1, 'sign only after valid retry');
+    }
+    for (const [response, code, expectedCalls] of [
+      [{ value: null }, 'CLEANUP_FEE_UNAVAILABLE', 2],
+      [null, 'CLEANUP_FEE_UNAVAILABLE', 2],
+      [{ value: 105000 }, 'CLEANUP_FEE_CONTEXT_STALE', 2],
+      [{ context: { slot: 101 }, value: 105000 }, 'CLEANUP_FEE_CONTEXT_STALE', 2],
+      ...[0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, '105000'].map(value => [
+        { context: { slot: 102 }, value }, 'CLEANUP_FEE_INVALID', 1]),
+      [{ context: { slot: 102 }, value: 200000 }, 'CLEANUP_FEE_TOO_HIGH', 1],
+    ]) {
+      let calls = 0;
+      executor.connection.getFeeForMessage = async () => { calls++; return response; };
+      const before = signatures;
+      await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), { code, recoveryStage: 'FEE_QUOTE' });
+      assert.strictEqual(calls, expectedCalls); assert.strictEqual(signatures, before);
+    }
+    executor.connection.getFeeForMessage = feeReader;
+    for (const [response, code, expectedCalls] of [
+      [{ value: { blockhash: PublicKey.default.toBase58(), lastValidBlockHeight: 200 } }, 'CLEANUP_BLOCKHASH_CONTEXT_STALE', 2],
+      [{ context: { slot: 100 } }, 'CLEANUP_BLOCKHASH_CONTEXT_STALE', 2],
+      [{ context: { slot: 102 }, value: { blockhash: 'invalid0', lastValidBlockHeight: 200 } }, 'CLEANUP_BLOCKHASH_INVALID', 1],
+      [{ context: { slot: 102 }, value: { blockhash: PublicKey.default.toBase58(), lastValidBlockHeight: null } }, 'CLEANUP_BLOCKHASH_INVALID', 1],
+    ]) {
+      let calls = 0;
+      executor.connection.getLatestBlockhashAndContext = async () => { calls++; return response; };
+      const before = signatures;
+      await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate), { code, recoveryStage: 'BLOCKHASH' });
+      assert.strictEqual(calls, expectedCalls); assert.strictEqual(signatures, before);
+    }
+    executor.connection.getLatestBlockhashAndContext = hashReader;
+    for (const nullFirst of [false, true]) {
+      const abort = new AbortController(); let calls = 0;
+      executor.connection.getFeeForMessage = async (...args) => {
+        calls++;
+        if (nullFirst && calls === 1) return { context: { slot: 102 }, value: null };
+        abort.abort(); return feeReader(...args);
+      };
+      const before = signatures;
+      await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate, { signal: abort.signal }),
+        { code: 'ACCOUNT_RECOVERY_ABORTED', recoveryStage: 'FEE_QUOTE' });
+      assert.strictEqual(signatures, before);
+      assert.strictEqual(calls, nullFirst ? 2 : 1);
+    }
+    executor.connection.getFeeForMessage = feeReader;
+    for (const fundedLamports of [null, 1.5]) {
+      const before = signatures;
+      await assert.rejects(executor.prepareEmptyTokenAccountClose({ ...candidate, fundedLamports }),
+        { code: 'ACCOUNT_CANDIDATE_FUNDING_INVALID', recoveryStage: 'CANDIDATE' });
+      assert.strictEqual(signatures, before);
+    }
+    currentInfo = { ...accountInfo(), lamports: null };
+    const before = signatures;
+    await assert.rejects(executor.prepareEmptyTokenAccountClose(candidate),
+      { code: 'ACCOUNT_BALANCE_INVALID', recoveryStage: 'ACCOUNT_SNAPSHOT' });
+    assert.strictEqual(signatures, before); assert.strictEqual(sendCalls, 0);
+  } finally {
+    Transaction.prototype.sign = originalSign;
+    executor.connection.getFeeForMessage = feeReader;
+    executor.connection.getLatestBlockhashAndContext = hashReader;
+    currentInfo = accountInfo();
+  }
   const prepared = await executor.prepareEmptyTokenAccountClose(candidate);
   assert.strictEqual(sendCalls, 0, 'prepare must not send');
   assert.strictEqual(prepared.status, 'READY');
