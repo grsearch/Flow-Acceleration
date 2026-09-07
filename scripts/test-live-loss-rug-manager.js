@@ -12,7 +12,11 @@ async function main() {
   let now = 1_788_660_000_000;
   const store = new ResearchStore({ dbPath: ':memory:', archiveDir: '.', flushMs: 60_000,
     flushMax: 100 }, { configuredTradingCostPct: 0 });
-  const strategy = { ...config.liveTrading.strategies.find(s => s.id === LEGACY_LIVE_ID) };
+  // Production policy deliberately keeps every live entry fail-closed. This
+  // isolated fake-chain test opts the one fixture back in so it can exercise
+  // post-entry evidence and settlement boundaries without weakening config.
+  const strategy = { ...config.liveTrading.strategies.find(s => s.id === LEGACY_LIVE_ID),
+    entryEnabled: true };
   store.preEntryRugRisk = { config: { enabled: true }, evaluateGuard() { return { blocked: false }; } };
   const sequence = [], settlements = [];
   let receiptReady = false;

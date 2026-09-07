@@ -130,7 +130,12 @@ async function testRealThreadIsolation() {
 function testAdaptersAndScheduling() {
   let reads = 0;
   const db = { prepare(sql) {
-    assert.match(sql.trim(), /^SELECT\b/i, 'read-only adapter must not initialize or mutate schemas');
+    const statement = sql.trim();
+    assert.match(statement, /^(?:SELECT|WITH)\b/i,
+      'read-only adapter must only prepare SELECT/CTE reads');
+    assert.doesNotMatch(statement,
+      /\b(?:INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|REPLACE|VACUUM|ATTACH|DETACH|PRAGMA)\b/i,
+      'read-only adapter must not initialize or mutate schemas');
     return { all() { reads += 1; return []; }, get() { reads += 1; return {}; } };
   } };
   const store = createReadStore(db, 'fixture');

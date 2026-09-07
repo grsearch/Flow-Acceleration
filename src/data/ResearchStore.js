@@ -7,6 +7,13 @@ const Database = require('better-sqlite3');
 const { costBreakdown, normalizeCostModel } = require('../core/CostModel');
 const { buildShadowRugPairComparison } = require('../core/ShadowRugPairComparison');
 const {
+  EXECUTION_VERSION: LEGACY_EARLY_FLOW_EXECUTION_VERSION,
+  STUDY_VERSION: LEGACY_EARLY_FLOW_STUDY_VERSION,
+  STUDY_ARMS: LEGACY_EARLY_FLOW_STUDY_ARMS,
+  FIVE_ARM_COHORT_IDS: LEGACY_EARLY_FLOW_FIVE_ARM_IDS,
+  DEFAULT_THRESHOLDS: LEGACY_EARLY_FLOW_DEFAULT_THRESHOLDS,
+} = require('../core/LegacyEarlyFlowEntryTracker');
+const {
   RawTradeShardManager, ensureRawExecutionColumns, normalizeRawExecutionContext,
 } = require('./RawTradeShardManager');
 const { serializeAmmExecutionContext, restoreRawExecutionContext } = require('./RawExecutionContext');
@@ -2216,6 +2223,8 @@ class ResearchStore {
         ON migration_second_leg_shadow_positions(status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_m2f_shadow_mint_signal
         ON migration_second_leg_shadow_positions(mint, signal_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_m2f_shadow_episode
+        ON migration_second_leg_shadow_positions(episode_id);
 
       CREATE TABLE IF NOT EXISTS holder_growth_shadow_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4777,6 +4786,11 @@ class ResearchStore {
       getMigrationSecondLegShadowPosition: this.db.prepare(`
         SELECT * FROM migration_second_leg_shadow_positions
         WHERE cohort_id = ? AND episode_id = ?
+      `),
+      migrationSecondLegShadowPositionsByEpisode: this.db.prepare(`
+        SELECT * FROM migration_second_leg_shadow_positions
+        WHERE episode_id = ?
+        ORDER BY id
       `),
       activeMigrationSecondLegShadowPositions: this.db.prepare(`
         SELECT * FROM migration_second_leg_shadow_positions
@@ -7810,6 +7824,10 @@ class ResearchStore {
     return this.stmts.activeMigrationSecondLegShadowPositions.all();
   }
 
+  migrationSecondLegShadowPositionsByEpisode(episodeId) {
+    return this.stmts.migrationSecondLegShadowPositionsByEpisode.all(String(episodeId));
+  }
+
   recoverableMigrationSecondLegNoExitPositions() {
     return this.stmts.recoverableMigrationSecondLegNoExitPositions.all();
   }
@@ -7989,7 +8007,7 @@ class ResearchStore {
     // This new execution version must never inherit PMO/history joins or count
     // an unavailable return as zero. These indexed reads run in the existing
     // Dashboard read-model worker, not on the live entry path.
-    const legacyIds = ['LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX'];
+    const legacyIds = [...LEGACY_EARLY_FLOW_FIVE_ARM_IDS];
     const parseLegacyJson = raw => {
       try {
         const value = JSON.parse(raw || '{}');
@@ -8026,13 +8044,170 @@ class ResearchStore {
         SUM(CASE WHEN status = 'CLOSED' AND net_return_pct > 0 THEN net_return_pct ELSE 0 END) AS gross_profit_pct,
         ABS(SUM(CASE WHEN status = 'CLOSED' AND net_return_pct < 0 THEN net_return_pct ELSE 0 END)) AS gross_loss_pct
       FROM migration_second_leg_shadow_positions
-      WHERE cohort_id IN (?, ?)
+      WHERE cohort_id IN (${legacyIds.map(() => '?').join(', ')})
       GROUP BY cohort_id, position_sol, configured_cost_pct, execution_version
       ORDER BY cohort_id, position_sol, configured_cost_pct, execution_version
     `).all(...legacyIds).map(row => ({ ...row,
       win_rate_pct: row.resolved > 0 ? row.wins / row.resolved * 100 : null,
       profit_factor: row.gross_loss_pct > 0 ? row.gross_profit_pct / row.gross_loss_pct : null,
     }));
+    const canonicalLegacyJson = value => {
+      if (Array.isArray(value)) return `[${value.map(canonicalLegacyJson).join(',')}]`;
+      if (value && typeof value === 'object') return `{${Object.keys(value).sort()
+        .map(key => `${JSON.stringify(key)}:${canonicalLegacyJson(value[key])}`).join(',')}}`;
+      const encoded = JSON.stringify(value);
+      return encoded === undefined ? 'undefined' : encoded;
+    };
+    const sameLegacyJson = values => values.length > 0
+      && values.every(value => canonicalLegacyJson(value) === canonicalLegacyJson(values[0]));
+    const legacyAuditRows = this.db.prepare(`
+      SELECT cohort_id, episode_id, mint, status, rejection_reason,
+        position_sol, configured_cost_pct, migration_at, signal_at, signal_price,
+        signal_age_ms, entry_target_at, entry_deadline_at, entry_at,
+        hard_stop_pct, max_hold_ms, net_return_pct, features_json
+      FROM migration_second_leg_shadow_positions
+      WHERE cohort_id IN (${legacyIds.map(() => '?').join(', ')})
+      ORDER BY episode_id, cohort_id
+    `).all(...legacyIds).map(row => ({ ...row, features: parseLegacyJson(row.features_json) }));
+    const episodes = new Map();
+    for (const row of legacyAuditRows) {
+      const rows = episodes.get(row.episode_id) || [];
+      rows.push(row);
+      episodes.set(row.episode_id, rows);
+    }
+    const fiveArmAudit = {
+      studyVersion: LEGACY_EARLY_FLOW_STUDY_VERSION,
+      requiredCohortIds: [...legacyIds], totalEpisodes: episodes.size,
+      forwardTaggedEpisodes: 0, completeEpisodes: 0, comparableEpisodes: 0,
+      incompleteEpisodes: 0, historicalTwoArmEpisodes: 0, partialFiveArmEpisodes: 0,
+      sourceMismatchEpisodes: 0, protocolMismatchEpisodes: 0,
+      definitionMismatchEpisodes: 0, protocolVariants: 0,
+    };
+    const comparable = new Map();
+    const comparableProtocolFingerprints = new Set();
+    const requiredIds = new Set(legacyIds);
+    const protocolOf = row => {
+      const strictExecution = row.features.strictExecution || {};
+      const cohort = strictExecution.cohort || {};
+      return {
+        executionVersion: row.features.executionVersion,
+        positionSol: row.position_sol,
+        configuredCostPct: row.configured_cost_pct,
+        entryDelayMs: row.entry_target_at - row.signal_at,
+        entryTimeoutMs: row.entry_deadline_at - row.entry_target_at,
+        hardStopPct: row.hard_stop_pct,
+        maxHoldMs: row.max_hold_ms,
+        policy: strictExecution.policy,
+        costs: strictExecution.costs,
+        cohort: Object.fromEntries(['entryMode', 'executionVersion', 'positionSizeSol',
+          'maxEntryPriceJumpPct', 'maxNegativeEntryJumpPct', 'maxEntryImpactPct',
+          'hardStopPct', 'trailingActivationPct', 'trailingStopPct', 'maxHoldMs']
+          .map(key => [key, cohort[key]])),
+      };
+    };
+    const newComparableStats = (row, protocolFingerprint) => ({
+      cohort_id: row.cohort_id, position_sol: row.position_sol,
+      configured_cost_pct: row.configured_cost_pct,
+      execution_version: row.features.executionVersion,
+      study_version: row.features.studyVersion,
+      protocol_fingerprint: protocolFingerprint,
+      signals: 0, mints: new Set(), pending_entries: 0, active_positions: 0,
+      entered: 0, resolved: 0, wins: 0, no_exit: 0, data_error: 0,
+      right_censored: 0, no_entry: 0, price_jump: 0, rug_rejected: 0,
+      study_filter_rejected: 0, returnTotal: 0, gross_profit_pct: 0,
+      gross_loss_pct: 0, maximum_winner_pct: null,
+    });
+    for (const episodeRows of episodes.values()) {
+      const ids = new Set(episodeRows.map(row => row.cohort_id));
+      const features = episodeRows.map(row => row.features);
+      const tagged = features.some(row => row.studyVersion === LEGACY_EARLY_FLOW_STUDY_VERSION);
+      if (tagged) fiveArmAudit.forwardTaggedEpisodes += 1;
+      const complete = episodeRows.length === legacyIds.length && ids.size === requiredIds.size
+        && [...requiredIds].every(id => ids.has(id));
+      if (!complete) {
+        fiveArmAudit.incompleteEpisodes += 1;
+        const historicalIds = ids.size === 2 && ids.has(legacyIds[0]) && ids.has(legacyIds[1]);
+        const historical = historicalIds && !tagged;
+        if (historical) fiveArmAudit.historicalTwoArmEpisodes += 1;
+        else fiveArmAudit.partialFiveArmEpisodes += 1;
+        continue;
+      }
+      fiveArmAudit.completeEpisodes += 1;
+      const sourceValid = new Set(episodeRows.map(row => row.signal_at)).size === 1
+        && new Set(episodeRows.map(row => row.mint)).size === 1
+        && new Set(episodeRows.map(row => row.migration_at)).size === 1
+        && new Set(episodeRows.map(row => row.signal_price)).size === 1
+        && features.every(row => row.sourceFeatures && typeof row.sourceFeatures === 'object')
+        && sameLegacyJson(features.map(row => row.sourceFeatures));
+      if (!sourceValid) fiveArmAudit.sourceMismatchEpisodes += 1;
+      const protocols = episodeRows.map(protocolOf);
+      const protocolValid = features.every(row => (
+        row.executionVersion === LEGACY_EARLY_FLOW_EXECUTION_VERSION
+        && row.strictExecution?.policy?.version
+        && row.strictExecution?.cohort?.executionVersion === LEGACY_EARLY_FLOW_EXECUTION_VERSION
+      )) && sameLegacyJson(protocols);
+      if (!protocolValid) fiveArmAudit.protocolMismatchEpisodes += 1;
+      const setValid = features.every(row => row.studyVersion === LEGACY_EARLY_FLOW_STUDY_VERSION
+        && sameLegacyJson([row.studyCohortIds, legacyIds]));
+      const definitionsValid = LEGACY_EARLY_FLOW_FIVE_ARM_IDS.slice(2).every(id => {
+        const row = episodeRows.find(item => item.cohort_id === id);
+        const definition = LEGACY_EARLY_FLOW_STUDY_ARMS[id];
+        return row && sameLegacyJson([row.features.singleVariable, definition.singleVariable])
+          && sameLegacyJson([row.features.studyThresholds,
+            { ...LEGACY_EARLY_FLOW_DEFAULT_THRESHOLDS, ...definition.thresholdPatch }]);
+      });
+      const definitionValid = setValid && definitionsValid;
+      if (!definitionValid) fiveArmAudit.definitionMismatchEpisodes += 1;
+      if (!sourceValid || !protocolValid || !definitionValid) continue;
+      fiveArmAudit.comparableEpisodes += 1;
+      const protocolFingerprint = canonicalLegacyJson(protocols[0]);
+      comparableProtocolFingerprints.add(protocolFingerprint);
+      for (const row of episodeRows) {
+        const key = `${row.cohort_id}\u0000${protocolFingerprint}`;
+        const stats = comparable.get(key) || newComparableStats(row, protocolFingerprint);
+        stats.signals += 1;
+        stats.mints.add(row.mint);
+        stats.pending_entries += row.status === 'PENDING_ENTRY' ? 1 : 0;
+        stats.active_positions += ['OPEN', 'EXIT_PENDING'].includes(row.status) ? 1 : 0;
+        stats.entered += row.entry_at != null ? 1 : 0;
+        const resolvedReturn = row.status === 'CLOSED' && Number.isFinite(row.net_return_pct)
+          ? row.net_return_pct : null;
+        if (resolvedReturn != null) {
+          stats.resolved += 1;
+          stats.returnTotal += resolvedReturn;
+          if (resolvedReturn > 0) {
+            stats.wins += 1;
+            stats.gross_profit_pct += resolvedReturn;
+            stats.maximum_winner_pct = stats.maximum_winner_pct == null
+              ? resolvedReturn : Math.max(stats.maximum_winner_pct, resolvedReturn);
+          } else if (resolvedReturn < 0) stats.gross_loss_pct += Math.abs(resolvedReturn);
+        }
+        stats.no_exit += row.status === 'NO_EXIT' ? 1 : 0;
+        stats.data_error += row.status === 'DATA_ERROR' ? 1 : 0;
+        stats.right_censored += row.status === 'RIGHT_CENSORED' ? 1 : 0;
+        stats.no_entry += row.status === 'NO_ENTRY' ? 1 : 0;
+        stats.price_jump += row.status === 'PRICE_JUMP' ? 1 : 0;
+        stats.rug_rejected += row.status === 'NO_ENTRY'
+          && String(row.rejection_reason || '').startsWith('PRE_ENTRY_RUG_') ? 1 : 0;
+        stats.study_filter_rejected += row.status === 'NO_ENTRY'
+          && String(row.rejection_reason || '').startsWith('STUDY_FILTER_REJECTED_') ? 1 : 0;
+        comparable.set(key, stats);
+      }
+    }
+    fiveArmAudit.protocolVariants = comparableProtocolFingerprints.size;
+    const protocolGroups = new Map([...comparableProtocolFingerprints].sort()
+      .map((fingerprint, index) => [fingerprint, `P${index + 1}`]));
+    const legacyComparableCohorts = [...comparable.values()].map(stats => {
+      const { mints, returnTotal, protocol_fingerprint: fingerprint, ...visible } = stats;
+      return {
+        ...visible, mints: mints.size, protocol_group: protocolGroups.get(fingerprint),
+        average_net_return_pct: stats.resolved > 0 ? returnTotal / stats.resolved : null,
+        win_rate_pct: stats.resolved > 0 ? stats.wins / stats.resolved * 100 : null,
+        profit_factor: stats.gross_loss_pct > 0
+          ? stats.gross_profit_pct / stats.gross_loss_pct : null,
+      };
+    }).sort((left, right) => legacyIds.indexOf(left.cohort_id)
+      - legacyIds.indexOf(right.cohort_id));
     const legacyPairStatement = this.db.prepare(`
       SELECT b.mint, b.migration_at, b.signal_at, b.signal_price, b.position_sol,
         b.configured_cost_pct, b.entry_target_at, b.entry_deadline_at, b.hard_stop_pct,
@@ -8188,6 +8363,9 @@ class ResearchStore {
       rugComparisons,
       pmoStats,
       legacyCohorts,
+      legacyAllTimeCohorts: legacyCohorts,
+      legacyComparableCohorts,
+      legacyFiveArmAudit: fiveArmAudit,
       legacyPositions,
     };
   }
@@ -9020,7 +9198,39 @@ class ResearchStore {
           AVG(entry_jump_pct) AS average_entry_jump_pct,
           AVG(entry_impact_pct) AS average_entry_impact_pct,
           AVG(max_favorable_return_pct) AS average_mfe_pct,
-          AVG(max_adverse_return_pct) AS average_mae_pct
+          AVG(max_adverse_return_pct) AS average_mae_pct,
+          AVG(CASE WHEN json_valid(features_json) THEN
+            CAST(json_extract(features_json,
+              '$.executionFriction.entry.schedule.lpFeeBasisPoints') AS REAL)
+            + CAST(json_extract(features_json,
+              '$.executionFriction.entry.schedule.protocolFeeBasisPoints') AS REAL)
+            + CAST(json_extract(features_json,
+              '$.executionFriction.entry.schedule.coinCreatorFeeBasisPoints') AS REAL)
+          END) AS average_entry_amm_fee_bps,
+          AVG(CASE WHEN json_valid(features_json) THEN
+            CAST(json_extract(features_json,
+              '$.executionFriction.exit.schedule.lpFeeBasisPoints') AS REAL)
+            + CAST(json_extract(features_json,
+              '$.executionFriction.exit.schedule.protocolFeeBasisPoints') AS REAL)
+            + CAST(json_extract(features_json,
+              '$.executionFriction.exit.schedule.coinCreatorFeeBasisPoints') AS REAL)
+          END) AS average_exit_amm_fee_bps,
+          COALESCE(SUM(CASE WHEN json_valid(features_json)
+            AND json_extract(features_json,
+              '$.executionFriction.entry.schedule.lpFeeBasisPoints') IS NOT NULL
+            AND json_extract(features_json,
+              '$.executionFriction.entry.schedule.protocolFeeBasisPoints') IS NOT NULL
+            AND json_extract(features_json,
+              '$.executionFriction.entry.schedule.coinCreatorFeeBasisPoints') IS NOT NULL
+            THEN 1 ELSE 0 END), 0) AS entry_fee_observations,
+          COALESCE(SUM(CASE WHEN json_valid(features_json)
+            AND json_extract(features_json,
+              '$.executionFriction.exit.schedule.lpFeeBasisPoints') IS NOT NULL
+            AND json_extract(features_json,
+              '$.executionFriction.exit.schedule.protocolFeeBasisPoints') IS NOT NULL
+            AND json_extract(features_json,
+              '$.executionFriction.exit.schedule.coinCreatorFeeBasisPoints') IS NOT NULL
+            THEN 1 ELSE 0 END), 0) AS exit_fee_observations
         FROM graduation_acceleration_shadow_positions
         GROUP BY cohort_id, entry_profile_id, position_sol
         ORDER BY entry_profile_id, position_sol

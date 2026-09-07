@@ -4,6 +4,35 @@ const strictAmm = require('./StrictAmmShadowExecution');
 
 const EXECUTION_VERSION = 'LEGACY_EARLY_FLOW_EXEC_V1';
 const ENTRY_MODE = 'LEGACY_EARLY_FLOW';
+const BASE_COHORT_ID = 'LEGACY-EARLY-FLOW-BASE';
+const RUGX_COHORT_ID = 'LEGACY-EARLY-FLOW-RUGX';
+const STUDY_VERSION = 'LEGACY_EARLY_FLOW_5ARM_V1';
+const STUDY_ARMS = Object.freeze({
+  'LEGACY-EARLY-FLOW-BREADTH6': Object.freeze({
+    rejectionReason: 'STUDY_FILTER_REJECTED_BREADTH6',
+    thresholdPatch: Object.freeze({ minBuyers5s: 6 }),
+    singleVariable: Object.freeze({ feature: 'buyers5s', operator: 'GTE', value: 6,
+      description: '5秒独立买家≥6' }),
+  }),
+  'LEGACY-EARLY-FLOW-CONCENTRATION55': Object.freeze({
+    rejectionReason: 'STUDY_FILTER_REJECTED_CONCENTRATION55',
+    thresholdPatch: Object.freeze({ maxSingleBuyShare5s: 0.55 }),
+    singleVariable: Object.freeze({ feature: 'maxSingleBuyShare5s', operator: 'LTE', value: 0.55,
+      description: '最大单笔买入占比≤55%' }),
+  }),
+  'LEGACY-EARLY-FLOW-EXCLUDE-FLAT': Object.freeze({
+    rejectionReason: 'STUDY_FILTER_REJECTED_EXCLUDE_FLAT',
+    thresholdPatch: Object.freeze({ excludedPriceChange10sMin: 0,
+      excludedPriceChange10sMax: 4 }),
+    singleVariable: Object.freeze({ feature: 'priceChange10sPct',
+      operator: 'EXCLUDE_INCLUSIVE_RANGE', min: 0, max: 4,
+      description: '排除10秒涨幅0%–4%' }),
+  }),
+});
+const STUDY_COHORT_IDS = Object.freeze(Object.keys(STUDY_ARMS));
+const FIVE_ARM_COHORT_IDS = Object.freeze([
+  BASE_COHORT_ID, RUGX_COHORT_ID, ...STUDY_COHORT_IDS,
+]);
 const DEFAULT_THRESHOLDS = Object.freeze({
   minAgeMs: 15_000, maxAgeMs: 25_000, minFdvUsd: 15_000, maxFdvUsd: 100_000,
   minPriceChange10sPct: -10, maxPriceChange10sPct: 8,
@@ -41,6 +70,12 @@ function matchesLegacyEntry(features, thresholds = {}) {
   const t = { ...DEFAULT_THRESHOLDS, ...thresholds };
   const keys = ['ageMs', 'fdvUsd', 'priceChange10sPct', 'netFlow1sSol',
     'buyers5s', 'trades5s', 'maxSingleBuyShare5s'];
+  const excludedMin = numeric(t.excludedPriceChange10sMin);
+  const excludedMax = numeric(t.excludedPriceChange10sMax);
+  const excludedPriceChange = excludedMin != null && excludedMax != null
+    && excludedMin <= excludedMax
+    && features?.priceChange10sPct >= excludedMin
+    && features?.priceChange10sPct <= excludedMax;
   return keys.every(key => Number.isFinite(features?.[key]))
     && features.ageMs >= t.minAgeMs && features.ageMs <= t.maxAgeMs
     && features.fdvUsd >= t.minFdvUsd && features.fdvUsd <= t.maxFdvUsd
@@ -48,7 +83,8 @@ function matchesLegacyEntry(features, thresholds = {}) {
     && features.priceChange10sPct <= t.maxPriceChange10sPct
     && features.netFlow1sSol > t.minNetFlow1sSol
     && features.buyers5s >= t.minBuyers5s && features.trades5s >= t.minTrades5s
-    && features.maxSingleBuyShare5s <= t.maxSingleBuyShare5s;
+    && features.maxSingleBuyShare5s <= t.maxSingleBuyShare5s
+    && !excludedPriceChange;
 }
 
 class LegacyEarlyFlowEntryTracker {
@@ -215,4 +251,6 @@ class LegacyEarlyFlowEntryTracker {
 }
 
 module.exports = { LegacyEarlyFlowEntryTracker, EXECUTION_VERSION, ENTRY_MODE,
+  BASE_COHORT_ID, RUGX_COHORT_ID, STUDY_VERSION, STUDY_ARMS,
+  STUDY_COHORT_IDS, FIVE_ARM_COHORT_IDS,
   DEFAULT_THRESHOLDS, matchesLegacyEntry, postPoolPrice, migrationEvidence };

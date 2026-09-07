@@ -48,7 +48,7 @@ function collectRuntime(options) {
   const sections = {};
   const errors = [];
   for (const [key, component] of Object.entries(options)) {
-    if (['config', 'runtimeIdentity', 'store'].includes(key) || !component) continue;
+    if (['config', 'runtimeIdentity', 'runtimeVersionState', 'store'].includes(key) || !component) continue;
     const method = ['engine', 'labeler'].includes(key) ? 'stats' : 'health';
     if (typeof component[method] !== 'function') continue;
     try { sections[key] = component[method]({ includeDatabase: false }); }
@@ -58,7 +58,11 @@ function collectRuntime(options) {
   try { database = options.store.healthSnapshot(); } catch (_) { errors.push('database'); }
   let maintenance = null;
   try { maintenance = options.smartWalletRegistry?.maintenanceHealth?.() || null; } catch (_) {}
-  return sanitize({ at: Date.now(), sections, database, maintenance, errors });
+  let versionConsistency = null;
+  try { versionConsistency = options.runtimeVersionState?.() || null; } catch (_) {
+    versionConsistency = { status: 'ERROR', ready: false, warnings: ['VERSION_CHECK_FAILED'] };
+  }
+  return sanitize({ at: Date.now(), sections, database, maintenance, versionConsistency, errors });
 }
 
 class DashboardProcessServer {

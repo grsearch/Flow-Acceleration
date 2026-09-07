@@ -99,8 +99,16 @@ async function main() {
       stream: { ...config.stream, heliusToken: secret, allenHarkToken: secret },
     };
     const pending = Object.freeze([{ signature: 'must-remain-queued' }]);
+    let versionReady = true;
+    const commit = 'a'.repeat(40);
     const options = { config: copiedConfig,
-      runtimeIdentity: { headCommit: 'a'.repeat(40), configurationIntegrity: { status: 'MATCH' } },
+      runtimeIdentity: { gitCommit: commit, runningCommit: commit, dashboardCommit: commit,
+        configurationIntegrity: { status: 'MATCH' } },
+      runtimeVersionState: () => ({ status: versionReady ? 'MATCH' : 'MISMATCH',
+        ready: versionReady, runningCommit: commit,
+        sourceCommit: versionReady ? commit : 'b'.repeat(40), dashboardCommit: commit,
+        configurationIntegrityStatus: 'MATCH',
+        warnings: versionReady ? [] : ['RUNNING_SOURCE_COMMIT_MISMATCH'] }),
       store: { rawBuffer: pending, healthSnapshot: () => ({ writeStatus: 'HEALTHY', pendingWrites: 1,
         queuedTradeLagMs: 0, lastWriteSuccessAt: Date.now() }),
       flushRawTrades: () => { throw new Error('Dashboard may not flush the parent queue'); } },
@@ -161,6 +169,17 @@ async function main() {
     assert.equal(detailed.json.runtimeDiagnostics.taskTimings.tasks['parser:transaction'].calls, 100);
     assert.equal(detailed.json.solUsdReference.reference.priceUsd, 100,
       'cached FDV reference health survives the independent Dashboard process');
+    assert.equal(detailed.json.versionConsistency.ready, true);
+    versionReady = false;
+    wrapper.child.send({ type: 'RUNTIME', snapshot: collectRuntime(options) });
+    await waitFor(async () => (await request(wrapper.port, '/health')).json.ready === false);
+    assert.equal((await request(wrapper.port, '/api/health')).json.status, 'version_mismatch');
+    const mismatchedCatalog = await request(wrapper.port, '/api/strategy-status');
+    assert.equal(mismatchedCatalog.json.ready, false);
+    assert.equal(mismatchedCatalog.json.versionConsistency.sourceCommit, 'b'.repeat(40));
+    versionReady = true;
+    wrapper.child.send({ type: 'RUNTIME', snapshot: collectRuntime(options) });
+    await waitFor(async () => (await request(wrapper.port, '/health')).json.ready === true);
     const missing = await request(wrapper.port, '/api/not-a-real-test-route');
     assert.equal(missing.status, 404);
     assert.equal(missing.json.error, 'api route not found');

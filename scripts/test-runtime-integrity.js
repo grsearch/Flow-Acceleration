@@ -4,7 +4,10 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { CRITICAL_FILES, collectRuntimeIntegrity, collectSafeConfigSummary } = require('../src/runtime/RuntimeIntegrity');
+const { CRITICAL_FILES, collectRuntimeIntegrity, collectSafeConfigSummary,
+  evaluateRuntimeVersionConsistency, bindServedDashboardIdentity,
+  createRuntimeVersionGuard } = require('../src/runtime/RuntimeIntegrity');
+const { installDashboardAssets } = require('../src/server/DashboardHttpAssets');
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-integrity-'));
 const headCommit = 'a'.repeat(40);
@@ -43,6 +46,7 @@ function runGit(args, input) {
     : Buffer.from(`${headCommit}:${file} missing\n`)));
 }
 
+(async () => {
 try {
   for (const file of CRITICAL_FILES) {
     const body = Buffer.from(`// ${file}\nconst value = 1;\n`);
@@ -53,6 +57,11 @@ try {
   fs.writeFileSync(path.join(directory, '.env'), `PRIVATE_KEY=${secret}\n`);
   const input = { projectDir: directory, runtimeConfig: config, expectedCommit: headCommit.slice(0, 7), runGit };
   let result = collectRuntimeIntegrity(input);
+  const startupIntegrity = result;
+  const servedIdentity = installDashboardAssets({ use() {} },
+    path.join(directory, 'src/server/public'));
+  assert.equal(servedIdentity.fingerprint, startupIntegrity.dashboardAssetFingerprint,
+    'runtime and HTTP server must derive the same page-asset identity');
   assert.equal(result.status, 'MATCH');
   assert.equal(result.expectedCommitMatches, true);
   assert.equal(result.files.length, CRITICAL_FILES.length);
@@ -79,8 +88,10 @@ try {
   assert.equal(result.status, 'UNKNOWN');
   assert.deepEqual(result.unverifiedFiles, [CRITICAL_FILES[1]]);
   result = collectRuntimeIntegrity({ ...input, runGit() { throw new Error(secret); } });
+  const noGitIntegrity = result;
   assert.equal(result.status, 'UNKNOWN');
   assert.equal(result.gitStatus, 'UNAVAILABLE');
+  assert.equal(result.startupIdentityMode, 'PINNED_FILE_FINGERPRINT');
   assert(!JSON.stringify(result).includes(secret), 'git stderr/error must never escape');
   result = collectRuntimeIntegrity({ ...input, runGit() { return Buffer.from(secret); } });
   assert.equal(result.headCommit, null);
@@ -102,6 +113,78 @@ try {
   assert(summary.warnings.includes('ENTRY_SLOT_GATE_MISSING:migrated_ge30_r23_f2_only_g2_xleg_live'));
   assert.equal(JSON.stringify(old), before, 'diagnostics must not change trading settings');
   assert.deepEqual(collectSafeConfigSummary(null), { available: false, warnings: ['CONFIG_UNAVAILABLE'] });
+  const matchingVersion = evaluateRuntimeVersionConsistency({ runningCommit: headCommit,
+    sourceCommit: headCommit, dashboardCommit: headCommit,
+    configurationIntegrity: { status: 'MATCH' }, capturedAt: 'fixture' });
+  assert.equal(matchingVersion.status, 'MATCH');
+  assert.equal(matchingVersion.ready, true);
+  const mismatchedVersion = evaluateRuntimeVersionConsistency({ runningCommit: headCommit,
+    sourceCommit: 'b'.repeat(40), dashboardCommit: headCommit,
+    configurationIntegrity: { status: 'MATCH' }, capturedAt: 'fixture' });
+  assert.equal(mismatchedVersion.status, 'MISMATCH');
+  assert.equal(mismatchedVersion.ready, false);
+  assert(mismatchedVersion.warnings.includes('RUNNING_SOURCE_COMMIT_MISMATCH'));
+  assert.equal(evaluateRuntimeVersionConsistency({ runningCommit: headCommit,
+    sourceCommit: headCommit, dashboardCommit: headCommit,
+    configurationIntegrity: { status: 'UNKNOWN' } }).ready, false,
+  'unknown source/config evidence must never claim READY');
+  const fingerprintVersion = evaluateRuntimeVersionConsistency({
+    runningCommit: headCommit, sourceCommit: headCommit,
+    dashboardCommit: startupIntegrity.dashboardAssetFingerprint,
+    dashboardIdentityKind: 'ASSET_SHA256',
+    runningFingerprint: startupIntegrity.runtimeFileFingerprint,
+    sourceFingerprint: startupIntegrity.runtimeFileFingerprint,
+    dashboardAssetFingerprint: startupIntegrity.dashboardAssetFingerprint,
+    configurationIntegrity: startupIntegrity,
+  });
+  assert.equal(fingerprintVersion.ready, true);
+  assert.equal(fingerprintVersion.trustMode, 'GIT_AND_FILE_FINGERPRINT');
+  assert.equal(bindServedDashboardIdentity(fingerprintVersion,
+    startupIntegrity.dashboardAssetFingerprint).ready, true);
+  const servedMismatch = bindServedDashboardIdentity(fingerprintVersion, 'd'.repeat(64));
+  assert.equal(servedMismatch.ready, false);
+  assert(servedMismatch.warnings.includes('SERVED_DASHBOARD_ASSET_MISMATCH'));
+  const noGitVersion = evaluateRuntimeVersionConsistency({
+    dashboardCommit: noGitIntegrity.dashboardAssetFingerprint,
+    dashboardIdentityKind: 'ASSET_SHA256',
+    runningFingerprint: noGitIntegrity.runtimeFileFingerprint,
+    sourceFingerprint: noGitIntegrity.runtimeFileFingerprint,
+    dashboardAssetFingerprint: noGitIntegrity.dashboardAssetFingerprint,
+    configurationIntegrity: noGitIntegrity,
+  });
+  assert.equal(noGitVersion.ready, true, 'a complete no-git release uses its pinned startup identity');
+  assert.equal(noGitVersion.status, 'MATCH_FINGERPRINT');
+  assert.equal(noGitVersion.trustMode, 'PINNED_FILE_FINGERPRINT');
+  assert(noGitVersion.warnings.includes('GIT_UNAVAILABLE_USING_PINNED_FILE_FINGERPRINT'));
+
+  let clock = 1_000; let reads = 0;
+  let currentIdentity = { sourceCommit: headCommit,
+    sourceFingerprint: startupIntegrity.runtimeFileFingerprint,
+    dashboardAssetFingerprint: startupIntegrity.dashboardAssetFingerprint };
+  const guard = createRuntimeVersionGuard({ runningCommit: headCommit,
+    dashboardCommit: startupIntegrity.dashboardAssetFingerprint,
+    configurationIntegrity: startupIntegrity,
+    refreshMs: 500, now: () => clock,
+    readIdentity: async () => { reads += 1; return currentIdentity; } });
+  assert.equal(guard.health().ready, true);
+  currentIdentity = { ...currentIdentity, sourceFingerprint: 'b'.repeat(64) };
+  clock += 100;
+  assert.equal(guard.health().ready, true, 'bounded cache avoids a git process per health request');
+  clock += 500;
+  assert.equal(guard.health().ready, true, 'health never waits for the asynchronous source scan');
+  await guard.refresh();
+  assert.equal(guard.health().ready, false,
+    'hot replacement is detected even when HEAD is unchanged');
+  assert(guard.health().warnings.includes('RUNNING_SOURCE_FILE_FINGERPRINT_MISMATCH'));
+  assert.equal(reads, 1);
+
+  currentIdentity = { sourceCommit: headCommit,
+    sourceFingerprint: startupIntegrity.runtimeFileFingerprint,
+    dashboardAssetFingerprint: 'e'.repeat(64) };
+  clock += 500;
+  await guard.refresh();
+  assert.equal(guard.health().ready, false, 'dashboard HTML replacement invalidates readiness');
+  assert(guard.health().warnings.includes('SOURCE_DASHBOARD_ASSET_MISMATCH'));
   console.log('test-runtime-integrity: ok (HEAD batch, mismatch, CRLF, missing/git unavailable, redaction, HO500/POST diagnostics)');
 } finally {
   const resolved = path.resolve(directory);
@@ -109,3 +192,4 @@ try {
   assert(path.basename(resolved).startsWith('flow-integrity-'));
   fs.rmSync(resolved, { recursive: true, force: true });
 }
+})().catch((error) => { console.error(error); process.exitCode = 1; });

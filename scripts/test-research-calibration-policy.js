@@ -1,14 +1,21 @@
 'use strict';
 const assert = require('assert');
 const { config } = require('../src/config');
-const { applyResearchCalibrationPolicy, CALIBRATION_ID, LEGACY_LIVE_ID, LEGACY_RUGX, LEGACY_BASE } = require('../src/core/ResearchCalibrationPolicy');
+const { applyResearchCalibrationPolicy, CALIBRATION_ID, LEGACY_LIVE_ID, LEGACY_RUGX, LEGACY_BASE,
+  LEGACY_BREADTH6, LEGACY_CONCENTRATION55, LEGACY_EXCLUDE_FLAT,
+  LEGACY_STUDY_VERSION } = require('../src/core/ResearchCalibrationPolicy');
+const { STUDY_ARMS: LEGACY_STUDY_ARMS,
+  DEFAULT_THRESHOLDS: LEGACY_DEFAULT_THRESHOLDS } = require('../src/core/LegacyEarlyFlowEntryTracker');
 const { costBreakdown } = require('../src/core/CostModel');
 const { collectSafeConfigSummary } = require('../src/runtime/RuntimeIntegrity');
 const { PumpTradeExecutor } = require('../src/core/PumpTradeExecutor');
 
 const active = config.liveTrading.strategies.filter((p) => p.enabled !== false && p.entryEnabled !== false);
-assert.deepStrictEqual(active.map((p) => p.id), [LEGACY_LIVE_ID]);
-const live = active[0];
+assert.deepStrictEqual(active.map((p) => p.id), [], 'all real-money entries stay code-locked off');
+const live = config.liveTrading.strategies.find((p) => p.id === LEGACY_LIVE_ID);
+assert.strictEqual(live.entryEnabled, false);
+assert.strictEqual(config.researchCalibration.liveEntryEnabled, false);
+assert.strictEqual(config.researchCalibration.liveEntryLocked, true);
 assert.strictEqual(live.positionSizeSol, 0.02);
 assert.strictEqual(live.maxConcurrentPositions, 3);
 assert.strictEqual(live.maxTotalConcurrentPositions, 3);
@@ -49,12 +56,36 @@ assert.strictEqual(rugx.liveBridgeEnabled, false);
 assert.strictEqual(baseline.liveBridgeEnabled, false);
 const legacySource = config.migrationSecondLegShadow.cohorts.find((p) => p.id === LEGACY_RUGX);
 const legacyBase = config.migrationSecondLegShadow.cohorts.find((p) => p.id === LEGACY_BASE);
-assert.strictEqual(legacySource.liveBridgeEnabled, true);
+assert.strictEqual(legacySource.liveBridgeEnabled, false);
 assert.strictEqual(legacyBase.liveBridgeEnabled, false);
+assert.strictEqual(legacyBase.studyVersion, LEGACY_STUDY_VERSION);
+assert.strictEqual(legacySource.studyVersion, LEGACY_STUDY_VERSION);
 for (const key of ['thresholds', 'positionSizeSol', 'costModel', 'strictExecution',
   'hardStopPct', 'trailingActivationPct', 'trailingStopPct', 'maxHoldMs']) {
   assert.deepStrictEqual(legacyBase[key], legacySource[key], `strict pair shares ${key}`);
 }
+const breadth6 = config.migrationSecondLegShadow.cohorts.find((p) => p.id === LEGACY_BREADTH6);
+const concentration55 = config.migrationSecondLegShadow.cohorts
+  .find((p) => p.id === LEGACY_CONCENTRATION55);
+const excludeFlat = config.migrationSecondLegShadow.cohorts.find((p) => p.id === LEGACY_EXCLUDE_FLAT);
+for (const row of [breadth6, concentration55, excludeFlat]) {
+  assert.strictEqual(row.studyVersion, LEGACY_STUDY_VERSION);
+  assert.deepStrictEqual(row.singleVariable, LEGACY_STUDY_ARMS[row.id].singleVariable);
+  assert.deepStrictEqual(row.thresholds, {
+    ...LEGACY_DEFAULT_THRESHOLDS, ...LEGACY_STUDY_ARMS[row.id].thresholdPatch,
+  }, `${row.id} freezes the entire effective threshold set`);
+  assert.strictEqual(row.liveBridgeEnabled, false);
+  assert.strictEqual(row.liveStrategyId, null);
+  assert.strictEqual(row.positionSizeSol, legacyBase.positionSizeSol);
+  for (const key of ['costModel', 'strictExecution', 'hardStopPct',
+    'trailingActivationPct', 'trailingStopPct', 'maxHoldMs']) {
+    assert.deepStrictEqual(row[key], legacyBase[key], `${row.id} changes no execution/exit variable`);
+  }
+}
+assert.strictEqual(breadth6.thresholds.minBuyers5s, 6);
+assert.strictEqual(concentration55.thresholds.maxSingleBuyShare5s, 0.55);
+assert.deepStrictEqual([excludeFlat.thresholds.excludedPriceChange10sMin,
+  excludeFlat.thresholds.excludedPriceChange10sMax], [0, 4]);
 assert.strictEqual(baseline.costModel.priorityFeeSol, 2 * config.liveTrading.priorityFeeSol);
 assert.strictEqual(costBreakdown(baseline.costModel).positionSizeSol, 0.02);
 assert.ok(Math.abs(costBreakdown(baseline.costModel).deterministicCostPct - 3.05) < 1e-12);
@@ -76,7 +107,7 @@ assert(collectSafeConfigSummary(staleFeeConfig).warnings.includes('CALIBRATION_S
 const staleEnvironment = { FLOW_LIVE_PRIORITY_FEE_SOL: '0.0005',
   FLOW_LIVE_EMERGENCY_PRIORITY_FEE_SOL: '0.002', FLOW_LIVE_MAX_POSITIONS: '1',
   FLOW_LIVE_COMPUTE_UNIT_LIMIT: '500000', FLOW_LIVE_EBA_CAL02_ENTRY_ENABLED: 'true',
-  FLOW_LIVE_LEGACY_EARLY_FLOW_RUGX_ENTRY_ENABLED: 'false' };
+  FLOW_LIVE_LEGACY_EARLY_FLOW_RUGX_ENTRY_ENABLED: 'true' };
 const savedEnvironment = new Map(Object.keys(staleEnvironment).map((key) => [key, process.env[key]]));
 const configModulePath = require.resolve('../src/config');
 const savedModule = require.cache[configModulePath];
@@ -118,9 +149,11 @@ assert.strictEqual(hold.positionSizeSol, 0.02);
 assert.strictEqual(hold.strictExecution.entryDelayMs, 1_000);
 const originalGlobalMode = [config.liveTrading.enabled, config.liveTrading.dryRun, config.liveTrading.safetyLock];
 const counts = [config.liveTrading.strategies.length, eb.entryProfiles.length, eb.exitProfiles.length];
-applyResearchCalibrationPolicy(config, { calibrationEntryEnabled: false });
+applyResearchCalibrationPolicy(config, { calibrationEntryEnabled: true });
 assert.deepStrictEqual([config.liveTrading.strategies.length, eb.entryProfiles.length, eb.exitProfiles.length], counts);
 assert.deepStrictEqual([config.liveTrading.enabled, config.liveTrading.dryRun, config.liveTrading.safetyLock], originalGlobalMode);
 assert.strictEqual(config.liveTrading.strategies.filter((p) => p.entryEnabled).length, 0);
+assert.strictEqual(config.migrationSecondLegShadow.cohorts
+  .find((p) => p.id === LEGACY_RUGX).liveBridgeEnabled, false);
 assert.strictEqual(eb.entryProfiles.find((p) => p.id === baseline.id).liveBridgeEnabled, false);
 console.log('test-research-calibration-policy: ok');

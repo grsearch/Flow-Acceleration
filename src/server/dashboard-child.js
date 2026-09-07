@@ -26,6 +26,7 @@ process.on('message', async (message) => {
       healthSnapshot: () => snapshot.database,
     };
     const options = { config, runtimeIdentity: message.runtimeIdentity, store,
+      runtimeVersionState: () => snapshot.versionConsistency,
       runtimeSnapshotState: () => ({
         mode: 'INDEPENDENT_HTTP_PROCESS', dashboardPid: process.pid,
         sampledAt: snapshot.at, ageMs: snapshot.at ? Date.now() - snapshot.at : null,

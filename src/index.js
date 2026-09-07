@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { config, validateConfig, streamTokenFor } = require('./config');
-const { collectRuntimeIntegrity } = require('./runtime/RuntimeIntegrity');
+const { collectRuntimeIntegrity, createRuntimeVersionGuard } = require('./runtime/RuntimeIntegrity');
 const { GracefulShutdown, createSignalShutdown } = require('./runtime/GracefulShutdown');
 const { RuntimeTaskMetrics } = require('./runtime/RuntimeTaskMetrics');
 const { ParserRejectionAudit } = require('./runtime/ParserRejectionAudit');
@@ -97,14 +97,30 @@ function createRuntime(runtimeConfig = config) {
       ? ':memory:'
       : path.resolve(runtimeConfig.storage.dbPath),
     gitCommit: configurationIntegrity.headCommit,
+    runningCommit: configurationIntegrity.headCommit,
+    runningFingerprint: configurationIntegrity.runtimeFileFingerprint,
+    // Historical API field retained for compatibility; it is now the exact
+    // dashboard asset-set SHA256, not a copy of the source commit.
+    dashboardCommit: configurationIntegrity.dashboardAssetFingerprint,
+    dashboardIdentityKind: 'ASSET_SHA256',
     configurationIntegrity,
     startedAt: runtimeStartedAt,
   };
+  const runtimeVersionGuard = createRuntimeVersionGuard({
+    projectDir: path.resolve(__dirname, '..'),
+    runningCommit: runtimeIdentity.runningCommit,
+    dashboardCommit: runtimeIdentity.dashboardCommit,
+    configurationIntegrity,
+  });
   console.log(
     `[Startup] identity pid=${runtimeIdentity.pid} cwd=${runtimeIdentity.cwd} `
     + `source=${runtimeIdentity.sourcePath} db=${runtimeIdentity.dbPath} `
     + `commit=${runtimeIdentity.gitCommit || 'unknown'}`,
   );
+  const initialVersionConsistency = runtimeVersionGuard.health();
+  if (!initialVersionConsistency.ready) {
+    console.error(`[Startup:version] NOT_READY ${JSON.stringify(initialVersionConsistency)}`);
+  }
   console.log('[Startup] creating research store');
   const store = new ResearchStore(runtimeConfig.storage, runtimeConfig.labels);
   const runtimeTasks = new RuntimeTaskMetrics({ onSlow: (row) => {
@@ -421,6 +437,7 @@ function createRuntime(runtimeConfig = config) {
   const server = new DashboardServer({
     config: runtimeConfig,
     runtimeIdentity,
+    runtimeVersionState: () => runtimeVersionGuard.health(),
     runtimeDiagnostics,
     store,
     engine,
@@ -1212,6 +1229,7 @@ function createRuntime(runtimeConfig = config) {
   function health() {
     return {
       runtime: runtimeMetrics,
+      versionConsistency: runtimeVersionGuard.health(),
       runtimeDiagnostics: runtimeDiagnostics.health(),
       engine: engine.stats(),
       labels: labeler.stats(),
@@ -1261,7 +1279,7 @@ function createRuntime(runtimeConfig = config) {
 
   return {
     start, stop, health, store, engine, labeler, parser, stream, server, trader, signalShadow,
-    runtimeDiagnostics,
+    runtimeDiagnostics, runtimeVersionGuard,
     flowFirstShadow, smartPullbackShadow, smartOpenShadow, flowSmartConfirmShadow,
     smartLikeEarlyShadow, preEntryRugRisk, smartResonanceShadow,
     smartWalletRegistry, smartWalletConsensusFlowRunnerShadow,

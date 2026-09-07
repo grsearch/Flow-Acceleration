@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const { fingerprintNamedHashes } = require('../runtime/RuntimeIntegrity');
 
 function acceptsGzip(request) {
   return String(request.headers['accept-encoding'] || '').split(',').some((part) => {
@@ -14,11 +15,14 @@ function acceptsGzip(request) {
 
 function installDashboardAssets(app, publicDir) {
   const assets = new Map();
+  const hashes = [];
   for (const name of fs.readdirSync(publicDir)) {
     if (!/^[\w.-]+\.(html|js|css)$/.test(name)) continue;
     const body = fs.readFileSync(path.join(publicDir, name));
+    const digest = crypto.createHash('sha256').update(body).digest('hex');
+    hashes.push({ name, sha256: digest });
     assets.set(`/${name}`, { body, gzip: zlib.gzipSync(body),
-      etag: `W/"${crypto.createHash('sha256').update(body).digest('hex')}"`,
+      etag: `W/"${digest}"`,
       type: name.endsWith('.html') ? 'text/html' : name.endsWith('.js') ? 'application/javascript' : 'text/css' });
   }
   app.use((request, response, next) => {
@@ -53,6 +57,7 @@ function installDashboardAssets(app, publicDir) {
     };
     next();
   });
+  return { fingerprint: fingerprintNamedHashes(hashes), files: hashes };
 }
 
 module.exports = { installDashboardAssets, acceptsGzip };
