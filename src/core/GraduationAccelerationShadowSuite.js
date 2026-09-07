@@ -4,6 +4,7 @@ const { costBreakdown } = require('./CostModel');
 const { evaluateUniversalRugGuard } = require('./UniversalRugGuard');
 const { hardBlockSignaturesForLifecycle } = require('./RugGuardPolicy');
 const { executableSell } = require('./ShadowExecutionModel');
+const friction = require('./GraduationExecutionFrictionStudy');
 const LONG_EXIT_EXPERIMENT = 'HO500_LONG_EXIT_V1';
 const MAX_LONG_EXIT_HOLD_MS = 60 * 60_000;
 const LONG_EXIT_TRADE_MAX_AGE_MS = 3_000;
@@ -227,7 +228,8 @@ class GraduationAccelerationShadowSuite {
     this.store = store;
     this.now = now;
     this.onLiveSignal = typeof onLiveSignal === 'function' ? onLiveSignal : null;
-    this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
+    this.entryProfiles = new Map(friction.profilesWithFriction(config.entryProfiles || [], config)
+      .map((row) => [row.id, row]));
     this.capacitySols = [...new Set((config.capacitySols || [0.05, 0.5, 1])
       .map(Number).filter((value) => Number.isFinite(value) && value > 0))];
     this.states = new Map();
@@ -306,15 +308,17 @@ class GraduationAccelerationShadowSuite {
       this._restorePostEntryCursor(position.mint, position.features?.postEntryTradeCursor);
     }
     this._restoreLongExitObservations(startupAt);
-    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
     for (const row of this.store.recoverableGraduationAccelerationNoExitPositions()) {
       const position = rowPosition(row);
+      const noExitObservationMs = this._noExitObservationMs(position);
       if (position.features?.experimentGroup === LONG_EXIT_EXPERIMENT || this._isPostPosition(position)) {
         position.notBeforeChainTimestampMs = startupAt;
       }
       if (!(position.exitDeadlineAt > 0)
         || startupAt > position.exitDeadlineAt + noExitObservationMs) {
         this.store.updateGraduationAccelerationShadowPosition(position.id, {
+          ...this._frictionAudit(position, { lateExitOutcome: 'EXPIRED_NO_EXECUTABLE_TRADE',
+            lateExitObservationEndedAt: startupAt }),
           lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
         });
         this.metrics.lateExitObservationExpired += 1;
@@ -405,7 +409,8 @@ class GraduationAccelerationShadowSuite {
       if (now > until) this.longExitObservations.delete(mint);
     }
     return [...new Set([
-      ...[...this.pendingEntries.values(), ...this.positions.values()].map((row) => row.mint),
+      ...[...this.pendingEntries.values(), ...this.positions.values(),
+        ...this.noExitWatches.values()].map((row) => row.mint),
       ...this.longExitObservations.keys(),
     ])];
   }
@@ -419,9 +424,50 @@ class GraduationAccelerationShadowSuite {
     return this.entryProfiles.get(position.entryProfileId);
   }
 
+  _noExitObservationMs(position) {
+    const executionFriction = position?.features?.executionFriction;
+    const deadline = Number(position?.exitDeadlineAt);
+    const frozenUntil = Number(executionFriction?.noExitObservationUntil);
+    if (executionFriction?.noExitObservationUntil != null
+      && Number.isFinite(deadline) && deadline > 0
+      && Number.isFinite(frozenUntil) && frozenUntil >= deadline) {
+      return frozenUntil - deadline;
+    }
+    const policy = this._positionProfile(position);
+    const candidates = [
+      executionFriction?.noExitObservationMs,
+      policy?.noExitObservationMs,
+      this.config.noExitObservationMs,
+    ];
+    const configured = candidates.find((value) => value != null && value !== ''
+      && Number.isFinite(Number(value)));
+    return Math.max(0, configured == null ? 10 * 60_000 : Number(configured));
+  }
+
   _isPostPosition(position) {
     return position?.features?.executionModelVersion === POST_EXECUTION_MODEL
       || this.entryProfiles.get(position?.entryProfileId)?.executionModelVersion === POST_EXECUTION_MODEL;
+  }
+
+  _frictionAudit(position, patch) {
+    if (!friction.isFriction(position)) return {};
+    position.features = { ...position.features, executionFriction: {
+      ...position.features.executionFriction, ...patch,
+    } };
+    return { features: position.features };
+  }
+
+  _frictionQuoteUnavailable(position, phase, trade, reason) {
+    const previous = position.features.executionFriction[`${phase}Unavailable`];
+    const patch = { [`${phase}Unavailable`]: { reason, at: trade.timestampMs,
+      slot: trade.slot, signature: trade.signature, eventIndex: trade.eventIndex,
+      observations: (previous?.observations || 0) + 1 } };
+    this._frictionAudit(position, patch);
+    // Keep the first failure visible without adding one DB write per tick.
+    // The final counter is persisted by the exit/NO_EXIT snapshot.
+    if (!previous || previous.reason !== reason) {
+      this.store.updateGraduationAccelerationShadowPosition(position.id, { features: position.features });
+    }
   }
 
   _retiredEntryProfile(position) {
@@ -555,8 +601,11 @@ class GraduationAccelerationShadowSuite {
     const entryChainAt = finite(features.entryChainTimestampMs);
     const maxAgeMs = finite(this._positionProfile(position)?.maxPositionTradeAgeMs,
       LONG_EXIT_TRADE_MAX_AGE_MS);
+    const strictPoint = friction.isFriction(position) ? postTradePoint(trade, this.now()) : null;
     let rejection = null;
-    if (trade.market !== 'PUMP_AMM') rejection = 'MARKET_MISMATCH';
+    if (friction.isFriction(position) && !strictPoint) rejection = 'FRICTION_POST_EVIDENCE_MISSING_OR_STALE';
+    else if (strictPoint && !canAdvancePostCursor(features.frictionExitTradeCursor, strictPoint)) rejection = 'FRICTION_EXIT_DUPLICATE_OR_OUT_OF_ORDER';
+    else if (trade.market !== 'PUMP_AMM') rejection = 'MARKET_MISMATCH';
     else if (!features.entryPool || !pool) rejection = 'POOL_MISSING';
     else if (String(pool) !== String(features.entryPool)) rejection = 'POOL_MISMATCH';
     else if (!(slot > 0) || !(entrySlot > 0)) rejection = 'SLOT_MISSING';
@@ -574,6 +623,8 @@ class GraduationAccelerationShadowSuite {
     position.lastAcceptedSlot = slot;
     position.lastAcceptedChainTimestampMs = chainAt;
     position.lastAcceptedTradeAt = timestampMs;
+    if (strictPoint) position.features = { ...position.features,
+      frictionExitTradeCursor: advancePostCursor(features.frictionExitTradeCursor, strictPoint) };
     return true;
   }
 
@@ -707,6 +758,8 @@ class GraduationAccelerationShadowSuite {
       if (now <= pending.entryDeadlineAt) continue;
       const profile = this.entryProfiles.get(pending.entryProfileId);
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+        ...this._frictionAudit(pending, { entryOutcome: 'NO_ENTRY',
+          entryFailureAt: now, entryFailureReason: 'NO_POST_TRADE_IN_DELAYED_ENTRY_WINDOW' }),
         status: STATUS.NO_ENTRY,
         rejectionReason: pending.features?.pairedSignalProfileId
           ? 'NO_POST_TRADE_IN_DELAYED_ENTRY_WINDOW' : profile?.migrationHandoff
@@ -751,10 +804,12 @@ class GraduationAccelerationShadowSuite {
         }
       }
     }
-    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
     for (const position of [...this.noExitWatches.values()]) {
+      const noExitObservationMs = this._noExitObservationMs(position);
       if (now <= position.exitDeadlineAt + noExitObservationMs) continue;
       this.store.updateGraduationAccelerationShadowPosition(position.id, {
+        ...this._frictionAudit(position, { lateExitOutcome: 'EXPIRED_NO_EXECUTABLE_TRADE',
+          lateExitObservationEndedAt: now }),
         lateExitStatus: 'EXPIRED_NO_EXECUTABLE_TRADE',
       });
       this.noExitWatches.delete(position.id);
@@ -1441,6 +1496,8 @@ class GraduationAccelerationShadowSuite {
     const qualification = pending.features?.qualification;
     if (!qualification || trade.market !== 'PUMP_AMM'
       || trade.timestampMs < pending.entryTargetAt || trade.timestampMs > pending.entryDeadlineAt) return;
+    if (friction.isFriction(pending)
+      && !friction.afterTarget(trade, pending.entryTargetAt, pending.entryDeadlineAt)) return;
     // Eligibility belongs to the source signal. Only execution price/impact is
     // evaluated after the delay; a later sell must not rewrite that eligibility.
     this._fillMigrationHandoffEntry(pending, profile, trade, price, qualification.gate,
@@ -1448,11 +1505,15 @@ class GraduationAccelerationShadowSuite {
   }
 
   _fillMigrationHandoffEntry(pending, profile, trade, price, gate, rugGuard) {
-    const execution = ammBuyAveragePrice(trade, pending.positionSol, price);
+    const isFriction = friction.isFriction(pending);
+    const execution = isFriction ? friction.quote(trade, pending.positionSol, 'BUY')
+      : ammBuyAveragePrice(trade, pending.positionSol, price);
     if (!execution.available) {
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+        ...this._frictionAudit(pending, { entryOutcome: 'NO_ENTRY', entryFailureAt: trade.timestampMs,
+          entryFailureReason: execution.reason || 'HANDOFF_RESERVES_UNAVAILABLE' }),
         status: STATUS.NO_ENTRY,
-        rejectionReason: 'HANDOFF_RESERVES_UNAVAILABLE',
+        rejectionReason: execution.reason || 'HANDOFF_RESERVES_UNAVAILABLE',
       });
       this.pendingEntries.delete(pending.id);
       this._unindex(pending);
@@ -1468,6 +1529,8 @@ class GraduationAccelerationShadowSuite {
     if (marketMovePct > maxMarketMovePct
       || (execution.impactPct != null && execution.impactPct > maxSelfImpactPct)) {
       this.store.updateGraduationAccelerationShadowPosition(pending.id, {
+        ...this._frictionAudit(pending, { entryOutcome: 'PRICE_JUMP', entryFailureAt: trade.timestampMs,
+          entry: execution.audit, entryMarketMovePct: marketMovePct }),
         status: STATUS.PRICE_JUMP,
         rejectionReason: marketMovePct > maxMarketMovePct
           ? `HANDOFF_MARKET_MOVE_${marketMovePct.toFixed(2)}PCT`
@@ -1488,7 +1551,7 @@ class GraduationAccelerationShadowSuite {
       entryPrice: fillPrice,
       entryJumpPct: marketMovePct,
       entryImpactPct: execution.impactPct,
-      tokenUnits: pending.positionSol / fillPrice,
+      tokenUnits: execution.tokenUnits ?? pending.positionSol / fillPrice,
       highestPrice: price,
       lowestPrice: price,
       coreWeightPct: 0,
@@ -1511,8 +1574,10 @@ class GraduationAccelerationShadowSuite {
         ...pending.features,
         executionModelVersion: POST_EXECUTION_MODEL,
         reserveState: trade.ammQuoteState,
-        feeModel: 'FLAT_ESTIMATE', feeModelIncludes: 'EXISTING_CONFIGURED_COSTS',
-        executionFeesAppliedSeparately: false,
+        feeModel: isFriction ? friction.FEE_MODEL : 'FLAT_ESTIMATE',
+        feeModelIncludes: isFriction ? 'AMM_FEES_IN_QUOTES; NETWORK_FEES_ONCE; RENT_EXCLUDED'
+          : 'EXISTING_CONFIGURED_COSTS',
+        executionFeesAppliedSeparately: isFriction,
         qualification,
         qualifiedAt: qualification.at,
         entryPool: trade.pool || trade.poolAddress || null,
@@ -1522,6 +1587,10 @@ class GraduationAccelerationShadowSuite {
         entryChainTimestampMs: finite(trade.chainTimestampMs),
         entryGate: { ...gate },
         actualExecutionDelayMs: trade.timestampMs - qualification.at,
+      };
+      if (isFriction) fill.features.executionFriction = {
+        ...pending.features.executionFriction, entryOutcome: 'FILLED',
+        entry: { ...execution.audit, actualDelayMs: trade.timestampMs - qualification.at },
       };
     }
     const pairedProfiles = [...this.entryProfiles.values()].filter((candidate) => (
@@ -1585,6 +1654,12 @@ class GraduationAccelerationShadowSuite {
         qualificationRugGuard: rugGuard,
         delayedEntryPolicy: { ...profile, handoffLiveStrategyId: null, liveStrategyId: null },
       };
+      if (profile.experimentGroup === friction.VERSION) {
+        features.executionFriction = friction.initialAudit(source, profile, entryTargetAt, entryDeadlineAt);
+        features.feeModel = friction.FEE_MODEL;
+        features.feeModelIncludes = 'AMM_FEES_IN_QUOTES; NETWORK_FEES_ONCE; RENT_EXCLUDED';
+        features.executionFeesAppliedSeparately = true;
+      }
       // Pending rows carry qualification evidence, never the source's fill.
       for (const key of ['entryPool', 'entrySlot', 'entrySignature', 'entryEventIndex', 'entryChainTimestampMs']) {
         delete features[key];
@@ -1595,7 +1670,8 @@ class GraduationAccelerationShadowSuite {
           entryProfileId: profile.id,
           mint: source.mint, symbol: source.symbol, creator: source.creator,
           status: STATUS.PENDING_ENTRY, positionSol: source.positionSol,
-          configuredCostPct: source.configuredCostPct,
+          configuredCostPct: profile.experimentGroup === friction.VERSION
+            ? 2 * friction.NETWORK_FEE_SOL_PER_SIDE / source.positionSol * 100 : source.configuredCostPct,
           signalAt: source.signalAt, signalPrice: source.signalPrice,
           signalCurvePct: source.signalCurvePct, entryTargetAt, entryDeadlineAt,
           coreWeightPct: 0, features,
@@ -1958,10 +2034,16 @@ class GraduationAccelerationShadowSuite {
     position.exitReason = reason;
     position.exitTargetMarket = market;
     position.exitTriggerAt = triggerAt;
-    const policy = position.features?.experimentGroup === LONG_EXIT_EXPERIMENT
+    const policy = position.features?.experimentGroup === LONG_EXIT_EXPERIMENT || friction.isFriction(position)
       ? this._positionProfile(position) : null;
     position.exitTargetAt = triggerAt + finite(policy?.exitDelayMs ?? this.config.exitDelayMs, 200);
     position.exitDeadlineAt = position.exitTargetAt + finite(policy?.exitTimeoutMs ?? this.config.exitTimeoutMs, 15_000);
+    const noExitObservationMs = this._noExitObservationMs(position);
+    this._frictionAudit(position, { exitTriggerAt: triggerAt, exitReason: reason,
+      exitTargetAt: position.exitTargetAt, exitDeadlineAt: position.exitDeadlineAt,
+      exitTriggerMarkPrice: position.lastPrice ?? null,
+      noExitObservationMs,
+      noExitObservationUntil: position.exitDeadlineAt + noExitObservationMs });
     this.store.updateGraduationAccelerationShadowPosition(position.id, {
       ...this._longExitSnapshot(position),
       status: position.status,
@@ -1974,18 +2056,30 @@ class GraduationAccelerationShadowSuite {
   }
 
   _close(position, trade, price) {
+    if (friction.isFriction(position)
+      && !friction.afterTarget(trade, position.exitTargetAt, position.exitDeadlineAt)) return;
     this._updateExtrema(position, trade.timestampMs, price);
     const profile = this._positionProfile(position);
     const coreWeight = position.coreExitPrice ? position.coreWeightPct / 100 : 0;
     const runnerWeight = 1 - coreWeight;
     let runnerPrice = price;
     let exitImpactPct = null;
+    let frictionExecution = null;
     const markReturnPct = ((price / position.entryPrice) - 1) * 100;
     // Every capacity-aware cohort uses the pool quote. Additionally, any
     // catastrophic mark move must use executable liquidity even for a legacy
     // cohort: otherwise a direct RUG is falsely recorded near the configured
     // -30% stop while a real 1 SOL position may recover almost nothing.
-    if (profile?.capacityAwareExit || markReturnPct <= -35) {
+    if (friction.isFriction(position)) {
+      frictionExecution = friction.quote(trade, position.tokenUnits, 'SELL',
+        position.features.executionFriction.entry?.tokenRaw);
+      if (!frictionExecution.available) {
+        this._frictionQuoteUnavailable(position, 'exit', trade, frictionExecution.reason);
+        return;
+      }
+      runnerPrice = frictionExecution.price;
+      exitImpactPct = frictionExecution.impactPct;
+    } else if (profile?.capacityAwareExit || markReturnPct <= -35) {
       const execution = executableSell(
         trade,
         position.tokenUnits * runnerWeight,
@@ -1998,11 +2092,17 @@ class GraduationAccelerationShadowSuite {
       runnerPrice = execution.price ?? price;
       exitImpactPct = execution.impactPct;
     }
-    const proceeds = position.tokenUnits
-      * ((position.coreExitPrice || 0) * coreWeight + runnerPrice * runnerWeight);
+    const proceeds = frictionExecution?.proceedsSol ?? (position.tokenUnits
+      * ((position.coreExitPrice || 0) * coreWeight + runnerPrice * runnerWeight));
     const grossReturnPct = ((proceeds / position.positionSol) - 1) * 100;
     const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: position.positionSol });
     const extraExitCostPct = position.coreExitPrice ? costs.fixedCostPct : 0;
+    const netReturnPct = grossReturnPct - position.configuredCostPct - extraExitCostPct;
+    if (frictionExecution) this._frictionAudit(position, { exitOutcome: 'CLOSED',
+      exit: { ...frictionExecution.audit, actualDelayMs: trade.timestampMs - position.exitTriggerAt,
+        afterTargetMs: trade.timestampMs - position.exitTargetAt,
+        economicPnlSol: netReturnPct / 100 * position.positionSol,
+        netReturnPct, markReturnPct, markToFillPct: (runnerPrice / price - 1) * 100 } });
     this.store.updateGraduationAccelerationShadowPosition(position.id, {
       ...this._longExitSnapshot(position),
       status: STATUS.CLOSED,
@@ -2012,7 +2112,7 @@ class GraduationAccelerationShadowSuite {
       exitImpactPct,
       exitReason: position.exitReason,
       grossReturnPct,
-      netReturnPct: grossReturnPct - position.configuredCostPct - extraExitCostPct,
+      netReturnPct,
     });
     this.positions.delete(position.id);
     this._unindex(position);
@@ -2035,14 +2135,17 @@ class GraduationAccelerationShadowSuite {
   }
 
   _observeLateExit(position, trade, price) {
-    const noExitObservationMs = finite(this.config.noExitObservationMs, 10 * 60_000);
+    const noExitObservationMs = this._noExitObservationMs(position);
     if (trade.market !== position.exitTargetMarket
       || trade.timestampMs <= position.exitDeadlineAt
       || trade.timestampMs > position.exitDeadlineAt + noExitObservationMs) return;
+    const isFriction = friction.isFriction(position);
+    if (isFriction && !friction.afterTarget(trade, position.exitDeadlineAt)) return;
     const coreWeight = position.coreExitPrice ? position.coreWeightPct / 100 : 0;
     const runnerWeight = 1 - coreWeight;
     const markReturnPct = ((price / position.entryPrice) - 1) * 100;
-    const execution = executableSell(
+    const execution = isFriction ? friction.quote(trade, position.tokenUnits, 'SELL',
+      position.features.executionFriction.entry?.tokenRaw) : executableSell(
       trade,
       position.tokenUnits * runnerWeight,
       price,
@@ -2050,14 +2153,24 @@ class GraduationAccelerationShadowSuite {
     );
     // This diagnostic is specifically the first demonstrably executable trade.
     // A conservative zero quote caused by absent reserves remains unobserved.
-    if (!execution.available) return;
+    if (!execution.available) {
+      if (isFriction) this._frictionQuoteUnavailable(position, 'lateExit', trade, execution.reason);
+      return;
+    }
     const lateExitPrice = execution.price;
-    const proceeds = position.tokenUnits
+    const proceeds = isFriction ? execution.proceedsSol : position.tokenUnits
       * ((position.coreExitPrice || 0) * coreWeight + lateExitPrice * runnerWeight);
     const grossReturnPct = ((proceeds / position.positionSol) - 1) * 100;
     const costs = costBreakdown({ ...this.config.costModel, positionSizeSol: position.positionSol });
     const extraExitCostPct = position.coreExitPrice ? costs.fixedCostPct : 0;
+    const lateExitNetReturnPct = grossReturnPct - position.configuredCostPct - extraExitCostPct;
+    this._frictionAudit(position, { lateExitOutcome: 'OBSERVED_EXECUTABLE',
+      lateExit: { ...execution.audit, observedAt: trade.timestampMs,
+        afterDeadlineMs: trade.timestampMs - position.exitDeadlineAt,
+        economicPnlSol: lateExitNetReturnPct / 100 * position.positionSol,
+        netReturnPct: lateExitNetReturnPct, excludedFromClosedReturns: true } });
     this.store.updateGraduationAccelerationShadowPosition(position.id, {
+      ...(isFriction ? this._longExitSnapshot(position) : {}),
       lateExitStatus: 'OBSERVED_EXECUTABLE',
       lateExitAt: trade.timestampMs,
       lateExitMarket: trade.market,
@@ -2066,7 +2179,7 @@ class GraduationAccelerationShadowSuite {
       lateExitImpactPct: execution.impactPct,
       lateExitDelayMs: Math.max(0, trade.timestampMs - position.exitTargetAt),
       lateExitAfterDeadlineMs: Math.max(0, trade.timestampMs - position.exitDeadlineAt),
-      lateExitNetReturnPct: grossReturnPct - position.configuredCostPct - extraExitCostPct,
+      lateExitNetReturnPct,
     });
     this.noExitWatches.delete(position.id);
     this._unindex(position);
@@ -2075,6 +2188,11 @@ class GraduationAccelerationShadowSuite {
   }
 
   _markNoExit(position, reason) {
+    this._frictionAudit(position, { exitOutcome: 'NO_EXIT', noExitAt: this.now(),
+      noExitReason: reason, lateExitOutcome: 'PENDING',
+      // This stress scenario is never booked as a return or a closed trade.
+      zeroRecoveryStressNetReturnPct: -100 - position.configuredCostPct / 2,
+      zeroRecoveryStressBasis: 'NO_EXIT_ZERO_PROCEEDS_PLUS_ENTRY_NETWORK_FEE_ONLY; NOT_ACTUAL_PNL' });
     this.store.updateGraduationAccelerationShadowPosition(position.id, {
       ...this._longExitSnapshot(position),
       status: STATUS.NO_EXIT,

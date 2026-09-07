@@ -8957,7 +8957,6 @@ if (graduationPostHo500Baseline) {
 
 applyResearchCalibrationPolicy(config, {
   focusEnabled: booleanEnv('FLOW_RESEARCH_FOCUS_ENABLED', true),
-  calibrationEntryEnabled: booleanEnv('FLOW_LIVE_LEGACY_EARLY_FLOW_RUGX_ENTRY_ENABLED', true),
 });
 
 // Solana requests priority price per CU, while operators reason about the total
@@ -9069,7 +9068,9 @@ function validateConfig() {
     if (!config.liveTrading.privateKey) {
       errors.push('FLOW_LIVE_PRIVATE_KEY is required for live trading');
     }
-    if (!process.env.FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL
+    const liveEntryEnabled = config.liveTrading.strategies
+      .some((strategy) => strategy.enabled !== false && strategy.entryEnabled !== false);
+    if (liveEntryEnabled && !process.env.FLOW_LIVE_MIGRATED_GFR_300_V2_POSITION_SOL
       && !process.env.FLOW_LIVE_GRADUATION_ACCEL_O90_M5_STAIR120_V4_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATED_GE30_R23_F2_ONLY_G2_XLEG_POSITION_SOL
       && !process.env.FLOW_LIVE_MIGRATED_GE30_D25_32_R24_F1_EXEC01_V2_R2_H15_POSITION_SOL

@@ -179,7 +179,13 @@ assert(healthTrading.includes('Legacy Early Flow RUGX'));
 assert(healthTrading.includes('H30 / A10 / D5 / 30m'));
 assert(!healthTrading.includes('1秒跌'));
 
-const ids = ['LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX'];
+const ids = [
+  'LEGACY-EARLY-FLOW-BASE',
+  'LEGACY-EARLY-FLOW-RUGX',
+  'LEGACY-EARLY-FLOW-BREADTH6',
+  'LEGACY-EARLY-FLOW-CONCENTRATION55',
+  'LEGACY-EARLY-FLOW-EXCLUDE-FLAT',
+];
 const configs = ids.map(id => ({ id, entryMode: 'LEGACY_EARLY_FLOW', newEntriesEnabled: true,
   positionSizeSol: 0.02, executionVersion: 'LEGACY_EARLY_FLOW_EXEC_V1',
   hardStopPct: 30, trailingActivationPct: 10, trailingStopPct: 5, maxHoldMs: 1_800_000,
@@ -202,6 +208,16 @@ const shadow = {
       { cohort_id: 'PMO-FLOW-H20-A75-D25-X300-BASE', signals: 999999 },
       { cohort_id: 'LEGACY-EARLY-FLOW-RUGX-OLD', signals: 888888 },
     ],
+    legacyComparableCohorts: ids.map(id => ({ cohort_id: id, position_sol: 0.02,
+      configured_cost_pct: 3.2, execution_version: 'LEGACY_EARLY_FLOW_EXEC_V1',
+      study_version: 'LEGACY_EARLY_FLOW_5ARM_V1', protocol_group: 'P1',
+      signals: 2, mints: 2, entered: 1, resolved: 1, win_rate_pct: 100,
+      average_net_return_pct: 7, profit_factor: null, study_filter_rejected: 1 })),
+    legacyFiveArmAudit: { studyVersion: 'LEGACY_EARLY_FLOW_5ARM_V1', totalEpisodes: 9,
+      forwardTaggedEpisodes: 4, completeEpisodes: 3, comparableEpisodes: 2,
+      incompleteEpisodes: 6, historicalTwoArmEpisodes: 5, partialFiveArmEpisodes: 1,
+      sourceMismatchEpisodes: 1, protocolMismatchEpisodes: 1,
+      definitionMismatchEpisodes: 1, protocolVariants: 1 },
     rugComparisons: [
       { baselineProfileId: ids[0], filteredProfileId: ids[1], label: 'EXACT_NEW_PAIR',
         pairedSignals: 4, comparableResolved: 2, blocked: 1, resolvedBlocked: 1,
@@ -225,9 +241,21 @@ const shadow = {
 sandbox.shadowFixture = shadow;
 run('activeLiveStrategyId="legacy-early-flow-base"; renderLegacyEarlyFlowShadow(shadowFixture)');
 let rows = element('#legacy-early-flow-cohort-rows').innerHTML;
-assert.equal((rows.match(/data-legacy-cohort=/g) || []).length, 2);
+assert.equal((rows.match(/data-legacy-cohort=/g) || []).length, 5);
+const comparableRows = element('#legacy-early-flow-comparable-cohort-rows').innerHTML;
+assert.equal((comparableRows.match(/data-legacy-cohort=/g) || []).length, 5);
+assert(comparableRows.includes('协议组 P1'));
+assert(comparableRows.includes('研究过滤 1'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('完整 episode / 可比'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('3 / 2'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('历史不完整 / 旧两组'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('6 / 5'));
+assert(html.includes('历史 all-time（不可直接横向比较）'));
 assert(rows.includes('原版无RUG过滤'));
 assert(rows.includes('当前阶段重复作恶钱包/模板RUG过滤'));
+assert(rows.includes('单变量：5秒独立买家≥6'));
+assert(rows.includes('单变量：最大单笔买入占比≤55%'));
+assert(rows.includes('单变量：排除10秒涨幅0%–4%'));
 assert(rows.includes('0.02 SOL'));
 assert(rows.includes('H30 / A10 / D5 / 30m'));
 assert(rows.includes('估算费用 3.2%，非链上实际费用'));
@@ -260,7 +288,7 @@ sandbox.shadowFixture = { ...shadow,
 };
 run('renderLegacyEarlyFlowShadow(shadowFixture)');
 assert(element('#legacy-early-flow-metrics').innerHTML.includes('18 / 2'));
-assert(element('#legacy-early-flow-metrics').innerHTML.includes('两臂记录 4'));
+assert(element('#legacy-early-flow-metrics').innerHTML.includes('配对组记录 4'));
 assert(element('#legacy-early-flow-position-rows').innerHTML.includes('+12%'));
 assert(!element('#legacy-early-flow-position-rows').innerHTML.includes('+333%'), 'dedicated indexed rows take precedence over mixed rows');
 assert(element('#legacy-early-flow-cohort-rows').innerHTML.includes('等待前向样本'), 'dedicated cohort data must not fall back to mixed aggregate for a missing arm');
@@ -286,10 +314,13 @@ assert(element('#legacy-early-flow-metrics').innerHTML.includes('待确认 · �
 
 run('renderLegacyEarlyFlowShadow({dashboardQuery:{status:"PREPARING"}})');
 rows = element('#legacy-early-flow-cohort-rows').innerHTML;
-assert.equal((rows.match(/data-legacy-cohort=/g) || []).length, 2, 'both configured families remain discoverable with no data');
+assert.equal((rows.match(/data-legacy-cohort=/g) || []).length, 5,
+  'all paired research cohorts remain discoverable with no data');
 assert(rows.includes('等待前向样本'));
 assert(rows.includes('配置待确认'));
 assert(!rows.includes('前向采集中'));
+assert(element('#legacy-early-flow-comparable-cohort-rows').innerHTML
+  .includes('等待可比完整 episode'));
 assert(!element('#legacy-early-flow-metrics').innerHTML.includes('允许发送信号'));
 assert(element('#legacy-early-flow-expression').textContent.includes('后台准备'));
 assert(element('#legacy-early-flow-pair-rows').innerHTML.includes('等待严格配对'));

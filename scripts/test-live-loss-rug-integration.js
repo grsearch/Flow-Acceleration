@@ -40,7 +40,10 @@ async function main() {
   };
   const manager = new LiveTradingManager({ config: { ...config.liveTrading, enabled: true,
     requestedEnabled: true, dryRun: false, safetyLock: false, killSwitchFile: null,
-    strategies: config.liveTrading.strategies.filter(row => row.id === LEGACY_LIVE_ID),
+    // Production policy pauses every real entry. Re-enable only this local
+    // fake-chain fixture so the RUG capture/learn/block path remains covered.
+    strategies: config.liveTrading.strategies.filter(row => row.id === LEGACY_LIVE_ID)
+      .map(row => ({ ...row, entryEnabled: true })),
     lossRugFeedback: { ...config.liveTrading.lossRugFeedback, enabled: true } },
     store, executor, now: () => now });
   assert.equal(manager.lossRugFeedback.health().status, 'DEGRADED');

@@ -1,6 +1,6 @@
 # Legacy Early Flow RUGX 0.02 SOL
 
-本次修改按用户明确授权，在部署时关闭其他实盘的新开仓，仅允许 `legacy_early_flow_rugx_live`（页面编号 `LEGACY-EARLY-FLOW-RUGX`）入场。源码修改不等于已经更新生产服务；必须通过安全更新流程部署和验证。不要用手动启动、强杀和另起实例替代现有服务管理。
+该版本曾授权 `legacy_early_flow_rugx_live`（页面编号 `LEGACY-EARLY-FLOW-RUGX`）小额入场；自 2026-09-07 起该入口和其他实盘新开仓均已在源码策略层固定关闭，只保留历史仓位恢复与退出。源码修改不等于已经更新生产服务；必须通过安全更新流程部署和验证。不要用手动启动、强杀和另起实例替代现有服务管理。
 
 ## 固定版本
 
@@ -42,7 +42,9 @@ API 依据：[Coinbase Prices](https://docs.cdp.coinbase.com/coinbase-business/t
 
 入场的 15–25 秒使用明确迁移时间；现有 RUG 学习器的 AMM 阶段使用首次观测 AMM 的时间，两者在数据迟到时可能不同。本版保留过滤器实际使用的阶段及年龄，另外记录入场方请求的阶段和时钟差异，不能把实际 AMM_EARLY 模板标成 AMM_MATURE。过滤与既有记忆按同一观察时钟匹配，不把正常的时钟差异额外变成拒绝条件，也不在此次改写其他策略的学习时钟。
 
-实盘只接 RUGX 的原始合格信号，不等待 Shadow 平仓或模拟成交成功。LiveTradingManager 在实际入场前再次执行阶段匹配的 RUG 检查。过滤器不可用时明确拒绝，不能退回无过滤实盘。
+历史实盘版本只接 RUGX 的原始合格信号，不等待 Shadow 平仓或模拟成交成功；当前桥接已关闭。LiveTradingManager 仍保留实际入场前的阶段匹配 RUG 检查，以便存量代码审计和未来新版本显式授权时复用。过滤器不可用时明确拒绝，不能退回无过滤实盘。
+
+另新增三个前向、仅 Shadow 的单变量组：`BREADTH6` 仅把 5 秒独立买家提高到 6，`CONCENTRATION55` 仅把最大单笔买入占比降到 55%，`EXCLUDE-FLAT` 仅排除 10 秒涨幅 0%–4%。三组都以 BASE 的首次合格时刻为共同候选，沿用同一 0.02 SOL、1 秒执行、成本与退出假设，不接实盘，也不叠加 RUG 硬拦以免混淆变量。
 
 Shadow 采用严格 POST 储备执行，入场/退出都以触发时刻加 1 秒作为执行目标，只接受目标之后的后续新行情。缺报价不伪造成交，不用旧缓存平仓，也不直接记为 -100%。这些延迟是可审计的模拟假设，实盘仍需逐笔对账。
 
@@ -53,12 +55,14 @@ Shadow 采用严格 POST 储备执行，入场/退出都以触发时刻加 1 秒
 ## 部署验收
 
 1. 使用既有安全更新流程，确认没有其他写库实例，源文件与提交完整性匹配。不要自动删库、强杀进程或强制覆盖脏文件。
-2. `/api/strategy-status` 只有 `legacy_early_flow_rugx_live` 的 `entryEnabled=true`，金额为 0.02；全局 LIVE、签名配置、余额与紧急开关仍决定实际执行能力。
-3. `/api/health` 的配置完整性无校准桥接/费用警告；迁移流、AMM 流及 SOL/USD 缓存就绪。Dashboard 显示两个新的 Shadow 项以及独立实盘源诊断。
-4. 一旦出现合格事件，核对同 episode 的 BASE、RUGX；源头已被 RUGX 拦截的事件记录 NO_ENTRY 和具体原因，不发实盘信号。放行事件再核对 Live decision，区分源头过滤与实盘执行拒绝。RUGX 零拦截不能宣称过滤有效。
+2. `/api/strategy-status` 的所有策略均应为 `entryEnabled=false`；LEGACY 历史定义仍保留 0.02 SOL 参数，但不得再产生新实盘入场。
+3. `/api/health` 的配置完整性无校准桥接/费用警告；迁移流、AMM 流及 SOL/USD 缓存就绪。Dashboard 显示 Legacy 五组、完整 episode 审计、历史不可比区以及独立实盘源诊断。
+4. 一旦出现合格事件，核对同 episode 的 BASE、RUGX、BREADTH6、CONCENTRATION55、EXCLUDE-FLAT 五行是否同批生成。过滤失败仍须写成 NO_ENTRY；旧两组历史和任何缺臂、错源或协议不一致 episode 都不得进入可比收益。RUGX 零拦截不能宣称过滤有效。
 5. 比较已结算净收益、尾部损失、被拦截的赢家/亏单、费用与信号到成交延迟，不只看胜率。
 
-新开仓单独开关为 `FLOW_LIVE_LEGACY_EARLY_FLOW_RUGX_ENTRY_ENABLED`，默认 true；设为 false 只停止新仓。旧 `FLOW_LIVE_EBA_CAL02_ENTRY_ENABLED` 不再重新启用 CAL02。
+自 2026-09-07 起全部实盘新开仓在源码策略层固定关闭；旧的
+`FLOW_LIVE_LEGACY_EARLY_FLOW_RUGX_ENTRY_ENABLED=true` 也不能重新开启该入口。
+历史仓位恢复与退出逻辑仍保留。旧 `FLOW_LIVE_EBA_CAL02_ENTRY_ENABLED` 同样不能重新启用 CAL02。
 
 ## 本地验证
 

@@ -115,7 +115,8 @@ async function main() {
     }
     assert.equal(snapshot.value.positions.length, 50, 'cache remains immutable');
     const health = JSON.parse((await get(port, '/api/health')).body);
-    assert.equal(health.status, 'stale');
+    assert.equal(health.status, 'version_mismatch');
+    assert.equal(health.versionConsistency.ready, false);
     assert.equal(JSON.parse((await get(port, '/health')).body).ready, false);
     const plain = await get(port, '/');
     const compressed = await get(port, '/', { 'Accept-Encoding': 'gzip' });

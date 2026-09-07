@@ -1,15 +1,23 @@
 'use strict';
 
 const { normalizeCostModel } = require('./CostModel');
+const { applyPostGradHoldingStudyPolicy } = require('./PostGradHoldingStudyPolicy');
+const {
+  EXECUTION_VERSION: LEGACY_VERSION,
+  BASE_COHORT_ID: LEGACY_BASE,
+  RUGX_COHORT_ID: LEGACY_RUGX,
+  STUDY_VERSION: LEGACY_STUDY_VERSION,
+  STUDY_ARMS: LEGACY_STUDY_ARMS,
+} = require('./LegacyEarlyFlowEntryTracker');
 
 const CALIBRATION_ID = 'early_pure_buy_burst_eba_fix20_calibration_live';
 const EB_VERSION = 'EB_EXEC_POST_TARGET_V1';
 const EB_EXIT = 'FIX20_H30_EXEC_V1';
 const EB_SOURCE = `EB_A_EXEC_V1:${EB_EXIT}`;
 const LEGACY_LIVE_ID = 'legacy_early_flow_rugx_live';
-const LEGACY_VERSION = 'LEGACY_EARLY_FLOW_EXEC_V1';
-const LEGACY_BASE = 'LEGACY-EARLY-FLOW-BASE';
-const LEGACY_RUGX = 'LEGACY-EARLY-FLOW-RUGX';
+const LEGACY_BREADTH6 = 'LEGACY-EARLY-FLOW-BREADTH6';
+const LEGACY_CONCENTRATION55 = 'LEGACY-EARLY-FLOW-CONCENTRATION55';
+const LEGACY_EXCLUDE_FLAT = 'LEGACY-EARLY-FLOW-EXCLUDE-FLAT';
 const LIVE_PRIORITY_FEE_SOL = 0.0001;
 const CALIBRATION_MAX_POSITIONS = 3;
 
@@ -23,7 +31,7 @@ function put(rows, value) {
 // Only the current authorized strategy is armed; LIVE/credentials/kill-switch gates
 // remain the operator's responsibility. Retirement never deletes definitions.
 function applyResearchCalibrationPolicy(config, {
-  focusEnabled = true, calibrationEntryEnabled = true,
+  focusEnabled = true,
 } = {}) {
   const live = config.liveTrading;
   // User-fixed per-transaction priority fee, including emergency exits and
@@ -42,7 +50,7 @@ function applyResearchCalibrationPolicy(config, {
     entryDelayMs: 1_000, exitDelayMs: 1_000,
   };
   for (const strategy of live.strategies) {
-    // Only legacy EARLY_FLOW RUGX is authorized for this deployment. Keep every historical
+    // All real-money calibration entries are paused. Keep every historical
     // definition for active-position recovery, but never rearm an old trial
     // through an obsolete environment flag or a formerly dormant default.
     strategy.entryEnabled = false;
@@ -99,7 +107,7 @@ function applyResearchCalibrationPolicy(config, {
     id: LEGACY_LIVE_ID, code: LEGACY_RUGX,
     label: 'Legacy Early Flow · 迁移15–25秒资金流 / RUGX / 0.02 SOL',
     ruleVersion: LEGACY_VERSION, signalSource: LEGACY_VERSION,
-    market: 'PUMP_AMM', enabled: true, entryEnabled: calibrationEntryEnabled,
+    market: 'PUMP_AMM', enabled: true, entryEnabled: false,
     calibrationOnly: true, sourceShadowCohortId: LEGACY_RUGX,
     positionSizeSol: 0.02, maxConcurrentPositions: CALIBRATION_MAX_POSITIONS,
     maxTotalConcurrentPositions: CALIBRATION_MAX_POSITIONS,
@@ -122,7 +130,8 @@ function applyResearchCalibrationPolicy(config, {
     id: LEGACY_BASE, label: 'Legacy Early Flow BASE · 同源无RUG过滤 / 0.02 SOL',
     enabled: true, newEntriesEnabled: true, entryMode: 'LEGACY_EARLY_FLOW',
     studyMode: 'LEGACY_EARLY_FLOW', confirmationMode: 'IMMEDIATE',
-    executionVersion: LEGACY_VERSION, strictExecution: { ...strictAmm },
+    executionVersion: LEGACY_VERSION, studyVersion: LEGACY_STUDY_VERSION,
+    strictExecution: { ...strictAmm },
     positionSizeSol: 0.02, costModel: { ...costModel },
     entryDelayMs: 1_000, entryTimeoutMs: 3_000,
     exitDelayMs: 1_000, exitTimeoutMs: 30_000,
@@ -146,7 +155,38 @@ function applyResearchCalibrationPolicy(config, {
     pairedBaselineCohortId: LEGACY_BASE, rugGuardMode: 'HARD_BLOCK',
     hardBlockSignatures: ['crossMintToxicWallets', 'crossMintToxicTemplate'],
     rugPolicyReason: 'LEGACY_EARLY_FLOW_STAGE_SCOPED_REPEAT_ACTOR',
-    liveBridgeEnabled: calibrationEntryEnabled, liveStrategyId: LEGACY_LIVE_ID,
+    liveBridgeEnabled: false, liveStrategyId: LEGACY_LIVE_ID,
+  });
+  // Forward-only single-variable arms share BASE's first qualifying candidate,
+  // fill model, costs and exits. They remain label-only Shadow cohorts so a
+  // stricter signal study cannot silently re-enable real-money execution or
+  // confound the factor under study with the RUG hard block.
+  put(legacySuite.cohorts, {
+    ...legacyBase, id: LEGACY_BREADTH6,
+    label: 'Legacy Early Flow BREADTH6 · 5秒独立买家≥6 / 0.02 SOL',
+    pairedBaselineCohortId: LEGACY_BASE,
+    studyVersion: LEGACY_STUDY_VERSION,
+    singleVariable: { ...LEGACY_STUDY_ARMS[LEGACY_BREADTH6].singleVariable },
+    thresholds: { ...legacyBase.thresholds,
+      ...LEGACY_STUDY_ARMS[LEGACY_BREADTH6].thresholdPatch },
+  });
+  put(legacySuite.cohorts, {
+    ...legacyBase, id: LEGACY_CONCENTRATION55,
+    label: 'Legacy Early Flow CONCENTRATION55 · 最大单买占比≤55% / 0.02 SOL',
+    pairedBaselineCohortId: LEGACY_BASE,
+    studyVersion: LEGACY_STUDY_VERSION,
+    singleVariable: { ...LEGACY_STUDY_ARMS[LEGACY_CONCENTRATION55].singleVariable },
+    thresholds: { ...legacyBase.thresholds,
+      ...LEGACY_STUDY_ARMS[LEGACY_CONCENTRATION55].thresholdPatch },
+  });
+  put(legacySuite.cohorts, {
+    ...legacyBase, id: LEGACY_EXCLUDE_FLAT,
+    label: 'Legacy Early Flow EXCLUDE-FLAT · 排除10秒涨幅0–4% / 0.02 SOL',
+    pairedBaselineCohortId: LEGACY_BASE,
+    studyVersion: LEGACY_STUDY_VERSION,
+    singleVariable: { ...LEGACY_STUDY_ARMS[LEGACY_EXCLUDE_FLAT].singleVariable },
+    thresholds: { ...legacyBase.thresholds,
+      ...LEGACY_STUDY_ARMS[LEGACY_EXCLUDE_FLAT].thresholdPatch },
   });
 
   const gd = config.migratedDropReboundShadow;
@@ -195,9 +235,11 @@ function applyResearchCalibrationPolicy(config, {
         && !cohort.id.startsWith('PMO-FLOW-H15-A30-D15-X120')) cohort.newEntriesEnabled = false;
     }
   }
+  applyPostGradHoldingStudyPolicy(config);
   config.researchCalibration = {
     version: LEGACY_VERSION, focusEnabled, liveStrategyId: LEGACY_LIVE_ID,
-    liveEntryEnabled: calibrationEntryEnabled, positionSizeSol: 0.02,
+    liveEntryEnabled: false, liveEntryLocked: true,
+    liveEntryLockReason: 'USER_PAUSED_2026_09_07', positionSizeSol: 0.02,
     costModelScope: 'ESTIMATED_ROUND_TRIP_NOT_CHAIN_SETTLEMENT',
     costModel: { ...costModel },
   };
@@ -206,4 +248,6 @@ function applyResearchCalibrationPolicy(config, {
 
 module.exports = { applyResearchCalibrationPolicy, CALIBRATION_ID, EB_VERSION, EB_SOURCE,
   LEGACY_LIVE_ID, LEGACY_VERSION, LEGACY_BASE, LEGACY_RUGX,
+  LEGACY_BREADTH6, LEGACY_CONCENTRATION55, LEGACY_EXCLUDE_FLAT,
+  LEGACY_STUDY_VERSION,
   LIVE_PRIORITY_FEE_SOL, CALIBRATION_MAX_POSITIONS };

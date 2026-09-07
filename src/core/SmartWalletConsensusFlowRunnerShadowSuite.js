@@ -90,6 +90,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     this.costs = costBreakdown(config.costModel || { positionSizeSol: config.positionSizeSol });
     this.entryProfiles = new Map((config.entryProfiles || []).map((row) => [row.id, row]));
     this.exitProfiles = new Map((config.exitProfiles || []).map((row) => [row.id, row]));
+    this.hasStrictHoldingExecution = [...this.entryProfiles.values()].some(row => row.strictExecution);
     this.maxConsensusWindowMs = Math.max(0, ...(config.entryProfiles || [])
       .map((row) => finite(row.consensusWindowMs, 0)));
     this.maxFlowWindowMs = Math.max(
@@ -350,9 +351,24 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
       WHERE status IN (${placeholders}) ORDER BY signal_at, id
     `).all(...ACTIVE_STATUSES);
-    for (const row of rows) {
-      const position = rowToPosition(row);
-      if (position.executionState.strictExecution) position.strictRestoredAt = this.now();
+    const restored = rows.map(rowToPosition);
+    const restartCensored = restored.filter(position => (
+      position.executionState.forwardStudy?.forwardOnly === true
+        && position.executionState.strictExecution
+    ));
+    this.store.db.transaction(() => {
+      for (const position of restartCensored) {
+        this._closeRightCensored(position, 'RESTART_CENSORED', { countMetric: false });
+      }
+    })();
+    this.metrics.restartCensored += restartCensored.length;
+    const censoredIds = new Set(restartCensored.map(position => position.id));
+    for (const position of restored) {
+      if (censoredIds.has(position.id)) continue;
+      if (position.executionState.strictExecution) {
+        position.strictRestoredAt = this.now();
+        this.hasStrictHoldingExecution = true;
+      }
       this.positions.set(position.id, position);
       this._index(position);
     }
@@ -427,6 +443,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       observerOnly: true,
       sendsTransactions: false,
       rugPolicy: 'OBSERVE_ONLY_NOT_AN_ENTRY_FILTER',
+      forwardHoldingStudy: this.config.forwardHoldingStudy || null,
       activePositions: this.positions.size,
       trackedMints: this.rowsByMint.size,
       holdingSubscriptionMints: this.healthHoldingSnapshot?.count ?? null,
@@ -447,6 +464,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     const capped = Math.max(1, Math.min(500, Number(limit) || 100));
     return {
       ...this.health(),
+      forwardPairAudit: this._forwardPairAudit(),
       summary: this.store.db.prepare(`
         SELECT entry_profile_id, exit_profile_id, status, COUNT(*) n,
           AVG(net_return_pct) avg_net_return_pct,
@@ -459,7 +477,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         SELECT entry_profile_id, exit_profile_id,
           COUNT(*) opportunities, COUNT(DISTINCT mint) independent_mints,
           SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) closed,
-          SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) censored,
+          SUM(CASE WHEN status IN ('NO_EXIT','RIGHT_CENSORED') THEN 1 ELSE 0 END) censored,
+          SUM(CASE WHEN status='RIGHT_CENSORED' THEN 1 ELSE 0 END) right_censored,
           SUM(CASE WHEN status IN ('CLOSED','EXPIRED','NO_ENTRY') THEN 1 ELSE 0 END) resolved,
           SUM(position_sol) planned_capital_sol,
           SUM(capital_in_sol) deployed_capital_sol,
@@ -499,6 +518,111 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions
         ORDER BY signal_at DESC, id DESC LIMIT ?
       `).all(capped),
+    };
+  }
+
+  _forwardPairAudit() {
+    const study = this.config.forwardHoldingStudy;
+    const entryIds = Array.isArray(study?.entryProfileIds) ? study.entryProfileIds : [];
+    const exitIds = Array.isArray(study?.exitProfileIds) ? study.exitProfileIds : [];
+    const expectedPairs = entryIds.flatMap(entryId => (
+      exitIds.map(exitId => [entryId, exitId])
+    ));
+    const expectedArms = expectedPairs.length;
+    if (!study?.version || !expectedArms) return null;
+
+    const expectedPairSql = expectedPairs.map(() => `
+      SUM(CASE WHEN entry_profile_id=? AND exit_profile_id=? THEN 1 ELSE 0 END)=1
+    `).join(' AND ');
+    const idPlaceholders = entryIds.map(() => '?').join(',');
+    const audit = this.store.db.prepare(`
+      WITH forward_rows AS (
+        SELECT *,
+          json_extract(execution_state_json, '$.forwardStudy.pairedOpportunityId') opportunity_id,
+          json_extract(execution_state_json, '$.strictExecution.pool') strict_pool,
+          json_extract(execution_state_json, '$.forwardStudy.signalReceivedAtMs') source_received_at,
+          json_extract(execution_state_json, '$.forwardStudy.signalChainTimestampMs') source_chain_at,
+          json_extract(execution_state_json, '$.strictExecution.cursor') source_cursor,
+          json_extract(execution_state_json, '$.strictExecution.policy') frozen_policy,
+          json_extract(execution_state_json, '$.strictExecution.costs') frozen_costs
+        FROM smart_wallet_consensus_flow_runner_shadow_positions
+        WHERE CASE WHEN json_valid(execution_state_json)
+          THEN json_extract(execution_state_json, '$.forwardStudy.version') END=?
+          AND entry_profile_id IN (${idPlaceholders})
+      ), grouped AS (
+        SELECT opportunity_id, COUNT(*) arms,
+          COUNT(DISTINCT entry_profile_id || char(0) || exit_profile_id) distinct_arms,
+          COUNT(DISTINCT mint) mint_variants,
+          COUNT(DISTINCT signal_at) signal_at_variants,
+          COUNT(DISTINCT signal_market) market_variants,
+          COUNT(DISTINCT signal_price) price_variants,
+          COUNT(DISTINCT strict_pool) pool_variants,
+          COUNT(DISTINCT source_received_at) received_at_variants,
+          COUNT(DISTINCT source_chain_at) chain_at_variants,
+          COUNT(DISTINCT source_cursor) source_cursor_variants,
+          COUNT(DISTINCT position_sol) position_size_variants,
+          COUNT(DISTINCT configured_cost_pct) configured_cost_variants,
+          COUNT(DISTINCT frozen_policy) policy_variants,
+          COUNT(DISTINCT frozen_costs) cost_snapshot_variants,
+          SUM(CASE WHEN json_extract(execution_state_json, '$.forwardStudy.forwardOnly')=1
+            AND json_extract(execution_state_json, '$.strictExecution.entry.id')=entry_profile_id
+            AND json_extract(execution_state_json, '$.strictExecution.exit.id')=exit_profile_id
+            AND cohort_id=entry_profile_id || '|' || exit_profile_id
+            AND json_extract(execution_state_json, '$.strictExecution.feeConvention')='ROUND_TRIP_ONCE'
+            THEN 0 ELSE 1 END) protocol_errors,
+          CASE WHEN ${expectedPairSql} THEN 1 ELSE 0 END exact_pair_set
+        FROM forward_rows
+        WHERE opportunity_id IS NOT NULL
+        GROUP BY opportunity_id
+      )
+      SELECT
+        (SELECT COUNT(*) FROM forward_rows) total_rows,
+        COUNT(*) total_opportunities,
+        COALESCE(SUM(arms=? AND distinct_arms=? AND exact_pair_set=1), 0) complete_opportunities,
+        COALESCE(SUM(NOT (arms=? AND distinct_arms=? AND exact_pair_set=1)), 0) incomplete_opportunities,
+        COALESCE(SUM(mint_variants!=1 OR signal_at_variants!=1 OR market_variants!=1
+          OR price_variants!=1 OR pool_variants!=1 OR received_at_variants!=1
+          OR chain_at_variants!=1 OR source_cursor_variants!=1), 0) source_mismatch_opportunities,
+        COALESCE(SUM(protocol_errors!=0 OR position_size_variants!=1
+          OR configured_cost_variants!=1 OR policy_variants!=1
+          OR cost_snapshot_variants!=1), 0) protocol_mismatch_opportunities,
+        (SELECT COUNT(*) FROM forward_rows WHERE opportunity_id IS NULL) unpaired_rows,
+        COALESCE(SUM(arms=? AND distinct_arms=? AND exact_pair_set=1
+          AND mint_variants=1 AND signal_at_variants=1 AND market_variants=1
+          AND price_variants=1 AND pool_variants=1 AND received_at_variants=1
+          AND chain_at_variants=1 AND source_cursor_variants=1
+          AND protocol_errors=0 AND position_size_variants=1
+          AND configured_cost_variants=1 AND policy_variants=1
+          AND cost_snapshot_variants=1), 0) comparable_opportunities
+      FROM grouped
+    `).get(
+      study.version,
+      ...entryIds,
+      ...expectedPairs.flat(),
+      expectedArms, expectedArms,
+      expectedArms, expectedArms,
+      expectedArms, expectedArms,
+    );
+    const taggedPlaceholders = entryIds.map(() => '?').join(',');
+    const untagged = this.store.db.prepare(`
+      SELECT COUNT(*) n
+      FROM smart_wallet_consensus_flow_runner_shadow_positions
+      WHERE entry_profile_id IN (${taggedPlaceholders})
+        AND CASE WHEN json_valid(execution_state_json)
+          THEN json_extract(execution_state_json, '$.forwardStudy.version') END IS NOT ?
+    `).get(...entryIds, study.version).n;
+    return {
+      studyVersion: study.version,
+      expectedArms,
+      totalRows: finite(audit.total_rows, 0),
+      totalOpportunities: finite(audit.total_opportunities, 0),
+      completeOpportunities: finite(audit.complete_opportunities, 0),
+      incompleteOpportunities: finite(audit.incomplete_opportunities, 0),
+      sourceMismatchOpportunities: finite(audit.source_mismatch_opportunities, 0),
+      protocolMismatchOpportunities: finite(audit.protocol_mismatch_opportunities, 0),
+      unpairedRows: finite(audit.unpaired_rows, 0),
+      untaggedRows: finite(untagged, 0),
+      comparableOpportunities: finite(audit.comparable_opportunities, 0),
     };
   }
 
@@ -656,6 +780,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     if (migratedAt > 0) {
       state.migratedAt = migratedAt;
       state.migrationObservedLive = true;
+      state.migrationPool = event.migration_pool ?? event.migrationPool
+        ?? event.pool ?? state.migrationPool;
     }
     this.store.db.prepare(`
       UPDATE smart_wallet_consensus_flow_runner_shadow_positions
@@ -675,36 +801,68 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     if (!this.config.enabled || !trade?.mint
       || !['PUMP_BONDING_CURVE', 'PUMP_AMM'].includes(trade.market)) return;
     const timestampMs = finite(trade.timestampMs);
+    const receivedAtMs = finite(trade.receivedAtMs);
+    const strictObservedAt = trade.market === 'PUMP_AMM' && this.hasStrictHoldingExecution
+      ? finite(receivedAtMs, timestampMs) : timestampMs;
     const price = tradePrice(trade);
-    if (!(timestampMs > 0)) return;
+    if (!(strictObservedAt > 0)) return;
     if (!(price > 0)) {
       if (trade.market === 'PUMP_AMM') this._evaluatePostGradHoldingProfiles(
-        trade, this._state(trade.mint), timestampMs, price, { strictOnly: true },
+        trade, this._state(trade.mint), strictObservedAt, price, { strictOnly: true },
       );
       return;
     }
-    this.advanceTime(timestampMs);
+    // Strict studies use the local processing clock for deadlines. The event's
+    // untrusted generic timestamp must never expire positions before the
+    // received/chain clocks have passed strict validation.
+    this.advanceTime(this.hasStrictHoldingExecution ? this.now() : timestampMs);
     const state = this._state(trade.mint);
-    state.lastAt = Math.max(state.lastAt, timestampMs);
+    state.lastAt = Math.max(state.lastAt, strictObservedAt);
+    // Strict FLOW arms must not count stale, duplicate, regressing or cross-pool
+    // trades simply because a later valid trade asks for the 60s aggregate.
+    let strictFlowAccepted = false;
+    if (trade.market === 'PUMP_AMM' && this.hasStrictHoldingExecution) {
+      const token = this.store.getToken(trade.mint);
+      const migrationPool = token?.migration_pool ?? token?.migrationPool ?? state.migrationPool;
+      const migratedAt = finite(token?.migrated_at ?? token?.migratedAt ?? state.migratedAt);
+      if (typeof migrationPool === 'string' && migrationPool.trim()
+        && migratedAt > 0
+        && trade.pool === migrationPool
+        && receivedAtMs >= migratedAt && finite(trade.chainTimestampMs) >= migratedAt) {
+        if (!state.strictFlowState || state.strictFlowState.pool !== migrationPool) {
+          state.strictFlowState = {
+            policy: { version: strictAmm.VERSION, maxTradeAgeMs: 3_000 },
+            pool: migrationPool,
+          };
+        }
+        strictFlowAccepted = strictAmm.accept(trade, state.strictFlowState, this.now());
+      }
+    }
     state.trades.push({
       timestampMs,
+      strictFlowAccepted,
+      receivedAtMs,
+      chainTimestampMs: finite(trade.chainTimestampMs),
+      pool: trade.pool,
+      signature: trade.signature || null,
+      eventIndex: trade.eventIndex ?? null,
       market: trade.market,
       side: String(trade.side || '').toUpperCase(),
       wallet: trade.wallet || null,
       solAmount: Math.max(0, finite(trade.solAmount, 0)),
       registeredWallet: Boolean(trade.wallet && (
         typeof this.registry.cachedMonitoringSnapshot === 'function'
-          ? this.registry.cachedMonitoringSnapshot(trade.wallet, timestampMs)
-          : this.registry.monitoringSnapshot(trade.wallet, timestampMs)
+          ? this.registry.cachedMonitoringSnapshot(trade.wallet, strictObservedAt)
+          : this.registry.monitoringSnapshot(trade.wallet, strictObservedAt)
       )),
     });
-    this._prune(state, timestampMs);
+    this._prune(state, strictObservedAt);
     if (trade.market === 'PUMP_AMM') {
-      this._evaluatePostGradHoldingProfiles(trade, state, timestampMs, price);
+      this._evaluatePostGradHoldingProfiles(trade, state, strictObservedAt, price);
     }
     for (const id of [...(this.rowsByMint.get(trade.mint) || [])]) {
       const position = this.positions.get(id);
-      if (position) this._observePosition(position, trade, timestampMs, price, state);
+      if (position) this._observePosition(position, trade, strictObservedAt, price, state);
     }
     this.metrics.observedTrades += 1;
   }
@@ -722,11 +880,12 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         this._requestExit(position, now, 'NO_GRADUATION');
       } else if (['SCOUT_OPEN', 'WAITING_FLOW'].includes(position.status)
         && position.graduatedAt
-        && now > position.graduatedAt + this._maxFlowWaitMs(position)) {
+        && now > (position.executionState.strictExecution
+          ? position.signalAt : position.graduatedAt) + this._maxFlowWaitMs(position)) {
         if (position.tokenUnits > 0) this._requestExit(position, now, 'FLOW_CONFIRM_TIMEOUT');
         else this._finishWithoutPosition(position, 'NO_ENTRY', 'FLOW_CONFIRM_TIMEOUT');
       } else if (position.status === 'SCALE_PENDING' && now > position.entryDeadlineAt) {
-        const profile = this.entryProfiles.get(position.entryProfileId);
+        const profile = this._entryFor(position);
         if (position.tokenUnits > 0) this._requestExit(position, now, 'SCALE_ENTRY_TIMEOUT');
         else this._finishWithoutPosition(
           position,
@@ -741,9 +900,10 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         this._closeNoExit(position, 'CORE_EXIT_TIMEOUT');
       } else if (['OPEN', 'RUNNER'].includes(position.status)) {
         const exit = this._exitFor(position);
-        if (position.executionState.strictExecution && exit.mode === 'FIXED_HOLD'
-          && now >= position.entryAt + exit.fixedHoldMs) {
-          this._requestExit(position, position.entryAt + exit.fixedHoldMs, 'FIXED_HOLD');
+        const strictDeadline = position.entryAt
+          + (exit.mode === 'FIXED_HOLD' ? exit.fixedHoldMs : exit.maxHoldMs);
+        if (position.executionState.strictExecution && now >= strictDeadline) {
+          this._requestExit(position, strictDeadline, exit.mode === 'FIXED_HOLD' ? 'FIXED_HOLD' : 'MAX_HOLD');
           continue;
         }
         if (now > position.entryAt + exit.maxHoldMs) {
@@ -769,6 +929,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         smartBuys: [], smartHoldings: new Map(), trades: [], lastAt: 0,
         graduatedAt: finite(token?.graduated_at ?? token?.graduatedAt),
         migratedAt: finite(token?.migrated_at ?? token?.migratedAt),
+        migrationPool: token?.migration_pool ?? token?.migrationPool ?? null,
         migrationObservedLive: false,
         firstAmmObservedAt: null,
       };
@@ -783,9 +944,9 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     while (state.smartBuys.length && state.smartBuys[0].timestampMs < smartCutoff) {
       state.smartBuys.shift();
     }
-    while (state.trades.length && state.trades[0].timestampMs < flowCutoff) {
-      state.trades.shift();
-    }
+    state.trades = state.trades.filter((row) => (
+      finite(row.receivedAtMs, row.timestampMs) >= flowCutoff
+    ));
   }
 
   _thresholdSnapshot(at) {
@@ -894,23 +1055,37 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
 
   _evaluatePostGradHoldingProfiles(trade, state, at, price, { strictOnly = false } = {}) {
     if (!this.postGradHoldingProfiles.length) return [];
-    if (!strictOnly && state.firstAmmObservedAt != null) return [];
     state.holdingEvaluatedProfiles ||= new Set();
-    if (strictOnly && !this.postGradHoldingProfiles.some(profile => profile.strictExecution
-      && !state.holdingEvaluatedProfiles.has(profile.id))) return [];
-    if (!strictOnly) state.firstAmmObservedAt ??= at;
     const token = this.store.getToken(trade.mint);
     const migratedAt = finite(
       token?.migrated_at ?? token?.migratedAt ?? state.migratedAt,
     );
-    const created = [];
-    for (const profile of this.postGradHoldingProfiles) {
-      if (strictOnly && !profile.strictExecution) continue;
-      if (state.holdingEvaluatedProfiles.has(profile.id)) continue;
-      state.holdingEvaluatedProfiles.add(profile.id);
-      const consensus = this._holdingConsensus(state, at, profile);
+    const migrationPool = token?.migration_pool ?? token?.migrationPool ?? state.migrationPool;
+    const receivedAtMs = finite(trade.receivedAtMs);
+    const chainTimestampMs = finite(trade.chainTimestampMs);
+    const profiles = this.postGradHoldingProfiles.filter((profile) => {
+      if (strictOnly && !profile.strictExecution) return false;
+      if (state.holdingEvaluatedProfiles.has(profile.id)) return false;
+      if (!profile.strictExecution || !(migratedAt > 0)
+        || typeof migrationPool !== 'string' || !migrationPool.trim()) return true;
+      // A different pool or a quote ordered before migration is not the first
+      // canonical post-migration AMM observation and must not consume it.
+      const canonicalTime = Number.isSafeInteger(trade.receivedAtMs)
+        && Number.isSafeInteger(trade.chainTimestampMs)
+        && receivedAtMs >= migratedAt && chainTimestampMs >= migratedAt;
+      return trade.pool === migrationPool && canonicalTime;
+    });
+    if (!profiles.length) return [];
+
+    const decisions = profiles.map((profile) => {
+      const evaluatedAt = profile.strictExecution ? finite(receivedAtMs, at) : at;
+      const consensus = this._holdingConsensus(state, evaluatedAt, profile);
       let rejectionReason = consensus.rejectionReason;
       if (!(migratedAt > 0)) rejectionReason = 'MIGRATION_ANCHOR_MISSING';
+      else if (profile.strictExecution
+        && (typeof migrationPool !== 'string' || !migrationPool.trim())) {
+        rejectionReason = 'MIGRATION_POOL_MISSING';
+      }
       else if (!state.migrationObservedLive) rejectionReason = 'FIRST_AMM_EVENT_MISSED';
       if (profile.strictExecution) {
         const policy = strictAmm.freezePolicy(profile, this.config);
@@ -921,38 +1096,135 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         (maximum, vote) => Math.max(maximum, finite(vote.registryVersion, 0)),
         0,
       );
-      const result = this.insertHoldingEvaluation.run({
-        entryProfileId: profile.id,
-        mint: trade.mint,
-        evaluatedAt: at,
-        migratedAt: migratedAt ?? null,
-        firstAmmAt: at,
-        status,
-        rejectionReason,
-        requiredClusters: consensus.required,
-        distinctClusters: consensus.votes.length,
-        eligibleWallets: consensus.eligibleWallets,
-        selectionAClusters: consensus.selectionA,
-        weightedScore: consensus.weightedScore,
-        clusterVotesJson: JSON.stringify(consensus.votes),
-        registryVersion,
-        createdAt: this.now(),
-      });
-      if (!result.changes) continue;
+      return {
+        profile, evaluatedAt, consensus, rejectionReason, status, registryVersion,
+        evaluation: {
+          entryProfileId: profile.id,
+          mint: trade.mint,
+          evaluatedAt,
+          migratedAt: migratedAt ?? null,
+          firstAmmAt: evaluatedAt,
+          status,
+          rejectionReason,
+          requiredClusters: consensus.required,
+          distinctClusters: consensus.votes.length,
+          eligibleWallets: consensus.eligibleWallets,
+          selectionAClusters: consensus.selectionA,
+          weightedScore: consensus.weightedScore,
+          clusterVotesJson: JSON.stringify(consensus.votes),
+          registryVersion,
+          createdAt: this.now(),
+        },
+      };
+    });
+
+    const forwardStudy = this.config.forwardHoldingStudy;
+    const forwardEntryIds = Array.isArray(forwardStudy?.entryProfileIds)
+      ? forwardStudy.entryProfileIds : [];
+    const forwardExitIds = Array.isArray(forwardStudy?.exitProfileIds)
+      ? forwardStudy.exitProfileIds : [];
+    const matrixDecisions = decisions.filter(decision => (
+      decision.profile.studyVersion === forwardStudy?.version
+        && forwardEntryIds.includes(decision.profile.id)
+    ));
+    const matrixDecisionSet = new Set(matrixDecisions);
+    const committed = [];
+    this.store.db.transaction(() => {
+      let skipExistingMatrix = false;
+      if (matrixDecisions.length) {
+        const completeEntrySet = matrixDecisions.length === forwardEntryIds.length
+          && forwardEntryIds.every(id => matrixDecisions.some(row => row.profile.id === id));
+        const placeholders = forwardEntryIds.map(() => '?').join(',');
+        const existing = completeEntrySet ? this.store.db.prepare(`
+          SELECT COUNT(*) n FROM smart_wallet_post_grad_holding_evaluations
+          WHERE mint=? AND entry_profile_id IN (${placeholders})
+        `).get(trade.mint, ...forwardEntryIds).n : 1;
+        // A pre-existing/legacy partial matrix is never completed using a later
+        // opportunity. The dashboard audit exposes it, while new writes remain
+        // all-or-nothing and source-paired.
+        skipExistingMatrix = !completeEntrySet || existing > 0;
+      }
+      for (const decision of decisions) {
+        if (skipExistingMatrix && matrixDecisionSet.has(decision)) {
+          committed.push({ ...decision, inserted: false, rows: [] });
+          continue;
+        }
+        const result = this.insertHoldingEvaluation.run(decision.evaluation);
+        if (!result.changes) {
+          if (matrixDecisionSet.has(decision)) {
+            throw new Error(`HOLD3 evaluation uniqueness race for ${decision.profile.id}`);
+          }
+          committed.push({ ...decision, inserted: false, rows: [] });
+          continue;
+        }
+        const rows = decision.rejectionReason ? [] : this._recordSignal(
+          trade, decision.profile, decision.consensus, decision.evaluatedAt, price,
+          { deferCommit: true },
+        );
+        const expectedRows = decision.rejectionReason
+          ? 0 : this._exitProfilesFor(decision.profile).length;
+        if (rows.length !== expectedRows) {
+          throw new Error(`Incomplete paired HOLD3 matrix for ${decision.profile.id}: `
+            + `${rows.length}/${expectedRows}`);
+        }
+        committed.push({ ...decision, inserted: true, rows });
+      }
+      if (matrixDecisions.length && !skipExistingMatrix) {
+        const qualificationStates = new Set(matrixDecisions.map(row => row.status));
+        if (qualificationStates.size !== 1) {
+          throw new Error('HOLD3 paired entries produced mixed qualification states');
+        }
+        if (matrixDecisions[0].status === 'QUALIFIED') {
+          const matrixRows = committed.filter(row => (
+            row.profile.studyVersion === forwardStudy.version
+              && forwardEntryIds.includes(row.profile.id)
+          ))
+            .flatMap(row => row.rows);
+          const expectedPairs = new Set(forwardEntryIds.flatMap(entryId => (
+            forwardExitIds.map(exitId => `${entryId}\u0000${exitId}`)
+          )));
+          const actualPairs = new Set(matrixRows.map(row => (
+            `${row.entryProfileId}\u0000${row.exitProfileId}`
+          )));
+          if (matrixRows.length !== expectedPairs.size || actualPairs.size !== expectedPairs.size
+            || [...expectedPairs].some(pair => !actualPairs.has(pair))) {
+            throw new Error(`Incomplete paired HOLD3 matrix: ${matrixRows.length}/${expectedPairs.size}`);
+          }
+        }
+      }
+    })();
+
+    for (const decision of decisions) state.holdingEvaluatedProfiles.add(decision.profile.id);
+    if (this.postGradHoldingProfiles.every(profile => (
+      state.holdingEvaluatedProfiles.has(profile.id)
+    ))) {
+      state.firstAmmObservedAt ??= Math.max(
+        ...decisions.map(decision => decision.evaluatedAt),
+      );
+    }
+    const created = [];
+    for (const decision of committed) {
+      if (!decision.inserted) continue;
       this.metrics.firstAmmHoldingEvaluations += 1;
-      if (rejectionReason) {
+      if (decision.rejectionReason) {
         this.metrics.holdingConsensusRejected += 1;
-        if (rejectionReason === 'MIGRATION_ANCHOR_MISSING'
-          || rejectionReason === 'FIRST_AMM_EVENT_MISSED') {
+        if (decision.rejectionReason === 'MIGRATION_ANCHOR_MISSING'
+          || decision.rejectionReason === 'MIGRATION_POOL_MISSING'
+          || decision.rejectionReason === 'FIRST_AMM_EVENT_MISSED') {
           this.metrics.migrationAnchorRejected += 1;
         }
         continue;
       }
       this.metrics.holdingConsensusQualified += 1;
-      this.lastEpisodes.set(`${trade.mint}:${profile.id}`, at);
-      created.push(...this._recordSignal(trade, profile, consensus, at, price));
+      this.lastEpisodes.set(`${trade.mint}:${decision.profile.id}`, decision.evaluatedAt);
+      this._commitSignalRows(decision.rows);
+      if (decision.rows.rugLabelObserved) this.metrics.rugLabelsObserved += 1;
+      created.push(...decision.rows);
     }
-    if (created.length) this.metrics.lastActionAt = this.now();
+    if (created.length) {
+      this.metrics.consensusSignals += committed.filter(row => row.rows.length).length;
+      this.metrics.lastActionAt = this.now();
+    }
     return created;
   }
 
@@ -999,15 +1271,16 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     return { votes, thresholds, required, selectionA, copyA, weightedScore };
   }
 
-  _recordSignal(event, profile, consensus, at, price) {
+  _recordSignal(event, profile, consensus, at, price, { deferCommit = false } = {}) {
     const token = this.store.getToken(event.mint);
     const graduatedAt = profile.postGraduationHoldingConsensus
       ? finite(token?.migrated_at ?? token?.migratedAt ?? at)
       : finite(token?.graduated_at ?? token?.graduatedAt);
     const rugLabel = this.rugRiskTracker?.snapshot
       ? this.rugRiskTracker.snapshot(event.mint, at) : null;
-    if (rugLabel) this.metrics.rugLabelsObserved += 1;
+    if (rugLabel && !deferCommit) this.metrics.rugLabelsObserved += 1;
     const rows = [];
+    rows.rugLabelObserved = Boolean(rugLabel);
     for (const exit of this._exitProfilesFor(profile)) {
       const strictPolicy = strictAmm.freezePolicy(profile, this.config, exit);
       const positionSol = strictPolicy ? finite(profile.positionSizeSol, this.config.positionSizeSol)
@@ -1016,9 +1289,17 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         positionSizeSol: positionSol, priceImpactPct: 0 }) : null;
       const executionState = strictPolicy ? { strictExecution: {
         policy: strictPolicy, pool: event.pool, cursor: strictAmm.observation(event),
-        exit: { ...exit }, costs: strictCosts, feeConvention: 'ROUND_TRIP_ONCE',
+        entry: JSON.parse(JSON.stringify(profile)), exit: { ...exit },
+        costs: strictCosts, feeConvention: 'ROUND_TRIP_ONCE',
         maxExitQuoteToMarketRatio: finite(this.config.maxExitQuoteToMarketRatio, 5),
       } } : {};
+      if (profile.studyVersion) executionState.forwardStudy = {
+        version: profile.studyVersion, forwardOnly: true,
+        pairedOpportunityId: `${profile.studyVersion}:${event.mint}:${event.pool}:${event.slot}:${event.signature}:${event.eventIndex}`,
+        signalReceivedAtMs: event.receivedAtMs,
+        signalChainTimestampMs: event.chainTimestampMs,
+        rugPolicy: 'LABEL_ONLY',
+      };
       const episodeId = `${event.mint}:${profile.id}:${at}`;
       const directCurveEntry = profile.directCurveEntry === true && !graduatedAt;
       const directPostGraduationEntry = profile.postGraduationHoldingConsensus === true
@@ -1072,15 +1353,21 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         SELECT * FROM smart_wallet_consensus_flow_runner_shadow_positions WHERE id=?
       `).get(Number(result.lastInsertRowid));
       const position = rowToPosition(row);
-      this.positions.set(position.id, position);
-      this._index(position);
       rows.push(position);
     }
-    if (rows.length) {
+    if (rows.length && !deferCommit) {
+      this._commitSignalRows(rows);
       this.metrics.consensusSignals += 1;
       this.metrics.lastActionAt = this.now();
     }
     return rows;
+  }
+
+  _commitSignalRows(rows) {
+    for (const position of rows) {
+      this.positions.set(position.id, position);
+      this._index(position);
+    }
   }
 
   _observePosition(position, trade, at, price, state) {
@@ -1091,6 +1378,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       this._saveStrictHeartbeat(position);
       return;
     }
+    if (strict) at = trade.receivedAtMs;
     // A reserve-derived mark and its executable quote can share the same bad
     // event. Check against an earlier accepted observation before this event
     // can move a stop, inflate a peak, or supply an execution quote.
@@ -1105,7 +1393,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     if (position.status === 'PENDING_SCOUT') {
       if (trade.market === 'PUMP_BONDING_CURVE' && at >= position.entryTargetAt
         && at <= position.entryDeadlineAt) {
-        const profile = this.entryProfiles.get(position.entryProfileId);
+        const profile = this._entryFor(position);
         this._buy(
           position,
           trade,
@@ -1118,15 +1406,16 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     }
     if (['SCOUT_OPEN', 'WAITING_FLOW'].includes(position.status)
       && position.graduatedAt && trade.market === 'PUMP_AMM') {
-      const profile = this.entryProfiles.get(position.entryProfileId);
+      const profile = this._entryFor(position);
       const features = this._flowFeatures(state, at, profile, position);
       if (this._flowQualified(features, profile, position, at)) {
         position.flowConfirmedAt = at;
         position.flowFeatures = features;
         position.status = 'SCALE_PENDING';
-        position.entryTargetAt = at + finite(profile?.entryDelayMs, this.config.entryDelayMs);
+        position.entryTargetAt = at + (strict?.policy.entryDelayMs
+          ?? finite(profile?.entryDelayMs, this.config.entryDelayMs));
         position.entryDeadlineAt = position.entryTargetAt
-          + finite(profile?.entryTimeoutMs, this.config.entryTimeoutMs);
+          + (strict?.policy.entryTimeoutMs ?? finite(profile?.entryTimeoutMs, this.config.entryTimeoutMs));
         this.metrics.flowConfirmed += 1;
         this._save(position);
       }
@@ -1137,7 +1426,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
         this._saveStrictHeartbeat(position);
         return;
       }
-      const profile = this.entryProfiles.get(position.entryProfileId);
+      const profile = this._entryFor(position);
       const remaining = Math.max(0, position.positionSol - position.capitalInSol);
       this._buy(
         position,
@@ -1157,7 +1446,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     const markReturn = (price / position.entryPrice - 1) * 100;
     position.highestReturnPct = Math.max(position.highestReturnPct, markReturn);
     const exit = this._exitFor(position);
-    if (position.status !== 'EXIT_PENDING' && markReturn <= -Math.abs(exit.hardStopPct)) {
+    if (position.status !== 'EXIT_PENDING' && exit.hardStopEnabled !== false
+      && markReturn <= -Math.abs(exit.hardStopPct)) {
       this._requestExit(position, at, 'HARD_STOP', trade);
     } else if (position.status === 'SCOUT_OPEN'
       && finite(exit.scoutProtectActivationPct, Infinity) <= position.highestReturnPct) {
@@ -1172,6 +1462,13 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
       } else if (exit.mode === 'CORE_RUNNER'
         && markReturn >= exit.coreActivationPct && !position.coreSoldAt) {
         this._requestCoreExit(position, trade, at, exit);
+      } else if (exit.mode === 'TRAILING'
+        && position.highestReturnPct >= exit.trailingActivationPct) {
+        const drawdownPct = (1 - (1 + markReturn / 100)
+          / (1 + position.highestReturnPct / 100)) * 100;
+        if (drawdownPct >= exit.trailingStopPct) {
+          this._requestExit(position, at, 'TRAILING_STOP', trade);
+        }
       }
     } else if (position.status === 'RUNNER') {
       const drawdown = position.highestReturnPct - markReturn;
@@ -1285,7 +1582,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     position.capitalInSol += sol;
     position.tokenUnits += quote.tokenUnits;
     position.entryTxCount += 1;
-    position.entryAt = position.entryAt || trade.timestampMs;
+    position.entryAt = position.entryAt || (strict ? trade.receivedAtMs : trade.timestampMs);
     position.entryMarket = trade.market;
     position.entryPrice = position.capitalInSol / position.tokenUnits;
     position.highestReturnPct = Math.max(0, (price / position.entryPrice - 1) * 100);
@@ -1308,21 +1605,35 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     const startAt = cumulative
       ? Math.max(at - windowMs, finite(position?.signalAt, at - windowMs))
       : at - windowMs;
+    const strict = position?.executionState?.strictExecution;
+    const observedAt = (row) => strict
+      ? finite(row.receivedAtMs) : finite(row.timestampMs);
     const rows = state.trades.filter((row) => row.market === 'PUMP_AMM'
-      && !row.registeredWallet && row.timestampMs >= startAt
-      && row.timestampMs <= at);
+      && !row.registeredWallet && observedAt(row) >= startAt
+      && observedAt(row) <= at
+      && (!strict || (row.strictFlowAccepted && row.pool === strict.pool
+        && (!position.strictRestoredAt || row.chainTimestampMs >= position.strictRestoredAt))));
     const splitAt = at - windowMs / 2;
     const summarize = (sample) => {
       const buys = sample.filter((row) => row.side === 'BUY');
       const sells = sample.filter((row) => row.side === 'SELL');
+      const transactionCount = (events) => {
+        const signatures = new Set();
+        let unidentified = 0;
+        for (const event of events) {
+          if (event.signature) signatures.add(event.signature);
+          else unidentified += 1;
+        }
+        return signatures.size + unidentified;
+      };
       const buyFlow = buys.reduce((sum, row) => sum + row.solAmount, 0);
       const sellFlow = sells.reduce((sum, row) => sum + row.solAmount, 0);
       const grossFlow = buyFlow + sellFlow;
       const netFlow = buyFlow - sellFlow;
       return {
         buyers: new Set(buys.map((row) => row.wallet).filter(Boolean)).size,
-        buyTx: buys.length,
-        sellTx: sells.length,
+        buyTx: transactionCount(buys),
+        sellTx: transactionCount(sells),
         buyFlowSol: buyFlow,
         sellFlowSol: sellFlow,
         grossFlowSol: grossFlow,
@@ -1333,8 +1644,8 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     return {
       windowMs,
       cumulative,
-      current: summarize(cumulative ? rows : rows.filter((row) => row.timestampMs >= splitAt)),
-      previous: summarize(cumulative ? [] : rows.filter((row) => row.timestampMs < splitAt)),
+      current: summarize(cumulative ? rows : rows.filter((row) => observedAt(row) >= splitAt)),
+      previous: summarize(cumulative ? [] : rows.filter((row) => observedAt(row) < splitAt)),
     };
   }
 
@@ -1359,7 +1670,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
   }
 
   _capturePostGradSnapshot(position, trade, state, at, price) {
-    const profile = this.entryProfiles.get(position.entryProfileId);
+    const profile = this._entryFor(position);
     const exit = this._exitFor(position);
     if (profile?.directPostGraduationEntry !== true || trade.market !== 'PUMP_AMM'
       || finite(exit?.maxHoldMs, 0) < 30 * 60_000
@@ -1390,7 +1701,7 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
   }
 
   _maxFlowWaitMs(position) {
-    const profile = this.entryProfiles.get(position.entryProfileId);
+    const profile = this._entryFor(position);
     if (Number.isFinite(profile?.maxFlowWaitMs)) return profile.maxFlowWaitMs;
     return profile?.flowGate === 'STRICT'
       ? Math.min(this.config.maxFlowWaitMs, this.config.strictMaxFlowConfirmationDelayMs)
@@ -1537,8 +1848,33 @@ class SmartWalletConsensusFlowRunnerShadowSuite {
     this._remove(position);
   }
 
+  _closeRightCensored(position, reason, { countMetric = true } = {}) {
+    const at = this.now();
+    const execution = position.executionState || (position.executionState = {});
+    execution.censoring = { reason, at, rightCensored: true };
+    this.close.run({
+      id: position.id,
+      status: 'RIGHT_CENSORED',
+      exitTxCount: position.exitTxCount,
+      exitAt: null,
+      exitMarket: null,
+      exitPrice: null,
+      exitReason: reason,
+      grossReturnPct: null,
+      netReturnPct: null,
+      estimatedCostSol: position.capitalInSol > 0 ? this._estimatedCostSol(position) : 0,
+      executionStateJson: JSON.stringify(execution),
+      updatedAt: at,
+    });
+    if (countMetric) this.metrics.restartCensored += 1;
+  }
+
   _exitFor(position) {
     return position.executionState.strictExecution?.exit || this.exitProfiles.get(position.exitProfileId);
+  }
+
+  _entryFor(position) {
+    return position.executionState.strictExecution?.entry || this.entryProfiles.get(position.entryProfileId);
   }
 
   _saveStrictHeartbeat(position) {

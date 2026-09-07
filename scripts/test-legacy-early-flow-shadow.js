@@ -3,7 +3,8 @@
 const assert = require('assert');
 const { ResearchStore } = require('../src/data/ResearchStore');
 const { MigrationSecondLegShadowSuite } = require('../src/core/MigrationSecondLegShadowSuite');
-const { matchesLegacyEntry, migrationEvidence, EXECUTION_VERSION } = require('../src/core/LegacyEarlyFlowEntryTracker');
+const { matchesLegacyEntry, migrationEvidence, EXECUTION_VERSION,
+  STUDY_VERSION, STUDY_ARMS } = require('../src/core/LegacyEarlyFlowEntryTracker');
 const strict = require('../src/core/StrictAmmShadowExecution');
 const { PreEntryRugRiskTracker } = require('../src/core/PreEntryRugRiskTracker');
 
@@ -11,6 +12,9 @@ const T = 1_920_000_000_000;
 const PRICE = 4e-7;
 const BASE = 'LEGACY-EARLY-FLOW-BASE';
 const RUGX = 'LEGACY-EARLY-FLOW-RUGX';
+const BREADTH6 = 'LEGACY-EARLY-FLOW-BREADTH6';
+const CONCENTRATION55 = 'LEGACY-EARLY-FLOW-CONCENTRATION55';
+const EXCLUDE_FLAT = 'LEGACY-EARLY-FLOW-EXCLUDE-FLAT';
 const costs = { platformFeePct: 1, buySlippagePct: 0, sellSlippagePct: 0,
   priceImpactPct: 9, baseTxFeeSol: 0.00001, priorityFeeSol: 0.0001,
   jitoTipSol: 0, fixedCostSol: 0, entryFailureRatePct: 0, entryFailureCostPct: 0 };
@@ -82,6 +86,14 @@ function thresholdTests() {
     netFlow1sSol: 0.1, buyers5s: 3, trades5s: 4, maxSingleBuyShare5s: 0.7 };
   assert(matchesLegacyEntry(valid));
   assert(matchesLegacyEntry({ ...valid, ageMs: 25_000, fdvUsd: 100_000, priceChange10sPct: 8 }));
+  assert(!matchesLegacyEntry({ ...valid, priceChange10sPct: 0 },
+    { excludedPriceChange10sMin: 0, excludedPriceChange10sMax: 4 }));
+  assert(!matchesLegacyEntry({ ...valid, priceChange10sPct: 4 },
+    { excludedPriceChange10sMin: 0, excludedPriceChange10sMax: 4 }));
+  assert(matchesLegacyEntry({ ...valid, priceChange10sPct: -0.01 },
+    { excludedPriceChange10sMin: 0, excludedPriceChange10sMax: 4 }));
+  assert(matchesLegacyEntry({ ...valid, priceChange10sPct: 4.01 },
+    { excludedPriceChange10sMin: 0, excludedPriceChange10sMax: 4 }));
   for (const patch of [{ ageMs: 14_999 }, { ageMs: 25_001 }, { fdvUsd: 14_999 },
     { fdvUsd: 100_001 }, { priceChange10sPct: -10.01 }, { priceChange10sPct: 8.01 },
     { netFlow1sSol: 0 }, { buyers5s: 2 }, { trades5s: 3 }, { maxSingleBuyShare5s: 0.7001 },
@@ -146,6 +158,117 @@ function sourceAndFillTests() {
   assert.strictEqual([...f.suite.positions.values()][0].highestPrice, peak, 'duplicate cannot change peak');
   assert.strictEqual(f.calls.length, 1);
   done(f);
+}
+
+function pairedStudyFilterRowsTests() {
+  const studyCohorts = configuration().cohorts;
+  for (const cohort of studyCohorts) cohort.studyVersion = STUDY_VERSION;
+  const base = studyCohorts.find(row => row.id === BASE);
+  studyCohorts.push(
+    { ...base, id: BREADTH6, pairedBaselineCohortId: BASE,
+      studyVersion: STUDY_VERSION,
+      singleVariable: { ...STUDY_ARMS[BREADTH6].singleVariable },
+      thresholds: { minBuyers5s: 6 } },
+    { ...base, id: CONCENTRATION55, pairedBaselineCohortId: BASE,
+      studyVersion: STUDY_VERSION,
+      singleVariable: { ...STUDY_ARMS[CONCENTRATION55].singleVariable },
+      thresholds: { maxSingleBuyShare5s: 0.55 } },
+    { ...base, id: EXCLUDE_FLAT, pairedBaselineCohortId: BASE,
+      studyVersion: STUDY_VERSION,
+      singleVariable: { ...STUDY_ARMS[EXCLUDE_FLAT].singleVariable },
+      thresholds: { excludedPriceChange10sMin: 0, excludedPriceChange10sMax: 4 } },
+  );
+
+  const rejected = fixture('study-rejected');
+  rejected.restart(0, { cohorts: studyCohorts });
+  for (let offset = 5_000; offset <= 15_000; offset += 1_000) {
+    rejected.emit(offset, PRICE, {
+      wallet: `study-wallet-${offset % 3}`,
+      solAmount: offset === 15_000 ? 0.6 : 0.08,
+    });
+  }
+  const rejectedRows = rejected.rows();
+  assert.strictEqual(rejectedRows.length, 5,
+    'BASE first candidate must persist every single-variable study arm');
+  const byCohort = Object.fromEntries(rejectedRows.map(row => [row.cohort_id, row]));
+  assert.strictEqual(byCohort[BASE].status, 'PENDING_ENTRY');
+  assert.strictEqual(byCohort[RUGX].status, 'PENDING_ENTRY', 'RUGX behavior stays unchanged');
+  assert.strictEqual(byCohort[BREADTH6].status, 'NO_ENTRY');
+  assert.strictEqual(byCohort[BREADTH6].rejection_reason,
+    'STUDY_FILTER_REJECTED_BREADTH6');
+  assert.strictEqual(byCohort[CONCENTRATION55].status, 'NO_ENTRY');
+  assert.strictEqual(byCohort[CONCENTRATION55].rejection_reason,
+    'STUDY_FILTER_REJECTED_CONCENTRATION55');
+  assert.strictEqual(byCohort[EXCLUDE_FLAT].status, 'NO_ENTRY');
+  assert.strictEqual(byCohort[EXCLUDE_FLAT].rejection_reason,
+    'STUDY_FILTER_REJECTED_EXCLUDE_FLAT');
+  assert.strictEqual(new Set(rejectedRows.map(row => row.episode_id)).size, 1);
+  assert.strictEqual(new Set(rejectedRows.map(row => row.signal_at)).size, 1);
+  const sourceFeatures = rejectedRows.map(row => JSON.parse(row.features_json).sourceFeatures);
+  assert(sourceFeatures.every(features => JSON.stringify(features) === JSON.stringify(sourceFeatures[0])),
+    'all study rows must freeze the same source features');
+  assert.strictEqual(rejected.suite.pendingEntries.size, 2,
+    'rejected study arms must never reach strict simulated execution');
+  for (const id of [BREADTH6, CONCENTRATION55, EXCLUDE_FLAT]) {
+    const frozen = JSON.parse(byCohort[id].features_json);
+    assert.strictEqual(frozen.studyVersion, STUDY_VERSION);
+    assert.deepStrictEqual(frozen.singleVariable, STUDY_ARMS[id].singleVariable);
+    assert.deepStrictEqual(frozen.studyThresholds, {
+      minAgeMs: 15_000, maxAgeMs: 25_000, minFdvUsd: 15_000, maxFdvUsd: 100_000,
+      minPriceChange10sPct: -10, maxPriceChange10sPct: 8,
+      minNetFlow1sSol: 0, minBuyers5s: id === BREADTH6 ? 6 : 3,
+      minTrades5s: 4, maxSingleBuyShare5s: id === CONCENTRATION55 ? 0.55 : 0.7,
+      ...(id === EXCLUDE_FLAT
+        ? { excludedPriceChange10sMin: 0, excludedPriceChange10sMax: 4 } : {}),
+    });
+  }
+  done(rejected);
+
+  const passed = fixture('study-passed');
+  passed.restart(0, { cohorts: studyCohorts });
+  for (let offset = 5_000; offset <= 15_000; offset += 1_000) {
+    passed.emit(offset, offset === 15_000 ? PRICE * 1.05 : PRICE, {
+      wallet: `unique-study-wallet-${offset}`,
+      solAmount: 0.1,
+    });
+  }
+  assert.strictEqual(passed.rows().length, 5);
+  assert(passed.rows().every(row => row.status === 'PENDING_ENTRY'),
+    'a study arm may enter strict execution only after its filter passes');
+  assert.strictEqual(passed.suite.pendingEntries.size, 5);
+  done(passed);
+
+  const upgrade = fixture('study-upgrade-existing-two-arm');
+  upgrade.seed();
+  const historical = upgrade.rows().map(row => ({ cohort: row.cohort_id,
+    episode: row.episode_id, signalAt: row.signal_at }));
+  assert.strictEqual(historical.length, 2);
+  upgrade.restart(15_100, { cohorts: studyCohorts });
+  for (const [offset, wallet] of [[16_100, 'upgrade-a'], [17_100, 'upgrade-b'],
+    [18_100, 'upgrade-c'], [19_100, 'upgrade-d']]) {
+    upgrade.emit(offset, PRICE, { wallet });
+  }
+  assert.deepStrictEqual(upgrade.rows().map(row => ({ cohort: row.cohort_id,
+    episode: row.episode_id, signalAt: row.signal_at })), historical,
+  'a later process-local candidate must not backfill three arms onto a historical two-arm episode');
+  assert.strictEqual(upgrade.suite.health().legacyEarlyFlow.incompleteHistoricalEpisodesSkipped, 1);
+  assert.strictEqual(upgrade.suite.pendingEntries.size, 0);
+  done(upgrade);
+
+  const drift = fixture('study-config-drift');
+  const driftCohorts = studyCohorts.map(cohort => ({ ...cohort,
+    thresholds: { ...(cohort.thresholds || {}) },
+    singleVariable: cohort.singleVariable ? { ...cohort.singleVariable } : undefined }));
+  driftCohorts.find(cohort => cohort.id === BREADTH6).thresholds.maxAgeMs = 26_000;
+  drift.restart(0, { cohorts: driftCohorts });
+  drift.seed();
+  assert.strictEqual(drift.rows().length, 0,
+    'an unversioned threshold drift must fail closed instead of creating a mixed study episode');
+  assert.strictEqual(drift.suite.health().fiveArmStudy.ready, false);
+  assert.strictEqual(drift.suite.health().fiveArmStudy.configurationError,
+    `THRESHOLDS_${BREADTH6}`);
+  assert.strictEqual(drift.suite.health().legacyEarlyFlow.invalidFiveArmConfigurations, 1);
+  done(drift);
 }
 
 function guardAndUnknownTests() {
@@ -539,7 +662,8 @@ function actualRugLifecycleTests() {
   done(f);
 }
 
-thresholdTests(); sourceAndFillTests(); guardAndUnknownTests(); exitTests(); recoveryTests(); boundaryTests();
+thresholdTests(); sourceAndFillTests(); pairedStudyFilterRowsTests();
+guardAndUnknownTests(); exitTests(); recoveryTests(); boundaryTests();
 entryImpactTests(); persistenceFailureTests(); actualRugLifecycleTests();
 referenceRecoveryTests();
 console.log('test-legacy-early-flow-shadow: ok');

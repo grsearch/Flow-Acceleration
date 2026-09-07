@@ -7,6 +7,8 @@ const { runBacktest } = require('../core/FlowBacktester');
 const { DashboardReadModel } = require('../data/DashboardReadModel');
 const { installDashboardAssets } = require('./DashboardHttpAssets');
 const { DashboardQueryRunner } = require('./DashboardQueryRunner');
+const { bindServedDashboardIdentity,
+  evaluateRuntimeVersionConsistency } = require('../runtime/RuntimeIntegrity');
 
 function snapshotMetadata(cached) {
   return cached ? { status: cached.status || 'READY', generatedAt: cached.generatedAt,
@@ -148,7 +150,8 @@ function loadRetentionMaintenance(dbPath) {
 
 class ResearchServer {
   constructor({
-    config, runtimeIdentity = null, runtimeSnapshotState = null, runtimeDiagnostics = null, store, engine, stream, labeler,
+    config, runtimeIdentity = null, runtimeSnapshotState = null, runtimeVersionState = null,
+    runtimeDiagnostics = null, store, engine, stream, labeler,
     trader = null, signalShadow = null,
     flowFirstShadow = null, smartPullbackShadow = null, smartOpenShadow = null,
     flowSmartConfirmShadow = null,
@@ -188,6 +191,7 @@ class ResearchServer {
     this.config = config;
     this.runtimeIdentity = runtimeIdentity;
     this.runtimeSnapshotState = runtimeSnapshotState;
+    this.runtimeVersionState = runtimeVersionState;
     this.runtimeDiagnostics = runtimeDiagnostics;
     this.store = store;
     this.engine = engine;
@@ -264,6 +268,39 @@ class ResearchServer {
     this._routes();
   }
 
+  _versionConsistency() {
+    try {
+      if (typeof this.runtimeVersionState === 'function') {
+        const state = this.runtimeVersionState();
+        if (state && typeof state.ready === 'boolean') {
+          return bindServedDashboardIdentity(state, this.dashboardAssetIdentity?.fingerprint);
+        }
+      }
+      const runningCommit = this.runtimeIdentity?.runningCommit
+        || this.runtimeIdentity?.gitCommit || this.runtimeIdentity?.headCommit || null;
+      if (!runningCommit && !this.runtimeIdentity) {
+        // Embedded fixture/server users predate the production runtime guard.
+        return { status: 'NOT_CONFIGURED', ready: true, warnings: ['RUNTIME_IDENTITY_NOT_CONFIGURED'] };
+      }
+      const assetIdentity = this.runtimeIdentity?.dashboardIdentityKind === 'ASSET_SHA256';
+      return evaluateRuntimeVersionConsistency({
+        runningCommit,
+        sourceCommit: this.runtimeIdentity?.sourceCommit || runningCommit,
+        dashboardCommit: this.runtimeIdentity?.dashboardCommit || (assetIdentity ? null : runningCommit),
+        dashboardIdentityKind: this.runtimeIdentity?.dashboardIdentityKind,
+        runningFingerprint: this.runtimeIdentity?.runningFingerprint,
+        sourceFingerprint: this.runtimeIdentity?.runningFingerprint,
+        dashboardAssetFingerprint: assetIdentity
+          ? this.dashboardAssetIdentity?.fingerprint : null,
+        servedDashboardFingerprint: assetIdentity
+          ? this.dashboardAssetIdentity?.fingerprint : null,
+        configurationIntegrity: this.runtimeIdentity?.configurationIntegrity,
+      });
+    } catch (_) {
+      return { status: 'ERROR', ready: false, warnings: ['VERSION_CHECK_FAILED'] };
+    }
+  }
+
   _liveSourceDiagnostics(strategy) {
     if (!strategy) return null;
     if (strategy.id === 'legacy_early_flow_rugx_live') {
@@ -334,7 +371,7 @@ class ResearchServer {
     const publicDir = path.join(__dirname, 'public');
     this.app.disable('x-powered-by');
     this.app.use(express.json({ limit: '64kb' }));
-    installDashboardAssets(this.app, publicDir);
+    this.dashboardAssetIdentity = installDashboardAssets(this.app, publicDir);
     this.app.use('/api', (request, response, next) => {
       const json = response.json.bind(response);
       response.json = (value) => {
@@ -413,6 +450,7 @@ class ResearchServer {
     // the five-second dashboard refresh cannot add pressure to a large database.
     this.app.get('/api/strategy-status', (_request, response) => {
       const enabled = (key) => Boolean(this.config[key]?.enabled);
+      const versionConsistency = this._versionConsistency();
       response.set('Cache-Control', 'no-store');
       response.json({
         live: (this.config.liveTrading?.strategies || []).map((row) => ({
@@ -421,6 +459,8 @@ class ResearchServer {
           positionSizeSol: row.positionSizeSol, signalSource: row.signalSource,
         })),
         runtime: this.runtimeIdentity,
+        ready: versionConsistency.ready,
+        versionConsistency,
         configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         shadows: {
           'smart-open': enabled('smartOpenShadow'),
@@ -638,6 +678,7 @@ class ResearchServer {
     });
 
     this.app.get('/api/live-trading', (request, response) => {
+      const versionConsistency = this._versionConsistency();
       const runtime = this.trader?.health() || {
         mode: 'DISABLED',
         enabled: false,
@@ -666,6 +707,8 @@ class ResearchServer {
       response.json({
         generatedAt: Date.now(),
         runtime,
+        ready: versionConsistency.ready,
+        versionConsistency,
         configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         monitoredWallets: this.config.smartWallets,
         ...databaseDashboard,
@@ -1371,13 +1414,17 @@ class ResearchServer {
       const streaming = (stream.regions || []).some((region) => region.state === 'connected');
       const databaseReady = databaseOperational(database.writeStatus);
       const runtimeSnapshot = this.runtimeSnapshotState?.() || { status: 'DIRECT' };
+      const versionConsistency = this._versionConsistency();
       response.set('Cache-Control', 'no-store');
       response.json({
         // Keep the liveness status tied to the stream so an external watchdog
         // cannot create a restart loop for a database lock. Readiness and the
         // detailed API expose the degraded database state separately.
         status: streaming ? 'streaming' : 'waiting',
-        ready: databaseReady && runtimeSnapshot.status !== 'STALE' && !(runtimeSnapshot.errors?.length),
+        ready: databaseReady && runtimeSnapshot.status !== 'STALE'
+          && !(runtimeSnapshot.errors?.length) && versionConsistency.ready,
+        readinessStatus: versionConsistency.ready ? 'READY' : 'VERSION_NOT_READY',
+        versionConsistency,
         runtimeSnapshot,
         configurationIntegrity: this.runtimeIdentity?.configurationIntegrity || { status: 'UNVERIFIED' },
         uptimeMs: now - this.startedAt,
@@ -1430,10 +1477,15 @@ class ResearchServer {
       const database = this.store.healthSnapshot();
       const streaming = (stream.regions || []).some((region) => region.state === 'connected');
       const runtimeSnapshot = this.runtimeSnapshotState?.() || { status: 'DIRECT' };
+      const versionConsistency = this._versionConsistency();
       response.json({
-        status: runtimeSnapshot.status === 'STALE' || runtimeSnapshot.errors?.length ? 'stale' : streaming
+        status: !versionConsistency.ready ? 'version_mismatch'
+          : runtimeSnapshot.status === 'STALE' || runtimeSnapshot.errors?.length ? 'stale' : streaming
           ? (databaseOperational(database.writeStatus) ? 'streaming' : 'degraded')
           : 'waiting',
+        ready: versionConsistency.ready && runtimeSnapshot.status !== 'STALE'
+          && !(runtimeSnapshot.errors?.length) && databaseOperational(database.writeStatus),
+        versionConsistency,
         uptimeMs: now - this.startedAt,
         dataLatencyMs: engine.lastTradeAt ? Math.max(0, now - engine.lastTradeAt) : null,
         runtime: this.runtimeIdentity,

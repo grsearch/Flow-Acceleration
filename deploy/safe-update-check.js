@@ -19,7 +19,9 @@ const PROPERTIES = [
   'NRestarts', 'InvocationID',
 ];
 const CONFIG_MODULES = ['src/config.js', 'src/core/CostModel.js', 'src/core/PrimaryThresholdProfiles.js',
-  'src/core/ResearchCalibrationPolicy.js'];
+  'src/core/ResearchCalibrationPolicy.js', 'src/core/PostGradHoldingStudyPolicy.js',
+  'src/core/LegacyEarlyFlowEntryTracker.js',
+  'src/core/StrictAmmShadowExecution.js', 'src/core/ShadowExecutionModel.js'];
 const HASH = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const ABS_PATH = /^\/[A-Za-z0-9_./-]+$/;
 const APP_ENV = /^(FLOW_|HELIUS_|ALLENHARK_)/;

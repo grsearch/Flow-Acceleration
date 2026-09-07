@@ -7,6 +7,13 @@ const strictAmm = require('./StrictAmmShadowExecution');
 const {
   LegacyEarlyFlowEntryTracker, ENTRY_MODE: LEGACY_ENTRY_MODE,
   EXECUTION_VERSION: LEGACY_EXECUTION_VERSION, matchesLegacyEntry, postPoolPrice,
+  BASE_COHORT_ID: LEGACY_BASE_COHORT_ID,
+  RUGX_COHORT_ID: LEGACY_RUGX_COHORT_ID,
+  STUDY_VERSION: LEGACY_STUDY_VERSION,
+  STUDY_ARMS: LEGACY_STUDY_ARMS,
+  STUDY_COHORT_IDS: LEGACY_STUDY_COHORT_IDS,
+  FIVE_ARM_COHORT_IDS: LEGACY_FIVE_ARM_COHORT_IDS,
+  DEFAULT_THRESHOLDS: LEGACY_DEFAULT_THRESHOLDS,
 } = require('./LegacyEarlyFlowEntryTracker');
 const {
   hardBlockSignaturesForLifecycle,
@@ -27,6 +34,17 @@ const STATUS = Object.freeze({
 function finite(value, fallback = null) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort()
+    .map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+function sameJson(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 function priceOf(trade) {
@@ -220,11 +238,22 @@ class MigrationSecondLegShadowSuite {
       positionSizeSol: cohort.positionSizeSol,
     })]));
     this.legacyCohorts = this.cohorts.filter(cohort => cohort.entryMode === LEGACY_ENTRY_MODE);
+    this.legacyBaseCohort = this.legacyCohorts.find(
+      cohort => cohort.id === LEGACY_BASE_COHORT_ID,
+    ) || this.legacyCohorts[0];
+    const configuredLegacyIds = new Set((Array.isArray(config.cohorts) ? config.cohorts : [])
+      .map(cohort => cohort?.id).filter(Boolean));
+    this.legacyStudyConfigured = LEGACY_STUDY_COHORT_IDS.some(id => configuredLegacyIds.has(id));
+    this.legacyFiveArmConfigurationError = this._legacyFiveArmConfigurationError();
+    this.legacyFiveArmReady = this.legacyStudyConfigured
+      && this.legacyFiveArmConfigurationError == null;
     this.legacyTracker = new LegacyEarlyFlowEntryTracker({ store, now, getSolUsdReference,
-      config: { ...(config.legacyEarlyFlow || {}), thresholds: this.legacyCohorts[0]?.thresholds } });
+      config: { ...(config.legacyEarlyFlow || {}), thresholds: this.legacyBaseCohort?.thresholds } });
     this.legacyMetrics = { signals: 0, rugRejected: 0, liveBridgeEmitted: 0,
       liveBridgeErrors: 0, persistenceErrors: 0, persistenceRetryErrors: 0,
-      persistenceFailedRows: 0, strictRejectedByReason: {} };
+      persistenceFailedRows: 0, existingEpisodesSuppressed: 0,
+      incompleteHistoricalEpisodesSkipped: 0, partialEpisodeConflicts: 0,
+      invalidFiveArmConfigurations: 0, strictRejectedByReason: {} };
     this.legacyPersistenceFailures = new Map();
     this.pendingEntries = new Map();
     this.positions = new Map();
@@ -251,6 +280,45 @@ class MigrationSecondLegShadowSuite {
       lastActionAt: null,
       lastError: null,
     };
+  }
+
+  _legacyFiveArmConfigurationError() {
+    if (!this.legacyStudyConfigured) return null;
+    const byId = new Map(this.legacyCohorts.map(cohort => [cohort.id, cohort]));
+    for (const id of LEGACY_FIVE_ARM_COHORT_IDS) {
+      const cohort = byId.get(id);
+      if (!cohort) return `MISSING_${id}`;
+      if (cohort.newEntriesEnabled === false) return `DISABLED_${id}`;
+      if (cohort.executionVersion !== LEGACY_EXECUTION_VERSION) return `EXECUTION_VERSION_${id}`;
+      if (cohort.studyVersion !== LEGACY_STUDY_VERSION) return `STUDY_VERSION_${id}`;
+    }
+    const base = byId.get(LEGACY_BASE_COHORT_ID);
+    const rugx = byId.get(LEGACY_RUGX_COHORT_ID);
+    const thresholds = cohort => ({ ...LEGACY_DEFAULT_THRESHOLDS, ...(cohort.thresholds || {}) });
+    if (!sameJson(thresholds(base), thresholds(rugx))) return 'RUGX_THRESHOLDS_DIFFER_FROM_BASE';
+    const protocolKeys = ['executionVersion', 'strictExecution', 'positionSizeSol', 'costModel',
+      'entryDelayMs', 'entryTimeoutMs', 'exitDelayMs', 'exitTimeoutMs',
+      'maxEntryPriceJumpPct', 'maxNegativeEntryJumpPct', 'maxEntryImpactPct',
+      'hardStopPct', 'trailingActivationPct', 'trailingStopPct', 'maxHoldMs', 'minHoldMs'];
+    const protocol = cohort => Object.fromEntries(protocolKeys.map(key => [key, cohort[key]]));
+    if (!sameJson(protocol(base), protocol(rugx))) return 'RUGX_PROTOCOL_DIFFERS_FROM_BASE';
+    for (const id of LEGACY_STUDY_COHORT_IDS) {
+      const cohort = byId.get(id);
+      const definition = LEGACY_STUDY_ARMS[id];
+      if (cohort.pairedBaselineCohortId !== LEGACY_BASE_COHORT_ID) {
+        return `BASELINE_${id}`;
+      }
+      if (!sameJson(cohort.singleVariable, definition.singleVariable)) {
+        return `SINGLE_VARIABLE_${id}`;
+      }
+      if (!sameJson(thresholds(cohort), { ...thresholds(base), ...definition.thresholdPatch })) {
+        return `THRESHOLDS_${id}`;
+      }
+      if (!sameJson(protocol(cohort), protocol(base))) return `PROTOCOL_${id}`;
+      if (cohort.rugGuardMode !== base.rugGuardMode || cohort.liveBridgeEnabled === true
+        || cohort.liveStrategyId != null) return `ISOLATION_${id}`;
+    }
+    return null;
   }
 
   start() {
@@ -314,6 +382,9 @@ class MigrationSecondLegShadowSuite {
       configuredCostPct: this.costsByCohort.get(cohort.id)?.deterministicCostPct ?? null,
       entryMode: cohort.entryMode,
       executionVersion: cohort.executionVersion,
+      studyVersion: cohort.studyVersion || null,
+      singleVariable: cohort.singleVariable || null,
+      thresholds: cohort.thresholds,
       positionSizeSol: cohort.positionSizeSol,
       strictExecution: cohort.strictExecution,
       liveBridgeEnabled: cohort.liveBridgeEnabled === true,
@@ -328,6 +399,10 @@ class MigrationSecondLegShadowSuite {
       sendsTransactions: false,
       liveDecisionIntegration: this.legacyCohorts.some(cohort => cohort.liveBridgeEnabled)
         ? 'LEGACY_EARLY_FLOW_RUGX_SOURCE_ONLY' : 'DISABLED',
+      fiveArmStudy: { configured: this.legacyStudyConfigured,
+        ready: this.legacyFiveArmReady, version: LEGACY_STUDY_VERSION,
+        configurationError: this.legacyFiveArmConfigurationError,
+        cohortIds: [...LEGACY_FIVE_ARM_COHORT_IDS] },
       sourceDiagnostics: { kind: 'LEGACY_EARLY_FLOW', ...this.legacyTracker.health(),
         ...this.legacyMetrics, sourceSignals: this.legacyTracker.metrics.signals,
         cohortSignals: this.legacyMetrics.signals,
@@ -938,8 +1013,16 @@ class MigrationSecondLegShadowSuite {
   _createLegacySignals(candidate) {
     const { trade, features, price } = candidate;
     const sourceAt = trade.receivedAtMs;
-    const eligible = this.legacyCohorts.filter(cohort => cohort.newEntriesEnabled !== false
-      && matchesLegacyEntry(features, cohort.thresholds));
+    if (this.legacyStudyConfigured && !this.legacyFiveArmReady) {
+      this.legacyMetrics.invalidFiveArmConfigurations += 1;
+      this._legacyReject('LEGACY_FIVE_ARM_CONFIGURATION_INVALID');
+      this.legacyTracker.markSignaled(candidate);
+      return;
+    }
+    const eligible = this.legacyFiveArmReady
+      ? LEGACY_FIVE_ARM_COHORT_IDS.map(id => this.cohortById.get(id))
+      : this.legacyCohorts.filter((cohort) => cohort.newEntriesEnabled !== false
+        && matchesLegacyEntry(features, cohort.thresholds));
     if (!eligible.length) return;
     // One mint per immutable execution version, even if a later confirmed
     // migration timestamp replaces the explicit completion fallback.
@@ -954,6 +1037,7 @@ class MigrationSecondLegShadowSuite {
         return;
       }
       const policy = strictAmm.freezePolicy(cohort, this.config, cohort);
+      const studyDefinition = LEGACY_STUDY_ARMS[cohort.id] || null;
       const frozenCohort = { id: cohort.id, entryMode: LEGACY_ENTRY_MODE,
         executionVersion: LEGACY_EXECUTION_VERSION, positionSizeSol: cohort.positionSizeSol,
         maxEntryPriceJumpPct: cohort.maxEntryPriceJumpPct,
@@ -964,17 +1048,31 @@ class MigrationSecondLegShadowSuite {
         rugGuardMode: cohort.rugGuardMode, liveBridgeEnabled: cohort.liveBridgeEnabled === true,
         liveStrategyId: cohort.liveStrategyId || null };
       const gate = this._legacyGuard(cohort, trade, features.migrationAt, sourceAt);
+      const studyRejectionReason = studyDefinition
+        && !matchesLegacyEntry(features, cohort.thresholds)
+        ? studyDefinition.rejectionReason : null;
       const frozen = { executionVersion: LEGACY_EXECUTION_VERSION, entryMode: LEGACY_ENTRY_MODE,
-        sourceFeatures: features, sourceGuard: gate, liveEligible: !gate.blocked,
+        ...(this.legacyFiveArmReady ? { studyVersion: LEGACY_STUDY_VERSION,
+          studyCohortIds: [...LEGACY_FIVE_ARM_COHORT_IDS] } : {}),
+        sourceFeatures: features, sourceGuard: gate,
+        ...(studyDefinition ? { studyThresholds: {
+          ...LEGACY_DEFAULT_THRESHOLDS, ...(cohort.thresholds || {}),
+        }, singleVariable: { ...studyDefinition.singleVariable } } : {}),
+        studyFilter: studyDefinition ? {
+          passed: studyRejectionReason == null,
+          rejectionReason: studyRejectionReason,
+        } : null,
+        liveEligible: !gate.blocked && studyRejectionReason == null,
         strictExecution: { policy, pool: trade.pool,
           cursor: { ...strictAmm.observation(trade), seenEventKeys: [`${trade.signature}:${trade.eventIndex}`] },
           source: this._legacyTradeEvidence(trade), cohort: frozenCohort,
           costs: this.costsByCohort.get(cohort.id), tokenUnits: null } };
-      rows.push({ cohort, gate, record: { cohortId: cohort.id, episodeId,
+      rows.push({ cohort, gate, studyRejectionReason, record: { cohortId: cohort.id, episodeId,
         mint: trade.mint, symbol: trade.symbol || candidate.state.symbol,
-        status: gate.blocked ? STATUS.NO_ENTRY : STATUS.PENDING_ENTRY,
-        rejectionReason: gate.blocked ? (String(gate.reason || '').startsWith('PRE_ENTRY_RUG_')
-          ? gate.reason : `PRE_ENTRY_RUG_${gate.reason || 'BLOCKED'}`) : null,
+        status: gate.blocked || studyRejectionReason ? STATUS.NO_ENTRY : STATUS.PENDING_ENTRY,
+        rejectionReason: studyRejectionReason || (gate.blocked
+          ? (String(gate.reason || '').startsWith('PRE_ENTRY_RUG_')
+            ? gate.reason : `PRE_ENTRY_RUG_${gate.reason || 'BLOCKED'}`) : null),
         positionSol: cohort.positionSizeSol, configuredCostPct: frozen.strictExecution.costs.deterministicCostPct,
         migrationAt: features.migrationAt, signalAt: sourceAt, signalPrice: price,
         signalAgeMs: features.ageMs, features: frozen, rugGuard: gate,
@@ -982,22 +1080,65 @@ class MigrationSecondLegShadowSuite {
         entryDeadlineAt: sourceAt + policy.entryDelayMs + policy.entryTimeoutMs,
         hardStopPct: cohort.hardStopPct, maxHoldMs: cohort.maxHoldMs } });
     }
-    let savedRows;
+    let persisted;
     try {
-      const insert = () => rows.map(item => ({ ...item,
-        saved: this.store.createMigrationSecondLegShadowPosition(item.record) }));
-      // The two small source rows commit together. No HTTP/RPC or guard scan
-      // occurs inside the transaction; a failed write cannot split the pair.
-      savedRows = this.store.db?.transaction ? this.store.db.transaction(insert)() : insert();
-    } catch (_) {
+      const expectedIds = new Set(rows.map(item => item.cohort.id));
+      const insert = () => {
+        const existing = typeof this.store.migrationSecondLegShadowPositionsByEpisode === 'function'
+          ? this.store.migrationSecondLegShadowPositionsByEpisode(episodeId)
+            .filter(row => expectedIds.has(row.cohort_id ?? row.cohortId)) : [];
+        // Never backfill missing study arms onto a candidate already captured by
+        // the historical two-arm build. Its later process-local feature window
+        // is not the original BASE candidate and therefore is not comparable.
+        if (existing.length) return { existing, savedRows: null };
+        const savedRows = rows.map(item => ({ ...item,
+          saved: this.store.createMigrationSecondLegShadowPosition(item.record) }));
+        if (savedRows.some(item => item.saved?.inserted !== true)) {
+          const error = new Error('Legacy episode appeared during atomic cohort insertion');
+          error.code = 'LEGACY_EPISODE_PARTIAL_CONFLICT';
+          throw error;
+        }
+        return { existing: [], savedRows };
+      };
+      // The paired source/study rows commit together. No HTTP/RPC or guard
+      // scan occurs inside the transaction; a failed write cannot split them.
+      persisted = this.store.db?.transaction ? this.store.db.transaction(insert)() : insert();
+    } catch (error) {
+      if (error?.code === 'LEGACY_EPISODE_PARTIAL_CONFLICT') {
+        this.legacyMetrics.partialEpisodeConflicts += 1;
+        this._legacyReject(error.code);
+        this.legacyTracker.markSignaled(candidate);
+        return;
+      }
       this.legacyMetrics.persistenceErrors += 1;
       return;
     }
+    if (persisted.existing.length) {
+      const expectedIds = new Set(rows.map(item => item.cohort.id));
+      const existingIds = new Set(persisted.existing.map(row => row.cohort_id ?? row.cohortId));
+      const complete = expectedIds.size === existingIds.size
+        && [...expectedIds].every(id => existingIds.has(id));
+      this.metrics.deduplicated += persisted.existing.length;
+      this.legacyMetrics.existingEpisodesSuppressed += 1;
+      if (!complete) {
+        this.legacyMetrics.incompleteHistoricalEpisodesSkipped += 1;
+        this._legacyReject('LEGACY_EXISTING_EPISODE_INCOMPLETE');
+      }
+      this.legacyTracker.markSignaled(candidate);
+      this.metrics.lastActionAt = this.now();
+      return;
+    }
+    const savedRows = persisted.savedRows;
     this.legacyTracker.markSignaled(candidate);
-    for (const { cohort, gate, saved } of savedRows) {
+    for (const { cohort, gate, studyRejectionReason, saved } of savedRows) {
       if (!saved?.inserted) { this.metrics.deduplicated += 1; continue; }
       this.metrics.matched += 1;
       this.legacyMetrics.signals += 1;
+      if (studyRejectionReason) {
+        this.metrics.noEntry += 1;
+        this._legacyReject(studyRejectionReason);
+        continue;
+      }
       if (gate.blocked) {
         this.metrics.rugRejected += 1;
         this.legacyMetrics.rugRejected += 1;
@@ -1008,7 +1149,7 @@ class MigrationSecondLegShadowSuite {
       this._index(pending);
       // Persisted inserted=true is the only bridge permission. Restoring an
       // existing row or replaying its source can never resubmit a live signal.
-      if (cohort.id === 'LEGACY-EARLY-FLOW-RUGX' && cohort.liveBridgeEnabled === true
+      if (cohort.id === LEGACY_RUGX_COHORT_ID && cohort.liveBridgeEnabled === true
         && cohort.liveStrategyId === 'legacy_early_flow_rugx_live'
         && typeof this.onLiveSignal === 'function') {
         const event = { ...this._legacyTradeEvidence(trade), mint: trade.mint,

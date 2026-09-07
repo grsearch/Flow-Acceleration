@@ -255,6 +255,10 @@ async function main() {
     },
   };
   const runtime = createRuntime(runtimeConfig);
+  const fixtureCommit = 'a'.repeat(40);
+  runtime.server.runtimeVersionState = () => ({ status: 'MATCH', ready: true,
+    runningCommit: fixtureCommit, sourceCommit: fixtureCommit, dashboardCommit: fixtureCommit,
+    configurationIntegrityStatus: 'MATCH', warnings: [] });
   const startupReplay = runtime.store.startupTradeReplayHealth();
   assert.strictEqual(startupReplay.primed, true);
   assert.strictEqual(startupReplay.active, false);

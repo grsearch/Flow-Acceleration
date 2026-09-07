@@ -5,13 +5,14 @@ const LiveTradingManager = require('../src/core/LiveTradingManager');
 const { MigrationSecondLegShadowSuite } = require('../src/core/MigrationSecondLegShadowSuite');
 const { PreEntryRugRiskTracker } = require('../src/core/PreEntryRugRiskTracker');
 const { config } = require('../src/config');
-const { LEGACY_LIVE_ID, LEGACY_RUGX, LEGACY_VERSION, CALIBRATION_ID } = require('../src/core/ResearchCalibrationPolicy');
+const { LEGACY_LIVE_ID, LEGACY_RUGX, LEGACY_BASE, LEGACY_VERSION, CALIBRATION_ID } = require('../src/core/ResearchCalibrationPolicy');
 
 async function main() {
   let now = 1_788_660_000_000;
   const store = new ResearchStore({ dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24,
     flushMs: 60_000, flushMax: 100 }, { configuredTradingCostPct: 0 });
   const strategy = { ...config.liveTrading.strategies.find((p) => p.id === LEGACY_LIVE_ID) };
+  strategy.entryEnabled = true;
   const old = config.liveTrading.strategies.find((p) => p.id === CALIBRATION_ID);
   let reject = false, throws = false, malformed = false;
   const guards = [];
@@ -138,12 +139,16 @@ async function sourceBridgeIntegration() {
     tokenTotalSupplyRaw: '1000000000000000', initialRealTokenReservesRaw: '1000000000000000' });
   store.recordMigration({ mint, migratedAt: t, timestampMs: t, pool: `${mint}-pool` });
   const manager = new LiveTradingManager({ config: { ...config.liveTrading,
-    enabled: true, requestedEnabled: true, safetyLock: false, dryRun: true, killSwitchFile: null },
+    enabled: true, requestedEnabled: true, safetyLock: false, dryRun: true, killSwitchFile: null,
+    strategies: config.liveTrading.strategies.map(row => row.id === LEGACY_LIVE_ID
+      ? { ...row, entryEnabled: true } : row) },
     store, now: () => now, executor: new Proxy({}, { get() {
       throw new Error('INTEGRATION TEST MUST NOT ACCESS AN EXECUTOR');
     } }) });
   const shadowConfig = { ...config.migrationSecondLegShadow,
-    cohorts: config.migrationSecondLegShadow.cohorts.filter(row => row.entryMode === 'LEGACY_EARLY_FLOW') };
+    cohorts: config.migrationSecondLegShadow.cohorts
+      .filter(row => [LEGACY_BASE, LEGACY_RUGX].includes(row.id))
+      .map(row => row.id === LEGACY_RUGX ? { ...row, liveBridgeEnabled: true } : row) };
   let bridgeCalls = 0;
   const createSuite = () => new MigrationSecondLegShadowSuite({ config: shadowConfig, store,
     now: () => now, getSolUsdReference: () => ({ priceUsd: 100, observedAt: t,

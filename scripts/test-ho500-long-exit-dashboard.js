@@ -15,19 +15,26 @@ const profiles = [1800, 3600].flatMap((hold) => [[30, 20], [100, 30]]
     hardStopPct: hardStop, runnerMaxHoldMs: hold * 1000,
     trailingActivationPct: activation, trailingStopPct: drawdown, capacitySols: [0.1],
   }))));
+const frictionProfiles = ['HO200', 'HO500'].flatMap(hold => [1_000, 2_000].map(delay => ({
+  id: `O_C80_${hold}_X60_POSTV1_FRIC1_D${delay}`,
+  label: `${hold} FRIC1 D${delay}`,
+  experimentGroup: 'HO_EXECUTION_FRICTION_V1',
+  shadowExecutionDelayMs: delay,
+  feeModel: 'OBSERVED_AMM_BPS_NETWORK_ASSUMPTION_V1',
+})));
 const store = new ResearchStore({
   dbPath: ':memory:', archiveDir: '.', rawRetentionHours: 24, flushMs: 60_000, flushMax: 100,
 }, { configuredTradingCostPct: 2.71 });
 let sequence = 0;
 
-function insert(profileId, status, netReturn, { entered = true, capacity = 0.1 } = {}) {
+function insert(profileId, status, netReturn, { entered = true, capacity = 0.1, features = {} } = {}) {
   sequence += 1;
   const at = 1_000_000 + sequence * 1000;
   const row = store.createGraduationAccelerationShadowPosition({
     cohortId: `${profileId}:${capacity === 0.1 ? '0_1' : '1'}SOL`, episodeId: `episode-${sequence}`,
     entryProfileId: profileId, mint: `test-mint-${sequence}`, status,
     positionSol: capacity, configuredCostPct: 2.71, signalAt: at, signalPrice: 1,
-    entryTargetAt: at + 500, entryDeadlineAt: at + 2500, coreWeightPct: 0,
+    entryTargetAt: at + 500, entryDeadlineAt: at + 2500, coreWeightPct: 0, features,
   });
   store.updateGraduationAccelerationShadowPosition(row.id, {
     entryAt: entered ? at + 500 : null, entryPrice: entered ? 1 : null,
@@ -74,6 +81,18 @@ try {
   insert(firstId, 'CLOSED', 9999, { capacity: 1 });
   insert(profiles[1].id, 'NO_EXIT', 999);
   insert('O_C80_HO500_X60', 'CLOSED', 7);
+  const entrySchedule = { lpFeeBasisPoints: 2, protocolFeeBasisPoints: 93,
+    coinCreatorFeeBasisPoints: 30 };
+  const exitSchedule = { lpFeeBasisPoints: 2, protocolFeeBasisPoints: 150,
+    coinCreatorFeeBasisPoints: 30 };
+  insert(frictionProfiles[0].id, 'CLOSED', -12, { features: { executionFriction: {
+    entry: { schedule: entrySchedule }, exit: { schedule: exitSchedule },
+  } } });
+  insert(frictionProfiles[0].id, 'NO_EXIT', null, { features: { executionFriction: {
+    entry: { schedule: entrySchedule },
+  } } });
+  insert(frictionProfiles[0].id, 'NO_ENTRY', null, { entered: false,
+    features: { executionFriction: { entryOutcome: 'NO_ENTRY' } } });
 
   let cohortReads = 0;
   const prepare = store.db.prepare.bind(store.db);
@@ -103,12 +122,20 @@ try {
   assert.equal(row.loss_80_count, 1);
   assert.equal(row.win_50_count, 2);
   assert.equal(row.win_100_count, 1);
+  const frictionRow = data.cohorts.find(cohort => cohort.entry_profile_id === frictionProfiles[0].id);
+  assert.equal(frictionRow.average_entry_amm_fee_bps, 125);
+  assert.equal(frictionRow.average_exit_amm_fee_bps, 182);
+  assert.equal(frictionRow.entry_fee_observations, 2);
+  assert.equal(frictionRow.exit_fee_observations, 1);
+  assert.equal(frictionRow.no_entry, 1);
+  assert.equal(frictionRow.no_exit, 1);
 
   const view = page();
   const runtimeProfiles = [...profiles].reverse();
   const originalOrder = runtimeProfiles.map(profile => profile.id).join(',');
   view.render({ ...data, runtime: { enabled: true, entryProfiles: [
     ...runtimeProfiles, { id: 'O_C80_HO500_X60', label: 'Original fixed 60s' },
+    ...frictionProfiles,
     { ...profiles[0], id: 'other-experiment', experimentGroup: 'ANOTHER_EXPERIMENT' },
   ] } });
   const result = view.element('#graduation-acceleration-long-exit-rows').innerHTML;
@@ -147,11 +174,14 @@ try {
     pairedEntryProfileId: 'O_C80_HO500_X60_POSTV1', executionModelVersion: 'POST_TRADE_V1' }));
   const oldRow = { ...row, entry_profile_id: firstId, average_net_return_pct: 81 };
   const postRow = { ...row, entry_profile_id: postProfiles[0].id, average_net_return_pct: -9 };
+  const frictionRows = data.cohorts.filter(cohort => cohort.entry_profile_id.includes('_FRIC1_'));
   view.render({ runtime: { enabled: true, entryProfiles: [
     ...profiles.map(profile => ({ ...profile, newEntriesEnabled: false })), ...postProfiles,
+    ...frictionProfiles,
   ] }, cohorts: [oldRow, postRow,
     { ...row, entry_profile_id: 'O_C80_HO500_X60_POSTV1', average_net_return_pct: -12 },
     { ...row, entry_profile_id: 'O_C80_HO500_X60_POSTV1_D1000', average_net_return_pct: -18 },
+    ...frictionRows,
   ], positions: [] });
   const mixed = view.element('#graduation-acceleration-long-exit-rows').innerHTML;
   assert.equal((mixed.match(/data-ho500-long-profile=/g) || []).length, 13,
@@ -160,7 +190,14 @@ try {
   assert(mixed.includes('旧 PRE · 历史口径'));
   assert(mixed.includes('+81%') && mixed.includes('-9%'));
   const execution = view.element('#graduation-acceleration-execution-model-rows').innerHTML;
-  assert(execution.includes('延迟 1 秒') && execution.includes('-12%') && execution.includes('-18%'));
+  for (const profile of frictionProfiles) {
+    assert(execution.includes(`data-ho-execution-model="${profile.id}"`));
+  }
+  assert(execution.includes('1 秒') && execution.includes('2 秒'));
+  assert(execution.includes('125 bps') && execution.includes('182 bps'));
+  assert(execution.includes('NO_ENTRY 1 / NO_EXIT 1'));
+  assert(execution.includes('-12%') && execution.includes('-18%'));
+  assert(view.html.includes('HO200 / HO500 执行摩擦对照'));
   assert.equal(view.requests(), 0, 'new execution comparison reuses the cached payload');
   console.log('test-ho500-long-exit-dashboard: ok (12 groups, 0.1 SOL isolation, unfinished states, coverage, tails, cached aggregation, no new requests)');
 } finally {

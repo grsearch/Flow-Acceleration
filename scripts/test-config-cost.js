@@ -484,9 +484,8 @@ assert.strictEqual(config.liveTrading.contextSlotRetryDelayMs, 50);
 assert.deepStrictEqual(
   config.liveTrading.strategies.filter((strategy) => strategy.entryEnabled !== false)
     .map((strategy) => strategy.code),
-  [
-    'LEGACY-EARLY-FLOW-RUGX',
-  ],
+  [],
+  'research deployment must not arm any new real-money entries',
 );
 assert.strictEqual(config.preEntryRugRisk.crossMintEnabled, true);
 assert.strictEqual(config.preEntryRugRisk.templateMinLargeBuys, 4);
@@ -1227,6 +1226,8 @@ assert.deepStrictEqual(
     'PMO-FLOW-H20-A75-D25-X300', 'PMO-FLOW-H20-A75-D25-X300-RUGX',
     'PMO-FLOW-H25-A100-D30-X600', 'PMO-FLOW-H25-A100-D30-X600-RUGX',
     'LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX',
+    'LEGACY-EARLY-FLOW-BREADTH6', 'LEGACY-EARLY-FLOW-CONCENTRATION55',
+    'LEGACY-EARLY-FLOW-EXCLUDE-FLAT',
   ],
 );
 assert.ok(config.migrationSecondLegShadow.cohorts
@@ -1235,7 +1236,7 @@ assert.ok(config.migrationSecondLegShadow.cohorts
 assert.ok(config.migrationSecondLegShadow.cohorts
   .filter((cohort) => cohort.id.startsWith('LEGACY-EARLY-FLOW-'))
   .every((cohort) => cohort.positionSizeSol === 0.02
-    && cohort.liveBridgeEnabled === (cohort.id === 'LEGACY-EARLY-FLOW-RUGX')));
+    && cohort.liveBridgeEnabled === false));
 assert.ok(config.migrationSecondLegShadow.cohorts
   .filter((cohort) => cohort.id.startsWith('PMO-FLOW-') && cohort.id.endsWith('-RUGX'))
   .every((cohort) => cohort.rugGuardMode === 'HARD_BLOCK'

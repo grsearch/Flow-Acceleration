@@ -757,9 +757,9 @@
               </div>
               <div class="strategy-expression" id="graduation-acceleration-expression">等待 Graduation Acceleration 配置…</div>
               <div class="strategy-metric-groups" id="graduation-acceleration-metrics"></div>
-              <div class="section-title"><h2>HO500 执行口径对照</h2><p>新 POSTV1 使用触发交易完成后的池状态。D1000 从同源即时成交时点再等 1 秒，取后续合格行情；无行情或跳价也计入失败样本。成本仍为原配置估算，不等同链上实际收益；旧 PRE 历史不可直接作同步对照。</p></div>
+              <div class="section-title"><h2>HO200 / HO500 执行摩擦对照</h2><p>FRIC1 四组从同源 POSTV1 成交时点分别延迟 1 / 2 秒，按对应事件的 LP、协议与 Creator 费率重算买卖，并只另扣双边网络费。NO_ENTRY、NO_EXIT 与已完成净收益分开显示；即时组及旧 PRE / D1000 仍是原配置估算，仅作参考。</p></div>
               <div class="table-wrap"><table>
-                <thead><tr><th>模型 / 容量</th><th>信号 / 已入场</th><th>已完成 / 待入场</th><th>无入场 / 跳价 / 无退出</th><th>平均 / 中位净收益</th><th>胜率 / PF</th></tr></thead>
+                <thead><tr><th>模型 / 容量</th><th>延迟 / 费用口径</th><th>事件费率（入 / 出）</th><th>信号 / 已入场</th><th>已完成 / 待入场</th><th>NO_ENTRY / NO_EXIT</th><th>平均 / 中位净收益</th><th>胜率 / PF</th></tr></thead>
                 <tbody id="graduation-acceleration-execution-model-rows"></tbody>
               </table></div>
               <div class="section-title"><h2>HO500 长持：同入场硬止损对照</h2><p>每代 12 组纯 Shadow，共享对应 HO500 0.1 SOL 即时成交入场；比较 30 / 60 分钟、两档移动止盈及 H20 / H30 / OFF，不发送交易。新 POSTV1 与旧 PRE 历史分开显示，D1000 不复制长持组。</p></div>
@@ -811,10 +811,15 @@
 
           <div class="strategy-pane" data-live-strategy-pane="legacy-early-flow" hidden>
             <article class="card record-section">
-              <div class="section-title"><h2>Legacy Early Flow · 原版 / RUGX 严格配对</h2><p>复原旧版毕业后资金流入场；仅比较本次部署后的新口径，不混入 PMO 或旧历史收益。Shadow 本身不签名；RUGX 可提供独立实盘信号，是否执行以实盘页为准。</p></div>
+              <div class="section-title"><h2>Legacy Early Flow · 同源五组前向研究</h2><p>BASE、RUGX 与三个单变量组必须来自同一个首次 BASE 候选；过滤失败也保存 NO_ENTRY。五组全部仅用于 Shadow 研究，不桥接实盘。</p></div>
               <div class="strategy-expression" id="legacy-early-flow-expression">等待旧版资金流配置…</div>
               <div class="strategy-metric-groups" id="legacy-early-flow-metrics"></div>
-              <div class="section-title"><h3>两组独立结果</h3><p>BASE 原版无 RUG 过滤；RUGX 仅增加当前生命周期阶段的重复作恶钱包/模板过滤。没有 Smart Wallet 买入或共识前提；未知退出不当作 0 收益。</p></div>
+              <div class="section-title"><h3>可比前向完整 episode</h3><p>只汇总五组齐全、signal_at 与 sourceFeatures 相同，且研究定义、执行版本和完整协议一致的 episode；协议变化时分组展示，不跨版本混算。</p></div>
+              <div class="table-wrap"><table>
+                <thead><tr><th>组别 / 金额 / 模型</th><th>退出配置</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / PF</th><th>待入场 / 活动</th><th>拒绝 / 未知退出</th></tr></thead>
+                <tbody id="legacy-early-flow-comparable-cohort-rows"></tbody>
+              </table></div>
+              <div class="section-title"><h3>历史 all-time（不可直接横向比较）</h3><p>保留旧两组和所有历史记录以兼容既有统计；缺臂、错源或协议/定义不一致的 episode 不进入上方可比结果。未知退出不当作 0 收益。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>组别 / 金额 / 模型</th><th>退出配置</th><th>信号 / Mint</th><th>完成 / 胜率</th><th>平均 / PF</th><th>待入场 / 活动</th><th>拒绝 / 未知退出</th></tr></thead>
                 <tbody id="legacy-early-flow-cohort-rows"></tbody>
@@ -824,7 +829,7 @@
                 <thead><tr><th>配对组</th><th>配对 / 可比</th><th>拦截 / 已验证</th><th>避开 RUG50 / RUG80</th><th>误杀赢家 / 大赢家</th><th>BASE</th><th>RUGX</th><th>均值提升</th></tr></thead>
                 <tbody id="legacy-early-flow-pair-rows"></tbody>
               </table></div>
-              <div class="section-title"><h3>最近模拟仓位</h3><p>只显示这两个精确 cohort。信号后严格 POST 行情，收益含配置估算费用但不是链上实际成交；硬止损阈值不保证成交亏损上限。</p></div>
+              <div class="section-title"><h3>最近模拟仓位</h3><p>显示五个精确 cohort 的 all-time 记录并保留研究版本证据。信号后严格 POST 行情，收益含配置估算费用但不是链上实际成交；硬止损阈值不保证成交亏损上限。</p></div>
               <div class="table-wrap"><table>
                 <thead><tr><th>时间 / 组别</th><th>状态 / Mint</th><th>金额 / AGE</th><th>1秒净流 / 5秒买家</th><th>价格 / 入场 / 出场</th><th>净收益 / MFE / MAE</th><th>持仓 / 原因</th></tr></thead>
                 <tbody id="legacy-early-flow-position-rows"></tbody>
@@ -1429,6 +1434,8 @@
     const runtimeSnapshotStale = data => data?.runtimeSnapshot?.status === 'STALE'
       || (Number.isFinite(data?.runtimeSnapshot?.sampledAt)
         && Date.now() - data.runtimeSnapshot.sampledAt > 15_000);
+    const runtimeVersionNotReady = data => data?.versionConsistency?.ready === false;
+    const shortCommit = value => typeof value === 'string' && value ? value.slice(0, 12) : 'unknown';
     const tone = value => Number.isFinite(value) ? (value >= 0 ? 'positive' : 'negative') : 'muted';
     const yesNo = value => value ? '开启' : '关闭';
     const enabledPct = (value, prefix = '') => Number.isFinite(value) && value > 0 ? `${prefix}${rate(value)}` : '关闭';
@@ -1563,9 +1570,12 @@
       const mismatchedFiles = integrity.mismatchedFiles || integrity.mismatches;
       const mismatches = Array.isArray(mismatchedFiles) ? mismatchedFiles.length : 0;
       const warning = issues || mismatches || ['MISMATCH','ERROR','DEGRADED'].includes(integrity.status);
+      const version = data.versionConsistency || {};
+      const versionWarning = version.ready === false;
       const missingHo500 = warnings.includes('HO500_STRATEGY_MISSING') ? ' · HO500 未配置' : '';
-      document.querySelector('#strategy-catalog-status').textContent = `目录 ${dateTime(catalogUpdatedAt)} · ${data.runtime?.gitCommit?.slice(0,7) || '版本未知'}${warning ? ` · 配置异常 ${integrity.status || ''}（差异 ${mismatches} / 问题 ${issues}）` : ''}${missingHo500}${runtimeSnapshotStale(data) ? ' · 交易状态快照已过期' : ''}`;
-      document.querySelector('#strategy-catalog-status').className = warning ? 'error' : 'muted';
+      const versionText = `运行 ${shortCommit(version.runningCommit || version.runningFingerprint || data.runtime?.gitCommit)} / 源码 ${shortCommit(version.sourceCommit || version.sourceFingerprint)} / 页面资产 ${shortCommit(version.dashboardCommit)}`;
+      document.querySelector('#strategy-catalog-status').textContent = `目录 ${dateTime(catalogUpdatedAt)} · ${versionText}${versionWarning ? ` · VERSION ${version.status || 'UNKNOWN'}（非 READY）` : ''}${warning ? ` · 配置异常 ${integrity.status || ''}（差异 ${mismatches} / 问题 ${issues}）` : ''}${missingHo500}${runtimeSnapshotStale(data) ? ' · 交易状态快照已过期' : ''}`;
+      document.querySelector('#strategy-catalog-status').className = warning || versionWarning ? 'error' : 'muted';
       if (activeLiveStrategyId === 'execution' && (previousId !== activeExecutionStrategyId || restarted)) {
         renderCachedStrategyView();
         if (activeTabId === 'live-trading') void refresh(true);
@@ -2519,6 +2529,7 @@
       const exitProfiles = Array.isArray(runtime.exitProfiles) ? runtime.exitProfiles : [];
       const exitLabels = Object.fromEntries(exitProfiles.map(row => [row.id, row.label || row.id]));
       const thresholds = runtime.dynamicThresholds || {};
+      const pairAudit = runtime.forwardPairAudit || {};
       document.querySelector('#smart-consensus-v2-expression').textContent = `严格 P_A 毕业预测、早期 Curve 共振，以及毕业首笔 AMM 时仍持仓的独立集群分开统计；当前合格集群 ${number(thresholds.eligible)}，普通 / 强信号门槛 ${number(thresholds.ordinary)} / ${number(thresholds.strong)}。`;
       renderMetricGroups('#smart-consensus-v2-metrics', [
         ['运行模式', runtime.enabled ? 'SHADOW SC-V2' : '关闭', '只做理论成交；RUG仅记录标签，不作本组入场过滤'],
@@ -2526,6 +2537,7 @@
         ['毕业持仓判定', number(runtime.firstAmmHoldingEvaluations), `通过 ${number(runtime.holdingConsensusQualified)} · 拒绝 ${number(runtime.holdingConsensusRejected)} · 锚点拒绝 ${number(runtime.migrationAnchorRejected)}`],
         ['直接 / Scout / Flow开仓', `${number(runtime.directOpened)} / ${number(runtime.scoutOpened)} / ${number(runtime.flowConfirmed)}`, `累计完成加仓 ${number(runtime.scaled)} · Core卖出 ${number(runtime.coreSold)}`],
         ['关闭 / 无入场 / NO_EXIT', `${number(runtime.closed)} / ${number(runtime.noEntry)} / ${number(runtime.noExit)}`, `重启删失 ${number(runtime.restartCensored)} · 最近动作 ${dateTime(runtime.lastActionAt)}`],
+        ['HOLD3完整配对', `${number(pairAudit.completeOpportunities)} / ${number(pairAudit.totalOpportunities)}`, `可比 ${number(pairAudit.comparableOpportunities)} · 缺臂 ${number(pairAudit.incompleteOpportunities)} · 来源/协议错配 ${number(pairAudit.sourceMismatchOpportunities)} / ${number(pairAudit.protocolMismatchOpportunities)} · 未配对/未标记 ${number(pairAudit.unpairedRows)} / ${number(pairAudit.untaggedRows)}`],
         ['恢复与持仓事件', `${number(runtime.restoredSmartHoldings)} / ${number(runtime.observedSmartPositionEvents)}`, `已观察成交 ${number(runtime.observedTrades)} · Smart OPEN ${number(runtime.observedSmartOpens)}`],
       ], []);
 
@@ -3434,15 +3446,34 @@
     function renderGraduationExecutionModels(data) {
       const rows = new Map((data.cohorts || []).filter(row => row.position_sol === 0.1)
         .map(row => [row.entry_profile_id, row]));
+      const configured = new Map((data.runtime?.entryProfiles || []).map(profile => [profile.id, profile]));
       const models = [
-        ['O_C80_HO500_X60_POSTV1', 'POSTV1 · 即时交易后报价'],
-        ['O_C80_HO500_X60_POSTV1_D1000', 'POSTV1 · 延迟 1 秒'],
-        ['O_C80_HO500_X60', '旧 PRE · 仅历史参考'],
+        { id: 'O_C80_HO200_X60_POSTV1', label: 'HO200 · POSTV1 即时基线', delayMs: 0 },
+        { id: 'O_C80_HO200_X60_POSTV1_FRIC1_D1000', label: 'HO200 · FRIC1 D1000', delayMs: 1_000, friction: true },
+        { id: 'O_C80_HO200_X60_POSTV1_FRIC1_D2000', label: 'HO200 · FRIC1 D2000', delayMs: 2_000, friction: true },
+        { id: 'O_C80_HO500_X60_POSTV1', label: 'HO500 · POSTV1 即时基线', delayMs: 0 },
+        { id: 'O_C80_HO500_X60_POSTV1_D1000', label: 'HO500 · 旧固定成本 D1000', delayMs: 1_000 },
+        { id: 'O_C80_HO500_X60_POSTV1_FRIC1_D1000', label: 'HO500 · FRIC1 D1000', delayMs: 1_000, friction: true },
+        { id: 'O_C80_HO500_X60_POSTV1_FRIC1_D2000', label: 'HO500 · FRIC1 D2000', delayMs: 2_000, friction: true },
+        { id: 'O_C80_HO500_X60', label: 'HO500 · 旧 PRE 历史参考', delayMs: 0 },
       ];
-      document.querySelector('#graduation-acceleration-execution-model-rows').innerHTML = models.map(([id, label]) => {
-        const row = rows.get(id);
-        if (!row) return `<tr data-ho500-execution-model="${id}"><td>${label}<br><span class="table-note">0.1 SOL</span></td><td colspan="5">尚无样本</td></tr>`;
-        return `<tr data-ho500-execution-model="${id}"><td>${label}<br><span class="table-note">0.1 SOL</span></td><td>${number(row.signals)} / ${number(row.entered)}</td><td>${number(row.resolved)} / ${number(row.pending_entries)}</td><td>${number(row.no_entry)} / ${number(row.price_jump)} / ${number(row.no_exit)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${rate(row.win_rate_pct)} / ${number(row.profit_factor, 2)}</td></tr>`;
+      document.querySelector('#graduation-acceleration-execution-model-rows').innerHTML = models.map(model => {
+        const row = rows.get(model.id);
+        const profile = configured.get(model.id) || {};
+        const delayMs = Number.isFinite(Number(profile.shadowExecutionDelayMs))
+          ? Number(profile.shadowExecutionDelayMs) : model.delayMs;
+        const delay = delayMs > 0 ? `${number(delayMs / 1_000, 0)} 秒` : '即时';
+        const feeBasis = model.friction ? '事件 LP + 协议 + Creator；双边网络费' : '原配置估算';
+        const entryFee = Number(row?.average_entry_amm_fee_bps);
+        const exitFee = Number(row?.average_exit_amm_fee_bps);
+        const hasEntryFee = row?.average_entry_amm_fee_bps != null && Number.isFinite(entryFee);
+        const hasExitFee = row?.average_exit_amm_fee_bps != null && Number.isFinite(exitFee);
+        const eventFees = model.friction
+          ? `${hasEntryFee ? `${number(entryFee, 2)} bps` : '—'} / ${hasExitFee ? `${number(exitFee, 2)} bps` : '—'}<br><span class="table-note">样本 ${number(row?.entry_fee_observations)} / ${number(row?.exit_fee_observations)}</span>`
+          : '—';
+        const heading = `<td><b>${escapeHtml(model.label)}</b><br><span class="table-note">0.1 SOL · ${escapeHtml(model.id)}</span></td>`;
+        if (!row) return `<tr data-ho-execution-model="${escapeHtml(model.id)}">${heading}<td>${delay}<br><span class="table-note">${feeBasis}</span></td><td>${eventFees}</td><td colspan="5">尚无样本</td></tr>`;
+        return `<tr data-ho-execution-model="${escapeHtml(model.id)}">${heading}<td>${delay}<br><span class="table-note">${feeBasis}</span></td><td>${eventFees}</td><td>${number(row.signals)} / ${number(row.entered)}</td><td>${number(row.resolved)} / ${number(row.pending_entries)}</td><td>NO_ENTRY ${number(row.no_entry)} / NO_EXIT ${number(row.no_exit)}<br><span class="table-note">跳价 ${number(row.price_jump)}</span></td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${pct(row.median_net_return_pct)}</td><td>${rate(row.win_rate_pct)} / ${number(row.profit_factor, 2)}</td></tr>`;
       }).join('');
     }
 
@@ -3587,7 +3618,13 @@
       )).join('') : '<tr><td colspan="8" class="empty">等待5/10/20/30/60秒 Launch快照</td></tr>';
     }
 
-    const legacyEarlyFlowCohortIds = ['LEGACY-EARLY-FLOW-BASE', 'LEGACY-EARLY-FLOW-RUGX'];
+    const legacyEarlyFlowCohortIds = [
+      'LEGACY-EARLY-FLOW-BASE',
+      'LEGACY-EARLY-FLOW-RUGX',
+      'LEGACY-EARLY-FLOW-BREADTH6',
+      'LEGACY-EARLY-FLOW-CONCENTRATION55',
+      'LEGACY-EARLY-FLOW-EXCLUDE-FLAT',
+    ];
     function legacyFdvReferenceMetrics(feed, tracker = {}, data = {}) {
       const reference = feed?.reference;
       const known = feed && (typeof feed.ready === 'boolean' || typeof feed.status === 'string');
@@ -3636,33 +3673,56 @@
         : runtime.enabled === false || runtime.newEntriesEnabled === false || rugx.newEntriesEnabled === false
           ? false : (rugx.liveBridgeEnabled ?? metrics.liveBridgeEnabled);
       const queryStatus = data.dashboardQuery?.status || data.dashboardSnapshot?.status;
+      const audit = shadow.legacyFiveArmAudit || {};
       const selected = activeLiveStrategyId === 'legacy-early-flow-base' ? legacyEarlyFlowCohortIds[0] : legacyEarlyFlowCohortIds[1];
-      document.querySelector('#legacy-early-flow-expression').textContent = `${selected}：毕业后15–25秒，FDV 15,000–100,000 USD，最长10秒可用历史涨跌−10%～+8%（逐信号保存覆盖长度），1秒净流>0，5秒≥3买家/≥4笔，最大单笔买入占比≤70%。BASE 无RUG过滤；RUGX 当前阶段重复作恶钱包/模板过滤；不要求Smart Wallet共识。${['PREPARING', 'REFRESHING'].includes(queryStatus) ? ' 历史统计后台准备/刷新中，未知数值保持待确认。' : ''}`;
+      document.querySelector('#legacy-early-flow-expression').textContent = `${selected}：毕业后15–25秒，FDV 15,000–100,000 USD，最长10秒可用历史涨跌−10%～+8%（逐信号保存覆盖长度），1秒净流>0，5秒≥3买家/≥4笔，最大单笔买入占比≤70%。BASE 与 RUGX 保留严格配对；BREADTH6、CONCENTRATION55、EXCLUDE-FLAT 从同一 BASE 首次机会分别只改变一个条件，未通过也保存 NO_ENTRY，全部仅 Shadow。${['PREPARING', 'REFRESHING'].includes(queryStatus) ? ' 历史统计后台准备/刷新中，未知数值保持待确认。' : ''}`;
       renderMetricGroups('#legacy-early-flow-metrics', [
-        ['当前查看', escapeHtml(selected), '两组配对结果始终同时展示，不合并收益'],
-        ['源头评估 / 命中', `${number(tracker.evaluated)} / ${number(tracker.sourceSignals ?? tracker.matched ?? tracker.signals)}`, `两臂记录 ${number(tracker.cohortSignals)}；同一源不算两次命中`],
+        ['当前查看', escapeHtml(selected), 'BASE/RUGX 严格配对；三个单变量组独立展示，不合并收益'],
+        ['源头评估 / 命中', `${number(tracker.evaluated)} / ${number(tracker.sourceSignals ?? tracker.matched ?? tracker.signals)}`, `配对组记录 ${number(tracker.cohortSignals)}；同一源只算一次命中`],
         ...legacyFdvReferenceMetrics(data.solUsdReference ?? metrics.solUsdReference, tracker, data),
         ['实盘桥接', bridgeEnabled === true ? '允许发送信号' : bridgeEnabled === false ? '关闭' : '待确认', escapeHtml(rugx.liveStrategyId || '实盘目标待确认')],
         ['桥接信号 / 错误', `${number(metrics.liveSignals ?? metrics.liveBridgeEmitted)} / ${number(metrics.liveBridgeErrors)}`, '收到信号不等于成交；查看对应实盘策略'],
         ['持久化异常 / 待处理', `${number(metrics.persistenceErrors)} / ${number(metrics.pendingErrors)}`, '写入失败隔离为DATA_ERROR；不计过滤收益'],
         ['严格行情拒绝', Object.keys(metrics.strictRejectedByReason || {}).length ? escapeHtml(Object.entries(metrics.strictRejectedByReason).map(([reason, count]) => `${reason}: ${number(count)}`).join(' · ')) : '暂无明细', '不回退到旧报价或将未知退出当成功'],
+        ['完整 episode / 可比', `${number(audit.completeEpisodes)} / ${number(audit.comparableEpisodes)}`, `总 episode ${number(audit.totalEpisodes)} · 当前研究版本标记 ${number(audit.forwardTaggedEpisodes)}`],
+        ['历史不完整 / 旧两组', `${number(audit.incompleteEpisodes)} / ${number(audit.historicalTwoArmEpisodes)}`, `其他部分五组 ${number(audit.partialFiveArmEpisodes)}；仅保留在 all-time`],
+        ['错源 / 协议 / 定义', `${number(audit.sourceMismatchEpisodes)} / ${number(audit.protocolMismatchEpisodes)} / ${number(audit.definitionMismatchEpisodes)}`, '任一不一致即从可比聚合排除，不按缺失组补写'],
+        ['可比协议分组', number(audit.protocolVariants), `${escapeHtml(audit.studyVersion || '研究版本待确认')}；不同执行协议不会混算`],
       ]);
-      const cohorts = (shadow.legacyCohorts || shadow.cohorts || []).filter(row => legacyEarlyFlowCohortIds.includes(row.cohort_id));
-      const rows = legacyEarlyFlowCohortIds.flatMap(id => {
-        const matches = cohorts.filter(row => row.cohort_id === id);
-        return matches.length ? matches : [{ cohort_id: id, pendingData: true }];
-      });
-      document.querySelector('#legacy-early-flow-cohort-rows').innerHTML = rows.map(row => {
-        const config = configurations.find(item => item.id === row.cohort_id) || {};
-        const isBaseline = row.cohort_id === legacyEarlyFlowCohortIds[0];
-        const running = runtime.enabled === false || runtime.newEntriesEnabled === false || config.newEntriesEnabled === false
-          ? '停止新增；存量继续退出' : runtime.enabled === true && config.id ? '前向采集中' : '配置待确认';
-        const amount = row.position_sol ?? config.positionSizeSol;
-        const cost = row.configured_cost_pct ?? config.configuredCostPct;
-        const model = row.execution_version || config.executionVersion || '模型待确认';
-        const exits = `H${number(config.hardStopPct)} / A${number(config.trailingActivationPct)} / D${number(config.trailingStopPct)} / ${age(config.maxHoldMs)}`;
-        return `<tr data-legacy-cohort="${escapeHtml(row.cohort_id)}"><td><b>${escapeHtml(row.cohort_id)}</b><br><span class="table-note">${isBaseline ? '原版无RUG过滤' : '当前阶段重复作恶钱包/模板RUG过滤'} · ${escapeHtml(running)}<br>${number(amount,4)} SOL · ${escapeHtml(model)}<br>估算费用 ${rate(cost,2)}，非链上实际费用</span></td><td>${escapeHtml(exits)}<br><span class="table-note">H硬止损 / A激活 / D峰值回撤；${row.pendingData ? '等待前向样本' : '未知退出不记0'}</span></td><td>${number(row.signals)} / ${number(row.mints)}<br><span class="table-note">入场 ${number(row.entered)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${number(row.profit_factor,2)}</td><td>${number(row.pending_entries)} / ${number(row.active_positions)}</td><td>RUG ${number(row.rug_rejected)} · 无入场 ${number(row.no_entry)} · 跳价 ${number(row.price_jump)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 截尾 ${number(row.right_censored)} · 数据异常 ${number(row.data_error)}</span></td></tr>`;
-      }).join('');
+      const renderLegacyCohortRows = (cohorts, comparableOnly = false) => {
+        const rows = legacyEarlyFlowCohortIds.flatMap(id => {
+          const matches = cohorts.filter(row => row.cohort_id === id);
+          return matches.length ? matches : [{ cohort_id: id, pendingData: true }];
+        });
+        return rows.map(row => {
+          const config = configurations.find(item => item.id === row.cohort_id) || {};
+          const isBaseline = row.cohort_id === legacyEarlyFlowCohortIds[0];
+          const cohortNote = {
+            'LEGACY-EARLY-FLOW-BASE': '原版无RUG过滤',
+            'LEGACY-EARLY-FLOW-RUGX': '当前阶段重复作恶钱包/模板RUG过滤',
+            'LEGACY-EARLY-FLOW-BREADTH6': '单变量：5秒独立买家≥6',
+            'LEGACY-EARLY-FLOW-CONCENTRATION55': '单变量：最大单笔买入占比≤55%',
+            'LEGACY-EARLY-FLOW-EXCLUDE-FLAT': '单变量：排除10秒涨幅0%–4%',
+          }[row.cohort_id] || (isBaseline ? '原版无RUG过滤' : '前向研究组');
+          const running = runtime.enabled === false || runtime.newEntriesEnabled === false || config.newEntriesEnabled === false
+            ? '停止新增；存量继续退出' : runtime.enabled === true && config.id ? '前向采集中' : '配置待确认';
+          const amount = row.position_sol ?? config.positionSizeSol;
+          const cost = row.configured_cost_pct ?? config.configuredCostPct;
+          const model = row.execution_version || config.executionVersion || '模型待确认';
+          const protocol = row.protocol_group ? ` · 协议组 ${escapeHtml(row.protocol_group)}` : '';
+          const exits = `H${number(config.hardStopPct)} / A${number(config.trailingActivationPct)} / D${number(config.trailingStopPct)} / ${age(config.maxHoldMs)}`;
+          const waiting = comparableOnly ? '等待可比完整 episode' : '等待前向样本';
+          return `<tr data-legacy-cohort="${escapeHtml(row.cohort_id)}"><td><b>${escapeHtml(row.cohort_id)}</b><br><span class="table-note">${escapeHtml(cohortNote)} · ${escapeHtml(running)}<br>${number(amount,4)} SOL · ${escapeHtml(model)}${protocol}<br>估算费用 ${rate(cost,2)}，非链上实际费用</span></td><td>${escapeHtml(exits)}<br><span class="table-note">H硬止损 / A激活 / D峰值回撤；${row.pendingData ? waiting : '未知退出不记0'}</span></td><td>${number(row.signals)} / ${number(row.mints)}<br><span class="table-note">入场 ${number(row.entered)}</span></td><td>${number(row.resolved)} / ${rate(row.win_rate_pct)}</td><td class="${tone(row.average_net_return_pct)}">${pct(row.average_net_return_pct)} / ${number(row.profit_factor,2)}</td><td>${number(row.pending_entries)} / ${number(row.active_positions)}</td><td>RUG ${number(row.rug_rejected)} · 研究过滤 ${number(row.study_filter_rejected ?? 0)} · 无入场 ${number(row.no_entry)} · 跳价 ${number(row.price_jump)}<br><span class="table-note">NO_EXIT ${number(row.no_exit)} · 截尾 ${number(row.right_censored)} · 数据异常 ${number(row.data_error)}</span></td></tr>`;
+        }).join('');
+      };
+      const allTimeCohorts = (shadow.legacyAllTimeCohorts || shadow.legacyCohorts
+        || shadow.cohorts || []).filter(row => legacyEarlyFlowCohortIds.includes(row.cohort_id));
+      const comparableCohorts = (shadow.legacyComparableCohorts || [])
+        .filter(row => legacyEarlyFlowCohortIds.includes(row.cohort_id));
+      document.querySelector('#legacy-early-flow-comparable-cohort-rows').innerHTML =
+        renderLegacyCohortRows(comparableCohorts, true);
+      document.querySelector('#legacy-early-flow-cohort-rows').innerHTML =
+        renderLegacyCohortRows(allTimeCohorts);
       const pairs = (shadow.rugComparisons || []).filter(row => (
         row.baselineProfileId === legacyEarlyFlowCohortIds[0]
         && row.filteredProfileId === legacyEarlyFlowCohortIds[1]
@@ -4125,6 +4185,7 @@
         `${number(profile.strategy?.entry?.minNetFlowW3Sol,1)}/${number(profile.strategy?.entry?.minUniqueBuyersW3)}`
       )).join(' · ') || '3/3 · 5/4 · 7/5';
       const cards = [
+        ['Runtime Version', [['状态', data.versionConsistency?.ready ? `${escapeHtml(data.versionConsistency?.status || 'MATCH')} · READY` : `${escapeHtml(data.versionConsistency?.status || 'UNKNOWN')} · 非 READY`], ['信任模式', escapeHtml(data.versionConsistency?.trustMode || '—')], ['运行身份', shortCommit(data.versionConsistency?.runningCommit || data.versionConsistency?.runningFingerprint || data.runtime?.gitCommit)], ['源码身份', shortCommit(data.versionConsistency?.sourceCommit || data.versionConsistency?.sourceFingerprint)], ['页面资产指纹', shortCommit(data.versionConsistency?.dashboardCommit)], ['告警', (data.versionConsistency?.warnings || []).map(escapeHtml).join(' / ') || '无']]],
         ['Range Scalper J', [['模式', rangeScalper.enabled ? 'SHADOW J（人工重新启用）' : '已停，仅保留历史'], ['订阅 Mint', number(rangeScalper.trackedMints)], ['区间有效', number(rangeScalper.rangeActive)], ['候选 / 信号', `${number(rangeScalper.candidates)} / ${number(rangeScalper.signals)}`], ['待入场', number(rangeScalper.pendingEntries)], ['活动仓位', number(rangeScalper.activePositions)], ['延长订阅', number(rangeScalper.extendedMints)], ['数据库仓位', number(data.database.rangeScalperShadowPositions?.total)], ['链上交易', '永不发送']]],
         ['Stream', [['状态', data.status], ['Regions', regions], ['订阅模式', data.stream.subscriptionMode === 'single-stream-atomic-filters' ? '单流 · Pump+AMM 原子更新' : escapeHtml(data.stream.subscriptionMode || '未知')], ['AMM Mint 请求 / 生效', `${number(data.stream.requestedAmmMintCount)} / ${number(data.stream.appliedAmmMintCount)}`], ['最近 Pump / AMM', `${Number.isFinite(data.stream.lastPumpMessageAt) ? age(Math.max(0, Date.now() - data.stream.lastPumpMessageAt)) : '—'} / ${Number.isFinite(data.stream.lastAmmMessageAt) ? age(Math.max(0, Date.now() - data.stream.lastAmmMessageAt)) : '—'}`], ['有效交易', number(data.stream.transactionsReceived)], ['重复副本已丢弃', number(data.stream.duplicatesDropped)], ['故障切换', number(data.stream.failovers)], ['主线程卡顿保护', `${number(data.stream.watchdogEventLoopDeferrals)} 次 · 最近延迟 ${number(data.stream.lastWatchdogLagMs)}ms`], ['错误', number(data.stream.errors)]]],
         ['Processing', [['数据延迟', Number.isFinite(data.dataLatencyMs) ? `${number(data.dataLatencyMs)} ms` : '—'], ['Buffer', number(data.engine.bufferedTrades)], ['Candidate', number(data.engine.candidateCount)], ['Pending Labels', number(data.labels.pendingSignals)], ['Research Primary', number(data.engine.signalsCreated)], ['Early Threshold', number(data.engine.primaryThresholdSignalsCreated)], ['Shadow Signals', number(data.engine.shadowSignalsCreated)]]],
@@ -4249,10 +4310,12 @@
           return `<tr><td>${dateTime(row.observedAt)}</td><td><b>${escapeHtml(row.strategyId || 'UNKNOWN')}</b><br><span class="table-note">${escapeHtml(row.source || 'SHADOW')} · ${escapeHtml(row.policyReason || '—')}</span></td><td>${mintLink(row.mint)}</td><td class="negative wrap-cell">${escapeHtml(reasons)}</td><td>${number(row.score)} / ${number(row.maxScore)}</td><td>${rate(row.buySharePct)}</td><td>${number(row.maxConsecutiveBuys)}</td><td>${number(row.buysPerBuyer,2)}<br><span class="table-note">${number(row.uniqueBuyers)} Buyers</span></td><td>${rate(row.repeatedBuySizeSharePct)}</td><td>${rate(row.maxBuyImpactPct)}</td><td class="negative">${pct(row.returnPct)}</td><td>${statusChip(row.blocked ? 'BLOCKED' : 'LABELED')}</td></tr>`;
         }).join('')
         : '<tr><td colspan="12" class="empty">尚无 RUG Guard 高风险判定</td></tr>';
-      const live = data.status === 'streaming' && !runtimeSnapshotStale(data);
+      const live = data.status === 'streaming' && !runtimeSnapshotStale(data)
+        && !runtimeVersionNotReady(data);
       document.querySelector('#status-dot').classList.toggle('live', live);
-      document.querySelector('#status-text').textContent = runtimeSnapshotStale(data)
-        ? '交易状态快照已过期' : live ? '链上数据流运行中' : '等待数据流';
+      document.querySelector('#status-text').textContent = runtimeVersionNotReady(data)
+        ? '运行/源码/页面版本不一致 · 非 READY'
+        : runtimeSnapshotStale(data) ? '交易状态快照已过期' : live ? '链上数据流运行中' : '等待数据流';
     }
 
     const signalVariantInput = document.querySelector('[name="signalVariant"]');
@@ -4332,8 +4395,9 @@
       strategyViewCache.set(context.viewKey, { data, render, storedAt: Date.now(), updatedAt });
       if (activeTabId === 'live-trading') {
         const runtimeStale = runtimeSnapshotStale(data);
+        const versionNotReady = runtimeVersionNotReady(data);
         const stale = Date.now() - updatedAt > 60_000;
-        setStrategyLoadStatus(`${stale || runtimeStale ? 'STALE' : 'READY'} · 数据更新时间 ${dateTime(updatedAt)}${stale ? ' · 后台统计延迟，以下并非当前实时值' : ''}${runtimeStale ? ' · 交易状态快照已过期，不能据此确认交易进程在线' : ''}`, 'muted');
+        setStrategyLoadStatus(`${versionNotReady ? 'VERSION MISMATCH · 非 READY' : stale || runtimeStale ? 'STALE' : 'READY'} · 数据更新时间 ${dateTime(updatedAt)}${stale ? ' · 后台统计延迟，以下并非当前实时值' : ''}${runtimeStale ? ' · 交易状态快照已过期，不能据此确认交易进程在线' : ''}${versionNotReady ? ` · 运行 ${shortCommit(data.versionConsistency?.runningCommit || data.versionConsistency?.runningFingerprint)} / 源码 ${shortCommit(data.versionConsistency?.sourceCommit || data.versionConsistency?.sourceFingerprint)} / 页面资产 ${shortCommit(data.versionConsistency?.dashboardCommit)}` : ''}`, versionNotReady ? 'error' : 'muted');
       }
     }
 
